@@ -47,8 +47,9 @@ import { roleConfig, type RoleConfig } from "./utils/role.js";
 import { startDiscoveryScheduler } from "./jobs/discoveryScheduler.js";
 import { ensureRegistryLoaded } from "./services/oidRegistry.js";
 import { detectTimescale, migrateToHypertables } from "./services/timescaleService.js";
-import { initializeQueue, startPgbossWorkers, startDiscoveryWorker, startQueueProducer, stopPgbossWorkers } from "./services/queueService.js";
+import { initializeQueue, startPgbossWorkers, startDiscoveryWorker, startScanWorker, startQueueProducer, stopPgbossWorkers } from "./services/queueService.js";
 import { runDiscovery } from "./services/discovery/discoveryEngine.js";
+import { runScan } from "./services/networkScanRunner.js";
 import { startSampleWriteBuffer, shutdownFlushSampleBuffers } from "./services/sampleWriteBuffer.js";
 import { startProbePatchBuffer, shutdownFlushProbePatchBuffer } from "./services/probePatchBuffer.js";
 import { runStartupDiskCheck } from "./utils/startupDiskCheck.js";
@@ -180,6 +181,12 @@ void (async () => {
     if (cfg.runsDiscoveryConsumers) {
       await startDiscoveryWorker(runDiscovery).catch((err) => {
         logger.warn({ err: err?.message }, "pg-boss discovery worker start failed");
+      });
+      // Network Discovery (business rule 34) rides the same role but its OWN
+      // queue — POLARIS_DISCOVERY_WORKERS defaults to 2, so a scan sharing that
+      // lane would stall integration discovery for the whole fleet.
+      await startScanWorker(runScan).catch((err) => {
+        logger.warn({ err: err?.message }, "pg-boss network-scan worker start failed");
       });
       // Snapshot per-FmgWorker lane state to the DB every 2 s so the web role
       // can surface "active FMG calls" on the integration card without holding

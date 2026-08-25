@@ -18,6 +18,7 @@ import notificationRulesRouter from "./routes/notificationRules.js";
 import automationScriptsRouter from "./routes/automationScripts.js";
 import maintenanceSchedulesRouter from "./routes/maintenanceSchedules.js";
 import contactsRouter from "./routes/contacts.js";
+import networkScansRouter from "./routes/networkScans.js";
 import notificationChannelsRouter from "./routes/notificationChannels.js";
 import pushSubscriptionsRouter from "./routes/pushSubscriptions.js";
 import conflictsRouter from "./routes/conflicts.js";
@@ -167,6 +168,11 @@ router.use("/maintenance-schedules", maintenanceSchedulesRouter);
 // Address book (Automations → Address Book tab + the recipient picker's
 // typeahead); per-route gates on the ownership-dimensioned contacts key.
 router.use("/contacts", contactsRouter);
+// Network Discovery — saved active scans of operator-supplied IP ranges
+// (Assets page → "+ Add Asset(s)" → Discovery). The whole mount carries a
+// networkScan:read floor; adoption additionally chains assets:write, so
+// "may scan" and "may create assets" stay separable (business rule 34a).
+router.use("/network-scans", networkScansRouter);
 // Outbound delivery channels (Automations → Delivery tab).
 router.use("/delivery-channels", notificationChannelsRouter);
 router.use("/notification-channels", deprecatedAlias("/api/v1/delivery-channels"), notificationChannelsRouter);

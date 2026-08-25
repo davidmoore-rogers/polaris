@@ -4850,6 +4850,36 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/networkScanService.ts
+
+**What it owns:** The saved network **Discovery** (`NetworkScan`) — CRUD, validation, run dispatch, cancellation, target preview, and adoption. Owns the operator-facing caps (`MAX_SCAN_TARGET_ROWS` 50, `MAX_CREDENTIALS_PER_METHOD` 10, `MAX_ADOPT_PER_CALL` 500, `SCAN_RUN_STALE_MS` 3 min) and the `ScanAutoMonitor` shape (auto-monitor selection keyed by POLLING METHOD).
+
+**Public API:** `listScans` / `getScan` / `createScan` / `updateScan` / `deleteScan`, `triggerScan` / `cancelRun` / `getRun` / `isScanRunning`, `previewTargets`, `adoptHits`, plus the pure `validateScanInput` / `assetTypeForHit` / `methodKeyForHit`.
+
+**Reads:** `NetworkScan`, `NetworkScanRun`, and (via `loadKnownAddresses` in the runner) `Asset.ipAddress` + `AssetAssociatedIp.ip`.
+
+**Writes:** `NetworkScan` rows, `NetworkScanRun` rows (queued), `Asset` (adoption ONLY), and `network_scan.created|updated|deleted|cancel_requested|adopted` Events.
+
+**Used by:** `src/api/routes/networkScans.ts` exclusively. The wizard (`public/js/assets-discovery.js`) talks to those routes.
+
+**Invariants:**
+- **Running creates nothing.** `triggerScan` writes a run row and hands it to a worker — no Asset, no AssetSource, no pin. That is what lets a `networkScan`-only role sweep a range, and it is why `adoptHits` is the single asset writer here (route-chained on `assets:write`).
+- **`validateScanInput` lives here, not in the route.** An imported `.discovery.json` must pass the same checks, and the caps are properties of the feature. It EXPANDS the targets, so an over-cap CIDR is refused when typed rather than by a run that fails minutes later.
+- **Dispatch mirrors `triggerDiscovery` exactly** — publish, else run in-process detached. pg-boss is NOT always on (`Setting.monitor.queueMode` defaults to cursor), so the fallback is mandatory rather than a nicety, and the route answers 202 either way.
+- **Adoption re-checks inventory at ADOPT time**, not scan time: hours may have passed and another operator (or a discovery run) may have created the device. The in-loop `known.add(address)` additionally guards one call against a duplicate selection.
+- **No `network-scan` sourceKind.** Assets are created like the manual `POST /assets` path so the `db.ts` extension mints the `manual` AssetSource row; `projectAssetFromSources` has zero rules for a kind outside its union, so a scan-kind row would project nothing while `projectionDriftService` compared projection against the stored row.
+- **Pins resolve through the SAME pure resolvers** the integration auto-monitor pass uses (`resolvePinnedInterfaces` → `splitPinsByProvenance`, `resolvePinnedStorage`), against the inventory the scan collected — so a selection means the same thing here as on the Integrations tab.
+- `ScanAutoMonitor` is keyed by polling METHOD because what can be pinned depends on what answered; one flat selection would mean something different per group.
+- `assetTypeForHit` is deliberately shallow — only a device saying what it is in as many words gets a type. Guessing from a vendor name is right often enough to look correct and wrong the rest of the time.
+- `deleteScan` refuses while a run is in flight (a stalled heartbeat does not count as in flight); the run rows cascade, being history OF this Discovery.
+
+**When changing this:**
+- Keep `validateScanInput` the single authority for semantics — the route's Zod is shape only, and the import path has no route at all.
+- If adoption grows a field, check it against the manual `POST /assets` create rather than inventing a second convention, and do NOT add an AssetSource kind without also adding projection rules (see the invariant above).
+- Never widen the adopt route to a single gate. "May scan" and "may create assets" being separable is the reason the `networkScan` key exists.
+
+---
+
 ## services/networkScanRunner.ts
 
 **What it owns:** Execution of ONE network **Discovery** (business rule 34) — expand the operator's targets, subtract what inventory already has, ICMP for liveness, then the enabled methods in the operator's order for identification. Owns the run row's transitions (`running` → `completed` / `aborted` / `error`), its counters, its heartbeat, and the `hits` blob the wizard's Results step reads. Owns the pacing constants (`SCAN_PING_CONCURRENCY` 64 / `SCAN_PING_TIMEOUT_MS` 1500 / `SCAN_IDENTIFY_CONCURRENCY` 12 / `SCAN_WALK_MAX_ROWS` 800 / `SCAN_MAX_HITS` 2000 / `SCAN_PROGRESS_FLUSH_MS` 2000) — constants rather than env vars because a Discovery is an explicit, cancellable, progress-visible action with no steady-state tuning problem.

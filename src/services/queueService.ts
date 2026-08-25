@@ -205,6 +205,27 @@ interface MonitorJobPayload {
 // run mid-walk.
 export const DISCOVERY_QUEUE_NAME = "polaris-discovery-run";
 
+// ─── network-scan queue ────────────────────────────────────────────────────
+// A network Discovery (business rule 34) is an operator-initiated ACTIVE SCAN
+// that can take tens of minutes on a wide range. It gets its OWN queue rather
+// than riding the discovery queue for one blunt reason: POLARIS_DISCOVERY_WORKERS
+// defaults to 2, so a single long scan sharing that lane would stall integration
+// discovery for the whole fleet until it finished. `policy: "singleton"` +
+// singletonKey = the SCAN id enforces one active run per Discovery across every
+// process (a second Run row would fight the first over the same counters).
+export const SCAN_QUEUE_NAME = "polaris-network-scan";
+
+export interface ScanJobPayload {
+  /** The NetworkScanRun row this job executes — it already exists, queued. */
+  runId: string;
+  /** Also carried so the singletonKey can be the SCAN, not the run. */
+  scanId: string;
+  actor: string;
+}
+
+/** Signature of the scan executor injected by the boot path (app.ts). */
+export type ScanJobHandler = (runId: string, actor: string) => Promise<void>;
+
 export interface DiscoveryJobPayload {
   integrationId: string;
   actor: string;
@@ -222,6 +243,7 @@ let metricsRefreshInterval: ReturnType<typeof setInterval> | null = null;
 // start* runs in one process; in the split each runs in its own process.
 let monitorWorkersStarted = false;
 let discoveryWorkerStarted = false;
+let scanWorkerStarted = false;
 let queuesEnsured = false;
 
 // Per-cadence worker slot pools, populated at boot inside startPgbossWorkers().
@@ -373,7 +395,7 @@ async function refreshPgbossMetrics(): Promise<void> {
     // (otherwise a stuck discovery worker is invisible until the UI surfaces it).
     // Discovery is intentionally left OUT of the heavyQueues set below — its
     // long-running jobs would trigger the monitor stalled-worker watchdog.
-    const queueNames = [...Object.values(QUEUE_NAMES), DISCOVERY_QUEUE_NAME];
+    const queueNames = [...Object.values(QUEUE_NAMES), DISCOVERY_QUEUE_NAME, SCAN_QUEUE_NAME];
     // MAX(EXTRACT(...)) gives the oldest waiting job per (queue, state) so a
     // queue that's draining quickly (low age) is distinguishable from one
     // that's stuck (high age) even at identical depth.
@@ -631,6 +653,10 @@ async function ensureQueues(boss: PgBossType): Promise<void> {
     };
     await boss.createQueue(DISCOVERY_QUEUE_NAME, { policy: "singleton", ...discoveryOptions });
     await boss.updateQueue(DISCOVERY_QUEUE_NAME, discoveryOptions);
+    // Same shape as discovery: a minutes-long handler, and no retry — a scan's
+    // side effects are its own run row, and a re-run is an operator decision.
+    await boss.createQueue(SCAN_QUEUE_NAME, { policy: "singleton", ...discoveryOptions });
+    await boss.updateQueue(SCAN_QUEUE_NAME, discoveryOptions);
   }
 
   queuesEnsured = true;
@@ -682,6 +708,33 @@ export async function startDiscoveryWorker(handler: DiscoveryJobHandler): Promis
   discoveryWorkerStarted = true;
   ensureMetricsRefresh();
   logger.info({ discoveryWorkers }, "pg-boss discovery worker started");
+}
+
+/**
+ * Register the network-scan consumer. Called by the same roles as the discovery
+ * worker; the executor is injected by the boot path for the same import-cycle
+ * reason.
+ *
+ * localConcurrency is 1 by design: a Discovery is an operator action with a
+ * progress readout in front of it, and running several at once on one node just
+ * makes each slower while multiplying the traffic an IDS sees. The singletonKey
+ * already prevents two runs of the SAME Discovery; this keeps two DIFFERENT
+ * ones from overlapping on a node.
+ */
+export async function startScanWorker(handler: ScanJobHandler): Promise<void> {
+  if (scanWorkerStarted) return;
+  const boss = await ensureBoss();
+  if (!boss) return;
+  await ensureQueues(boss);
+  await boss.work<ScanJobPayload>(SCAN_QUEUE_NAME, {
+    localConcurrency: 1, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<ScanJobPayload>[]) => {
+    const { runId, actor } = jobs[0].data;
+    await handler(runId, actor);
+  });
+  scanWorkerStarted = true;
+  ensureMetricsRefresh();
+  logger.info("pg-boss network-scan worker started");
 }
 
 export async function startPgbossWorkers(): Promise<void> {
@@ -990,6 +1043,23 @@ export async function publishDiscoveryJob(integrationId: string, actor: string, 
 }
 
 /**
+ * Hand a network Discovery run to the scan worker. Returns false when pg-boss
+ * isn't live (cursor mode, or the package absent), which is the caller's signal
+ * to run it in-process — the `triggerDiscovery` fallback shape. pg-boss is NOT
+ * always on, so that fallback is mandatory rather than a nicety.
+ */
+export async function publishScanJob(runId: string, scanId: string, actor: string): Promise<boolean> {
+  if (!bossInstance) return false;
+  await bossInstance.send(
+    SCAN_QUEUE_NAME,
+    { runId, scanId, actor } as ScanJobPayload,
+    // Keyed on the SCAN, not the run: one active sweep per Discovery.
+    { singletonKey: scanId },
+  );
+  return true;
+}
+
+/**
  * Graceful stop. Drains in-flight jobs (up to a timeout) before resolving.
  * Called on process shutdown handlers; safe if pg-boss never started.
  */
@@ -1010,6 +1080,7 @@ export async function stopPgbossWorkers(): Promise<void> {
   bossInstance = null;
   monitorWorkersStarted = false;
   discoveryWorkerStarted = false;
+  scanWorkerStarted = false;
   queuesEnsured = false;
 }
 
