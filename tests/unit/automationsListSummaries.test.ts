@@ -139,7 +139,7 @@ describe("Reset column", () => {
       trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
       reset: { mode: "auto" },
     });
-    expect(out).toMatch(/first successful probe/i);
+    expect(out).toMatch(/first successful poll/i);
   });
 });
 

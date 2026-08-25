@@ -257,6 +257,7 @@ input, select, textarea { font-family: inherit; }
 .dot.down { background: var(--md-error); }
 .dot.unk  { background: var(--md-outline); }
 .dot.dep-down { background: #607d8b; }
+.dot.passive { background: #5c6bc0; }
 .dot.maint { background: #9575cd; }
 
 /* ─── Top app bar ─────────────────────────────────────────────────────── */
@@ -1043,6 +1044,7 @@ button, .list-item, .chip { touch-action: manipulation; }
 .status-pill.unk       { background: var(--md-surface-cont-highest); color: var(--md-on-surface-variant); }
 .status-pill.dep-down  { background: rgba(96,125,139,.18); color: #b0bec5; }
 .status-pill.maint     { background: rgba(149,117,205,.18); color: #b39ddb; }
+.status-pill.passive   { background: transparent; color: #9fa8da; box-shadow: inset 0 0 0 1px rgba(92,107,192,.55); }
 
 /* ─── Asset cards ─────────────────────────────────────────────────────── */
 .asset-list {

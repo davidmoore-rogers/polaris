@@ -32,28 +32,20 @@ interface Calc {
 let calc: (thr: unknown, intervalSec: unknown, timeoutMs: unknown) => Calc;
 
 beforeAll(() => {
+  // The helper lives in its own tiny module now — it is shared with the
+  // automations wizard (the missed-poll COUNT belongs to the down-detection
+  // automation, business rule 34), and the wizard's DOM tests cannot eval
+  // integrations.js. That also means this loader no longer needs the elaborate
+  // sandbox that existed purely to keep 7,500 lines of integrations.js from
+  // throwing at parse time.
   const here = dirname(fileURLToPath(import.meta.url));
-  const code = readFileSync(resolve(here, "../../public/js/integrations.js"), "utf8");
-  const doc = {
-    addEventListener() {}, removeEventListener() {},
-    getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
-    createElement: () => ({ style: {}, setAttribute() {}, appendChild() {}, addEventListener() {} }),
-    documentElement: { getAttribute: () => "dark" },
-    body: { appendChild() {}, addEventListener() {} },
-  };
-  const sandbox: Record<string, any> = {
-    window: {}, document: doc, console,
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-    location: { hash: "", search: "", pathname: "/integrations.html" },
-    setTimeout, clearTimeout, setInterval, clearInterval, fetch: () => Promise.reject(new Error("no network")),
-  };
-  sandbox.window.document = doc;
-  sandbox.window.location = sandbox.location;
-  sandbox.window.localStorage = sandbox.localStorage;
-  sandbox.window.addEventListener = () => {};
+  const code = readFileSync(resolve(here, "../../public/js/monitor-down-after.js"), "utf8");
+  const sandbox: Record<string, any> = { window: {}, console };
   vm.createContext(sandbox);
   vm.runInContext(code, sandbox);
-  calc = sandbox.window._polarisMonDownAfterCalc;
+  calc = sandbox.window.PolarisMonitorDownAfter.calc;
+  // The legacy alias must keep working for one release.
+  expect(sandbox.window._polarisMonDownAfterCalc).toBe(calc);
 });
 
 describe("_polarisMonDownAfterCalc", () => {
@@ -77,8 +69,10 @@ describe("_polarisMonDownAfterCalc", () => {
   it("treats a threshold of 1 as the timeout alone (no interval to wait out)", () => {
     const c = calc(1, 300, 5000);
     expect(c.realSec).toBe(5);
-    expect(c.note).toContain("1 consecutive missed probe");
-    expect(c.note).not.toContain("probes");
+    // "poll", not "probe": the note shares the automation's own vocabulary
+    // now that the count is the automation's field.
+    expect(c.note).toContain("1 consecutive missed poll");
+    expect(c.note).not.toContain("polls");
   });
 
   it("carries the probe timeout into the figure", () => {
@@ -104,7 +98,10 @@ describe("_polarisMonDownAfterCalc", () => {
     // Detection also includes the blind gap before the first probe notices —
     // stating it is the difference between an honest number and a misleading one.
     expect(calc(3, 60, 5000).note).toContain("another poll interval on top");
-    expect(calc(3, 60, 5000).note).toContain("Recovery needs the same number of successes");
+    // The count is now visible on the same screen (it is the automation's own
+    // field), so the note names it instead of saying "the same number".
+    expect(calc(3, 60, 5000).note).toContain("Recovery to Up needs 3 consecutive successes");
+    expect(calc(1, 60, 5000).note).toContain("Recovery to Up needs 1 consecutive success");
   });
 
   it("no longer mentions a confirmation re-probe", () => {

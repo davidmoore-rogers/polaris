@@ -835,6 +835,8 @@ async function fetchAssetsPage() {
         a._monitor = ["Monitored", "Down"];
       } else if (a.monitorStatus === "recovering") {
         a._monitor = ["Monitored", "Recovering"];
+      } else if (a.monitorStatus === "passive") {
+        a._monitor = ["Monitored", "Passive"];
       } else {
         // "unknown" (never probed) and any unrecognized value fall through
         // here. Filter chip is "Pending" — operators read it as "we don't
@@ -3086,6 +3088,22 @@ function assetMonitorBadge(asset) {
   if (s === "warning")    return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
   if (s === "down")       return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
   if (s === "recovering") return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Recovering</span>';
+  // No down-detection automation covers this device, so Polaris renders no
+  // verdict about it (business rule 34). Deliberately NOT folded into Pending:
+  // this device is being polled perfectly well, and "Pending" says the opposite.
+  // The tooltip separates answering from dark using consecutiveFailures, which
+  // keeps advancing while passive precisely so this stays answerable.
+  if (s === "passive") {
+    var pBits = ["Passive — no down-detection automation covers this device",
+                 "Polling continues and samples are recorded",
+                 "Polaris will not declare Warning or Down"];
+    pBits.push((asset.consecutiveFailures || 0) === 0
+      ? "Its last poll succeeded"
+      : "Its last " + asset.consecutiveFailures + " poll(s) failed");
+    if (clickCls) pBits.push("Click for options");
+    var pTitle = ' title="' + escapeHtml(pBits.join("\n")) + '"';
+    return '<span class="badge badge-monitor-passive' + clickCls + '"' + pTitle + toggleAttrs + '>Passive</span>';
+  }
   // unknown / null / unrecognized → Pending. Same blue treatment as
   // Recovering (different label).
   return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
@@ -16494,6 +16512,8 @@ function _depTreeStatusPip(node) {
     case "warning":    return '<span class="dep-tree-pip dep-tree-pip-warn" title="Warning">▲</span>';
     case "recovering": return '<span class="dep-tree-pip dep-tree-pip-rec"  title="Recovering">▲</span>';
     case "down":       return '<span class="dep-tree-pip dep-tree-pip-down" title="Down">▼</span>';
+    // Hollow glyph, matching the hollow pill: no verdict was rendered.
+    case "passive":    return '<span class="dep-tree-pip dep-tree-pip-passive" title="Passive — no down-detection automation covers this device">◇</span>';
     default:           return '<span class="dep-tree-pip dep-tree-pip-unk"  title="Pending">●</span>';
   }
 }

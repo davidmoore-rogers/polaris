@@ -18,6 +18,12 @@
     // (their frozen monitorStatus is not live state); purple matches the
     // assets-page maintenance pill and the Status Map dot.
     { id: "maintenance", label: "Maint", color: window.POLARIS_HEALTH_COLORS.maintenance, val: function (d) { return d.statusCounts.maintenance; } },
+    // Passive — no down-detection automation covers these devices, so Polaris
+    // renders no verdict about them. Its own tile because a climbing Passive
+    // count is the signal that devices have stopped being judged, and folding
+    // it into Unknown would read as "never probed" about devices being polled
+    // perfectly well.
+    { id: "passive", label: "Passive", color: window.POLARIS_HEALTH_COLORS.passive, val: function (d) { return d.statusCounts.passive; } },
     { id: "uptime",  label: "Uptime",  color: null,      val: function (d) { return d.uptimePercent; } },
     { id: "alerts",  label: "Alerts",  color: null,      val: function (d) { return d.activeAlertCount; } },
   ];
@@ -76,7 +82,7 @@
     },
 
     renderPreview: function (el) {
-      renderTiles(el, { statusCounts: { total: 312, up: 296, down: 4, warning: 7, unknown: 3, recovering: 0, maintenance: 2 }, uptimePercent: 99.2, activeAlertCount: 11 }, null);
+      renderTiles(el, { statusCounts: { total: 312, up: 296, down: 4, warning: 7, unknown: 3, recovering: 0, passive: 0, maintenance: 2 }, uptimePercent: 99.2, activeAlertCount: 11 }, null);
     },
 
     renderConfig: function (el, config, onChange) {

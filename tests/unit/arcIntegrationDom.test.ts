@@ -25,6 +25,11 @@ vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
 const g = globalThis as Record<string, unknown>;
 const SRC = readFileSync(resolve(__dirname, "../../public/js/integrations.js"), "utf8");
+// The "Declare Down after" arithmetic moved to its own module (shared with the
+// automations wizard now that the missed-poll count belongs to the down-detection
+// automation), and integrations.js calls it at RENDER time — so the harness has
+// to load it the way the page does.
+const DOWN_AFTER_SRC = readFileSync(resolve(__dirname, "../../public/js/monitor-down-after.js"), "utf8");
 
 let win: InstanceType<typeof Window>;
 let scope: Record<string, any>;
@@ -53,7 +58,7 @@ function boot(): Record<string, any> {
     var permAtLeast = function(){ return true; };
   `;
 
-  (win as any).eval(stubs + "\n" + SRC + "\n;window.__scope = this;");
+  (win as any).eval(stubs + DOWN_AFTER_SRC + "\n" + SRC + "\n;window.__scope = this;");
   return win as unknown as Record<string, any>;
 }
 

@@ -488,6 +488,8 @@
       case "warning":    return P.degraded;
       case "down":       return P.down;
       case "recovering": return P.recovering;
+      // No verdict rendered — distinct from the grey "no samples" unknown.
+      case "passive":    return P.passive;
       default:           return P.unknown;
     }
   }

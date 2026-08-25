@@ -1766,40 +1766,13 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
  * confirmation re-probe is really 30s before they wonder why Down took 90.
  */
 /**
- * The shared arithmetic behind "Declare Down after": how long a device really
- * takes to reach Down, given how many confirmations it needs and how fast they
- * happen. Pure, and used BOTH at render time (so the field is right on first
- * paint) and by the live sync below — one implementation, no drift.
- *
- * "Effective spacing" applies the same floors the server does
- * (monitoringService.resolveProbeIntervalSec): never tighter than the probe
- * timeout, never tighter than the 5s probe-loop tick. Surfacing the floor is the
- * point — an operator with a 30s SNMP timeout should see that their 10s
- * confirmation re-probe is really 30s, before they wonder why Down took 90.
+ * The "Declare Down after" arithmetic now lives in
+ * public/js/monitor-down-after.js (window.PolarisMonitorDownAfter.calc, with the
+ * _polarisMonDownAfterCalc alias kept). It is shared with the automations wizard
+ * now that the missed-poll COUNT belongs to the down-detection automation rather
+ * than to these cards (business rule 34), and the wizard's DOM tests cannot eval
+ * this file.
  */
-window._polarisMonDownAfterCalc = function (thr, intervalSec, timeoutMs) {
-  thr = Math.min(100, Math.max(1, Number(thr) > 0 ? Math.round(Number(thr)) : 3));
-  var interval = Number(intervalSec) > 0 ? Math.round(Number(intervalSec)) : 60;
-  var timeoutSec = Math.ceil((Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000) / 1000);
-  // Every miss after the first waits a FULL poll interval — there is no
-  // confirmation re-probe (that was the fast-confirm cadence, removed
-  // 2026-08-19; in-run resolution is the ICMP loss sampler's job now and it
-  // feeds packet loss only, never this decision). The first miss itself costs
-  // up to the probe timeout.
-  var realSec = interval * Math.max(0, thr - 1) + timeoutSec;
-  return {
-    threshold: thr,
-    interval: interval,
-    timeoutSec: timeoutSec,
-    realSec: realSec,
-    note: "= " + thr + " consecutive missed probe" + (thr === 1 ? "" : "s") +
-      " ≈ " + realSec + "s from the first miss" +
-      (thr > 1 ? " (" + (thr - 1) + " × the " + interval + "s interval, plus up to the " + timeoutSec + "s timeout on the first)" : " (up to the " + timeoutSec + "s probe timeout)") + "." +
-      " Recovery needs the same number of successes." +
-      " Measured from the first missed probe — the wait for that first probe is another poll interval on top.",
-  };
-};
-
 /**
  * Keep the derived "Declare Down after" field and the two stored fields
  * (failureThreshold + the stream's poll interval) in agreement. Called from the

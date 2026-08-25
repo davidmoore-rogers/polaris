@@ -1634,6 +1634,7 @@
       case "up": return "up";
       case "down": return "down";
       case "unknown": return "unk";
+      case "passive": return "passive";
       default: return "unk";
     }
   }
@@ -1661,6 +1662,10 @@
       case "up":      return '<span class="status-pill up"><span class="dot up"></span>Up' + rttBit + '</span>';
       case "down":    return '<span class="status-pill down"><span class="dot down"></span>Down — ' + (asset.consecutiveFailures || 0) + ' consecutive fails</span>';
       case "unknown": return '<span class="status-pill unk"><span class="dot unk"></span>No samples yet</span>';
+      // Passive keeps SOME reachability signal in the label — the counter is
+      // still advancing, and "Passive" alone would read as "not looked at".
+      case "passive": return '<span class="status-pill passive"><span class="dot passive"></span>Passive — ' +
+        ((asset.consecutiveFailures || 0) === 0 ? 'last poll ok' : (asset.consecutiveFailures + ' consecutive fails')) + '</span>';
       default:        return '<span class="status-pill unk"><span class="dot unk"></span>Monitored</span>';
     }
   }

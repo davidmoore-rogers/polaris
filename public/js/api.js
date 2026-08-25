@@ -1308,6 +1308,10 @@ window.POLARIS_HEALTH_COLORS = {
   unmonitored: "#757575", // gray — unmonitored
   recovering:  "#0288d1", // blue — endpoint nodes only
   depDown:     "#607d8b", // slate — Device Map widget's dep-suppressed pin
+  // Indigo — no down-detection automation covers the device, so Polaris has no
+  // verdict to paint. Distinct from the grey "unknown", which claims we have no
+  // samples: a passive device is polled and charted like any other.
+  passive:     "#5c6bc0",
 };
 
 // The lighter material trio/quad the dashboard widgets use for pips + tiles

@@ -33,6 +33,9 @@
       case "up":       return "monitor-up";
       case "degraded": return "monitor-degraded";
       case "down":     return "monitor-down";
+      // No down-detection automation covers it, so there is no verdict to
+      // paint. NOT "unknown", which claims we have no samples.
+      case "passive":  return "monitor-passive";
       default:         return "monitor-unknown";
     }
   }
@@ -177,7 +180,7 @@
         });
         marker._site = site;   // clusterIcon() rolls up health across children
         var HP = window.POLARIS_HEALTH_COLORS;
-        var color = { "monitor-up": HP.up, "monitor-degraded": HP.degraded, "monitor-down": HP.down, "monitor-dep-down": HP.depDown, "monitor-unmonitored": HP.unmonitored, "monitor-unknown": HP.unknown }[monitorClass(site)] || HP.unknown;
+        var color = { "monitor-up": HP.up, "monitor-degraded": HP.degraded, "monitor-down": HP.down, "monitor-dep-down": HP.depDown, "monitor-unmonitored": HP.unmonitored, "monitor-passive": HP.passive, "monitor-unknown": HP.unknown }[monitorClass(site)] || HP.unknown;
         var name = escapeHtml(site.hostname || "(unnamed)");
         marker.bindTooltip(
           "<strong>" + name + "</strong>" +

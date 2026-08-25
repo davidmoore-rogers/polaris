@@ -360,6 +360,9 @@
       case "up":       return "monitor-up";
       case "degraded": return "monitor-degraded";
       case "down":     return "monitor-down";
+      // No down-detection automation covers it, so there is no verdict to
+      // paint. NOT "unknown", which claims we have no samples.
+      case "passive":  return "monitor-passive";
       default:         return "monitor-unknown";
     }
   }
@@ -1576,6 +1579,8 @@
       case "warning":    return P.degraded;
       case "down":       return P.down;
       case "recovering": return P.recovering;
+      // No verdict rendered — distinct from the grey "no samples" unknown.
+      case "passive":    return P.passive;
       default:           return P.unknown;
     }
   }
