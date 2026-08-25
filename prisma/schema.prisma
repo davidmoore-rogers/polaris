@@ -4278,6 +4278,27 @@ model Contact {
   email         String   @unique // normalized: trimmed + lower-cased on write
   name          String?
   description   String?
+
+  // Directory sync (business rule 35).
+  /// WHO owns this row: "manual" | "entra" | "ad". Denormalized from
+  /// DirectoryContactSource so the visibility gate and the fire-time load are
+  /// one indexed WHERE rather than a join, and so a row's provenance is visible
+  /// in a plain SELECT. Carries the BACKEND NAME rather than a boolean because
+  /// AddressBookEntry.source is that same vocabulary, so it maps straight
+  /// through to what the picker badges. Single writer: directorySyncService,
+  /// plus adoptDirectoryContact, which flips it back to "manual".
+  origin        String   @default("manual")
+  /// "person" | "group" - a mail-enabled distribution list is not a person,
+  /// and the picker says so. Manual rows are people by default.
+  kind          String   @default("person")
+  /// Directory-sourced identity. Operator-editable on a manual row, overwritten
+  /// from the directory on a synced one. jobTitle + department are what let an
+  /// operator tell two people with the same name apart in the picker; phone is
+  /// on-call context. All of it is employee PII - see the posture note in
+  /// directorySyncService.ts. None of it may reach Event.details.
+  jobTitle      String?
+  department    String?
+  phone         String?
   // Device ownership, two shapes, one live at a time. assetCondition is the
   // nested AND/OR tree the automations device filter uses (evaluated by
   // evaluateScopeCondition over the wider DEVICE_FILTER vocabulary);
@@ -4291,10 +4312,49 @@ model Contact {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
+  directorySources DirectoryContactSource[]
+
   // Substring search on email/name is served by GIN trigram indexes created in
   // migration 20260825050000_contacts_search_indexes -- Prisma cannot express a
   // functional lower(...) gin_trgm_ops index, so they live only in SQL.
+  @@index([origin])
   @@map("contacts")
+}
+
+/// Provenance for the address-book directory (GAL) sync - the TagAutoAssignment
+/// / RegionTagAssignment pattern applied to Contact rows. One row per
+/// (integration, directory object) the SYNC created, so a reconcile deletes only
+/// what it wrote and a hand-added row (which never has one) survives forever.
+///
+/// A person present in BOTH AD and Entra owns ONE Contact with TWO provenance
+/// rows; the Contact dies only when its LAST provenance row goes. `observed` is
+/// the per-source field blob, and the Contact is PROJECTED from the set
+/// (projectContactFromSources) rather than last-writer-wins - otherwise two
+/// directories that disagree would ping-pong the row on alternating runs. That
+/// is the AssetSource / projectAssetFromSources shape, at contact scale.
+///
+/// NO foreign key on integrationId, deliberately: a cascade would strip the
+/// provenance and strand the Contact rows it justified, which is exactly the
+/// state in which the sync can no longer tell its own rows from an operator's.
+/// Integration delete and the sync-disable toggle call purgeDirectoryContacts
+/// explicitly instead.
+model DirectoryContactSource {
+  integrationId String
+  /// Graph object id (user / group / orgContact) or AD objectGUID hex.
+  externalId    String
+  /// "entra" | "ad"
+  sourceKind    String
+  contactId     String
+  contact       Contact  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  /// The DirectoryPerson this source last reported. Employee PII at rest.
+  observed      Json
+  firstSeenAt   DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+
+  @@id([integrationId, externalId])
+  @@index([contactId])
+  @@index([integrationId])
+  @@map("directory_contact_sources")
 }
 
 // Operator-defined maintenance window definition. Targets = the union of the

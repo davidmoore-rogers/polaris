@@ -7,6 +7,19 @@
  *   POST   /preview         contacts:read    (dry-run a contact's device filter)
  *   GET    /filter-schema   contacts:read    (device-filter builder vocabulary)
  *   GET    /:id             contacts:read    (one row)
+ *   POST   /:id/adopt       contacts:write   (take ownership of a synced row)
+ *
+ * VISIBILITY GATE (business rule 35). Directory-synced entries and the live
+ * GAL fan-out are both narrowed by `automationManagement:read`, NOT by the
+ * `contacts` key every built-in role holds: the whole employee roster is not
+ * something every account should be able to enumerate. Both halves take the
+ * same gate on purpose -- gating the stored copy while leaving the live
+ * typeahead open would be a gate in name only, since it serves the same people
+ * from the same directory, a query at a time.
+ *
+ * It FILTERS rather than 403s -- the documented posture for mixed-visibility
+ * reads (`/search`, `/dashboard/noc-summary`). An ungated caller still gets
+ * their curated address book; they simply never see the synced rows.
  *   POST   /                contacts:write   (create — createdBy stamped to the caller)
  *   PUT    /:id             contacts:write   (edit own; fullwrite edits anyone's)
  *   DELETE /:id             contacts:write   (delete own; fullwrite deletes anyone's)
@@ -23,7 +36,7 @@
 
 import { Router } from "express";
 import { z } from "zod";
-import { assertOwnership, requireOwnership, requirePermission } from "../middleware/permissions.js";
+import { assertOwnership, hasPermission, requireOwnership, requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import { AppError } from "../../utils/errors.js";
 import { contactSearchLimiter } from "../middleware/rateLimits.js";
@@ -33,6 +46,7 @@ import { listScopeOptions } from "../../services/notificationRuleService.js";
 import { listAssetTypes } from "../../services/assetTypeService.js";
 import { listAssetTags } from "../../services/tagAssignmentService.js";
 import {
+  adoptDirectoryContact,
   CONTACT_PAGE_DEFAULT,
   CONTACT_PAGE_MAX,
   createContact,
@@ -60,6 +74,12 @@ const contactInputSchema = z.object({
   email: z.string().min(1).max(320),
   name: z.string().max(200).nullish(),
   description: z.string().max(1000).nullish(),
+  // Operator-settable on a row they own. On a synced row a write adopts the
+  // row rather than editing it in place, because the sync would otherwise
+  // overwrite these on its next run.
+  jobTitle: z.string().max(200).nullish(),
+  department: z.string().max(200).nullish(),
+  phone: z.string().max(64).nullish(),
   ...filterInputFields,
 });
 
@@ -70,9 +90,22 @@ const previewInputSchema = z.object(filterInputFields);
 // how a paginated endpoint quietly becomes an unpaginated one again.
 const listQuerySchema = z.object({
   q: z.string().max(200).optional(),
+  origin: z.enum(["manual", "directory", "all"]).optional().default("all"),
   limit: z.coerce.number().int().min(1).max(CONTACT_PAGE_MAX).optional().default(CONTACT_PAGE_DEFAULT),
   offset: z.coerce.number().int().min(0).optional().default(0),
 });
+
+/**
+ * May this caller see directory-synced entries and the live GAL?
+ *
+ * Deliberately a function of the ROLE only, never of the request body or query
+ * -- the operator chooses what to filter, the gate chooses what exists.
+ * Synchronous and safe here because every route below runs behind a
+ * requirePermission guard, which has already resolved the snapshot.
+ */
+function canSeeDirectory(req: Parameters<typeof hasPermission>[0]): boolean {
+  return hasPermission(req, "automationManagement", "read");
+}
 
 export const contactsRouter = Router();
 
@@ -87,8 +120,17 @@ export const contactsRouter = Router();
 contactsRouter.get("/", requirePermission("contacts", "read"), async (req, res, next) => {
   try {
     const query = listQuerySchema.parse(req.query);
-    const page = await listContacts(query);
-    res.json({ contacts: page.contacts, total: page.total, limit: query.limit, offset: query.offset });
+    const directoryVisible = canSeeDirectory(req);
+    const page = await listContacts({ ...query, includeDirectorySynced: directoryVisible });
+    res.json({
+      contacts: page.contacts,
+      total: page.total,
+      limit: query.limit,
+      offset: query.offset,
+      // So the UI can hide the origin filter entirely rather than offer a
+      // control that silently returns nothing.
+      directoryVisible,
+    });
   } catch (err) { next(err); }
 });
 
@@ -99,11 +141,20 @@ contactsRouter.get("/search", contactSearchLimiter, requirePermission("contacts"
   try {
     const q = typeof req.query.q === "string" ? req.query.q : "";
     const wantDirectory = req.query.directory === "1" || req.query.directory === "true";
+    const directoryVisible = canSeeDirectory(req);
     const entries = await searchAddressBook(q, {
       callerUsername: req.session?.username ?? null,
-      includeDirectory: wantDirectory,
+      includeLiveDirectory: wantDirectory && directoryVisible,
+      includeDirectorySynced: directoryVisible,
     });
-    res.json({ entries, directoryAvailable: await directorySearchAvailable() });
+    // `directoryAvailable` answers "is a directory configured"; it is reported
+    // as false to a caller who may not see one either way, so the UI never
+    // advertises a source it will then withhold.
+    res.json({
+      entries,
+      directoryAvailable: directoryVisible ? await directorySearchAvailable() : false,
+      directoryVisible,
+    });
   } catch (err) { next(err); }
 });
 
@@ -168,6 +219,24 @@ contactsRouter.post("/", requireOwnership("contacts"), async (req, res, next) =>
     const input = contactInputSchema.parse(req.body);
     const contact = await createContact(input, requestActor(req) ?? null);
     res.status(201).json({ contact });
+  } catch (err) { next(err); }
+});
+
+/**
+ * Take ownership of a directory-synced entry without editing it.
+ *
+ * `requireOwnership` asserts at least write; assertOwnership then refuses a
+ * write-level caller because a synced row's `createdBy` is null, so in practice
+ * this needs fullwrite -- the same bar as editing one, which is the same act.
+ */
+contactsRouter.post("/:id/adopt", requireOwnership("contacts"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const existing = await getContact(id);
+    if (!existing) throw new AppError(404, "Contact not found");
+    assertOwnership(req, existing.createdBy, "take ownership of address-book entries");
+    const contact = await adoptDirectoryContact(id, { actor: requestActor(req) ?? null });
+    res.json({ contact });
   } catch (err) { next(err); }
 });
 

@@ -919,6 +919,9 @@ const api = {
     filterSchema: () => request("GET", "/contacts/filter-schema"),
     create:  (body)  => request("POST", "/contacts", body),
     update:  (id, b) => request("PUT", `/contacts/${id}`, b),
+    // Take ownership of a directory-synced row: it stops being updated or
+    // removed by the sync, and survives the person leaving the directory.
+    adopt:   (id)    => request("POST", `/contacts/${id}/adopt`),
     delete:  (id)    => request("DELETE", `/contacts/${id}`),
   },
   // Network Discovery — saved active scans of operator-supplied IP ranges

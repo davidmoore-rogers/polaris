@@ -30,6 +30,8 @@ const prismaMock = vi.hoisted(() => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  directoryContactSource: { deleteMany: vi.fn() },
+  $transaction: vi.fn(),
   asset: { findMany: vi.fn(), findUnique: vi.fn() },
   user: { findMany: vi.fn() },
   pushSubscription: { groupBy: vi.fn() },
@@ -43,10 +45,13 @@ vi.mock("../../src/db.js", () => ({ prisma: prismaMock }));
 vi.mock("../../src/services/eventLogService.js", () => ({ logEvent: vi.fn() }));
 
 import {
+  adoptDirectoryContact,
   bumpContactCache,
   conditionMeansAllDevices,
   CONTACT_PAGE_MAX,
   createContact,
+  deleteContact,
+  updateContact,
   listContacts,
   normalizeContactCondition,
   normalizeContactEmail,
@@ -72,6 +77,11 @@ const contactRow = (over: Record<string, unknown> = {}) => ({
   email: "noc@example.com",
   name: "NOC",
   description: null,
+  origin: "manual",
+  kind: "person",
+  jobTitle: null,
+  department: null,
+  phone: null,
   assetCriteria: null,
   assetIds: [],
   createdBy: "jsmith",
@@ -521,11 +531,31 @@ describe("listContacts (paging + server-side search)", () => {
     expect(args.skip).toBe(0);
   });
 
-  it("treats a blank query as no predicate at all", async () => {
+  it("treats a blank query as no search predicate, but keeps the visibility gate", async () => {
     prismaMock.contact.findMany.mockResolvedValue([]);
     prismaMock.contact.count.mockResolvedValue(0);
     await listContacts({ q: "   " });
+    // Gated by DEFAULT: includeDirectorySynced has to be granted, never assumed.
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where).toEqual({ origin: "manual" });
+
+    await listContacts({ q: "   ", includeDirectorySynced: true });
     expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where).toEqual({});
+  });
+
+  it("never widens visibility from the caller's own origin filter", async () => {
+    // The gate and the filter are separate parameters precisely so asking for
+    // directory rows cannot grant them.
+    prismaMock.contact.findMany.mockResolvedValue([]);
+    prismaMock.contact.count.mockResolvedValue(0);
+
+    await listContacts({ origin: "directory" });
+    // Nothing, not the manual rows: falling back would answer a question the
+    // caller did not ask, and read as a broken filter rather than a gate.
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where).toEqual({ origin: { in: [] } });
+
+    await listContacts({ origin: "directory", includeDirectorySynced: true });
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where)
+      .toEqual({ origin: { not: "manual" } });
   });
 });
 
@@ -543,10 +573,36 @@ describe("address-book reads are bounded", () => {
       { name: { contains: "noc", mode: "insensitive" } },
     ]);
     expect(args.take).toBe(21); // limit * 2 + 1, so dedupe cannot short the page
-    // Only the five columns a typeahead entry needs — no JSON filter blobs.
-    expect(Object.keys(args.select).sort()).toEqual(
-      ["createdBy", "description", "email", "id", "name"],
-    );
+    // Scalars only — no JSON filter blobs, so rowToContact never runs here.
+    expect(Object.keys(args.select).sort()).toEqual([
+      "createdBy", "department", "description", "email", "id", "jobTitle", "kind", "name", "origin", "phone",
+    ]);
+  });
+
+  it("hides directory-synced rows from an ungated caller, and the live fan-out with them", async () => {
+    prismaMock.user.findMany.mockResolvedValue([]);
+    prismaMock.contact.findMany.mockResolvedValue([]);
+
+    await searchAddressBook("noc");
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where.origin).toBe("manual");
+
+    await searchAddressBook("noc", { includeDirectorySynced: true });
+    expect(prismaMock.contact.findMany.mock.calls.at(-1)![0].where.origin).toBeUndefined();
+  });
+
+  it("badges a synced row as its directory, not as a plain contact", async () => {
+    // origin stores the BACKEND NAME so it maps straight onto the picker's
+    // existing entra / ad badges with no client-side translation.
+    prismaMock.user.findMany.mockResolvedValue([]);
+    prismaMock.contact.findMany.mockResolvedValue([
+      contactRow({ id: "c1", email: "a@example.com", origin: "entra", jobTitle: "Foreman" }),
+      contactRow({ id: "c2", email: "b@example.com", origin: "manual" }),
+    ]);
+
+    const out = await searchAddressBook("", { includeDirectorySynced: true });
+    expect(out.find((e) => e.email === "a@example.com")!.source).toBe("entra");
+    expect(out.find((e) => e.email === "a@example.com")!.jobTitle).toBe("Foreman");
+    expect(out.find((e) => e.email === "b@example.com")!.source).toBe("contact");
   });
 
   it("the fire path loads only contacts that could own a device", async () => {
@@ -563,5 +619,96 @@ describe("address-book reads are bounded", () => {
     // pass `undefined` for "no filter", which leaves the column SQL NULL.
     expect(args.where.OR.filter((c: Record<string, unknown>) => "assetCondition" in c || "assetCriteria" in c))
       .toHaveLength(2);
+  });
+});
+
+describe("adoption: an operator taking a synced row out of the sync's hands", () => {
+  /** $transaction([deleteMany, update]) resolves to both results, in order. */
+  const stubAdoptTx = (row: Record<string, unknown>) => {
+    prismaMock.directoryContactSource.deleteMany.mockResolvedValue({ count: 1 });
+    prismaMock.contact.update.mockResolvedValue(row);
+    prismaMock.$transaction.mockResolvedValue([{ count: 1 }, row]);
+  };
+
+  it("creating over a synced address adopts the row instead of 409ing", async () => {
+    // email is UNIQUE, so a synced row physically blocks hand-creating the same
+    // person. Refusing would leave the operator no way to claim an address they
+    // are looking straight at.
+    prismaMock.contact.findUnique
+      .mockResolvedValueOnce({ id: "c1", name: "J Martin", origin: "entra" })   // collision probe
+      .mockResolvedValueOnce({ id: "c1", email: "j@example.com", name: "J Martin", origin: "entra" });
+    stubAdoptTx(contactRow({ id: "c1", email: "j@example.com", origin: "manual", createdBy: "jsmith" }));
+
+    const out = await createContact({ email: "j@example.com", name: "J Martin" }, "jsmith");
+    expect(out.origin).toBe("manual");
+    expect(prismaMock.contact.create).not.toHaveBeenCalled();
+    // Dropping the provenance is the whole mechanism: it is what makes the row
+    // survive the person leaving the directory.
+    expect(prismaMock.directoryContactSource.deleteMany)
+      .toHaveBeenCalledWith({ where: { contactId: "c1" } });
+    const data = prismaMock.contact.update.mock.calls.at(-1)![0].data;
+    expect(data.origin).toBe("manual");
+    expect(data.createdBy).toBe("jsmith");
+  });
+
+  it("creating over a MANUAL address still 409s — adoption is only for synced rows", async () => {
+    prismaMock.contact.findUnique.mockResolvedValue({ id: "c1", name: "NOC", origin: "manual" });
+    await expect(createContact({ email: "noc@example.com" }, "jsmith"))
+      .rejects.toThrow(/already in the address book/i);
+  });
+
+  it("editing a synced row adopts it rather than writing into it", async () => {
+    // A plain update would look like it worked and be overwritten on the next
+    // discovery run.
+    prismaMock.contact.findUnique
+      .mockResolvedValueOnce(null)                                              // no email clash
+      .mockResolvedValueOnce({ origin: "ad" })                                  // current row
+      .mockResolvedValueOnce({ id: "c1", email: "j@example.com", name: null, origin: "ad" });
+    stubAdoptTx(contactRow({ id: "c1", email: "j@example.com", origin: "manual" }));
+
+    const out = await updateContact("c1", { email: "j@example.com", name: "Jay" }, "jsmith");
+    expect(out.origin).toBe("manual");
+    expect(prismaMock.directoryContactSource.deleteMany).toHaveBeenCalled();
+  });
+
+  it("a bare adopt keeps what the directory reported — it claims, it does not blank", async () => {
+    prismaMock.contact.findUnique.mockResolvedValue({
+      id: "c1", email: "j@example.com", name: "J Martin", origin: "entra",
+    });
+    stubAdoptTx(contactRow({ id: "c1", email: "j@example.com", origin: "manual" }));
+
+    await adoptDirectoryContact("c1", { actor: "jsmith" });
+    const data = prismaMock.contact.update.mock.calls.at(-1)![0].data;
+    expect(Object.keys(data).sort()).toEqual(["createdBy", "origin"]);
+  });
+
+  it("refuses to adopt a row that is already the operator's", async () => {
+    prismaMock.contact.findUnique.mockResolvedValue({
+      id: "c1", email: "noc@example.com", name: "NOC", origin: "manual",
+    });
+    await expect(adoptDirectoryContact("c1", { actor: "jsmith" }))
+      .rejects.toThrow(/already an address-book entry you own/i);
+  });
+});
+
+describe("deleteContact", () => {
+  it("refuses a synced row, naming both ways out", async () => {
+    // Deleting would succeed and then be undone by the next run, leaving the
+    // operator believing the address was gone.
+    prismaMock.contact.findUnique.mockResolvedValue({
+      email: "j@example.com", name: "J Martin", origin: "ad",
+    });
+    await expect(deleteContact("c1", "jsmith")).rejects.toThrow(/Active Directory/);
+    await expect(deleteContact("c1", "jsmith")).rejects.toThrow(/directory-sync filter/);
+    expect(prismaMock.contact.delete).not.toHaveBeenCalled();
+  });
+
+  it("deletes a manual row", async () => {
+    prismaMock.contact.findUnique.mockResolvedValue({
+      email: "noc@example.com", name: "NOC", origin: "manual",
+    });
+    prismaMock.contact.delete.mockResolvedValue({});
+    await deleteContact("c1", "jsmith");
+    expect(prismaMock.contact.delete).toHaveBeenCalledWith({ where: { id: "c1" } });
   });
 });
