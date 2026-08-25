@@ -12,6 +12,7 @@
  */
 
 import { AppError } from "../utils/errors.js";
+import type { DirectoryPerson, DirectorySyncFilter } from "./directorySyncService.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { normalizeMacOrNull } from "../utils/mac.js";
 import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
@@ -450,6 +451,137 @@ export async function testConnection(config: EntraIdConfig): Promise<{
     }
     return { ok: false, message: err.message || "Unknown error" };
   }
+}
+
+
+// ─── Directory (GAL) bulk read ──────────────────────────────────────────────
+//
+// The scheduled sync's reader (business rule 35). Same grants as the live
+// search above, a different query shape: a full enumeration wants every
+// mail-enabled principal, not the ones matching a term.
+//
+// Deliberately NO `$search`. Paging with $select + $filter + $top is the
+// ordinary Graph collection read, which also means this path does not inherit
+// the `VERIFY ON A REAL TENANT` risk attached to the live search's
+// $search + $filter + $count=true combination on /groups — that shape stays
+// owned by the code that needs term matching.
+
+/** Graph's page ceiling for these collections. */
+const GAL_PAGE_SIZE = 999;
+
+function galPhone(u: any): string | null {
+  const business = Array.isArray(u?.businessPhones) ? u.businessPhones.find((p: unknown) => typeof p === "string" && p.trim()) : null;
+  const v = business || u?.mobilePhone;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
+/**
+ * Every mail-enabled principal in the tenant, for the address-book sync.
+ *
+ * The three collections run in parallel and degrade INDEPENDENTLY, the same
+ * posture as the live search: a tenant that granted User.Read.All but not
+ * Group.Read.All syncs people rather than failing the whole pass. That matters
+ * more here than there — a thrown error would abort the run, and an aborted run
+ * writes nothing, so one missing grant would keep the address book permanently
+ * empty with no partial result to diagnose from.
+ *
+ * The `$filter` does the two exclusions Graph can actually answer
+ * (accountEnabled, userType). It does NOT attempt shared / room / equipment
+ * mailboxes: Graph exposes no mailbox type on /users, only
+ * `mailboxSettings.userPurpose`, which is a PER-USER call needing
+ * MailboxSettings.Read.All — twenty thousand extra requests per run. Those
+ * entries are reported as mailboxKind "unknown" so directoryExclusionReason
+ * leaves them alone rather than guessing, and the operator excludes them by
+ * name or domain instead. The UI says so.
+ */
+export async function listDirectoryPeople(
+  config: EntraIdConfig,
+  filter: DirectorySyncFilter,
+  signal?: AbortSignal,
+): Promise<DirectoryPerson[]> {
+  const cap = filter.maxEntries;
+  const userFilter = encodeURIComponent("accountEnabled eq true and userType eq 'Member'");
+
+  const [users, groups, orgContacts] = await Promise.all([
+    graphPage(
+      config,
+      "https://graph.microsoft.com/v1.0/users" +
+        "?$select=id,displayName,mail,jobTitle,department,businessPhones,mobilePhone,accountEnabled,userType,onPremisesDistinguishedName" +
+        `&$filter=${userFilter}&$top=${GAL_PAGE_SIZE}`,
+      cap,
+      signal,
+    ).catch(() => [] as any[]),
+    filter.includeGroups
+      ? graphPage(
+          config,
+          "https://graph.microsoft.com/v1.0/groups" +
+            `?$filter=mailEnabled%20eq%20true&$select=id,displayName,mail,description&$top=${GAL_PAGE_SIZE}`,
+          cap,
+          signal,
+        ).catch(() => [] as any[])
+      : Promise.resolve([] as any[]),
+    filter.includeOrgContacts
+      ? graphPage(
+          config,
+          "https://graph.microsoft.com/v1.0/contacts" +
+            `?$select=id,displayName,mail,companyName,jobTitle,department,phones&$top=${GAL_PAGE_SIZE}`,
+          cap,
+          signal,
+        ).catch(() => [] as any[])
+      : Promise.resolve([] as any[]),
+  ]);
+
+  const out: DirectoryPerson[] = [];
+  for (const u of users) {
+    // A mailbox-less account cannot receive email, so it is not a recipient.
+    // UPN is NOT a fallback — it frequently isn't a routable address.
+    if (!u?.mail) continue;
+    out.push({
+      externalId: String(u.id),
+      email: String(u.mail),
+      name: u.displayName ?? null,
+      jobTitle: u.jobTitle ?? null,
+      department: u.department ?? null,
+      phone: galPhone(u),
+      description: null,
+      kind: "person",
+      // Present on hybrid-joined users; lets the OU filters work against a
+      // tenant synced from on-prem AD even with no AD integration configured.
+      distinguishedName: u.onPremisesDistinguishedName ?? undefined,
+      disabled: u.accountEnabled === false,
+      mailboxKind: "unknown",
+    });
+  }
+  for (const g of groups) {
+    if (!g?.mail) continue;
+    out.push({
+      externalId: String(g.id),
+      email: String(g.mail),
+      name: g.displayName ?? null,
+      jobTitle: null,
+      department: null,
+      phone: null,
+      description: g.description || "Distribution list",
+      kind: "group",
+    });
+  }
+  for (const c of orgContacts) {
+    if (!c?.mail) continue;
+    const phones = Array.isArray(c.phones)
+      ? c.phones.find((p: any) => typeof p?.number === "string" && p.number.trim())?.number ?? null
+      : null;
+    out.push({
+      externalId: String(c.id),
+      email: String(c.mail),
+      name: c.displayName ?? null,
+      jobTitle: c.jobTitle ?? null,
+      department: c.department ?? null,
+      phone: phones,
+      description: c.companyName || "Org contact",
+      kind: "person",
+    });
+  }
+  return out.slice(0, cap);
 }
 
 // ─── Manual query (UI tool) ─────────────────────────────────────────────────

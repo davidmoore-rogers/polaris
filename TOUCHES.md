@@ -1684,6 +1684,25 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/directorySyncService.ts
+
+**What it owns:** The SCHEDULED half of the GAL story (business rule 35) — the exclusion filter's normalization and decision, and the projection of a contact's directory-owned fields from its provenance rows. Its live sibling `directorySearchService` persists nothing; this one is why `Contact.origin` and `DirectoryContactSource` exist.
+
+**Public API:** `normalizeDirectorySyncFilter`, `directoryExclusionReason` (PURE), `projectContactFromSources` (PURE), plus the `DirectoryPerson` / `DirectorySyncFilter` types the two bulk readers produce and consume.
+
+**Cross-service deps:** `utils/integrationFilter` (`matchesWildcard` — the canonical glob-lite matcher every device/VM/interface filter already uses, so an operator who has configured one knows how this behaves).
+
+**Used by:** `entraIdService.listDirectoryPeople` and `activeDirectoryService.listDirectoryPeople` (the bulk readers, which import the types), and the discovery engine's post-sync pass.
+
+**Invariants:**
+
+- **No directory PII in Events or logs, ever.** Exclusion reasons are categories (`"disabled account"`, `"room mailbox"`), never names or addresses. Events are readable by anyone with events access and are shipped off-host by the syslog and SFTP archivers. The single deliberate exception lives in contactService: `contact.adopted` names the address, because one human act is audited by name while bulk machine activity is anonymous. Do not "fix" that asymmetry.
+- **`mailboxKind: "unknown"` is not a claim.** Graph cannot report a mailbox type in bulk, so the Entra reader says `"unknown"` for every user; `directoryExclusionReason` excludes only on a POSITIVE identification. Treating unknown as shared would drop a whole tenant.
+- **The projection must be order-independent.** It is a projection precisely so two directories that disagree cannot ping-pong the row on alternating runs. A test asserts `project([a,b]) === project([b,a])` — keep it.
+- **Include wins over exclude** for OU and domain, matching `filterDevices`.
+
+**When changing this:** adding a field to `DirectoryPerson` means adding it to BOTH readers (a field only one populates projects as null wherever the other ranks first) and deciding whether it belongs on the `Contact` row — anything that lands there is employee PII in every backup. Adding an exclusion means adding it to `normalizeDirectorySyncFilter`, to the Zod block in `integrations.ts`, and to the Directory tab in `integrations.js`, or the control exists in exactly one of the three places.
+
 ## services/directorySearchService.ts
 
 **What it owns:** The address book's live lookup into the organization's directory (GAL) — fanning one typeahead query across every opted-in AD / Entra integration and merging the hits.
