@@ -299,6 +299,86 @@ model DiscoveryRun {
   @@map("discovery_runs")
 }
 
+// ─── Network Discovery (active scan) ──────────────────────────────────────────
+//
+// A saved, re-runnable active scan of operator-supplied IP ranges. Operator-
+// facing name: a **Discovery**. The models are `NetworkScan*` so nothing here
+// collides with the integration-discovery machinery (DiscoveryRun /
+// discoveryEngine / discoveryRunState) — the same split CLAUDE.md documents for
+// Automation/NotificationRule.
+//
+// This is deliberately NOT an 8th Integration type and NOT a DiscoveryRun row.
+// DiscoveryRun.integrationId is @unique and NOT NULL, so a scan with no
+// Integration behind it cannot get a row there; and inserting a queued/running
+// row would trip anyOtherRunActive() (the backup-restore guard) and surface in
+// the /integrations/discoveries progress UI as an integration that isn't one.
+model NetworkScan {
+  id          String  @id @default(uuid())
+  name        String  @unique
+  description String?
+
+  // ScanTarget[] — [{ kind: "cidr" | "range" | "single", value: string }].
+  // Expanded to an ordered, deduped host list by expandScanTargets (utils/cidr).
+  targets Json @default("[]")
+
+  // ScanMethod[] — [{ type: "icmp"|"snmp"|"restapi"|"ssh"|"winrm",
+  //                   credentialIds: string[] }], tried in array order.
+  // ICMP carries no credentials (the store has no "icmp" type by design).
+  methods Json @default("[]")
+
+  // Per-polling-method auto-monitor selection applied to whatever gets adopted:
+  // { [method]: { interfaces?: AutoMonitorSelection, storage?: ... } }.
+  // Null = pin nothing. Same byNames/byPatterns/byTypes/byLldp vocabulary as the
+  // integration Monitoring tab, so the pure resolvers are reused verbatim.
+  autoMonitor Json?
+
+  createdBy String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  lastRunAt DateTime?
+
+  runs NetworkScanRun[]
+
+  @@map("network_scans")
+}
+
+// One execution of a NetworkScan. Carries DiscoveryRun's operational columns —
+// cancelRequested (polled by the worker, which aborts its own AbortController)
+// and workerHeartbeatAt (drives the stale-run reaper) — but NOT its
+// one-row-per-integration uniqueness: run history is wanted here, and it is what
+// lets the wizard reattach to a scan still in flight instead of losing it when
+// the operator closes the modal.
+model NetworkScanRun {
+  id     String      @id @default(uuid())
+  scanId String
+  scan   NetworkScan @relation(fields: [scanId], references: [id], onDelete: Cascade)
+
+  status String  @default("queued") // queued | running | completed | aborted | error
+  actor  String
+  error  String?
+
+  totalTargets       Int @default(0) // after expansion + exclusions
+  droppedTargetCount Int @default(0) // over the cap, or excluded (loopback/link-local/multicast)
+  scannedCount       Int @default(0)
+  hitCount           Int @default(0)
+  skippedKnownCount  Int @default(0) // responders whose address an Asset already carries
+
+  // ScanHit[] — one per responder: address, which method answered, the
+  // identified fields, and the interface/storage inventory the scan collected.
+  hits Json @default("[]")
+
+  cancelRequested   Boolean   @default(false)
+  workerHeartbeatAt DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([scanId, createdAt])
+  @@index([status])
+  @@map("network_scan_runs")
+}
+
 // Credential store for monitoring probes (SNMP, WinRM, SSH).
 // Single discriminator table; type-specific fields live in `config` JSON
 // following the same plaintext-at-rest + mask-on-API-read pattern as Integration.

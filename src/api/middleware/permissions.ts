@@ -75,6 +75,7 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "assets", label: "Assets", description: "Asset inventory CRUD + PDF/CSV export." },
   { key: "assetsQuarantine", label: "Asset Quarantine", description: "Push MAC quarantine to FortiGates + release + verify." },
   { key: "assetsProbe", label: "Asset Probes", description: "Manual probe-now, SNMP walk, forward/reverse DNS lookup on a specific asset." },
+  { key: "networkScan", label: "Network Discovery", description: "Active scan of operator-supplied IP ranges: create / edit / run a Discovery and adopt what answers. Its own key rather than part of `assetsProbe` (probe-now / SNMP walk on ONE existing asset) — an unannounced sweep is IDS-visible. Read = browse saved Discoveries + watch a run; Read-Write = create / edit / delete / run. Adopting the responders as assets additionally requires `assets` Read-Write, chained at the route." },
   { key: "assetMonitorSettings", label: "Asset Monitor Settings", description: "Per-asset / class / integration / manual monitor cadence + retention overrides." },
   { key: "processControl", label: "Process Control", description: "Start / stop / restart a service-backed process on a host via the Polaris Agent. Operator-initiated, confirmed, and audited; the agent never self-acts." },
   { key: "mibDatabase", label: "MIB Database", description: "Upload / browse / walk SNMP MIB modules." },

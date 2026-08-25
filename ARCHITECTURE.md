@@ -645,6 +645,52 @@ DiscoveryRun
   -- discovery worker, read by the web process's /discoveries endpoint +
   -- isDiscoveryRunning + slow-run check. See "Multi-process architecture".
 
+NetworkScan
+  id          UUID PK
+  name        String  @unique   -- the operator's handle; round-trips through the .discovery.json filename
+  description String?
+  targets     Json              -- ScanTarget[]: [{ kind: "cidr"|"range"|"single", value }]
+  methods     Json              -- ScanMethod[]: [{ type: "icmp"|"snmp"|"restapi"|"ssh"|"winrm", credentialIds[] }], tried in array order
+  autoMonitor Json?             -- per-polling-method { interfaces?, storage? } selection applied to adopted assets; NULL = pin nothing
+  createdBy / createdAt / updatedAt / lastRunAt
+  runs        NetworkScanRun[]
+  -- A saved, re-runnable ACTIVE SCAN of operator-supplied IP ranges.
+  -- Operator-facing name: a **Discovery**. Named NetworkScan* so nothing
+  -- collides with the integration-discovery machinery (DiscoveryRun /
+  -- discoveryEngine / discoveryRunState) -- the Automation/NotificationRule
+  -- split. Deliberately NOT an 8th Integration type (that carries the ~30
+  -- callsite onboarding checklist and would put a scan on the Integrations
+  -- page) and deliberately NOT a DiscoveryRun row: that table's
+  -- `integrationId` is @unique AND NOT NULL, and a queued/running row there
+  -- would trip the backup-restore guard (`anyRunActive()`) and surface in the
+  -- /integrations/discoveries progress UI as an integration that isn't one.
+  -- The `autoMonitor` blob reuses the integration Monitoring tab's
+  -- byNames/byPatterns/byTypes/byLldp vocabulary verbatim, so the pure
+  -- resolvers (resolvePinnedInterfaces / resolvePinnedStorage) are shared
+  -- rather than reimplemented. Gated by the `networkScan` RBAC key; ADOPTING
+  -- the results chains `assets:write` on top, so "may find out what is on the
+  -- network" and "may add it to inventory" stay separable.
+
+NetworkScanRun
+  id       UUID PK
+  scanId   String   -- FK -> NetworkScan, ON DELETE CASCADE (not a hypertable, so the no-FK rule does not apply)
+  status   String   -- queued | running | completed | aborted | error
+  actor    String
+  error    String?
+  totalTargets / droppedTargetCount / scannedCount / hitCount / skippedKnownCount Int
+  hits     Json     -- ScanHit[]: one per responder (address, which method answered, identified fields, collected interface/storage inventory)
+  cancelRequested   Boolean    -- the web role sets it; the worker polls and aborts its own AbortController
+  workerHeartbeatAt DateTime?  -- drives the stale-run reaper
+  startedAt / finishedAt / createdAt / updatedAt
+  -- One row per execution. Carries DiscoveryRun's operational columns but NOT
+  -- its one-row-per-parent uniqueness: run history is wanted, and an
+  -- addressable in-flight run is what lets the wizard REATTACH to a scan
+  -- instead of losing it when the operator closes the modal (the
+  -- agent-build.js progress-strip precedent). `droppedTargetCount` counts both
+  -- over-the-cap truncation and the addresses excluded regardless of what the
+  -- operator typed (loopback / link-local incl. cloud metadata / multicast /
+  -- unspecified) -- silent truncation would read as "the range is clean".
+
 Asset
   id              UUID PK
   ipAddress       String?
