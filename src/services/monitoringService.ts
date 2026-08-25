@@ -136,6 +136,7 @@ import {
 } from "../utils/hardwareSensors.js";
 import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
+import { ifStatusLabel, snmpIfTypeLabel } from "../utils/ifMib.js";
 import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity, type FdbEntry } from "../utils/macForwarding.js";
 import { buildArpNeighbors, arpNeighborsFromFortiosRest, type ArpNeighborEntry } from "../utils/arpNeighbors.js";
 import { persistAssetArpNeighbors } from "./arpTableService.js";
@@ -7852,32 +7853,6 @@ function parseLldpCapabilities(raw: unknown): string[] {
   return out;
 }
 
-function ifStatusLabel(n: number | null): string | null {
-  switch (n) {
-    case 1: return "up";
-    case 2: return "down";
-    case 3: return "testing";
-    case 4: return "unknown";
-    case 5: return "dormant";
-    case 6: return "notPresent";
-    case 7: return "lowerLayerDown";
-    default: return null;
-  }
-}
-
-// Maps IF-MIB ifType integer (1.3.6.1.2.1.2.2.1.3) to our canonical type string.
-// Only covers the values commonly seen on network gear; everything else is null.
-function snmpIfTypeLabel(n: number | null | undefined): string | null {
-  switch (n) {
-    case 6:   return "physical";   // ethernetCsmacd
-    case 24:  return "loopback";   // softwareLoopback
-    case 131: return "tunnel";     // tunnel
-    case 135: return "vlan";       // l2vlan
-    case 161: return "aggregate";  // ieee8023adLag
-    case 166: return "tunnel";     // mpls
-    default:  return null;
-  }
-}
 
 // ─── Persisting telemetry / system info ─────────────────────────────────────
 
