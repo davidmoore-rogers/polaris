@@ -1570,55 +1570,27 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
 // ─── Region tag picker (shared by user-regions modal + role slide-over) ──
 
 async function loadRegionList() {
-  try {
-    if (api.mapRegions && typeof api.mapRegions.list === "function") {
-      var regions = await api.mapRegions.list();
-      _regionByName = {};
-      (regions || []).forEach(function (r) {
-        if (r && r.name) _regionByName[r.name] = r.color || "";
-      });
-      _regionList = Object.keys(_regionByName).sort();
-      // Re-render any open user table so existing rows pick up the colors.
-      if (typeof renderUsersBody === "function" && document.getElementById("users-tbody")) {
-        try { renderUsersBody(); } catch (_) {}
-      }
-    }
-  } catch (_) {
-    // Region listing requires mapRegions=read; non-admin viewers fall
-    // through to a free-text picker with no autocomplete.
-    _regionList = [];
-    _regionByName = {};
+  // The fetch + the name->color map live in the shared PolarisRegionPills
+  // module (region-pills.js) so the Device Map's "My regions" strip and this
+  // page's pickers read one catalogue and paint one color per region. The
+  // locals below stay as this page's own view of it: the picker also needs the
+  // NAME list and an "is this tag in the catalogue?" test for orphan tags.
+  // A failed load (region listing requires mapRegions=read) leaves both empty,
+  // which degrades the picker to free text -- unchanged behavior.
+  _regionByName = await window.PolarisRegionPills.load();
+  _regionList = window.PolarisRegionPills.names();
+  // Re-render any open user table so existing rows pick up the colors.
+  if (typeof renderUsersBody === "function" && document.getElementById("users-tbody")) {
+    try { renderUsersBody(); } catch (_) {}
   }
 }
 
-// Return the stored hex color for a region name, or a neutral fallback so a
-// region tag that was hand-typed (and not in the map-regions catalogue) still
-// renders as a recognizable pill.
-function regionColorFor(name) {
-  var c = _regionByName[name];
-  if (c && /^#[0-9a-fA-F]{6}$/.test(c)) return c;
-  return "#9e9e9e";
-}
-
-// Convert a #rrggbb hex to "r, g, b" so we can drop it into rgba(...) for the
-// translucent pill background while keeping the solid border + text in full color.
-function hexToRgbTriplet(hex) {
-  var m = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex || "");
-  if (!m) return "158, 158, 158";
-  return parseInt(m[1], 16) + ", " + parseInt(m[2], 16) + ", " + parseInt(m[3], 16);
-}
-
-// One badge per region, colored by the region's stored color.
-function regionPillsHtml(names) {
-  if (!Array.isArray(names) || names.length === 0) return "";
-  return names.map(function (n) {
-    var hex = regionColorFor(n);
-    var rgb = hexToRgbTriplet(hex);
-    return '<span class="badge" style="background:rgba(' + rgb + ',0.18);color:' + hex + ';border:1px solid rgba(' + rgb + ',0.45)">' +
-      escapeHtml(n) +
-    '</span>';
-  }).join("");
-}
+// Thin aliases over the shared module (region-pills.js). The stored hex, the
+// neutral fallback for a tag outside the catalogue, and the hex->rgba pill
+// markup all live there; these keep the existing call sites reading naturally.
+function regionColorFor(name)  { return window.PolarisRegionPills.colorFor(name); }
+function hexToRgbTriplet(hex)  { return window.PolarisRegionPills.rgbTriplet(hex); }
+function regionPillsHtml(names) { return window.PolarisRegionPills.html(names); }
 
 // Render every map-region as a clickable pill colored by the region's stored
 // color. Selected pills are filled; deselected pills are an outline of the

@@ -79,6 +79,8 @@
     initMap();
     wireModal();
     wireRegionEditing();
+    wireShowRegions();
+    renderMyRegions().catch(function () {});
 
     try {
       await loadSites();
@@ -2677,6 +2679,75 @@
     polygonsByRegionId: {} // id → L.polygon
   };
 
+  // ─── Read-only region overlay ("Show regions", any map viewer) ────────────
+  // A SEPARATE state object from regionState, not a field on it:
+  // teardownRegionEditMode() nulls regionState.layer and clears its polygon
+  // map, so hanging the read-only layer off the same object guarantees an
+  // eventual accidental teardown. Exactly one of the two owns the drawn
+  // regions at any moment — see the handshake in enter/teardown edit mode.
+  var regionViewState = {
+    showing: false,
+    layer: null,
+    payload: null,      // memoized /map/region-overlay response
+    wasShowing: false   // restore the overlay after edit mode exits
+  };
+
+  // ---- "My regions" strip ---------------------------------------------------
+  // The signed-in operator's OWN region scope, rendered read-only at the right
+  // of the toolbar beside "Edit regions". Region tags decide which sites and
+  // assets a scoped operator is answerable for, and which alerts route to
+  // them, but until now no page said what a given operator's own scope was --
+  // the Users page shows it only to whoever can administer users.
+  //
+  // Display only: it is not a map filter. The map already renders exactly the
+  // sites the viewer's role may read, so narrowing to "my" regions would hide
+  // sites the operator is legitimately responsible for seeing.
+  async function renderMyRegions() {
+    var box = document.getElementById("map-my-regions");
+    if (!box) return;
+    var mine = Array.isArray(window.currentEffectiveRegions)
+      ? window.currentEffectiveRegions.slice().sort()
+      : [];
+
+    box.hidden = false;
+    if (mine.length === 0) {
+      // An empty effective scope means UNRESTRICTED, not "assigned to none" --
+      // a bare label with nothing after it would read as a broken widget, so
+      // the strip states the semantics.
+      box.innerHTML =
+        '<span class="map-my-regions-label">My regions:</span>' +
+        '<span class="map-my-regions-all" title="Your account is not scoped to any region, ' +
+        'so every site you can read is on the map.">all regions</span>';
+      return;
+    }
+
+    // Pill colors come from the map-region catalogue, whose GET is gated
+    // `mapRegions:read` -- a viewer holding only `deviceMap:read` gets the
+    // neutral hue rather than a failed strip (PolarisRegionPills.load swallows
+    // that, the same fallback a tag outside the catalogue already takes).
+    if (!window.PolarisRegionPills.isLoaded()) await window.PolarisRegionPills.load();
+    box.innerHTML =
+      '<span class="map-my-regions-label">My regions:</span>' +
+      window.PolarisRegionPills.html(mine, regionScopeSource);
+  }
+
+  // Why the viewer holds a given region -- their own account, their role, or an
+  // IdP group. /auth/me returns all three sets and the effective union; app.js
+  // keeps the account + role halves, so a tag in the union but in neither of
+  // those is group-derived (those are re-resolved live at each login and never
+  // persisted onto the user's own columns).
+  function regionScopeSource(name) {
+    var own  = Array.isArray(window.currentUserRegions) ? window.currentUserRegions : [];
+    var role = Array.isArray(window.currentRoleRegions) ? window.currentRoleRegions : [];
+    var from = [];
+    if (own.indexOf(name) !== -1) from.push("your account");
+    if (role.indexOf(name) !== -1) {
+      from.push("your role" + (window.currentUserRole ? " (" + window.currentUserRole + ")" : ""));
+    }
+    if (from.length === 0) from.push("your identity-provider groups");
+    return "Region scope from " + from.join(" and ");
+  }
+
   function wireRegionEditing() {
     var editBtn    = document.getElementById("map-edit-regions");
     var saveBtn    = document.getElementById("map-save-regions");
@@ -2706,6 +2777,108 @@
     }
   }
 
+  // ---- "Show regions" (read-only) -----------------------------------------
+  // Unlike Edit regions this is NOT permission-gated: any viewer who can see
+  // the map can see how its regions nest. It reads /map/region-overlay, which
+  // sits under the deviceMap:read mount for exactly that reason.
+  function wireShowRegions() {
+    var btn = document.getElementById("map-show-regions");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      toggleShowRegions().catch(function (err) {
+        setStatus("Failed to load regions: " + (err && err.message ? err.message : err));
+      });
+    });
+    if (window.PolarisRegionTree && typeof window.PolarisRegionTree.attachTreeTooltip === "function") {
+      // Reuses the topology edge tooltip, which is already body-mounted (so
+      // modal overflow can't clip it), viewport-edge aware and in this IIFE.
+      window.PolarisRegionTree.attachTreeTooltip(btn, loadRegionOverlay, {
+        show: showEdgeTooltip,
+        move: moveEdgeTooltip,
+        hide: hideEdgeTooltip
+      });
+    }
+  }
+
+  // Memoized per page visit. Cleared when edit mode exits, since a polygon
+  // edit can have changed every level in the tree.
+  async function loadRegionOverlay() {
+    if (regionViewState.payload) return regionViewState.payload;
+    var data = await api.mapRegions.overlay();
+    regionViewState.payload = data || { regions: [], roots: [], maxLevel: 0, warnings: [] };
+    return regionViewState.payload;
+  }
+
+  function setShowRegionsButton(showing) {
+    var btn = document.getElementById("map-show-regions");
+    if (!btn) return;
+    btn.textContent = showing ? "Hide regions" : "Show regions";
+    btn.setAttribute("aria-pressed", showing ? "true" : "false");
+  }
+
+  async function toggleShowRegions() {
+    if (regionViewState.showing) { hideRegionOverlay(); return; }
+    await showRegionOverlay();
+  }
+
+  async function showRegionOverlay() {
+    if (regionState.editing) return; // edit mode owns the polygons
+    var payload = await loadRegionOverlay();
+    var regions = (payload && Array.isArray(payload.regions)) ? payload.regions : [];
+    if (regions.length === 0) {
+      setStatus("No regions are defined yet.");
+      return;
+    }
+    regionViewState.layer = L.featureGroup().addTo(map);
+    var ordered = window.PolarisRegionTree
+      ? window.PolarisRegionTree.paintOrder(payload)
+      : regions;
+    for (var i = 0; i < ordered.length; i++) {
+      addReadOnlyRegionPolygon(ordered[i], payload.maxLevel);
+    }
+    regionViewState.showing = true;
+    setShowRegionsButton(true);
+    setStatus(window.PolarisRegionTree ? window.PolarisRegionTree.summaryLine(payload) : "");
+  }
+
+  // Read-only twin of addRegionPolygon. Shares applyRegionColor and nothing
+  // else — in particular no click handler that could open the rename / delete
+  // popup, and no vertex handles.
+  function addReadOnlyRegionPolygon(region, maxLevel) {
+    if (!region || !Array.isArray(region.polygon) || region.polygon.length < 3) return;
+    var style = window.PolarisRegionTree
+      ? window.PolarisRegionTree.overlayStyle(region.level, maxLevel)
+      : { weight: 2, fillOpacity: 0.06, labelPermanent: false, dashArray: null };
+    var poly = L.polygon(region.polygon, {
+      className: "map-region-polygon map-region-polygon-readonly",
+      weight: style.weight,
+      fillOpacity: style.fillOpacity,
+      dashArray: style.dashArray || null
+      // Left INTERACTIVE (Leaflet's default) so the per-region hover label
+      // below actually fires — a non-interactive layer never gets mouseover, so
+      // every region would have needed a permanent label instead. Site markers
+      // still win any click: they live in Leaflet's markerPane, which sits
+      // above the overlayPane these polygons are drawn in. No click handler is
+      // attached here, so a click on bare polygon does nothing.
+    });
+    applyRegionColor(poly, region.color);
+    var label = escapeHtml(region.name) + " (L" + (region.level == null ? 1 : region.level) + ")";
+    // Only the outermost ring of a nested set gets a permanent label; labelling
+    // every ring at every depth is unreadable.
+    poly.bindTooltip(label, {
+      permanent: !!style.labelPermanent,
+      direction: "center",
+      className: "map-region-label"
+    });
+    regionViewState.layer.addLayer(poly);
+  }
+
+  function hideRegionOverlay() {
+    if (regionViewState.layer) { map.removeLayer(regionViewState.layer); regionViewState.layer = null; }
+    regionViewState.showing = false;
+    setShowRegionsButton(false);
+  }
+
   // Swap the three toolbar buttons between view ("Edit regions" visible) and
   // edit ("Save Regions" + "Discard Changes" visible) modes. Single helper so
   // the visibility rule lives in one place.
@@ -2720,6 +2893,16 @@
 
   async function enterRegionEditMode() {
     if (regionState.editing) return;
+    // Hand the polygons over from the read-only overlay. Two stacked layers
+    // would double-render every region, and the read-only ones sitting on top
+    // would swallow the clicks that open the rename / delete popup.
+    regionViewState.wasShowing = regionViewState.showing;
+    if (regionViewState.showing) hideRegionOverlay();
+    var showBtn = document.getElementById("map-show-regions");
+    if (showBtn) {
+      showBtn.disabled = true;
+      showBtn.title = "Regions are shown while you are editing them";
+    }
     regionState.editing = true;
     regionState.polygonsByRegionId = {};
     regionState.layer = L.featureGroup().addTo(map);
@@ -2823,6 +3006,17 @@
     if (regionState.layer) { map.removeLayer(regionState.layer); regionState.layer = null; }
     regionState.polygonsByRegionId = {};
     setEditModeButtons(false);
+
+    // Hand the polygons back. The memoized payload is DROPPED rather than
+    // reused: an edit in this session can have changed the nesting, and
+    // therefore every level in the tree.
+    var showBtn = document.getElementById("map-show-regions");
+    if (showBtn) { showBtn.disabled = false; showBtn.title = ""; }
+    regionViewState.payload = null;
+    if (regionViewState.wasShowing) {
+      regionViewState.wasShowing = false;
+      showRegionOverlay().catch(function () { /* the toolbar button can retry */ });
+    }
   }
 
   function addRegionPolygon(region) {

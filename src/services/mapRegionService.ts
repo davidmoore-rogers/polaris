@@ -45,6 +45,8 @@ import { logger } from "../utils/logger.js";
 import { pointInPolygon, type LatLng } from "../utils/geo.js";
 import { buildCidrMatcher } from "../utils/cidr.js";
 import { controllerIdentityKeys, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
+import { buildRegionHierarchy, type RegionHierarchy } from "../utils/regionHierarchy.js";
+import { createTtlCache } from "../utils/ttlCache.js";
 
 const SETTING_KEY = "mapRegions";
 const TAG_PREFIX = "region:";
@@ -99,19 +101,32 @@ export interface ReconcileSummary extends Record<string, unknown> {
 
 // --- Persistence helpers ---
 
-async function loadAll(): Promise<MapRegion[]> {
-  const row = await prisma.setting.findUnique({ where: { key: SETTING_KEY } });
-  if (!row?.value) return [];
+/**
+ * Load the blob along with its `Setting.updatedAt`, which the hierarchy cache
+ * uses as a free, exact version stamp — no content hashing needed.
+ */
+async function loadAllWithVersion(): Promise<{ regions: MapRegion[]; version: string }> {
+  const row = await prisma.setting.findUnique({
+    where: { key: SETTING_KEY },
+    select: { value: true, updatedAt: true },
+  });
+  const version = row?.updatedAt ? new Date(row.updatedAt).toISOString() : "none";
+  if (!row?.value) return { regions: [], version };
   const val = row.value as unknown;
-  if (!Array.isArray(val)) return [];
+  if (!Array.isArray(val)) return { regions: [], version };
   // Legacy regions pre-date the color field — back-fill at read time with a
   // random palette pick so the UI has something to render. Persist back on
   // the next write through updateRegion; we deliberately don't write here
   // (a read shouldn't mutate the Setting blob).
-  return (val as Partial<MapRegion>[]).map((r) => ({
+  const regions = (val as Partial<MapRegion>[]).map((r) => ({
     ...(r as MapRegion),
     color: typeof r.color === "string" && HEX_COLOR_RE.test(r.color) ? r.color.toLowerCase() : randomTagColor(),
   }));
+  return { regions, version };
+}
+
+async function loadAll(): Promise<MapRegion[]> {
+  return (await loadAllWithVersion()).regions;
 }
 
 async function persistAll(regions: MapRegion[]): Promise<void> {
@@ -120,6 +135,10 @@ async function persistAll(regions: MapRegion[]): Promise<void> {
     update: { value: regions as any },
     create: { key: SETTING_KEY, value: regions as any },
   });
+  // Invalidation lives HERE rather than at the three CRUD call sites so a
+  // future write path cannot forget it. Levels are global: editing one polygon
+  // can re-level an entire ancestor chain, so any write invalidates everything.
+  invalidateRegionHierarchy();
 }
 
 // --- Validation ---
@@ -528,6 +547,97 @@ async function dropProvenance(
 
 async function dropAllProvenance(regionId: string): Promise<void> {
   await prisma.regionTagAssignment.deleteMany({ where: { regionId } });
+}
+
+// --- Derived nesting levels ---
+
+/** A region decorated with its DERIVED place in the containment forest. */
+export interface MapRegionWithLevel extends MapRegion {
+  /** 1 = contains no other region. May have gaps on an uneven tree. */
+  level: number;
+  /** 0 = top-level. Always gap-free — route on this, not on `level`. */
+  depth: number;
+  parentId: string | null;
+  childIds: string[];
+  /** Outermost first (root → parent). */
+  ancestorIds: string[];
+}
+
+/**
+ * The hierarchy is DERIVED on read and cached per blob version — never written
+ * into the `mapRegions` blob. A persisted level would be a second source of
+ * truth that a restore, a backup import or a hand-edited Setting could silently
+ * desynchronize, and the drift would be invisible because nothing would
+ * recompute to compare. See `src/utils/regionHierarchy.ts`.
+ *
+ * Keyed on `Setting.updatedAt`, so a stale entry is unreachable even before the
+ * TTL fires — the TTL is only a memory bound. `persistAll` invalidates.
+ */
+const REGION_HIERARCHY_TTL_MS = 5 * 60_000;
+const _hierarchyCache = createTtlCache<{ regions: MapRegion[]; hierarchy: RegionHierarchy }>({
+  ttlMs: REGION_HIERARCHY_TTL_MS,
+  maxEntries: 4,
+});
+
+/** Drop the cached containment forest. Called by every write via `persistAll`. */
+export function invalidateRegionHierarchy(): void {
+  _hierarchyCache.invalidate();
+}
+
+/** The region list plus its containment forest, cached per blob version. */
+export async function getRegionHierarchy(): Promise<{ regions: MapRegion[]; hierarchy: RegionHierarchy }> {
+  const { regions, version } = await loadAllWithVersion();
+  return _hierarchyCache.getOrCompute(version, async () => ({
+    regions,
+    hierarchy: buildRegionHierarchy(regions.map((r) => ({ id: r.id, polygon: r.polygon }))),
+  }));
+}
+
+/**
+ * Name-sorted regions decorated with their derived level/depth/parent.
+ *
+ * A SEPARATE function from `listRegions`, deliberately: `reconcileMapRegions`
+ * and `notificationRuleService.listScopeOptions` both call `listRegions`, and if
+ * the plain read path returned decorated objects then any future code that
+ * round-tripped one back through `persistAll` would write derived fields into
+ * the blob — the exact failure deriving-on-read exists to prevent.
+ */
+export async function listRegionsWithLevels(): Promise<MapRegionWithLevel[]> {
+  const { regions, hierarchy } = await getRegionHierarchy();
+  return regions
+    .map((r) => {
+      const node = hierarchy.byId[r.id];
+      return {
+        ...r,
+        level: node?.level ?? 1,
+        depth: node?.depth ?? 0,
+        parentId: node?.parentId ?? null,
+        childIds: node?.childIds ?? [],
+        ancestorIds: node?.ancestorIds ?? [],
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Which regions' levels MOVED between two hierarchies. Pure.
+ *
+ * Exists because editing one polygon can re-level an entire ancestor chain —
+ * changing who gets paged for regions the operator never touched. Without an
+ * audit trail built from this, that change is completely invisible.
+ */
+export function diffRegionLevels(
+  before: RegionHierarchy,
+  after: RegionHierarchy,
+): Array<{ regionId: string; from: number | null; to: number | null }> {
+  const out: Array<{ regionId: string; from: number | null; to: number | null }> = [];
+  const ids = new Set([...Object.keys(before.byId), ...Object.keys(after.byId)]);
+  for (const id of Array.from(ids).sort()) {
+    const from = before.byId[id]?.level ?? null;
+    const to = after.byId[id]?.level ?? null;
+    if (from !== to) out.push({ regionId: id, from, to });
+  }
+  return out;
 }
 
 // --- Public API ---

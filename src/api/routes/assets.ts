@@ -20,7 +20,12 @@ import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
 import { clampAcquiredToLastSeen, EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
-import { quarantineAsset, releaseQuarantine, verifyAssetQuarantine } from "../../services/assetQuarantineService.js";
+import {
+  quarantineAsset,
+  releaseQuarantine,
+  verifyAssetQuarantine,
+  getQuarantinePushAvailability,
+} from "../../services/assetQuarantineService.js";
 import { syncDescriptionsOnSave } from "../../services/descriptionSyncService.js";
 import { cidrContains } from "../../utils/cidr.js";
 import { buildIpContexts, type IpContext } from "../../services/subnetService.js";
@@ -1089,6 +1094,24 @@ router.get("/agent-install-scripts", requirePermission("assets", "read"), async 
     res.json({ scripts: AGENT_INSTALL_SCRIPTS });
   } catch (err) { next(err); }
 });
+
+// GET /api/v1/assets/quarantine-availability — is quarantine push configured
+// on ANY enabled FortiManager / FortiGate integration? Drives whether the
+// frontends offer the quarantine verbs at all (row menu, bulk bar, details
+// tab): with the per-integration toggle off fleet-wide a push can only fail
+// with "0/0 FortiGate(s) accepted the push". MUST stay above GET /:id so the
+// literal path isn't captured as an asset id. Gated on the quarantine key at
+// read level — the callers already hold `assetsQuarantine:write`, and the
+// answer says nothing about any individual integration.
+router.get(
+  "/quarantine-availability",
+  requirePermission("assetsQuarantine", "read"),
+  async (_req, res, next) => {
+    try {
+      res.json(await getQuarantinePushAvailability());
+    } catch (err) { next(err); }
+  },
+);
 
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", requirePermission("assets", "read"), async (req, res, next) => {

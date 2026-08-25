@@ -509,21 +509,12 @@
     }).join("") + '</div>';
   }
 
-  // Widget header title. When a widget's asset-type filter selects a strict
-  // subset of the eight built-ins, the chosen types are appended in parens
-  // (e.g. "Highest Avg CPU (Server, Switch)"); all-on (or no filter) → bare label.
+  // Widget header title — composed by the widget registry (PolarisWidgets.
+  // widgetTitle) from the module's label plus the asset-type and
+  // minimum-severity gear filters. Kept as a local alias since several call
+  // sites use it.
   function widgetTitleFor(module, w) {
-    var base = module ? module.label : (w.type + " (unknown widget)");
-    var cfg = (w && w.config) || {};
-    var BUILTIN = (window.PolarisWidgets && PolarisWidgets.BUILTIN_ASSET_TYPES) || [];
-    if (Array.isArray(cfg.assetTypes) && cfg.assetTypes.length > 0 && cfg.assetTypes.length < BUILTIN.length) {
-      var labels = (window.PolarisWidgets && PolarisWidgets.ASSET_TYPE_LABELS) || {};
-      var picked = BUILTIN
-        .filter(function (t) { return cfg.assetTypes.indexOf(t) !== -1; })  // preserve built-in order
-        .map(function (t) { return labels[t] || t; });
-      if (picked.length) base += " (" + picked.join(", ") + ")";
-    }
-    return base;
+    return PolarisWidgets.widgetTitle(module, w);
   }
 
   function mountWidgetShell(w) {
@@ -550,7 +541,7 @@
     article.innerHTML =
       '<div class="dashboard-widget-header">' +
         grip +
-        '<div class="dashboard-widget-title">' + escapeHtml(label) + '</div>' +
+        '<div class="dashboard-widget-title" title="' + escapeHtml(label) + '">' + escapeHtml(label) + '</div>' +
         editControls +
       '</div>' +
       '<div class="dashboard-widget-body"></div>';
@@ -746,11 +737,16 @@
     src.widget.config = Object.assign({}, src.widget.config || {}, { [key]: value });
     queueSave();
     renderWidget(src.widget);
-    // Header title may depend on the asset-type filter — refresh it in place
+    // Header title may depend on the asset-type filter or the minimum-severity
+    // tier — refresh it in place
     // (renderWidget only re-renders the body, not the shell header).
     var article = canvasEl.querySelector('.dashboard-widget[data-id="' + cssEscape(id) + '"]');
     var titleEl = article && article.querySelector(".dashboard-widget-title");
-    if (titleEl) titleEl.textContent = widgetTitleFor(PolarisWidgets.getByType(src.widget.type), src.widget);
+    if (titleEl) {
+      var label = widgetTitleFor(PolarisWidgets.getByType(src.widget.type), src.widget);
+      titleEl.textContent = label;
+      titleEl.setAttribute("title", label);
+    }
   }
 
   function handleTapToAdd(type) {

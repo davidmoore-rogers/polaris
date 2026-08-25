@@ -157,6 +157,21 @@ function downloadCsv(headers, rows, filename) {
   URL.revokeObjectURL(url);
 }
 
+/** Download an object as a pretty-printed .json file. Same Blob + a.download
+ *  shape as downloadCsv above; two spaces because the file is meant to be read
+ *  and hand-edited (an automation export, a config dump). */
+function downloadJson(obj, filename) {
+  var blob = new Blob([JSON.stringify(obj, null, 2) + "\n"], { type: "application/json;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function _csvRow(cells) {
   return cells.map(function (c) {
     var s = String(c == null ? "" : c);
@@ -168,6 +183,7 @@ function _csvRow(cells) {
 }
 if (typeof window !== "undefined") {
   window.downloadCsv = downloadCsv;
+  window.downloadJson = downloadJson;
   window._csvRow = _csvRow;
 }
 
@@ -581,6 +597,7 @@ const api = {
     resetMonitorOverride: (id)  => request("POST", `/assets/${id}/monitor-override/reset`),
     effectiveMonitorSettings: (id) => request("GET", `/assets/${id}/effective-monitor-settings`),
     snmpWalk:             (id, body, signal) => request("POST", `/assets/${id}/snmp-walk`, body, signal),
+    quarantineAvailability: ()  => request("GET", "/assets/quarantine-availability"),
     quarantine:           (id, reason) => request("POST", `/assets/${id}/quarantine`, reason !== undefined ? { reason } : {}),
     unquarantine:         (id)  => request("DELETE", `/assets/${id}/quarantine`),
     verifyQuarantine:     (id)  => request("POST", `/assets/${id}/quarantine/verify`),
@@ -1209,6 +1226,11 @@ const api = {
     create: (name, polygon, color) => request("POST",   "/map/regions", color ? { name, polygon, color } : { name, polygon }),
     update: (id, body)             => request("PUT",    `/map/regions/${id}`, body),
     delete: (id)                   => request("DELETE", `/map/regions/${id}`),
+    // Read-only geometry + the derived containment tree for the map's "Show
+    // regions" button. A DIFFERENT endpoint from list() on purpose: this one
+    // lives under the /map mount and is reachable at deviceMap:read, whereas
+    // list() needs mapRegions:read — see the route's own comment.
+    overlay: ()                    => request("GET",    "/map/region-overlay"),
   },
   auth: {
     me: () => request("GET", "/auth/me"),

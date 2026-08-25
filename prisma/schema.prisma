@@ -3930,6 +3930,20 @@ model NotificationRule {
   // seeds this from the trigger's notify actions as they are created, so new
   // automations tell the same people it recovered.
   resetActions Json?
+  // Re-send this alert's notifications while it stays unhandled:
+  // { everyMin, stopOn: "acknowledge" | "clear", stopAfterHours? }.
+  //
+  // Only escalation TIERS could repeat before this — the engine's initial fire
+  // sent once and never revisited it, so an alert nobody looked at went quiet.
+  // Swept by the same escalateNotifications tick, keyed REPEAT_STATE_KEY in
+  // Notification.escalationState.
+  //
+  // Deliberately NO maxRepeats: the operator asked for unbounded, and the
+  // optional stopAfterHours is the escape hatch. Repeats re-run NOTIFY actions
+  // only (REPEATABLE_ACTION_TYPES) — unbounded re-execution of a
+  // ticket-creating webhook or a registry script is not symmetric with an extra
+  // email. NULL = never repeats, which is every pre-feature automation.
+  repeat Json?
   createdBy    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt

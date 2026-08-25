@@ -3941,6 +3941,24 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   font-family: var(--font-mono);
   color: var(--color-text-secondary);
 }
+/* The sub-asset an alert was raised for (Notification.dimension) — a port,
+   sensor, mount or tunnel. Monospace because it's an identifier, and sized down
+   so it reads as a qualifier on the hostname beside it rather than a second
+   name. Overrides .recent-item-title span, which paints every child white. */
+.recent-item-title .dash-alert-dim {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+/* "Showing 25 of 214 …" under a capped widget list. Centered and quiet: it's a
+   statement about the view, not another row. */
+.widget-overflow-note {
+  padding: 8px 0 0;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
 .dash-alert-source { color: var(--color-text-secondary); }
 .dash-alert-expand {
   padding: 8px 4px 4px 24px;
@@ -4339,6 +4357,15 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   color: var(--color-text-primary);
   letter-spacing: 0.2px;
   user-select: none;
+  /* One line, always. The title carries qualifiers (asset-type filter, minimum
+     severity tier) that can outrun a quarter-width widget, and the article's
+     height is a fixed pixel value — a wrapped header would steal a line from
+     the chart below it. min-width:0 is what lets a flex item ellipsize; the
+     full text rides the element's title attribute. */
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .dashboard-widget-title[draggable="true"] { cursor: grab; }
 .dashboard-widget-title[draggable="true"]:active { cursor: grabbing; }
@@ -4941,6 +4968,32 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   font-size: 0.76rem;
   color: var(--color-text-tertiary);
 }
+
+/* Devices-step match preview (wizard step 2). A FIXED-height well: the
+   debounced preview swaps "Checking…" for a count plus a result table on every
+   edit of the condition tree, and letting that content resize the step made the
+   modal jump under the operator's cursor mid-edit. The head (count / status)
+   sits at the top and the matched-device list scrolls inside the body, so the
+   box occupies the same height whatever the preview returns — including before
+   the first one has run. Deliberately unstyled otherwise: a border would draw a
+   visible empty frame in the states that fill less than the reserved height. */
+.aw-preview-box {
+  display: flex;
+  flex-direction: column;
+  height: 232px;
+}
+.aw-preview-head {
+  flex: 0 0 auto;
+  margin: 0 0 4px;
+  font-size: 0.85rem;
+}
+.aw-preview-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+.aw-preview-body tbody td { padding: 0.4rem 0.75rem; }
+.aw-preview-muted { color: var(--color-text-tertiary); }
 
 /* Step-5 review summary card (label/value rows, setup.html's review-grid
    promoted). */

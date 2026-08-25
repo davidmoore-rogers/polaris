@@ -28,6 +28,11 @@ import { resolveTagScopesForUser } from "./regionScopeService.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import { stripRegionPrefix } from "./notificationService.js";
 import {
+  deviceRegionsAtLevels,
+  regionLevelIndex,
+  type RegionLevelIndex,
+} from "./regionHierarchyService.js";
+import {
   renderNotificationTemplate,
   substituteAckToken,
   ackUrlForEmail,
@@ -436,6 +441,10 @@ export interface ExpandDeliveriesOptions {
   /** Escalation provenance (tier/attempt) — stamped into every row's meta so
    *  the View tab's "Escalated" marker and audits can attribute the send. */
   escalation?: { tier: number; attempt: number };
+  /** Repeat provenance (attempt) — a SEPARATE meta key from `escalation`, so a
+   *  reminder is never mistaken for an escalation by anything reading the
+   *  delivery history. */
+  repeat?: { attempt: number };
 }
 
 export async function expandDeliveries(
@@ -443,7 +452,7 @@ export async function expandDeliveries(
   targets: DeliveryTarget[] | undefined,
   opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
-  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation } = opts;
+  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -473,16 +482,33 @@ export async function expandDeliveries(
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
     seen.add(key);
-    const withEsc = escalation
-      ? ({ ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}), escalation } as Prisma.InputJsonValue)
+    // Fold in whichever provenance is present, and keep meta strictly
+    // undefined when neither is — so every pre-feature path still writes a
+    // byte-identical row.
+    const provenance = escalation || repeat
+      ? ({
+          ...(meta && typeof meta === "object" ? (meta as Record<string, unknown>) : {}),
+          ...(escalation ? { escalation } : {}),
+          ...(repeat ? { repeat } : {}),
+        } as Prisma.InputJsonValue)
       : meta;
-    rows.push({ notificationId, channelId, transport, target, meta: withEsc ?? undefined });
+    rows.push({ notificationId, channelId, transport, target, meta: provenance ?? undefined });
     rowAck.push(ackFor ?? null);
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)
   // users in the TRIGGERING asset's region(s) + (if opted in) users in the
   // rule's scope region(s) + legacy tag-routing. Deduped by id.
+  // Resolved AT MOST ONCE per notification, and only when an action actually
+  // asks for level routing — the same posture as assetContactEmails() in
+  // automationActionService. A rule with three notify actions shares one
+  // lookup; a rule that never opts in pays nothing.
+  let _regionLevels: RegionLevelIndex | null = null;
+  const regionLevels = async (): Promise<RegionLevelIndex> => {
+    if (!_regionLevels) _regionLevels = await regionLevelIndex();
+    return _regionLevels;
+  };
+
   const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
     const map = new Map<string, RecipientUser>();
     const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
@@ -494,6 +520,19 @@ export async function expandDeliveries(
     if (t.recipientRoles?.length) addUsers(await resolveUsersByRoles(t.recipientRoles));
     if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
     if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
+    // Asset-RELATIVE level routing: level 1 = the device's own innermost
+    // region, 2 = the division containing it, walked outward along the
+    // containment edges (regionHierarchyService). Matches `regionSet`
+    // (region tags only) via resolveUsersByRegions rather than the flattened
+    // `matchSet` recipientDeviceRegion uses, because these names come from the
+    // region catalogue by construction — the same reasoning recipientRegions
+    // already carries. The asymmetry with recipientDeviceRegion is deliberate
+    // and documented in TOUCHES.md; do NOT "unify" them, that changes who
+    // existing rules deliver to.
+    if (t.recipientDeviceRegionLevels?.length && assetRegionTags?.length) {
+      const names = deviceRegionsAtLevels(assetRegionTags, t.recipientDeviceRegionLevels, await regionLevels());
+      if (names.length) addUsers(await resolveUsersByRegions(names));
+    }
     if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
     if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
     return Array.from(map.values());

@@ -25,6 +25,7 @@
 import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
 import { prisma } from "../db.js";
 import { AppError } from "../utils/errors.js";
+import { pairCableMembers, type CableMember } from "../utils/cableMembers.js";
 import { controllerStampWhereOr, readFirewallDeviceName } from "../utils/fortinetParentKey.js";
 import { loadIconResolutionCache, resolveIconUrl } from "./deviceIconService.js";
 import { inferInterfaceTopology } from "./interfaceTopologyService.js";
@@ -1242,10 +1243,47 @@ export async function buildSiteTopology(siteId: string) {
       // Treating one as a cable member would mint a phantom parallel line;
       // skip it and let this side fall back to the CMDB trunk membership.
       if (SYNTHETIC_FALLBACK_RE.test(n.localIfName)) continue;
+      // LLDP as CABLE evidence takes a far tighter freshness bound than LLDP
+      // as a display value. persistLldpNeighbors deliberately keeps a vanished
+      // neighbor row for 48h so the operator-facing Neighbor column doesn't
+      // flap on a missed advertisement — but a row that outlived its cable is
+      // exactly what mints a phantom parallel line here: re-patch a link from
+      // port9 to port10 and the switch claims both ports for two days. Same 1h
+      // bound the interface-name inference and the per-edge tooltip details
+      // already use; past it this side falls back to the CMDB trunk membership
+      // rather than to nothing.
+      if (new Date(n.lastSeen) <= ifMetricStaleCutoff) continue;
       const key = switchSwitchPairKey(n.assetId, n.matchedAsset.id);
       if (!key || !pairIface.has(key)) continue; // enrich inferred pairs only
       addTo(pairLldp, key, n.assetId, membersOf(n.assetId, n.localIfName));
     }
+    // `membersOf` returns CMDB trunk members (physical by construction) but
+    // degrades to the interface name as-is when membership wasn't scraped —
+    // which may be an aggregate. The repeat rule turns on exactly that
+    // distinction, so classify from what the device reported. Two positive
+    // signals for "this is an aggregate": the name PARENTS physical members,
+    // or its own ifType says it isn't physical. Anything else — including a
+    // name with no current interface row at all — is treated as physical,
+    // because that is the SAFE default here: refusing to repeat costs one
+    // undrawn line (named in the reason as unpaired), while wrongly repeating
+    // draws a cable that doesn't exist, which is the bug this rule exists for.
+    const ifTypeByKey = new Map<string, string | null>();
+    for (const r of ifMetricRows) ifTypeByKey.set(`${r.assetId}|${r.ifName}`, r.ifType);
+    const isAggregateName = (assetId: string, name: string): boolean => {
+      if (physicalByParent.has(`${assetId}|${name}`)) return true;
+      const t = ifTypeByKey.get(`${assetId}|${name}`);
+      return !!t && t !== "physical";
+    };
+    const describeMembers = (assetId: string, ports: string[]): CableMember[] =>
+      ports.map((port) => {
+        const operStatus = ifMetricByKey.get(`${assetId}|${port}`)?.operStatus;
+        return {
+          port,
+          physical: !isAggregateName(assetId, port),
+          // Absent reading = unknown, which is NOT down.
+          down: !!operStatus && String(operStatus).toLowerCase() !== "up",
+        };
+      });
     const expandedSwitchPairs = new Set<string>();
     const memberCableEdges: InterfaceEdge[] = [];
     for (const [pairKey, ifaceByAsset] of pairIface) {
@@ -1256,19 +1294,33 @@ export async function buildSiteTopology(siteId: string) {
         if (fromLldp && fromLldp.size) return [...fromLldp].sort(naturalPort);
         return [...(ifaceByAsset.get(id) ?? [])].sort(naturalPort);
       };
-      const aMembers = sideMembers(aId);
-      const bMembers = sideMembers(bId);
-      const n = Math.max(aMembers.length, bMembers.length);
-      if (n === 0) continue; // neither side resolved — leave the original edge
+      // How many lines, and which port sits on each end, is decided by the
+      // pure `pairCableMembers`: a lone PHYSICAL member is never repeated
+      // across parallel lines (one port terminates one cable) and a member the
+      // device reports as down loses to a live sibling. See
+      // utils/cableMembers.ts for both rules and why they exist.
+      const aMembers = describeMembers(aId, sideMembers(aId));
+      const bMembers = describeMembers(bId, sideMembers(bId));
+      const { lines, unpaired, droppedDown } = pairCableMembers(aMembers, bMembers);
+      if (lines.length === 0) continue; // neither side resolved — leave the original edge
       expandedSwitchPairs.add(pairKey);
       const aLabel = switchHostById.get(aId) || aId;
       const bLabel = switchHostById.get(bId) || bId;
+      const n = lines.length;
+      // Both notes go on EVERY line of the bundle: the operator opens the
+      // tooltip on whichever line looks wrong, not necessarily the one that
+      // lost its peer.
+      const discrepancy =
+        unpaired.length > 0
+          ? `\nMember counts disagreed (${aLabel}: ${aMembers.length}, ${bLabel}: ${bMembers.length}). ` +
+            `Not drawn: ${unpaired.join(", ")} — a physical port terminates one cable, so the surplus is ` +
+            `a trunk member left configured after a re-patch, or an LLDP row whose cable moved.`
+          : "";
+      const stateNote =
+        droppedDown.length > 0 ? `\nIgnored (link down): ${droppedDown.join(", ")}.` : "";
       for (let i = 0; i < n; i++) {
-        // Pad the shorter side by reusing its lone member (single-member
-        // aggregate facing a multi-member peer) so every member line still
-        // carries a label on both ends.
-        const aPort = aMembers[i] ?? (aMembers.length === 1 ? aMembers[0] : null);
-        const bPort = bMembers[i] ?? (bMembers.length === 1 ? bMembers[0] : null);
+        const aPort = lines[i].a;
+        const bPort = lines[i].b;
         memberCableEdges.push({
           source: aId,
           target: bId,
@@ -1279,8 +1331,9 @@ export async function buildSiteTopology(siteId: string) {
           reason:
             `Rule: inter-switch physical member link${n > 1 ? ` (${i + 1} of ${n})` : ""}.\n` +
             `Evidence: ${aLabel} and ${bLabel} are connected over ${n} physical member port${n > 1 ? "s" : ""} ` +
-            `(LACP/ISL aggregate bundles expanded to their managed-switch CMDB trunk members); ` +
-            `this line is ${aLabel} "${aPort || "?"}" ↔ ${bLabel} "${bPort || "?"}".`,
+            `(each side's LLDP local ports, else its managed-switch CMDB trunk members); ` +
+            `this line is ${aLabel} "${aPort || "?"}" ↔ ${bLabel} "${bPort || "?"}".` +
+            discrepancy + stateNote,
         });
       }
     }

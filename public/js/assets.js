@@ -1474,7 +1474,9 @@ function _assetsUpdateBulkBar() {
     var hasQuarantined = selected.some(function (a) { return a.status === "quarantined"; });
     var bQ  = document.getElementById("assets-bulk-quarantine-btn");
     var bUQ = document.getElementById("assets-bulk-unquarantine-btn");
-    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable ? "" : "none";
+    // Quarantine (but not Release) additionally needs push enabled on some
+    // integration — see _quarantinePushAvailable().
+    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable && _quarantinePushAvailable() ? "" : "none";
     if (bUQ) bUQ.style.display = count > 0 && hasQuarantined    ? "" : "none";
   }
 }
@@ -1618,6 +1620,39 @@ function _renderLeaseBody(r, ctx) {
   '</div>';
 }
 
+// ─── Quarantine push availability ───────────────────────────────────────────
+//
+// Quarantine push is per-integration (`config.pushQuarantine`, the DHCP-Push-
+// style toggle on the Quarantine Push tab of the FortiManager / FortiGate
+// integration) and OFF by default. With it off, quarantineAsset() skips every
+// sighting's integration, lands on zero targets and throws a 502 reading
+// "0/0 FortiGate(s) accepted the push" — a device-shaped failure for what is
+// really an unconfigured feature. So the verbs are hidden instead of offered:
+// GET /assets/quarantine-availability answers whether ANY enabled Fortinet
+// integration carries the toggle.
+//
+// `null` means "not answered yet or the probe failed" and reads as AVAILABLE:
+// fail-open, because the fetch resolves in the first moment of the page while
+// the affordances are only built on a click/panel-open, and hiding a verb an
+// operator needs on a transient error is worse than surfacing the push's own
+// error. Release is never gated — releaseQuarantine unpushes from the targets
+// recorded on the asset without consulting the toggle, so an asset quarantined
+// before push was switched off must stay releasable.
+var _qtnPushEnabled = null;
+
+function _quarantinePushAvailable() { return _qtnPushEnabled !== false; }
+
+if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
+  userReady.then(function () {
+    // Only roles that can act on it ask — the route is read-gated on the same
+    // key, so a viewer without it would just collect a 403 per page load.
+    if (!canQuarantineAssets()) return null;
+    return api.assets.quarantineAvailability().then(function (r) {
+      _qtnPushEnabled = !!(r && r.pushEnabled);
+    });
+  }).catch(function () { _qtnPushEnabled = null; });
+}
+
 /**
  * Quarantine verbs for one asset row, as row-context-menu items (0 or 1 of them).
  *
@@ -1634,6 +1669,8 @@ function _renderLeaseBody(r, ctx) {
  *  - Fortinet infrastructure (firewall / switch / access point) can never be
  *    quarantined: blocking the device that enforces the block would lock the
  *    operator out of their own network.
+ *  - No enabled Fortinet integration has quarantine push turned on → nothing
+ *    to push to, so no verb (_quarantinePushAvailable).
  */
 /**
  * Every verb offered for one asset row, in menu order:
@@ -1678,6 +1715,9 @@ function _quarantineMenuItems(a) {
     }];
   }
   if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return [];
+  // No enabled integration has quarantine push turned on — the verb can only
+  // 502 with "0/0 FortiGate(s) accepted the push".
+  if (!_quarantinePushAvailable()) return [];
   return [{
     label: "Quarantine…",
     danger: true,
@@ -5039,7 +5079,10 @@ async function openViewModal(id) {
     // Gated on assetsQuarantine, NOT assets — see canQuarantineAssets() in
     // app.js. A role may hold either key without the other, and every route the
     // tab calls checks the quarantine key.
-    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
+    // ...and only offered on a not-yet-quarantined asset when quarantine push
+    // is enabled somewhere (_quarantinePushAvailable); an already-quarantined
+    // asset keeps the tab regardless so Release + the push targets stay visible.
+    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ && _quarantinePushAvailable()))) {
       tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     // Events tab — audit history scoped to this asset (resourceType=asset,
@@ -10474,11 +10517,62 @@ function assetMonitoringViewHTML(a) {
 }
 
 /**
+ * Replays the five-state monitor machine over a probe-sample stream and
+ * returns one display state per sample, in order.
+ *
+ * Failures stay LITERAL — a failed probe is yellow, and red once it is the
+ * Nth consecutive failure (N = failureThreshold, the same count the pill uses
+ * to declare down). Successes come from the machine, which is what makes
+ * "recovering" visible: the only exit from `down` is a success, and the pill
+ * reads Recovering until N consecutive successes have confirmed the device,
+ * so those cells are blue rather than green. Worked examples at threshold 3:
+ * one missed poll → green, yellow, green (a blip never smears); a device
+ * going down and coming back → green, yellow, yellow, red, blue, blue, green.
+ *
+ * A failure DURING recovery is yellow, not blue — the bar's failure vocabulary
+ * is unchanged — but the machine still holds `recovering`, so the successes
+ * after that blip stay blue until the run of N is complete, matching the pill.
+ *
+ * The pre-window state is assumed `up`: only an outage visible in the sample
+ * stream produces recovering cells. Seeding `unknown` instead would paint the
+ * first cells of every bar blue, since the machine's unknown→success arrow is
+ * the same one down uses.
+ */
+function _intermittencyStates(samples, threshold) {
+  var thr = (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
+  var cf = 0;
+  var cs = 0;
+  var st = "up";
+  return (samples || []).map(function (s) {
+    var display;
+    if (s.success) {
+      cf = 0;
+      cs += 1;
+      if (st === "down") st = (cs >= thr) ? "up" : "recovering";
+      else if (st === "recovering" || st === "warning") st = (cs >= thr) ? "up" : st;
+      else st = "up";
+      display = (st === "recovering") ? "recovering" : "up";
+    } else {
+      cs = 0;
+      cf += 1;
+      if (cf >= thr) st = "down";
+      else if (st === "up") st = "warning";
+      // else stay put (warning / recovering / down) and let cf march on.
+      display = (cf >= thr) ? "down" : "warning";
+    }
+    return { timestamp: s.timestamp, status: display };
+  });
+}
+
+/**
  * Renders a thin colored bar under the Status row on the asset System tab.
- * Each cell = one probe sample over the past hour, colored by the resolved
- * monitor state at that point. Replays the five-state machine forward over
- * the samples (starting from "unknown") so the bar matches what the Status
- * pill would have read sample-by-sample. Runs once on tab open; not
+ * Each cell = one probe sample over the last 30 minutes, colored by
+ * _intermittencyStates' replay of the five-state machine so the bar reads as
+ * the same vocabulary as the Status pill above it. The replay walks the FULL
+ * hour and only the trailing 30 cells are shown, so both counters are warmed
+ * up across the window boundary — a dip that started before the visible
+ * window keeps its correct red/yellow, and a recovery that started before it
+ * keeps its blue. Runs once on tab open; not
  * auto-refreshed (the sample chart above already auto-refreshes and this
  * mostly serves as an at-a-glance intermittency indicator).
  */
@@ -10516,36 +10610,15 @@ async function _renderIntermittencyBar(assetId, effP) {
     slot.innerHTML = '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">No samples in the last 30 minutes</span>';
     return;
   }
-  // Per-sample coloring (NOT a replay of the Status pill's hysteresis state
-  // machine): each block reflects that single sample's outcome so the bar
-  // reads literally. A success is green immediately — no recovery smear.
-  // A failure is yellow (warning); once it's the Nth consecutive failure
-  // (N = failureThreshold, the same count the pill uses to declare down) it
-  // flips red and stays red while the run continues. Worked examples at
-  // threshold 3: one missed poll → green, yellow, green; a device going down
-  // → green, yellow, yellow, red. We still walk the FULL hour and slice the
-  // trailing 30 so the consecutive-failure counter is warmed up across the
-  // 30-sample boundary (a dip that started before the visible window keeps
-  // its correct red/yellow color).
-  var cf = 0;
-  var allStates = allSamples.map(function (s) {
-    var status;
-    if (s.success) {
-      cf = 0;
-      status = "up";
-    } else {
-      cf += 1;
-      status = (cf >= threshold) ? "down" : "warning";
-    }
-    return { timestamp: s.timestamp, status: status };
-  });
-  var states = allStates.slice(-30);
+  var states = _intermittencyStates(allSamples, threshold).slice(-30);
 
   // Color map mirrors badge-monitor-* hues so the bar reads as the same
   // visual vocabulary as the pill above it. This bar only ever emits
-  // up / warning / down per sample; unknown remains the fallback color.
+  // up / recovering / warning / down per sample; unknown remains the
+  // fallback color.
   var colors = {
     up:         "rgba(0,200,83,0.65)",
+    recovering: "rgba(79,195,247,0.75)",
     warning:    "rgba(255,193,7,0.75)",
     down:       "rgba(211,47,47,0.75)",
     unknown:    "rgba(117,117,117,0.45)",

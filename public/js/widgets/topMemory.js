@@ -17,6 +17,10 @@
     type: "topMemory",
     category: "Monitoring",
     label: "Highest Avg Memory",
+    // Under the "Minimum severity" filter the widget lists the ALERTING rows
+    // (sorted severity-first), not the fleet's top values — so the header drops
+    // the superlative and gains the tier instead.
+    severityLabel: "Avg Memory",
     description: "Monitored assets with the highest average memory usage (averaged over the last N polls — gear-configurable, default 10).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },

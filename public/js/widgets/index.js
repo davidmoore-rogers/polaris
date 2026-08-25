@@ -449,6 +449,15 @@
     return "No rows at or above " + tierByKey(config.minSeverity).key + " severity";
   };
 
+  // The active tier's operator-facing label ("Warning and up"), or null at tier
+  // "all". Widget HEADERS append it so a severity-narrowed widget says what it
+  // is now showing — a top-N metric widget filtered to alerting rows is no
+  // longer "the highest N in the fleet", it's "the alerting ones, ranked".
+  window.PolarisWidgets.severityTierLabel = function (config) {
+    if (!window.PolarisWidgets.minSeverityRank(config)) return null;
+    return tierByKey(config.minSeverity).label;
+  };
+
   window.PolarisWidgets.minSeverityOptionsHTML = function (current) {
     var cur = current || "all";
     return window.PolarisWidgets.SEVERITY_TIERS.map(function (t) {
@@ -853,6 +862,40 @@
     server: "#4fc3f7", switch: "#26c6da", router: "#7e57c2", firewall: "#ef5350",
     workstation: "#66bb6a", printer: "#ffa726", access_point: "#ab47bc", other: "#90a4ae",
     hypervisor: "#5c6bc0",
+  };
+
+  // ─── Widget header title ─────────────────────────────────────────────────
+  // The name a widget INSTANCE wears on the canvas, derived from its
+  // registration plus the two gear controls that change what it's showing:
+  //
+  //   • asset-type filter — a strict subset of the built-ins is appended in
+  //     parens ("Highest Avg CPU (Server, Switch)"); all-on / unset → bare.
+  //   • minimum severity — the tier is appended ("… — Warning and up"), and a
+  //     widget may declare a `severityLabel` to swap its base label: a top-N
+  //     metric widget narrowed to alerting rows is no longer showing the
+  //     fleet's highest values (nor even ranking purely by value — those feeds
+  //     sort severity-first), so keeping the superlative would name something
+  //     the widget is not doing. Widgets whose label carries no superlative
+  //     ("Down Assets", "Packet Loss") declare none and just gain the tier.
+  //
+  // Lives here rather than in dashboard.js because it reads the registry's own
+  // catalogs, and because dashboard.js is a boot IIFE with no seam to test.
+  window.PolarisWidgets.widgetTitle = function (module, w) {
+    var cfg = (w && w.config) || {};
+    var tier = window.PolarisWidgets.severityTierLabel(cfg);
+    var base = module
+      ? ((tier && module.severityLabel) || module.label)
+      : ((w && w.type) + " (unknown widget)");
+    var BUILTIN = window.PolarisWidgets.BUILTIN_ASSET_TYPES || [];
+    if (Array.isArray(cfg.assetTypes) && cfg.assetTypes.length > 0 && cfg.assetTypes.length < BUILTIN.length) {
+      var labels = window.PolarisWidgets.ASSET_TYPE_LABELS || {};
+      var picked = BUILTIN
+        .filter(function (t) { return cfg.assetTypes.indexOf(t) !== -1; })  // preserve built-in order
+        .map(function (t) { return labels[t] || t; });
+      if (picked.length) base += " (" + picked.join(", ") + ")";
+    }
+    if (tier) base += " — " + tier;
+    return base;
   };
 
   // Severity pill for rows whose asset carries an active automation alert

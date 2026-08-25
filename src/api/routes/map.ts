@@ -8,6 +8,10 @@
  *   GET /map/search?q=<query>   — autocomplete over firewall hostnames
  *   GET /map/sites/:id/topology — FortiGate + its FortiSwitches + FortiAPs + edges
  *                                 (+ savedLayouts: shared per-view node positions)
+ *   GET /map/region-overlay     — read-only region polygons + the derived
+ *                                 containment tree, for the "Show regions"
+ *                                 button. Note the DELIBERATE permission
+ *                                 widening documented at the route itself.
  *
  * Write endpoints (escalate to deviceMap=write per-route):
  *   PUT    /map/sites/:id/topology/layout — full-replace one (site, view) layout
@@ -32,6 +36,7 @@ import {
   monitorStatusToHealth,
   fetchRecentSampleStats,
 } from "../../services/topologyGraphService.js";
+import { getRegionHierarchy } from "../../services/mapRegionService.js";
 import {
   saveLayout,
   deleteLayout,
@@ -64,6 +69,54 @@ const SaveLayoutSchema = z.object({
 
 // ─── GET /map/sites ────────────────────────────────────────────────────────────
 // Every firewall asset with non-null lat/lng — one pin per managed FortiGate.
+/**
+ * GET /map/region-overlay — read-only region geometry + the containment tree,
+ * for the map's "Show regions" button and its hover tree.
+ *
+ * SECURITY, DELIBERATE: this WIDENS who can read region polygons. The CRUD
+ * router at /map/regions is gated `mapRegions:read`, which a viewer holding
+ * only `deviceMap:read` need not have. This route lives here instead so it
+ * inherits the /map mount's `deviceMap:read` floor, because the button is meant
+ * to be available to anyone who can look at the map. The same viewer already
+ * gets every firewall's hostname and coordinates from GET /map/sites, so the
+ * incremental exposure is the polygons and their names.
+ *
+ * It is NOT in the dash listener's API_PATH_ALLOWLIST (src/dash/dashServer.ts)
+ * and must not be added: the unauthenticated wallboard cannot run the Device
+ * Map at all, so reaching this there would be a pure attack-surface increase.
+ * `tests/integration/dashServer.test.ts` pins the 404.
+ *
+ * Deliberately named with no shared prefix with the /map/regions mount, so the
+ * routing is obvious to the next reader rather than merely correct.
+ */
+router.get("/region-overlay", async (_req, res, next) => {
+  try {
+    const { regions, hierarchy } = await getRegionHierarchy();
+    res.json({
+      regions: regions.map((r) => {
+        const node = hierarchy.byId[r.id];
+        return {
+          id: r.id,
+          name: r.name,
+          color: r.color,
+          polygon: r.polygon,
+          level: node?.level ?? 1,
+          depth: node?.depth ?? 0,
+          parentId: node?.parentId ?? null,
+          childIds: node?.childIds ?? [],
+          ancestorIds: node?.ancestorIds ?? [],
+        };
+      }),
+      roots: hierarchy.rootIds,
+      maxLevel: hierarchy.maxLevel,
+      warnings: hierarchy.warnings,
+      truncated: hierarchy.truncated,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get("/sites", async (req, res, next) => {
   try {
     // Optional "My regions" filter: ?regionTags=East,West restricts to firewalls

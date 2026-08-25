@@ -68,6 +68,8 @@ const FULL_PARTS: TemplateContextParts = {
   },
   escalationTier: 2,
   escalationElapsed: "1h 30m",
+  repeatAttempt: 3,
+  repeatElapsed: "45m",
 };
 
 /**

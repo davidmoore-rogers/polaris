@@ -13,14 +13,10 @@ import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { findRulesMatchingAsset } from "./notificationRuleService.js";
 
-export const REGION_TAG_PREFIX = "region:";
-
-/** Strip the `region:` prefix from a map-region tag (case-insensitive). */
-export function stripRegionPrefix(tag: string): string {
-  return tag.toLowerCase().startsWith(REGION_TAG_PREFIX)
-    ? tag.slice(REGION_TAG_PREFIX.length)
-    : tag;
-}
+// Both moved to utils/tagNormalize (a leaf) so regionHierarchyService can use
+// them without closing an import cycle through this file. Re-exported here
+// because several modules already import them from this path.
+export { REGION_TAG_PREFIX, stripRegionPrefix } from "../utils/tagNormalize.js";
 
 export interface ListFilters {
   severity?: string[];

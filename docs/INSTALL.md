@@ -1382,7 +1382,7 @@ When `agent/VERSION` advances and you build (or auto-build fires), existing inst
 
 **Fleet-wide:** Integrations → Polaris Agents tab → Polaris Agent card. When any installed agents lag the current build, the card shows an "N of M installed agents running an older version" line with an **Upgrade all** button. Click → confirm → Polaris fans out to every out-of-date host with a Promise pool of 4 (the SSH/WinRM connections are the bottleneck; higher parallelism risks tripping per-host concurrent-connection limits — Windows WinRM caps at ~5 by default).
 
-Failures land per-row as `installStatus="upgrade_failed"` with the error captured in `installError`; an audit Event (`agent.upgrade_failed`) goes out per failed host. The operator retries individuals via the Retry Upgrade button on the asset details panel, or just clicks Upgrade-all again (already-current hosts are silently skipped by the eligibility filter).
+Failures land per-row as `installStatus="upgrade_failed"` with the error captured in `installError`; an audit Event (`agent.upgrade_failed`) goes out per failed host. A failed row is still upgradeable — the old binary is what's still running — so it keeps its out-of-date badge and stays in the eligibility filter: retry an individual host with the Retry Upgrade button on its asset details panel, click Upgrade-all again, or simply leave it, since the next build's auto-upgrade fan-out (when enabled) picks it up along with everything else. Already-current hosts are silently skipped. That matters most for laptops: a machine asleep or off-VPN during a fan-out fails, then catches up on its own once it's reachable at the next attempt.
 
 ---
 

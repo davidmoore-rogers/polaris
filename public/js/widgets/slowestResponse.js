@@ -18,6 +18,10 @@
     type: "slowestResponse",
     category: "Monitoring",
     label: "Slowest Response",
+    // Under the "Minimum severity" filter the widget lists the ALERTING rows
+    // (sorted severity-first), not the fleet's top values — so the header drops
+    // the superlative and gains the tier instead.
+    severityLabel: "Response Time",
     description: "Monitored assets with the highest average response time (last 10 probes).",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },

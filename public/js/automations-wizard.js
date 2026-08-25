@@ -73,12 +73,30 @@ function _looksLikeDeviceId(tag) {
  */
 var DYNAMIC_PILL_KINDS = { deviceRegion: "recipientDeviceRegion", assetContacts: "recipientAssetContacts" };
 
+/**
+ * The level-scoped device-region pill. Unlike the two above, its VALUE carries
+ * information (the asset-relative level as a string), so several can coexist
+ * and it can't be a flag keyed by kind alone.
+ */
+var DYNAMIC_LEVEL_KIND = "deviceRegionLevel";
+
+/** Is this pill one of the dynamic "resolve from the triggering device" kinds? */
+function isDynamicKind(kind) {
+  return !!DYNAMIC_PILL_KINDS[kind] || kind === DYNAMIC_LEVEL_KIND;
+}
+
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
-  var userIds = [], addresses = [], roles = [], regions = [];
+  var userIds = [], addresses = [], roles = [], regions = [], levels = [];
   var out = {};
   (pills || []).forEach(function (p) {
     if (!p || !p.value) return;
+    // Checked BEFORE the flag kinds: this one is keyed by value, not by kind.
+    if (p.kind === DYNAMIC_LEVEL_KIND) {
+      var lv = Number(p.value);
+      if (Number.isInteger(lv) && lv >= 1 && levels.indexOf(lv) === -1) levels.push(lv);
+      return;
+    }
     if (DYNAMIC_PILL_KINDS[p.kind]) { out[DYNAMIC_PILL_KINDS[p.kind]] = true; return; }
     if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
     else if (p.kind === "role") { if (roles.indexOf(p.value) === -1) roles.push(p.value); }
@@ -92,13 +110,14 @@ function pillsToRecipients(pills) {
   if (addresses.length) out.addresses = addresses;
   if (roles.length) out.recipientRoles = roles;
   if (regions.length) out.recipientRegions = regions;
+  if (levels.length) out.recipientDeviceRegionLevels = levels.slice().sort(function (a, b) { return a - b; });
   return out;
 }
 
 /** The payload halves → pills. A user id with no matching account is KEPT as an
  *  "unknown" pill rather than silently dropped on the next save — losing a
  *  recipient because their account was renamed is worse than showing a stub. */
-function recipientsToPills(rec, users, roles) {
+function recipientsToPills(rec, users, roles, maxLevel) {
   var byId = {};
   (users || []).forEach(function (u) { byId[u.id] = u; });
   var roleById = {};
@@ -113,6 +132,19 @@ function recipientsToPills(rec, users, roles) {
   if (rec && rec.recipientAssetContacts) {
     out.push({ kind: "assetContacts", value: "1", label: "Asset’s Responsible Contacts" });
   }
+  // A stored level that no longer exists (someone removed the containing
+  // polygon) is KEPT as an unknown pill, never dropped — the same contract as
+  // an unknown user or role, and for the same reason: losing a recipient
+  // silently is worse than showing a stub the operator can remove.
+  ((rec && rec.recipientDeviceRegionLevels) || []).forEach(function (n) {
+    var top = typeof maxLevel === "number" ? maxLevel : 0;
+    out.push({
+      kind: DYNAMIC_LEVEL_KIND,
+      value: String(n),
+      label: "Asset’s L" + n + " Region Users",
+      unknown: top > 0 && n > top,
+    });
+  });
   ((rec && rec.recipientRegions) || []).forEach(function (name) {
     out.push({ kind: "region", value: name, label: name });
   });
@@ -1086,8 +1118,14 @@ async function openAutomationWizard(existing, opts) {
   // the affected-devices preview's self-exclusion, the draft stash — then does
   // the right thing without a second condition. Only the copy and the
   // all-steps-unlocked behaviour need to know about cloning explicitly.
-  var cloning = !!(opts && opts.clone) && !!existing;
+  // An IMPORT is a clone whose source was a file rather than a row, so it
+  // rides the same path: detached deep copy, saved as a CREATE, created
+  // disabled, all steps unlocked. Only the labels and the banner differ.
+  var importing = !!(opts && opts.import) && !!existing;
+  var cloning = importing || (!!(opts && opts.clone) && !!existing);
   var editing = cloning ? null : (existing || null);
+  // What the imported file said it needs, and what it could not carry.
+  var importInfo = importing ? (opts.importInfo || {}) : null;
 
   // ── Draft (rule-shape v2) ──────────────────────────────────────────────
   var draft;
@@ -1108,14 +1146,14 @@ async function openAutomationWizard(existing, opts) {
       scope: { allAssets: true },
       trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: null, forDurationSec: 0 },
       reset: null, // defaulted per trigger type on Step-4 entry
-      cooldownSec: null, messageTemplate: null, requireAckNote: false,
+      cooldownSec: null, messageTemplate: null, requireAckNote: false, repeat: null,
       // The audit Event is an action now, present by default — a new
       // automation behaves like every existing one until someone removes it.
       actions: [{ type: "event" }], escalation: null,
     };
   }
   if (cloning) {
-    draft.name = (opts && opts.name) || (draft.name + " (copy)");
+    draft.name = (opts && opts.name) || (importing ? draft.name : draft.name + " (copy)");
     // A clone starts DISABLED, and that is deliberate. Business rule 18: two
     // automations watching the same thing at the same scope rank BOTH fire, and
     // a clone is by construction identical to its source — so saving it enabled
@@ -1630,27 +1668,190 @@ async function openAutomationWizard(existing, opts) {
     '<button class="btn btn-secondary" id="aw-cancel">Cancel</button>' +
     '<button class="btn btn-secondary" id="aw-back" style="display:none">&larr; Back</button>' +
     '<button class="btn btn-primary" id="aw-next">Next &rarr;</button>' +
-    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : cloning ? "Create clone" : "Create automation") + '</button>';
+    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : cloning && !importing ? "Create clone" : "Create automation") + '</button>';
 
-  openModal(editing ? "Edit automation" : cloning ? "Clone automation" : "New automation", body, footer, { wide: true });
+  openModal(editing ? "Edit automation" : importing ? "Imported automation" : cloning ? "Clone automation" : "New automation", body, footer, { wide: true });
+
+  // ── Export / import / view-code (public/js/automations-portability.js) ──
+  // Guarded on the global: the wizard is standalone and loads on five pages,
+  // so a page that omits the module degrades to hiding these affordances.
+  function portability() {
+    return (typeof window !== "undefined" && window.PolarisAutomationPortability) || null;
+  }
+
+  /** The catalogs the strip needs to turn ids into readable names. All are
+   *  already fetched for the builder's own pickers, so this costs no request. */
+  function portabilityCatalogs() {
+    return {
+      channels: _ruleChannels || [],
+      scripts: _awScripts || [],
+      users: _ruleRecipientUsers || [],
+      roles: (_awScopeOptions && _awScopeOptions.roles) || [],
+      regions: (_awScopeOptions && _awScopeOptions.regions) || [],
+      stateProbes: (s && s.stateProbes) || [],
+      tags: _ruleTagList || [],
+      assetTypes: _ruleAssetTypes || [],
+      assets: [],
+    };
+  }
 
   // ── Step 1: Name & description ─────────────────────────────────────────
+  /** What an imported file needs that this install may not have, and what the
+   *  file could not carry. Rendered on step 1 because it is the first thing the
+   *  operator sees and it says which later steps need attention. */
+  function importNoteHtml() {
+    if (!importing) return '';
+    var P = portability();
+    var deps = (importInfo && importInfo.dependencies) || [];
+    var checked = P ? P.checkDependencies(deps, portabilityCatalogs()) : [];
+    var missing = checked.filter(function (c) { return c.present === false; });
+    var unknown = checked.filter(function (c) { return c.present === null; });
+    var present = checked.filter(function (c) { return c.present === true; });
+
+    // Every import loses its delivery wiring by design (an exported file
+    // carries no channel, recipient or script ids), so Actions always needs a
+    // look. The other two only when the file says so.
+    var todo = ['<strong>Actions</strong> \u2014 the imported file carries no delivery wiring, so this automation is in-app only until you add some'];
+    if (importInfo && importInfo.needsDevices) {
+      todo.push('<strong>Devices</strong> \u2014 the device filter named specific devices, which do not travel between installs');
+    }
+    if (importInfo && (importInfo.blankedDimensions || []).length) {
+      todo.push('<strong>Trigger</strong> \u2014 pick the state probe or widget again; without it the trigger would watch every one on the device');
+    }
+
+    function depLine(c) {
+      return escapeHtml(c.name) + ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(c.kind) + ')</span>';
+    }
+
+    var depHtml = '';
+    if (checked.length) {
+      depHtml = '<div style="margin-top:0.5rem">This automation expects:</div><ul style="margin:0.25rem 0 0;padding-left:1.1rem">' +
+        present.map(function (c) { return '<li>\u2713 ' + depLine(c) + '</li>'; }).join('') +
+        missing.map(function (c) { return '<li><strong>\u2717 not in this install:</strong> ' + depLine(c) + '</li>'; }).join('') +
+        unknown.map(function (c) { return '<li>? ' + depLine(c) + '</li>'; }).join('') +
+        '</ul>';
+    }
+
+    var problems = ((importInfo && importInfo.problems) || []).map(function (m) {
+      return '<div style="margin-top:0.35rem"><strong>' + escapeHtml(m) + '</strong></div>';
+    }).join('');
+
+    return '<div class="aw-clone-note" style="font-size:0.85rem;margin:0 0 1rem;padding:0.5rem 0.65rem;' +
+      'border-left:3px solid var(--color-warning, #b7791f);background:var(--color-bg-subtle, rgba(183,121,31,0.08))">' +
+      'Imported from a file. It will be created <strong>disabled</strong> \u2014 review it, then enable it from the list.' +
+      problems +
+      '<div style="margin-top:0.5rem">Still to do:</div><ul style="margin:0.25rem 0 0;padding-left:1.1rem">' +
+      todo.map(function (t) { return '<li>' + t + '</li>'; }).join('') + '</ul>' +
+      depHtml +
+      '</div>';
+  }
+
   function step1Html() {
     // Cloning: say up front that the copy is inert and why, because the wizard
     // has no enabled control to show it — that lives on the list toggle.
-    var cloneNote = cloning
+    var cloneNote = cloning && !importing
       ? '<p class="aw-clone-note" style="font-size:0.85rem;margin:0 0 1rem;padding:0.5rem 0.65rem;' +
         'border-left:3px solid var(--color-warning, #b7791f);background:var(--color-bg-subtle, rgba(183,121,31,0.08))">' +
         'Copied from <strong>' + escapeHtml((existing && existing.name) || "") + '</strong>. ' +
         'It will be created <strong>disabled</strong> — an identical automation watching the same thing would ' +
         'alert alongside the original. Change what you need, save, then enable it from the list.</p>'
       : "";
+    // Import is offered when CREATING only \u2014 replacing the automation an
+    // operator opened to edit would be a data-loss trap, not a feature.
+    var importRow = (!editing && !cloning && portability() && permAtLeast("automationManagement", "fullwrite"))
+      ? '<div style="display:flex;align-items:center;gap:0.5rem;margin:0 0 1rem;flex-wrap:wrap">' +
+          '<button class="btn btn-secondary" id="aw-import-btn" type="button">Import from file\u2026</button>' +
+          '<span style="font-size:0.8rem;color:var(--color-text-tertiary);flex:1 1 16rem">Start from an exported automation. The file\u2019s name becomes this automation\u2019s name.</span>' +
+          '<input type="file" id="aw-import-input" accept=".json,.automation.json,application/json" style="display:none">' +
+        '</div>'
+      : '';
     return '<h3 style="margin:0 0 0.25rem">What is this automation?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it and describe what it watches for. (Severity is set with the trigger on the next steps.)</p>' +
+      importNoteHtml() +
+      importRow +
       cloneNote +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
       '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>';
   }
+  /**
+   * Wire the Import control. Reading the file is done in the BROWSER — nothing
+   * is uploaded — and the parsed rule is handed to a fresh wizard in `import`
+   * mode, which then saves through the ordinary POST /automations. The server's
+   * ruleInputSchema + assertActionRefs stay the authority.
+   */
+  function wireStep1() {
+    var btn = document.getElementById("aw-import-btn");
+    var input = document.getElementById("aw-import-input");
+    if (!btn || !input) return;
+
+    btn.addEventListener('click', function () {
+      // Reset first: picking the SAME file twice must still fire `change`.
+      input.value = "";
+      input.click();
+    });
+
+    input.addEventListener('change', async function () {
+      var file = this.files && this.files[0];
+      input.value = "";
+      if (!file) return;
+      var P = portability();
+      if (!P) return;
+
+      // Refuse without reading: a rule is a few KB.
+      if (file.size > P.MAX_IMPORT_BYTES) {
+        showToast("That file is too large to be an automation.", "error");
+        return;
+      }
+
+      // Anything typed so far is about to be replaced, and the stash is only
+      // written by the Cancel button — so ask rather than silently discarding.
+      collectStep1();
+      if (draft.name || draft.description) {
+        var ok = await showConfirm("Replace what you have started with the imported automation?");
+        if (!ok) return;
+      }
+
+      var parsedFile;
+      try {
+        var text = await file.text();
+        parsedFile = P.parseImportFile(text, file.name, triggerTypeNames());
+      } catch (err) {
+        showToast((err && err.message) || "That file could not be read as an automation.", "error");
+        return;
+      }
+
+      // A preview in flight from THIS wizard would otherwise land in the new
+      // one and paint the old draft's device count into it.
+      if (scopePreviewTimer) { clearTimeout(scopePreviewTimer); scopePreviewTimer = null; }
+      if (trigPreviewTimer) { clearTimeout(trigPreviewTimer); trigPreviewTimer = null; }
+
+      // Reopen rather than mutate: steps 1-3 were rendered once at open, so
+      // swapping `draft` underneath them would leave stale DOM. openModal
+      // replaces the shared overlay's body, so there is no need to close first
+      // (and closing would blank the screen for three catalogue re-fetches).
+      openAutomationWizard(parsedFile.rule, {
+        import: true,
+        name: parsedFile.name,
+        importInfo: {
+          dependencies: parsedFile.dependencies,
+          needsDevices: parsedFile.needsDevices,
+          blankedDimensions: parsedFile.blankedDimensions,
+          problems: parsedFile.problems,
+        },
+      }).catch(function (err) {
+        showToast((err && err.message) || "Failed to open the imported automation", "error");
+      });
+    });
+  }
+
+  /** Trigger type names from the schema, so an unknown type in a file is
+   *  refused before it can throw mid-render. */
+  function triggerTypeNames() {
+    return ((s && s.triggerTypes) || []).map(function (t) {
+      return typeof t === "string" ? t : t.type;
+    }).filter(Boolean);
+  }
+
   function collectStep1() {
     draft.name = document.getElementById("aw-name").value.trim();
     draft.description = document.getElementById("aw-desc").value.trim() || null;
@@ -1693,7 +1894,9 @@ async function openAutomationWizard(existing, opts) {
       '<div id="aw-cond-wrap" style="display:' + (allAssets ? "none" : "block") + '">' +
         '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Build the filter from conditions and nested groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move a condition into another group or reorder groups.</p>' +
         '<div id="aw-cond-root">' + condBuilder.groupHtml(root, 0) + '</div>' +
-        '<div id="aw-scope-preview" style="margin-top:0.75rem"></div>' +
+        // Fixed-height (see .aw-preview-box): the debounced reload must not
+        // resize the step under the operator's cursor.
+        '<div id="aw-scope-preview" class="aw-preview-box" style="margin-top:0.75rem">' + scopePreviewHtml('<span class="aw-preview-muted">Checking…</span>') + '</div>' +
       '</div>';
   }
   function wireStep2() {
@@ -1736,6 +1939,13 @@ async function openAutomationWizard(existing, opts) {
     }
     return condBuilder.validate(sc.condition);
   }
+  // One shell for every preview state — "Checking…", a result, an error — so the
+  // box's height comes from the CSS rather than from what came back. Head holds
+  // the count line (which may wrap); the matched-device list scrolls in the body.
+  function scopePreviewHtml(headHtml, bodyHtml) {
+    return '<p class="aw-preview-head">' + headHtml + '</p>' +
+      '<div class="aw-preview-body' + (bodyHtml ? ' table-wrapper' : '') + '">' + (bodyHtml || "") + '</div>';
+  }
   function scheduleScopePreview() {
     if (scopePreviewTimer) clearTimeout(scopePreviewTimer);
     scopePreviewTimer = setTimeout(runScopePreview, 400);
@@ -1744,7 +1954,7 @@ async function openAutomationWizard(existing, opts) {
     var box = document.getElementById("aw-scope-preview");
     if (!box) return;
     collectStep2();
-    box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">Checking…</p>';
+    box.innerHTML = scopePreviewHtml('<span class="aw-preview-muted">Checking…</span>');
     try {
       var res = await api.automations.preview({ scope: draft.scope });
       var rows = (res.matches || []).slice(0, 15).map(function (m) {
@@ -1755,13 +1965,17 @@ async function openAutomationWizard(existing, opts) {
       // stated rather than hidden: the filter does select them, and event and
       // change triggers fire on them.
       var un = res.unmonitoredCount || 0;
-      box.innerHTML = '<p style="font-size:0.85rem;margin:0 0 4px"><strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
-          (un ? ' <span style="color:var(--color-text-tertiary)">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
-        '</p>' +
-        (rows ? '<div class="table-wrapper" style="max-height:180px;overflow:auto"><table><tbody>' + rows + '</tbody></table></div>' +
-          (res.totalEvaluated > 15 ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0">…and ' + (res.totalEvaluated - 15) + ' more.</p>' : "") : "");
+      // The "first 15" note rides the head rather than trailing the list: in a
+      // scrolling body it would sit below the fold, i.e. exactly where an
+      // operator wondering whether the list is complete can't see it.
+      box.innerHTML = scopePreviewHtml(
+        '<strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
+          (un ? ' <span class="aw-preview-muted">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
+          (res.totalEvaluated > 15 ? ' <span class="aw-preview-muted">Showing the first 15.</span>' : ""),
+        rows ? '<table><tbody>' + rows + '</tbody></table>' : ""
+      );
     } catch (err) {
-      box.innerHTML = '<p style="color:var(--color-text-tertiary);font-size:0.85rem">' + escapeHtml(err.message || "Preview unavailable") + '</p>';
+      box.innerHTML = scopePreviewHtml('<span class="aw-preview-muted">' + escapeHtml(err.message || "Preview unavailable") + '</span>');
     }
   }
 
@@ -2707,7 +2921,26 @@ async function openAutomationWizard(existing, opts) {
     var hasWindow = leaves.some(function (l) { return tgLeafWindowedRatio(l) && Number(l.windowSec) > 0; });
     return hasWindow ? Math.round((Number(tr.forDurationSec) || 0) / 60) : 0;
   }
+  /** Metrics whose reading is meaningless without an id-valued dimension: the
+   *  filter is optional in the schema, so leaving it blank silently watches
+   *  EVERY probe / widget on the device rather than the one intended. */
+  var REQUIRED_DIM_BY_METRIC = {
+    customStateValue: { key: "stateProbeId", label: "state probe" },
+    customWidgetValue: { key: "widgetId", label: "custom widget" },
+  };
+
+  function tgValidateRequiredDimension(leaf, label) {
+    var need = REQUIRED_DIM_BY_METRIC[leaf && leaf.metric];
+    if (!need) return null;
+    var df = leaf.dimensionFilter || {};
+    if (df[need.key]) return null;
+    return label + ": choose a " + need.label + ". Without one this would watch every " +
+      need.label + " on the device, not just the one you mean.";
+  }
+
   function tgValidateLeaf(leaf, label) {
+    var dimProblem = tgValidateRequiredDimension(leaf, label);
+    if (dimProblem) return dimProblem;
     if (leaf.type === "asset_state") {
       if (leaf.value == null || String(leaf.value).trim() === "") return label + ": choose or enter a value.";
       return null;
@@ -3147,10 +3380,133 @@ async function openAutomationWizard(existing, opts) {
   }
 
   // ── Step 5: Actions + escalation + summary ─────────────────────────────
+  /**
+   * Who a collapsed notify row reaches, in a few words.
+   *
+   * Added because the pairing this feature exists for — front-line staff on the
+   * trigger, the division's managers on the escalation — is two notify actions
+   * on the SAME channel, which read identically as "Notify via Email" when
+   * folded. The dynamic recipients are named explicitly and everything else is
+   * counted, so the line stays short.
+   */
+  function notifySuffix(a) {
+    var bits = [];
+    if (a.recipientAllUsers) bits.push("all users");
+    else if (a.recipientAllRegions) bits.push("all region users");
+    (a.recipientDeviceRegionLevels || []).forEach(function (n) { bits.push("L" + n + " region users"); });
+    if (a.recipientDeviceRegion) bits.push("device’s region users");
+    if (a.recipientAssetContacts) bits.push("responsible contacts");
+    var regions = (a.recipientRegions || []).length;
+    if (regions) bits.push(regions + " region" + (regions === 1 ? "" : "s"));
+    var roles = (a.recipientRoles || []).length;
+    if (roles) bits.push(roles + " role" + (roles === 1 ? "" : "s"));
+    var named = (a.recipientUserIds || []).length + (a.addresses || []).length;
+    if (named) bits.push(named + " recipient" + (named === 1 ? "" : "s"));
+    return bits.length ? " — " + bits.join(", ") : "";
+  }
+
+  /** Server-published caps + copy vocabulary for the repeat control. */
+  function repeatMeta() {
+    return (s && s.repeatMeta) || { minEveryMin: 5, maxEveryMin: 1440, unbounded: true, maxStopAfterHours: 720 };
+  }
+
+  /**
+   * "Repeat this notification until it's handled".
+   *
+   * Three things the copy has to state because none of them can be inferred:
+   * reminders re-send NOTIFICATIONS only (API calls and scripts run once, at
+   * the first fire); cooldown limits how often a NEW alert fires and does not
+   * limit reminders; and reminders cannot be exercised from the Test-delivery
+   * button, because a test Notification carries ruleId null on purpose so the
+   * sweep can't enlist it.
+   */
+  function repeatControlHtml() {
+    var m = repeatMeta();
+    var r = draft.repeat || null;
+    return '' +
+      '<label style="display:block;margin:0.6rem 0 0;font-weight:400">' +
+        '<input type="checkbox" id="aw-repeat-on"' + (r ? " checked" : "") + '> ' +
+        'Repeat this notification until it’s handled' +
+      '</label>' +
+      '<div id="aw-repeat-fields" style="margin:4px 0 0 1.4rem"' + (r ? "" : ' hidden') + '>' +
+        '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+          '<span style="font-size:0.85rem">Re-send every</span>' +
+          '<input type="number" id="aw-repeat-every" class="input" min="' + m.minEveryMin + '" max="' + m.maxEveryMin + '" ' +
+                 'value="' + escapeHtml(r && r.everyMin != null ? String(r.everyMin) : "15") + '" style="width:5rem">' +
+          '<span style="font-size:0.85rem">minutes, until</span>' +
+          '<select id="aw-repeat-stopon" class="input" style="width:auto">' +
+            '<option value="acknowledge"' + (!r || r.stopOn !== "clear" ? " selected" : "") + '>Acknowledged</option>' +
+            '<option value="clear"' + (r && r.stopOn === "clear" ? " selected" : "") + '>Cleared only</option>' +
+          '</select>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap">' +
+          '<span style="font-size:0.85rem">…and give up after</span>' +
+          '<input type="number" id="aw-repeat-stopafter" class="input" min="1" max="' + m.maxStopAfterHours + '" ' +
+                 'placeholder="never" value="' + escapeHtml(r && r.stopAfterHours != null ? String(r.stopAfterHours) : "") + '" style="width:5rem">' +
+          '<span style="font-size:0.85rem">hours (optional)</span>' +
+        '</div>' +
+        '<p id="aw-repeat-note" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0"></p>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0">' +
+          'Reminders re-send the notifications only — API calls and scripts run once, when the alert first fires. ' +
+          'Cooldown limits how often a <em>new</em> alert fires; it does not limit reminders. ' +
+          'The Test delivery button can’t exercise reminders.' +
+        '</p>' +
+      '</div>';
+  }
+
+  /** The live volume line + the two conditional warnings. */
+  function syncRepeatNote() {
+    var panel = document.getElementById("aw-step-5");
+    if (!panel) return;
+    var on = panel.querySelector("#aw-repeat-on");
+    var fields = panel.querySelector("#aw-repeat-fields");
+    if (fields) fields.hidden = !(on && on.checked);
+    var note = panel.querySelector("#aw-repeat-note");
+    if (!note || !on || !on.checked) return;
+
+    var every = Number((panel.querySelector("#aw-repeat-every") || {}).value) || 0;
+    var stopAfter = Number((panel.querySelector("#aw-repeat-stopafter") || {}).value) || 0;
+    var bits = [];
+    if (every >= 1) {
+      var perDay = Math.round((24 * 60) / every);
+      // Per RECIPIENT, because the count is unknowable client-side the moment a
+      // dynamic pill is in play.
+      bits.push("Every " + every + " minutes = about <strong>" + perDay + " per day, per recipient</strong>" +
+        (stopAfter ? ", stopping after " + stopAfter + " hour" + (stopAfter === 1 ? "" : "s") + "." : ", until someone acknowledges or the alert clears."));
+      if (draftHasDynamicRecipient()) bits.push("× everyone those recipients resolve to at fire time.");
+    }
+    // Manual reset means nothing clears it on its own, so "until it's handled"
+    // really does mean forever.
+    if (draft.reset && draft.reset.mode === "manual") {
+      bits.push('<span style="color:var(--color-warning)">This automation only clears when someone clears it by hand, so reminders will not stop on their own.</span>');
+    }
+    if (draftHasAnyEscalation()) {
+      bits.push("This automation also escalates; a reminder and an escalation can arrive in the same minute.");
+    }
+    note.innerHTML = bits.join(" ");
+  }
+
+  /** Does any notify action route to a recipient resolved at fire time? */
+  function draftHasDynamicRecipient() {
+    return (draft.actions || []).some(function (a) {
+      return a && a.type === "notify" && (a.recipientDeviceRegion || a.recipientAssetContacts ||
+        a.recipientAllUsers || a.recipientAllRegions || (a.recipientDeviceRegionLevels || []).length);
+    });
+  }
+
+  function draftHasAnyEscalation() {
+    if (draft.escalation && (draft.escalation.tiers || []).length) return true;
+    if ((draft.actions || []).some(function (a) { return a && a.escalation && (a.escalation.tiers || []).length; })) return true;
+    return ((draft.severityBands || []).some(function (b) {
+      return (b && b.escalation && (b.escalation.tiers || []).length) ||
+        (b && (b.actions || []).some(function (a) { return a && a.escalation && (a.escalation.tiers || []).length; }));
+    }));
+  }
+
   function actionSummary(a) {
     if (a.type === "notify") {
       var ch = chanById(a.channelId);
-      return "Notify via " + (ch ? ch.name : "…");
+      return "Notify via " + (ch ? ch.name : "…") + notifySuffix(a);
     }
     if (a.type === "api_call") return (a.method || "POST") + " " + (a.url || "…");
     if (a.type === "script") {
@@ -3193,6 +3549,7 @@ async function openAutomationWizard(existing, opts) {
           'Require a note when acknowledging' +
         '</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Acknowledging asks what the problem was and what the fix was, and won’t go through empty. Escalation still stops on acknowledge.</p>' +
+        repeatControlHtml() +
       '</div>';
 
     // Per-severity action sections: with severity bands, each tier CAN get its
@@ -3366,6 +3723,17 @@ async function openAutomationWizard(existing, opts) {
       refreshMirrorNote(panel);
     });
 
+    var repToggle = panel.querySelector("#aw-repeat-on");
+    if (repToggle) {
+      ["#aw-repeat-on", "#aw-repeat-every", "#aw-repeat-stopon", "#aw-repeat-stopafter"].forEach(function (sel) {
+        var el = panel.querySelector(sel);
+        if (el) el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input", function () {
+          if (sel === "#aw-repeat-on") { collectStep5(); }
+          syncRepeatNote();
+        });
+      });
+      syncRepeatNote();
+    }
     var perSevCb = panel.querySelector("#aw-band-actions-multi");
     if (perSevCb) {
       perSevCb.addEventListener("change", function () {
@@ -3991,11 +4359,75 @@ async function openAutomationWizard(existing, opts) {
   }
 
   // ── Step 6: Summary + affected devices ─────────────────────────────────
+  /** Export / View code, offered on the Summary card. Both are read-level:
+   *  they only re-serialize what the operator is already looking at. The code
+   *  editor's SAVE is gated separately, inside openCodeModal. */
+  function codeButtonsHtml() {
+    if (!portability()) return '';
+    return '<button class="btn btn-secondary" id="aw-view-code" type="button" style="padding:2px 10px;font-size:0.8rem">View code</button>' +
+      '<button class="btn btn-secondary" id="aw-export" type="button" style="padding:2px 10px;font-size:0.8rem">Export</button>';
+  }
+
+  function wireCodeButtons() {
+    var P = portability();
+    if (!P) return;
+
+    var exportBtn = document.getElementById('aw-export');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', function () {
+        // No collect needed: goToStep already collected every step passed
+        // through, and buildPayload is a pure function of the draft.
+        var body = buildPayload({ nameFallback: 'Untitled automation' });
+        var file = P.buildExportFile(body, portabilityCatalogs(), {
+          polarisVersion: (window.polarisVersion || undefined),
+        });
+        var missing = (file.dependencies || []).length;
+        window.downloadJson(file, P.filenameForExport(body.name));
+        showToast(missing
+          ? 'Exported. The file lists ' + missing + ' thing' + (missing === 1 ? '' : 's') + ' it needs — delivery wiring is not included.'
+          : 'Exported.', 'success');
+      });
+    }
+
+    var viewBtn = document.getElementById('aw-view-code');
+    if (viewBtn) {
+      viewBtn.addEventListener('click', function () {
+        var canSave = permAtLeast('automationManagement', 'fullwrite');
+        P.openCodeModal({
+          title: 'Automation code',
+          body: buildPayload({ nameFallback: 'Untitled automation' }),
+          canSave: canSave,
+          onSave: canSave ? async function (edited) {
+            // Apply to the draft, then save through the ONE save path so
+            // validation, the POST-vs-PUT choice and the toast stay shared.
+            applyPayloadToDraft(edited);
+            var ok = await saveAutomation(null);
+            if (!ok) throw new Error('The automation was not saved — see the message above.');
+          } : null,
+        });
+      });
+    }
+  }
+
+  /** Edited JSON -> draft. Mirrors _awDraftFromRule, but for a body that came
+   *  out of buildPayload rather than off the API. */
+  function applyPayloadToDraft(p) {
+    var next = _awDraftFromRule(p);
+    // buildPayload omits `enabled` semantics the draft needs, so carry the
+    // edited value when present and otherwise keep what the draft had.
+    if (typeof p.enabled === 'boolean') next.enabled = p.enabled;
+    else next.enabled = draft.enabled;
+    Object.keys(next).forEach(function (k) { draft[k] = next[k]; });
+  }
+
   function renderStep6() {
     var panel = document.getElementById("aw-step-6");
     panel.innerHTML = '<h3 style="margin:0 0 0.25rem">Review &amp; save</h3>' +
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-        '<label style="font-weight:600;margin:0 0 6px;display:block">Summary</label>' +
+        '<div style="display:flex;align-items:center;gap:0.5rem;margin:0 0 6px;flex-wrap:wrap">' +
+          '<label style="font-weight:600;margin:0;flex:1 1 auto">Summary</label>' +
+          codeButtonsHtml() +
+        '</div>' +
         '<div id="aw-summary"></div>' +
       '</div>' +
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
@@ -4012,6 +4444,7 @@ async function openAutomationWizard(existing, opts) {
         : "");
     renderSummary();
     renderAffectedDevices();
+    wireCodeButtons();
     if (permAtLeast("automationManagement", "fullwrite")) renderTestDelivery();
   }
 
@@ -4195,23 +4628,13 @@ async function openAutomationWizard(existing, opts) {
   }
 
   /** The DRAFT as the test endpoint wants it — what's on screen, not what's saved. */
+  /** The draft as a preview body. This was a near-copy of buildPayload,
+   *  differing only in the name fallback and three omitted keys — and
+   *  `previewInputSchema`'s base is a plain z.object (not .strict()), so
+   *  `enabled` / `channels` / `emailComposition` are stripped rather than
+   *  rejected. One builder, so the two can no longer drift. */
   function testDeliveryPayload() {
-    return {
-      name: draft.name || "Untitled automation",
-      description: draft.description,
-      severity: draft.severity,
-      trigger: draft.trigger,
-      scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
-      reset: draft.reset,
-      actions: draft.actions,
-      cooldownSec: draft.cooldownSec,
-      messageTemplate: draft.messageTemplate,
-      requireAckNote: draft.requireAckNote === true,
-      escalation: draft.escalation,
-      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
-      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
-      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
-    };
+    return buildPayload({ nameFallback: "Untitled automation" });
   }
   async function renderAffectedDevices() {
     var box = document.getElementById("aw-affected");
@@ -4385,6 +4808,12 @@ async function openAutomationWizard(existing, opts) {
 
   /** Role catalogue for the recipient tokens (from /automations/scope-options). */
   function awRoles() { return (_awScopeOptions && _awScopeOptions.roles) || []; }
+  /** How deep region nesting goes. 1 (or absent) = nothing is nested, so the
+   *  picker offers no level entries and a STORED level renders as unknown. */
+  function awRegionMaxLevel() {
+    var lv = _awScopeOptions && _awScopeOptions.regionLevels;
+    return lv && typeof lv.maxLevel === "number" ? lv.maxLevel : 1;
+  }
 
   /**
    * Roles matching the typed fragment, as suggestion entries. Local — the role
@@ -4404,10 +4833,14 @@ async function openAutomationWizard(existing, opts) {
   // What each pill kind prints ahead of its label, and what its tooltip says.
   // The qualifier is what keeps a region called "Ashfield" from reading like a
   // person called "Ashfield" in a list that mixes both.
-  var PILL_QUALIFIER = { role: "role:", region: "region:", deviceRegion: "dynamic:", assetContacts: "dynamic:" };
+  var PILL_QUALIFIER = {
+    role: "role:", region: "region:", deviceRegion: "dynamic:",
+    deviceRegionLevel: "dynamic:", assetContacts: "dynamic:",
+  };
   var PILL_TITLE = {
     region: "Every user tagged with this region",
-    deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region",
+    deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region (any level)",
+    deviceRegionLevel: "At fire time: the users tagged with the region this many levels out from the TRIGGERING device’s own region",
     assetContacts: "At fire time: the address-book contacts whose device filter covers the TRIGGERING device",
   };
 
@@ -4417,7 +4850,9 @@ async function openAutomationWizard(existing, opts) {
       ? (p.unknown ? "This user account no longer exists" : "Polaris user account")
       : p.kind === "role"
         ? (p.unknown ? "This role no longer exists" : "Every user holding this role")
-        : PILL_TITLE[p.kind] || p.value;
+        : p.kind === DYNAMIC_LEVEL_KIND && p.unknown
+          ? "No region is nested this deep any more — this reaches nobody"
+          : PILL_TITLE[p.kind] || p.value;
     // The save affordance only makes sense for a typed address that isn't
     // already in the book, and only for someone who may add one.
     var showSave = p.kind === "address" && canAddContacts() &&
@@ -4445,7 +4880,7 @@ async function openAutomationWizard(existing, opts) {
    * would look like it worked and then send to nobody.
    */
   function pillAllowedInField(kind, field) {
-    return !DYNAMIC_PILL_KINDS[kind] || field === "to";
+    return !isDynamicKind(kind) || field === "to";
   }
 
   /**
@@ -4457,6 +4892,7 @@ async function openAutomationWizard(existing, opts) {
     if (!e) return null;
     if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
     if (e.source === "deviceRegion") return { kind: "deviceRegion", value: "1", label: e.name };
+    if (e.source === "deviceRegionLevel") return { kind: DYNAMIC_LEVEL_KIND, value: String(e.level), label: e.name };
     if (e.source === "assetContacts") return { kind: "assetContacts", value: "1", label: e.name };
     if (e.source === "user") return { kind: "user", value: e.id, label: e.name || e.email };
     if (!e.email) return null;
@@ -4809,7 +5245,7 @@ async function openAutomationWizard(existing, opts) {
           // email…" disclosure, which is where they used to hide.
           var comp0 = action.emailComposition || {};
           h = '<div class="na-recips">' +
-            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles()), canReadContacts()) +
+            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts()) +
             recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers, awRoles()), false) +
             recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers, awRoles()), false) +
             "</div>" +
@@ -5091,6 +5527,7 @@ async function openAutomationWizard(existing, opts) {
         // The two dynamic pills — on an email action these REPLACE the old
         // checkboxes, so they're collected from the To field and nowhere else.
         if (to.recipientDeviceRegion) a.recipientDeviceRegion = true;
+        if (to.recipientDeviceRegionLevels) a.recipientDeviceRegionLevels = to.recipientDeviceRegionLevels;
         if (to.recipientAssetContacts) a.recipientAssetContacts = true;
       }
       // Push broadcast modes. "All users" subsumes everything, so the narrower
@@ -5259,6 +5696,27 @@ async function openAutomationWizard(existing, opts) {
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
     var ackNoteEl = panel.querySelector("#aw-require-ack-note");
     if (ackNoteEl) draft.requireAckNote = ackNoteEl.checked;
+    // Repeat-until-handled, also a property of the alert record.
+    var repOn = panel.querySelector("#aw-repeat-on");
+    if (repOn) {
+      if (!repOn.checked) {
+        draft.repeat = null;
+      } else {
+        var every = Number((panel.querySelector("#aw-repeat-every") || {}).value);
+        var stopOnEl = panel.querySelector("#aw-repeat-stopon");
+        var afterRaw = (panel.querySelector("#aw-repeat-stopafter") || {}).value;
+        var rep = {
+          everyMin: isNaN(every) ? 0 : every,
+          stopOn: stopOnEl && stopOnEl.value === "clear" ? "clear" : "acknowledge",
+        };
+        // Blank means unbounded, which is the default the operator asked for —
+        // so the key is omitted rather than sent as 0.
+        if (afterRaw !== "" && afterRaw != null && !isNaN(Number(afterRaw))) {
+          rep.stopAfterHours = Number(afterRaw);
+        }
+        draft.repeat = rep;
+      }
+    }
     // The BASE severity section's chain is the rule-level escalation (the engine
     // resolves it for an alert sitting at the base severity).
     var baseSecC = panel.querySelector("#aw-actions") && panel.querySelector("#aw-actions").closest(".form-group");
@@ -5575,6 +6033,12 @@ async function openAutomationWizard(existing, opts) {
     var ackNoteRow = draft.requireAckNote
       ? '<dt>Acknowledging</dt><dd>requires a note</dd>'
       : "";
+    var repeatRow = draft.repeat
+      ? '<dt>Reminders</dt><dd>every ' + escapeHtml(String(draft.repeat.everyMin)) + ' min until ' +
+          (draft.repeat.stopOn === "clear" ? "cleared" : "acknowledged") +
+          (draft.repeat.stopAfterHours ? ", giving up after " + escapeHtml(String(draft.repeat.stopAfterHours)) + "h" : " — no limit") +
+        '</dd>'
+      : "";
     var resetRow = (draft.resetActions && draft.resetActions.length)
       ? '<dt>When it resets</dt><dd>' + draft.resetActions.map(function (a) { return escapeHtml(actionSummary(a)); }).join("<br>") + '</dd>'
       : '<dt>When it resets</dt><dd><span style="color:var(--color-text-tertiary)">nothing — the alert just clears</span></dd>';
@@ -5601,6 +6065,7 @@ async function openAutomationWizard(existing, opts) {
       '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
       msgRow +
       ackNoteRow +
+      repeatRow +
       '<dt>Actions</dt><dd>' + (actionLines.length ? actionLines.join("<br>") : '<span style="color:var(--color-text-tertiary)">in-app alert only</span>') + '</dd>' +
       resetRow +
       bandsRow +
@@ -5697,19 +6162,18 @@ async function openAutomationWizard(existing, opts) {
     closeModal();
   });
 
-  document.getElementById("aw-save").addEventListener("click", async function () {
-    COLLECT[step]();
-    // Validate every step; jump to the first failing one.
-    for (var i = 1; i <= STEPS.length; i++) {
-      var problem = VALIDATE[i]();
-      if (problem) {
-        if (i !== step) goToStep(i, { skipCollect: true });
-        showToast(problem, "error");
-        return;
-      }
-    }
-    var payload = {
-      name: draft.name,
+  /**
+   * The wire shape, derived purely from `draft` — no DOM reads, so export and
+   * the code viewer can call it from any step (goToStep has already collected
+   * every step the operator passed through). Extracted from the save handler so
+   * save / export / view-code cannot drift apart.
+   *
+   * `nameFallback` exists for the test-delivery caller, whose draft may not be
+   * named yet.
+   */
+  function buildPayload(o) {
+    return {
+      name: draft.name || ((o && o.nameFallback) || ""),
       description: draft.description,
       enabled: draft.enabled,
       severity: draft.severity,
@@ -5731,22 +6195,53 @@ async function openAutomationWizard(existing, opts) {
       // Reset actions: the wizard's mirror markers are wizard-only, and the
       // server schema is strict.
       resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
+      repeat: draft.repeat || null,
     };
-    this.disabled = true;
+  }
+
+  /**
+   * Validate every step, then POST or PUT. Returns true on success. The
+   * validate-all loop lives HERE rather than in buildPayload, because export and
+   * the code viewer must work on an incomplete draft.
+   */
+  async function saveAutomation(btn) {
+    COLLECT[step]();
+    // Validate every step; jump to the first failing one.
+    for (var i = 1; i <= STEPS.length; i++) {
+      var problem = VALIDATE[i]();
+      if (problem) {
+        if (i !== step) goToStep(i, { skipCollect: true });
+        showToast(problem, "error");
+        return false;
+      }
+    }
+    var payload = buildPayload();
+    if (btn) btn.disabled = true;
     try {
       if (editing) await api.automations.update(editing.id, payload);
       else await api.automations.create(payload);
       _awDraftStash = null;
       closeModal();
       showToast(editing ? "Automation saved"
+        : importing ? "Automation imported — it starts disabled, enable it when you're ready"
         : cloning ? "Automation cloned — it starts disabled, enable it when you're ready"
         : "Automation created", "success");
       if (window._reloadRules) window._reloadRules();
-    } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
+      return true;
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      showToast(err.message || "Save failed", "error");
+      return false;
+    }
+  }
+
+  document.getElementById("aw-save").addEventListener("click", function () {
+    saveAutomation(this);
   });
 
   // ── First render ───────────────────────────────────────────────────────
   // (Severity moved off step 1 onto the trigger step — wired in wireStep3.)
+  wireStep1();
   wireStep2();
   wireStep3();
   updateStepper();
@@ -5801,6 +6296,7 @@ function _awDraftFromRule(r) {
     // undefined (never set) vs null (deliberately off) matters: a NEW draft
     // seeds its reset list from the trigger, a stored rule shows what it saved.
     resetActions: Array.isArray(r.resetActions) && r.resetActions.length ? JSON.parse(JSON.stringify(r.resetActions)) : null,
+    repeat: r.repeat ? JSON.parse(JSON.stringify(r.repeat)) : null,
     // Per-severity actions are opt-in on the Actions step; a stored rule opts in
     // iff any band actually carries its own actions/escalation.
     bandActionsPerSeverity: (Array.isArray(r.severityBands) ? r.severityBands : []).some(function (b) {

@@ -28,12 +28,18 @@ interface Cfg { minSeverity?: string }
 let W: {
   SEVERITY_TIERS: Tier[];
   ALERT_SEVERITY_RANK: Record<string, number>;
+  BUILTIN_ASSET_TYPES: string[];
   minSeverityRank: (c?: Cfg) => number;
   filterByMinSeverity: <T>(rows: T[] | null, c?: Cfg, sevOf?: (r: T) => string | undefined) => T[];
   severityTierForRank: (rank: number) => string;
   minSeverityEmptyText: (c?: Cfg) => string | null;
   minSeverityOptionsHTML: (current?: string) => string;
   renderMinSeverityConfig: (el: any, c: Cfg, onChange: (k: string, v: unknown) => void, hint?: string) => void;
+  severityTierLabel: (c?: Cfg) => string | null;
+  widgetTitle: (
+    module: { label: string; severityLabel?: string } | null,
+    w: { type?: string; config?: Cfg & { assetTypes?: string[] } },
+  ) => string;
 };
 const g = globalThis as Record<string, unknown>;
 let doc: Window["document"];
@@ -211,5 +217,62 @@ describe("renderMinSeverityConfig (gear popover control)", () => {
   it("renders a per-widget hint when given one", () => {
     const { note } = mount({ minSeverity: "critical" }, "Only nodes with an active alert are shown.");
     expect(note.textContent).toBe("Only nodes with an active alert are shown.");
+  });
+});
+
+describe("severityTierLabel", () => {
+  it("is null while the widget is unfiltered", () => {
+    expect(W.severityTierLabel()).toBeNull();
+    expect(W.severityTierLabel({})).toBeNull();
+    expect(W.severityTierLabel({ minSeverity: "all" })).toBeNull();
+    // Junk resolves to the "all" tier, so it must not label the header either.
+    expect(W.severityTierLabel({ minSeverity: "not-a-tier" })).toBeNull();
+  });
+
+  it("names the active tier with the same words as the gear control", () => {
+    W.SEVERITY_TIERS.slice(1).forEach((t) => {
+      expect(W.severityTierLabel({ minSeverity: t.key })).toBe(t.label);
+    });
+    expect(W.severityTierLabel({ minSeverity: "warning" })).toBe("Warning and up");
+  });
+});
+
+describe("widgetTitle", () => {
+  const topCpu = { label: "Highest Avg CPU", severityLabel: "Avg CPU" };
+  const downAssets = { label: "Down Assets" };  // no superlative → no variant
+
+  it("is the bare registration label when nothing is filtered", () => {
+    expect(W.widgetTitle(topCpu, {})).toBe("Highest Avg CPU");
+    expect(W.widgetTitle(topCpu, { config: { minSeverity: "all" } })).toBe("Highest Avg CPU");
+  });
+
+  it("drops the superlative and names the tier once a minimum is set", () => {
+    // The point of the change: a CPU widget narrowed to alerting rows is not
+    // showing the fleet's highest CPU, so the header must stop claiming it.
+    expect(W.widgetTitle(topCpu, { config: { minSeverity: "warning" } }))
+      .toBe("Avg CPU — Warning and up");
+    expect(W.widgetTitle(topCpu, { config: { minSeverity: "critical" } }))
+      .toBe("Avg CPU — Critical only");
+  });
+
+  it("keeps the label of a widget that declares no severity variant", () => {
+    expect(W.widgetTitle(downAssets, { config: { minSeverity: "serious" } }))
+      .toBe("Down Assets — Serious and up");
+  });
+
+  it("appends an asset-type subset, and stacks it with the tier", () => {
+    const types = { assetTypes: ["switch", "server"] };
+    expect(W.widgetTitle(topCpu, { config: types })).toBe("Highest Avg CPU (Server, Switch)");
+    expect(W.widgetTitle(topCpu, { config: { ...types, minSeverity: "warning" } }))
+      .toBe("Avg CPU (Server, Switch) — Warning and up");
+  });
+
+  it("says nothing extra when every built-in type is selected", () => {
+    expect(W.widgetTitle(topCpu, { config: { assetTypes: W.BUILTIN_ASSET_TYPES as unknown as string[] } }))
+      .toBe("Highest Avg CPU");
+  });
+
+  it("names an unknown widget type rather than throwing", () => {
+    expect(W.widgetTitle(null, { type: "goneWidget" })).toBe("goneWidget (unknown widget)");
   });
 });

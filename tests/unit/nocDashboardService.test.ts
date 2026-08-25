@@ -363,18 +363,20 @@ describe("getRecentReboots", () => {
 });
 
 describe("getRecentAlerts", () => {
-  it("maps UNCLEARED notifications to {hostname, message, severity, raisedAt, ruleName, acknowledged}", async () => {
+  it("maps UNCLEARED notifications to {assetId, hostname, dimension, message, severity, raisedAt, ruleName, acknowledged}", async () => {
     const t = new Date("2026-06-20T00:00:00Z");
     notifFindMany.mockReset();
     notifFindMany.mockResolvedValueOnce([
       {
-        id: "n1", assetHostname: "fw-1", message: "fw-1 is down", severity: "critical", triggeredAt: t,
+        id: "n1", assetId: "asset-1", assetHostname: "fw-1", dimension: null,
+        message: "fw-1 is down", severity: "critical", triggeredAt: t,
         acknowledged: true, acknowledgedBy: "jsmith", rule: { name: "Asset down" },
       },
     ]);
     const r = await noc.getRecentAlerts();
-    expect(r[0]).toEqual({
-      id: "n1", hostname: "fw-1", message: "fw-1 is down", severity: "critical", raisedAt: t,
+    expect(r.alerts[0]).toEqual({
+      id: "n1", assetId: "asset-1", hostname: "fw-1", dimension: null,
+      message: "fw-1 is down", severity: "critical", raisedAt: t,
       ruleName: "Asset down", acknowledged: true, acknowledgedBy: "jsmith",
     });
     // It reads ALERTS, never audit Events — the whole point of the feed.
@@ -382,6 +384,22 @@ describe("getRecentAlerts", () => {
     expect(notifFindMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ cleared: false }),
     }));
+  });
+
+  it("carries the dimension, so one automation's per-port alerts are tellable apart", async () => {
+    // A per-interface automation raises one alert per pinned port: same rule,
+    // same minute, same message template. Without the dimension the widget
+    // renders rows that differ in nothing.
+    const t = new Date("2026-06-20T00:00:00Z");
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "p10", assetId: "sw", assetHostname: "sw-1", dimension: "port10", message: "m", severity: "serious", triggeredAt: t, acknowledged: false, acknowledgedBy: null, rule: { name: "Interface down" } },
+      { id: "p2", assetId: "sw", assetHostname: "sw-1", dimension: "port2", message: "m", severity: "serious", triggeredAt: t, acknowledged: false, acknowledgedBy: null, rule: { name: "Interface down" } },
+    ]);
+    const r = await noc.getRecentAlerts();
+    // Equal severity AND equal timestamp → dimension orders NUMERICALLY, so
+    // port2 precedes port10 (the asset Alerts tab's tiebreak).
+    expect(r.alerts.map((x) => x.dimension)).toEqual(["port2", "port10"]);
   });
 
   it("reports a `serious` automation as serious, not the Event level's collapsed error", async () => {
@@ -397,7 +415,7 @@ describe("getRecentAlerts", () => {
       },
     ]);
     const r = await noc.getRecentAlerts();
-    expect(r[0].severity).toBe("serious");
+    expect(r.alerts[0].severity).toBe("serious");
   });
 
   it("orders severity-first on the AUTOMATION ladder (serious above warning), newest within a tier", async () => {
@@ -411,7 +429,7 @@ describe("getRecentAlerts", () => {
       { id: "serious-new", assetHostname: "d", message: "m", severity: "serious", triggeredAt: recent, acknowledged: false, acknowledgedBy: null, rule: { name: "r" } },
     ]);
     const r = await noc.getRecentAlerts();
-    expect(r.map((x) => x.id)).toEqual(["serious-new", "serious-old", "warn-new", "notice-new"]);
+    expect(r.alerts.map((x) => x.id)).toEqual(["serious-new", "serious-old", "warn-new", "notice-new"]);
   });
 
   it("scopes to the filtered asset id set, and honors the row cap after ordering", async () => {
@@ -422,9 +440,25 @@ describe("getRecentAlerts", () => {
     ]);
     const r = await noc.getRecentAlerts(1, ["asset-1"]);
     // The cap slices the SORTED list, so the critical survives a limit of 1.
-    expect(r.map((x) => x.id)).toEqual(["c"]);
+    expect(r.alerts.map((x) => x.id)).toEqual(["c"]);
+    // …and `total` reports what the cap hid, so the widget can say "1 of 2"
+    // instead of silently ending. This is the whole reason a screenful of
+    // criticals could hide every serious alert on the fleet.
+    expect(r.total).toBe(2);
+  });
+
+  it("keeps assetId-null alerts under an asset filter — no filter can speak to them", async () => {
+    // A host_metric alert (Polaris's own CPU) or a system-scoped event alert
+    // carries no assetId. `assetId IN (...)` never matches NULL, so narrowing a
+    // wallboard to a region used to make alerts about Polaris ITSELF vanish.
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([]);
+    await noc.getRecentAlerts(100, ["asset-1"]);
     expect(notifFindMany).toHaveBeenCalledWith(expect.objectContaining({
-      where: expect.objectContaining({ cleared: false, assetId: { in: ["asset-1"] } }),
+      where: expect.objectContaining({
+        cleared: false,
+        OR: [{ assetId: { in: ["asset-1"] } }, { assetId: null }],
+      }),
     }));
   });
 
@@ -434,7 +468,7 @@ describe("getRecentAlerts", () => {
       { id: "n1", assetHostname: null, message: "orphan", severity: "warning", triggeredAt: new Date(1), acknowledged: false, acknowledgedBy: null, rule: null },
     ]);
     const r = await noc.getRecentAlerts();
-    expect(r[0]).toMatchObject({ ruleName: null, hostname: null });
+    expect(r.alerts[0]).toMatchObject({ ruleName: null, hostname: null, assetId: null, dimension: null });
   });
 });
 
@@ -605,10 +639,10 @@ describe("getNocSummaryPayload", () => {
 
     const r = await noc.getNocSummaryPayload({ feeds: null, ...grantAll() });
     expect(Object.keys(r).sort()).toEqual([
-      "activeAlertCount", "activeAlerts", "diskUsage", "downInterfaces", "downIpsecTunnels",
-      "downNodes", "downNodesTotal", "packetLoss", "recentReboots", "sitesWithIssues",
-      "slowestResponse", "stalePolls", "statusCounts", "storageForecast", "temperature",
-      "topCpu", "topMemory", "uptimePercent",
+      "activeAlertCount", "activeAlerts", "activeAlertsTotal", "diskUsage", "downInterfaces",
+      "downIpsecTunnels", "downNodes", "downNodesTotal", "packetLoss", "recentReboots",
+      "sitesWithIssues", "slowestResponse", "stalePolls", "statusCounts", "storageForecast",
+      "temperature", "topCpu", "topMemory", "uptimePercent",
     ]);
   });
 
@@ -620,6 +654,7 @@ describe("getNocSummaryPayload", () => {
     expect(r.downNodes).toEqual([]);
     expect(r.downNodesTotal).toBe(0);
     expect(r.activeAlerts).toEqual([]);
+    expect(r.activeAlertsTotal).toBe(0);
     expect(groupBy).not.toHaveBeenCalled();
     expect(findMany).not.toHaveBeenCalled();
     expect(eventFindMany).not.toHaveBeenCalled();

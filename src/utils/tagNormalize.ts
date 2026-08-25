@@ -18,6 +18,27 @@ export const TAG_MAX_LEN = 64;
 export const TAGS_MAX_COUNT = 64;
 
 /**
+ * The prefix an ASSET's region tag carries. `User`/`Role`/`GroupMapping`
+ * `regionTags` store bare names, so anything comparing the two sides strips it
+ * first.
+ *
+ * Lives in this leaf util rather than in `notificationService` (which still
+ * re-exports it for its existing importers) because `regionHierarchyService`
+ * needs it on the alert-routing path, and notificationService imports
+ * notificationRuleService — importing it from there would have closed a
+ * notificationRuleService → regionHierarchyService → notificationService →
+ * notificationRuleService cycle.
+ */
+export const REGION_TAG_PREFIX = "region:";
+
+/** Strip the `region:` prefix from a map-region tag (case-insensitive). */
+export function stripRegionPrefix(tag: string): string {
+  return tag.toLowerCase().startsWith(REGION_TAG_PREFIX)
+    ? tag.slice(REGION_TAG_PREFIX.length)
+    : tag;
+}
+
+/**
  * Validate + normalize a list of operator-typed tags. `label` only shapes the
  * error message (e.g. "region tag" → "Region tag ... exceeds 64 characters").
  */

@@ -59,6 +59,7 @@ function loadedRule(): Record<string, unknown> {
     escalation: { stopOn: "acknowledge", tiers: [{ afterMin: 15, actions: [{ type: "notify", channelId: "c1", addresses: ["mgr@example.com"] }] }] },
     severityBands: [{ threshold: 90, severity: "serious", actions: [] }, { threshold: 95, severity: "critical", actions: [] }],
     bandNotify: { onIncrease: true, onDecrease: false, onResolved: true, resolvedMode: "reuse" },
+    repeat: { everyMin: 15, stopOn: "acknowledge" },
     createdBy: "op",
   };
 }
@@ -78,6 +79,22 @@ describe("_ruleToInput", () => {
     expect(body.escalation).toEqual(loadedRule().escalation);
     expect(body.messageTemplate).toBe("{asset} cpu {value}");
     expect(body.cooldownSec).toBe(600);
+    expect(body.repeat).toEqual(loadedRule().repeat);
+  });
+
+  it("resends the repeat config, so the enable toggle can't delete it", () => {
+    // The list row's toggle PUTs the WHOLE record and the server maps an
+    // omitted nullable Json to Prisma.DbNull, so an unlisted field is silently
+    // cleared. Flipping enabled must not cost the operator their reminders.
+    const body = ruleToInput(loadedRule(), { enabled: false });
+    expect(body.repeat).toEqual({ everyMin: 15, stopOn: "acknowledge" });
+    expect(ruleInputSchema.parse(body).repeat).toEqual({ everyMin: 15, stopOn: "acknowledge" });
+  });
+
+  it("sends null for an automation that does not repeat", () => {
+    const r = loadedRule();
+    r.repeat = null;
+    expect(ruleToInput(r).repeat).toBeNull();
   });
 
   it("produces a body the real ruleInputSchema accepts, preserving the bands", () => {

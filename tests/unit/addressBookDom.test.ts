@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
+import { installAppOverlay } from "../fixtures/appOverlay.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
@@ -37,6 +38,8 @@ let toasts: string[];
 let previewed: Record<string, unknown>[];
 let confirmAnswer = true;
 let level = "fullwrite";
+/** Region nesting depth the stubbed filter-schema reports. 1 = flat. */
+let schemaMaxLevel = 1;
 
 const PAGE_HTML = '<div id="contacts-list"></div>';
 
@@ -75,6 +78,11 @@ beforeAll(() => {
   };
   g._trapFocus = () => () => {};
   g._focusFirstIn = () => {};
+  // buildOverlay lives in app.js now (it is shared with the automations code
+  // editor, which opens on pages that never load the address book). Load the
+  // REAL one rather than stubbing it: these tests assert on overlay structure
+  // and the z-index rungs, which a stub would trivially satisfy.
+  installAppOverlay();
   g.currentUsername = "alice";
   (win as unknown as Record<string, unknown>).currentUsername = "alice";
 
@@ -97,7 +105,7 @@ beforeAll(() => {
           maxDepth: 5,
           maxRules: 100,
         },
-        options: { regions: ["Ashfield", "Memphis"] },
+        options: { regions: ["Ashfield", "Memphis"], regionLevels: { maxLevel: schemaMaxLevel } },
       }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
       update: async (_id: string, body: Record<string, unknown>) => { updated.push(body); return { contact: { id: _id, ...body } }; },
@@ -115,6 +123,17 @@ beforeAll(() => {
   (0, eval)(src);
 });
 
+/**
+ * Re-evaluate the module, dropping its memoized filter-schema.
+ *
+ * `_filterSchema` is a module-level cache and the module is eval'd once in
+ * beforeAll, so a test that needs a DIFFERENT stubbed schema (a nested region
+ * catalogue rather than a flat one) has no other way to get one.
+ */
+function reloadAddressBook(): void {
+  (0, eval)(readFileSync(resolve(__dirname, "../../public/js/automations-address-book.js"), "utf8"));
+}
+
 beforeEach(() => {
   deleted = [];
   created = [];
@@ -123,6 +142,10 @@ beforeEach(() => {
   previewed = [];
   confirmAnswer = true;
   level = "fullwrite";
+  schemaMaxLevel = 1;
+  // Fresh module per test, so one test's stubbed schema can't leak into the
+  // next through the module-level _filterSchema memo.
+  reloadAddressBook();
   contacts = [
     { id: "c1", email: "mine@example.com", name: "Mine", description: "d1", assetCondition: null, assetConditionEffective: null, assetFilterUnconvertible: [], assetIds: [], createdBy: "alice" },
     {
@@ -448,6 +471,53 @@ describe("picker selection", () => {
     expect(pane.textContent).not.toContain("Responsible Contacts");
     expect(pane.textContent).toContain("Ashfield");
     expect(pane.textContent).toContain("Memphis");
+  });
+
+  it("offers NO level entries while the region catalogue is flat", async () => {
+    // On a flat catalogue "L1 Region Users" is a synonym for the all-levels
+    // entry, and offering it would invite a rule that quietly changes meaning
+    // the day someone draws a containing polygon.
+    (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as { textContent: string };
+    expect(pane.textContent).toContain("Region Users");
+    expect(pane.textContent).not.toContain("L1 Region Users");
+    expect(pane.textContent).not.toContain("L2 Region Users");
+  });
+
+  it("offers one level entry per level once regions are nested", async () => {
+    schemaMaxLevel = 2;
+    reloadAddressBook();
+    (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as { textContent: string };
+    expect(pane.textContent).toContain("L1 Region Users");
+    expect(pane.textContent).toContain("L2 Region Users");
+    expect(pane.textContent).not.toContain("L3 Region Users");
+    // The all-levels entry stays — it is what stored rules use.
+    expect(pane.textContent).toContain("Asset’s Region Users");
+  });
+
+  it("returns a picked level entry with its own source and level", async () => {
+    schemaMaxLevel = 2;
+    reloadAddressBook();
+    const picker = (window as unknown as {
+      PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ field: string; entries: Array<Record<string, unknown>> }> };
+    }).PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    click(doc.querySelector('[data-ab-tab="regions"]'));
+    const box = doc.querySelector('[data-ab-pick="deviceRegionLevel|deviceRegionLevel:2"]') as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    expect(box).toBeTruthy();
+    box.checked = true;
+    box.dispatchEvent(new (win as unknown as { Event: new (t: string, o?: unknown) => unknown }).Event("change", { bubbles: true }));
+    click(doc.querySelector('[data-ab="add-to"]'));
+    const settled = await picker;
+    expect(settled.entries.some((e) => e.source === "deviceRegionLevel" && e.level === 2)).toBe(true);
   });
 
   it("heads the PEOPLE list with the responsible-contacts entry", async () => {

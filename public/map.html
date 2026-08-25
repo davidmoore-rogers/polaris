@@ -25,6 +25,13 @@
 
       <div class="map-toolbar">
         <button type="button" id="map-theme-toggle" class="btn-icon map-theme-toggle" aria-label="Toggle map theme" title="Toggle map theme (saved per user)" style="line-height:0"></button>
+        <!-- The viewer's own region scope, read-only. Rendered by map.js
+             (renderMyRegions) once /auth/me has answered. -->
+        <div class="map-my-regions" id="map-my-regions" hidden></div>
+        <!-- Read-only, and deliberately NOT permission-gated: any viewer who
+             can see the map can see how its regions nest. Hovering it shows the
+             containment tree (region-tree.js + the shared hover tooltip). -->
+        <button type="button" id="map-show-regions" class="btn btn-secondary" aria-pressed="false">Show regions</button>
         <button type="button" id="map-edit-regions" class="btn btn-secondary" hidden>Edit regions</button>
         <div id="map-status" class="map-status"></div>
         <div class="map-edit-actions" id="map-edit-actions">
@@ -123,6 +130,8 @@
   <script src="/js/vendor/jspdf.plugin.autotable.min.js"></script>
   <script src="/js/vendor/html-to-image.min.js"></script>
   <script src="/js/api.js"></script>
+  <script src="/js/region-pills.js"></script>
+  <script src="/js/region-tree.js"></script>
   <script src="/js/push.js"></script>
   <script src="/js/totp-self.js"></script>
   <script src="/js/brand-logo.js"></script>
@@ -144,6 +153,7 @@
        automations.js is not needed here. -->
   <script src="/js/condition-builder.js"></script>
   <script src="/js/automations-wizard.js"></script>
+  <script src="/js/automations-portability.js"></script>
   <!-- Asset modal's Maintenance tab (ad-hoc "enter maintenance until…") needs
        maintCreateAdhoc; the Maintenance MODAL itself is wired on assets.html only. -->
   <script src="/js/assets-maintenance.js"></script>

@@ -348,6 +348,47 @@ export interface QuarantineAssetResult {
 }
 
 /**
+ * Whether quarantine push is available on this install at all: does ANY
+ * enabled FortiManager / FortiGate integration carry `config.pushQuarantine`?
+ *
+ * `quarantineAsset` already skips every sighting whose integration has the
+ * toggle off, so with it off fleet-wide a push resolves to zero targets and
+ * the operator gets a 502 reading "0/0 FortiGate(s) accepted the push" — a
+ * failure that describes a device problem when the real answer is that the
+ * feature was never turned on. The frontends call this to hide the quarantine
+ * verbs rather than offer a button that can only fail.
+ *
+ * Deliberately install-wide rather than per-asset: the per-asset answer needs
+ * each asset's sightings joined to their integrations, and the row menu asks
+ * this question for every row of a 2000-asset table. On a multi-integration
+ * install where only some carry the toggle this is therefore the OPTIMISTIC
+ * answer — the push stays the authority, and its per-target records still name
+ * the FortiGates it skipped.
+ *
+ * Release is NOT gated on it: `releaseQuarantine` unpushes from the targets
+ * recorded on the asset without consulting the toggle, so an asset quarantined
+ * before push was switched off must stay releasable.
+ */
+export async function getQuarantinePushAvailability(): Promise<{
+  pushEnabled: boolean;
+  integrationCount: number;
+  pushEnabledCount: number;
+}> {
+  const rows = await prisma.integration.findMany({
+    where: { type: { in: ["fortimanager", "fortigate"] }, enabled: true },
+    select: { config: true },
+  });
+  const pushEnabledCount = rows.filter(
+    (r) => ((r.config ?? {}) as Record<string, unknown>).pushQuarantine === true,
+  ).length;
+  return {
+    pushEnabled: pushEnabledCount > 0,
+    integrationCount: rows.length,
+    pushEnabledCount,
+  };
+}
+
+/**
  * Quarantine an asset across every FortiGate it has been recently sighted
  * on. Per-FortiGate is all-or-nothing; across-FortiGate is best-effort
  * (partial successes still flip the asset to `quarantined`).

@@ -20,6 +20,10 @@
     type: "diskUsage",
     category: "Monitoring",
     label: "Highest Disk Usage",
+    // Under the "Minimum severity" filter the widget lists the ALERTING rows
+    // (sorted severity-first), not the fleet's top values — so the header drops
+    // the superlative and gains the tier instead.
+    severityLabel: "Disk Usage",
     description: "Monitored filesystems with the highest used percentage, per volume.",
     defaultSize: { width: 4, height: 1 },
     minSize: { width: 3, height: 1 },
