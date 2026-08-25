@@ -31,75 +31,18 @@ import {
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
 import { listRegions } from "./mapRegionService.js";
 import { ipInCidr } from "../utils/cidr.js";
-import { scopeCidrOf, type ScopeConditionAsset } from "./notificationTypes.js";
+import { invalidateDownDetectionCache } from "./downDetectionService.js";
+import { scopeMatchesAsset } from "./notificationTypes.js";
 
 /**
- * Minimal asset shape needed to evaluate scope membership. Extends the
- * condition-evaluator's field vocabulary (notificationTypes.ScopeConditionAsset)
- * so the flat-scope matcher and the condition tree can never drift apart —
- * this layer just requires the dimensions the flat matcher always reads.
+ * Scope membership (ScopeAsset + scopeMatchesAsset) now lives in
+ * notificationTypes beside the condition evaluator it delegates to, so that
+ * downDetectionService can reach it without importing this module — which
+ * imports downDetectionService to invalidate its cache on every rule write.
+ * Re-exported here because the engine, the routes and the tests have always
+ * imported it from this path.
  */
-export interface ScopeAsset extends ScopeConditionAsset {
-  assetType: string | null;
-  tags: string[];
-  discoveredByIntegrationId: string | null;
-}
-
-/**
- * Does `scope` select `asset`? AND across the provided dimensions, OR within
- * each list. `allAssets` short-circuits true. A scope with no dimensions and
- * allAssets unset matches NOTHING (the builder requires an explicit selection).
- * KEEP IN LOCKSTEP with the engine's SQL `scopeWhere` + loadScopeAssets
- * subnet post-filter (notificationEngine.ts) — this is the in-memory twin.
- */
-export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean {
-  if (scope.allAssets) return true;
-  let anyDimension = false;
-
-  if (scope.assetTypes && scope.assetTypes.length > 0) {
-    anyDimension = true;
-    if (!scope.assetTypes.includes(asset.assetType ?? "")) return false;
-  }
-  if (scope.tags && scope.tags.length > 0) {
-    anyDimension = true;
-    const set = new Set(asset.tags.map((t) => t.toLowerCase()));
-    if (!scope.tags.some((t) => set.has(t.toLowerCase()))) return false;
-  }
-  if (scope.assetIds && scope.assetIds.length > 0) {
-    anyDimension = true;
-    if (!scope.assetIds.includes(asset.id)) return false;
-  }
-  if (scope.integrationIds && scope.integrationIds.length > 0) {
-    anyDimension = true;
-    if (!scope.integrationIds.includes(asset.discoveredByIntegrationId ?? "")) return false;
-  }
-  if (scope.manufacturers && scope.manufacturers.length > 0) {
-    anyDimension = true;
-    const mfr = (asset.manufacturer ?? "").toLowerCase();
-    if (!mfr || !scope.manufacturers.some((m) => mfr.includes(m.toLowerCase()))) return false;
-  }
-  if (scope.models && scope.models.length > 0) {
-    anyDimension = true;
-    const model = (asset.model ?? "").toLowerCase();
-    if (!model || !scope.models.some((m) => model.includes(m.toLowerCase()))) return false;
-  }
-  if (scope.subnetCidrs && scope.subnetCidrs.length > 0) {
-    anyDimension = true;
-    const ip = asset.ipAddress ?? "";
-    if (!ip) return false;
-    const inAny = scope.subnetCidrs.some((c) => {
-      try { return ipInCidr(ip, scopeCidrOf(c)); } catch { return false; }
-    });
-    if (!inAny) return false;
-  }
-  // Nested condition tree (the wizard's builder). ANDs with any flat
-  // dimensions above when both are present.
-  if (scope.condition) {
-    anyDimension = true;
-    if (!evaluateScopeCondition(scope.condition, asset)) return false;
-  }
-  return anyDimension;
-}
+export { scopeMatchesAsset, type ScopeAsset } from "./notificationTypes.js";
 
 /**
  * Enabled, asset-scoped rules whose scope matches the given asset. Backs the
@@ -492,6 +435,9 @@ export async function createRule(input: RuleInput, actor?: string) {
     },
   });
   bumpChangeSubscriptions();
+  // Unconditional: an edit can turn a rule INTO or OUT OF a down-detection
+  // rule, so gating on "was it one?" would miss half the transitions.
+  invalidateDownDetectionCache();
   await logEvent({
     action: "notification_rule.created",
     resourceType: "notification-rule",
@@ -510,7 +456,7 @@ export async function createRule(input: RuleInput, actor?: string) {
  *  they linger firing forever (per-dimension rows under a now-composite rule,
  *  a cpu row under a now-temperature rule). Threshold/operator/tree edits keep
  *  the identity: the state keys stay meaningful and re-evaluate next tick. */
-function triggerIdentityOf(trigger: Trigger): string {
+export function triggerIdentityOf(trigger: Trigger): string {
   switch (trigger.type) {
     case "asset_metric": case "host_metric": return `${trigger.type}:${trigger.metric}`;
     case "asset_state": return `asset_state:${trigger.field}`;
@@ -571,6 +517,9 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
     await prisma.notificationRuleState.deleteMany({ where: { ruleId: id } });
   }
   bumpChangeSubscriptions();
+  // Unconditional: an edit can turn a rule INTO or OUT OF a down-detection
+  // rule, so gating on "was it one?" would miss half the transitions.
+  invalidateDownDetectionCache();
   await logEvent({
     action: "notification_rule.updated",
     resourceType: "notification-rule",
@@ -596,6 +545,9 @@ export async function deleteRule(id: string, actor?: string) {
   // set to null (onDelete: SetNull) so history survives.
   await prisma.notificationRule.delete({ where: { id } });
   bumpChangeSubscriptions();
+  // Unconditional: an edit can turn a rule INTO or OUT OF a down-detection
+  // rule, so gating on "was it one?" would miss half the transitions.
+  invalidateDownDetectionCache();
   await logEvent({
     action: "notification_rule.deleted",
     resourceType: "notification-rule",

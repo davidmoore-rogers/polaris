@@ -114,7 +114,44 @@ describe("triggerSignature", () => {
   });
 
   it("keys asset_state by field", () => {
-    expect(triggerSignature({ type: "asset_state", field: "monitorStatus", operator: "==", value: "down", forDurationSec: 0 } as any)).toBe("as:monitorStatus:");
+    expect(triggerSignature({ type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", forDurationSec: 0 } as any)).toBe("as:ifOperStatus:");
+  });
+
+  // monitorStatus is the one state field keyed by VALUE and NOT by its device
+  // filter — it is a single per-asset column with no reading dimensions, so a
+  // dimensionFilter on it narrows the asset set rather than the reading. Every
+  // "== down" automation therefore has to land in ONE carve-out group whatever
+  // its device filter, because that group is also what decides whose
+  // missed-poll count governs each asset (down-detection authority).
+  it("groups every monitorStatus == down rule together regardless of device filter", () => {
+    const down = (df?: any): Trigger =>
+      ({ type: "asset_state", field: "monitorStatus", operator: "==", value: "down", forDurationSec: 0, dimensionFilter: df } as any);
+    expect(triggerSignature(down())).toBe("as:monitorStatus:==down");
+    expect(triggerSignature(down({ hostnamePattern: "core-" }))).toBe(triggerSignature(down()));
+    expect(triggerSignature(down({ modelPattern: "FortiSwitch" }))).toBe(triggerSignature(down()));
+  });
+
+  it("keys monitorStatus by the compared VALUE — down and warning are different things to watch", () => {
+    const at = (value: string): Trigger =>
+      ({ type: "asset_state", field: "monitorStatus", operator: "==", value, forDurationSec: 0 } as any);
+    expect(triggerSignature(at("down"))).not.toBe(triggerSignature(at("warning")));
+    expect(triggerSignature(at("down"))).not.toBe(triggerSignature(at("passive")));
+    // and by the comparator, so "is not down" never shadows "is down"
+    expect(triggerSignature(at("down"))).not.toBe(
+      triggerSignature({ type: "asset_state", field: "monitorStatus", operator: "!=", value: "down", forDurationSec: 0 } as any),
+    );
+  });
+
+  it("compares monitorStatus values case-insensitively", () => {
+    const at = (value: string): Trigger =>
+      ({ type: "asset_state", field: "monitorStatus", operator: "==", value, forDurationSec: 0 } as any);
+    expect(triggerSignature(at("Down"))).toBe(triggerSignature(at("down")));
+  });
+
+  it("still keys OTHER state fields by their dimension filter", () => {
+    const iface = (df?: any): Trigger =>
+      ({ type: "asset_state", field: "ifOperStatus", operator: "==", value: "down", forDurationSec: 0, dimensionFilter: df } as any);
+    expect(triggerSignature(iface({ interfaceName: "port2" }))).not.toBe(triggerSignature(iface()));
   });
 
   it("returns null for host_metric / event / change / composite (exempt from carve-out)", () => {

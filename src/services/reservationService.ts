@@ -1604,7 +1604,17 @@ async function attemptQueuedPush(
       },
       select: { monitored: true, monitorStatus: true },
     });
-    if (firewallAsset?.monitored && firewallAsset.monitorStatus !== "up") {
+    // "passive" is exempt from the not-up deferral. A gate no down-detection
+    // automation covers is never "up" BY CONSTRUCTION — Polaris renders no
+    // verdict for it — so a bare `!== "up"` test would defer its reservation
+    // pushes forever. Every other non-up state keeps deferring exactly as
+    // before; passive is not evidence the gate is unreachable, it is the
+    // absence of evidence either way.
+    if (
+      firewallAsset?.monitored &&
+      firewallAsset.monitorStatus !== "up" &&
+      firewallAsset.monitorStatus !== "passive"
+    ) {
       return "skipped-monitored-down";
     }
     if (!firewallAsset?.monitored) {

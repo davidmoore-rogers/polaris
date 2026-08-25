@@ -76,6 +76,32 @@ const monitoredAssetsByStatus = new Gauge({
   registers: [registry],
 });
 
+// ─── Down detection (automation-owned) ──────────────────────────────────────
+// The down-detection index resolves which automation defines "down" for each
+// asset. It sits on the probe hot path, and a fleet with no covering automation
+// is judged by nothing at all — so both its cost and its coverage are worth
+// seeing. `passive` climbing is the signal that devices stopped being judged.
+
+const downDetectionBuildDuration = new Histogram({
+  name: "polaris_down_detection_build_seconds",
+  help: "Time to rebuild the down-detection index (rule set x monitored fleet).",
+  buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
+  registers: [registry],
+});
+
+const downDetectionAssets = new Gauge({
+  name: "polaris_down_detection_assets",
+  help: "Monitored assets by whether a down-detection automation covers them.",
+  labelNames: ["coverage"] as const,
+  registers: [registry],
+});
+
+const downDetectionUnavailable = new Counter({
+  name: "polaris_down_detection_unavailable_total",
+  help: "Times the down-detection index could not be built and every asset was treated as passive.",
+  registers: [registry],
+});
+
 const pgbossQueueJobs = new Gauge({
   name: "polaris_pgboss_queue_jobs",
   help: "pg-boss job counts by queue and state (pg-boss mode only).",
@@ -368,12 +394,28 @@ export function recordProbe(transport: string, durationSeconds: number, outcome:
 
 export function setMonitoredAssets(
   total: number,
-  byStatus: { up: number; down: number; unknown: number },
+  byStatus: { up: number; down: number; unknown: number; passive?: number },
 ): void {
   monitoredAssets.set(total);
   monitoredAssetsByStatus.set({ status: "up" }, byStatus.up);
   monitoredAssetsByStatus.set({ status: "down" }, byStatus.down);
   monitoredAssetsByStatus.set({ status: "unknown" }, byStatus.unknown);
+  // Optional so a caller that predates the sixth state still compiles; passive
+  // assets would otherwise land in `unknown` and read as "never probed".
+  monitoredAssetsByStatus.set({ status: "passive" }, byStatus.passive ?? 0);
+}
+
+export function recordDownDetectionBuild(durationSeconds: number): void {
+  downDetectionBuildDuration.observe(durationSeconds);
+}
+
+export function setDownDetectionAssets(covered: number, passive: number): void {
+  downDetectionAssets.set({ coverage: "covered" }, covered);
+  downDetectionAssets.set({ coverage: "passive" }, passive);
+}
+
+export function recordDownDetectionUnavailable(): void {
+  downDetectionUnavailable.inc();
 }
 
 export function setQueueDepth(depths: Partial<Record<Cadence, number>>): void {

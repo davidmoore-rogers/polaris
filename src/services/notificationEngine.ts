@@ -306,6 +306,15 @@ export function isSuppressedForNotifications(a: { status: string; dependencySupp
  *   recovering → came back but hasn't held for threshold successes; asset-down
  *                is still live, so this is the tail of that same outage.
  *   unknown    → never probed (UI "Pending") — nothing measured yet.
+ *   passive    → no down-detection automation covers the device, so Polaris
+ *                renders no verdict about it. NOT answering, for the reason
+ *                this gate exists: a dark passive device sits at 100% loss
+ *                indefinitely and there is no asset-down alert to supersede
+ *                the loss alert (that is precisely what is missing), so
+ *                admitting it would park a permanently-firing, never-clearing
+ *                alert on every device an operator just told Polaris to stop
+ *                judging. "Stop judging these" must not quietly become "judge
+ *                them by a different metric".
  *
  * A null status is treated as not answering: it means the same thing `unknown`
  * does on a row written before the column existed.
@@ -935,13 +944,40 @@ export function buildShadowIndex(rules: DbRule[]): ShadowIndex {
   return { bySig, maxRankBySig };
 }
 
+/**
+ * Does a peer rule genuinely COVER this asset — i.e. could it produce a reading
+ * for it at all? Scope alone is not the whole answer: a trigger's device
+ * filter (hostname / IP / MAC / manufacturer / model) narrows the asset set
+ * just as scope does, so a peer scoped to all assets but filtered to
+ * `hostname matches "core-"` covers only the core switches.
+ *
+ * This used to be scope-only, which was safe while `triggerSignature` pinned
+ * the dimensionFilter — two differently-filtered rules were in different
+ * signature groups and never compared. Now that monitorStatus rules group by
+ * value instead (so down automations with different device filters CAN carve
+ * each other out), the filter has to be tested here or a filtered peer would
+ * shadow every asset in its scope, including ones it can never fire on.
+ *
+ * For asset_metric this is a no-op: peers in a signature group have identical
+ * filters by construction, so the predicate short-circuits in applyDeviceFilters'
+ * "no patterns set" check.
+ */
+function peerCoversAsset(peer: DbRule, asset: ScopeAsset): boolean {
+  if (!scopeMatchesAsset(peer.scope, asset)) return false;
+  const df = (peer.trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] }).dimensionFilter;
+  if (!df) return true;
+  const rec = df as Record<string, string | undefined>;
+  if (!DEVICE_FILTER_DIMENSIONS.some((d) => rec[d])) return true;
+  return deviceFilterMatch(df, asset);
+}
+
 /** Does a higher-rank same-signature rule also cover this asset? */
 export function isAssetShadowed(index: ShadowIndex, rule: DbRule, sig: string, rank: number, asset: ScopeAsset): boolean {
   const group = index.bySig.get(sig);
   if (!group) return false;
   for (const other of group) {
     if (other.rule.id === rule.id) continue;
-    if (other.rank > rank && scopeMatchesAsset(other.rule.scope, asset)) return true;
+    if (other.rank > rank && peerCoversAsset(other.rule, asset)) return true;
   }
   return false;
 }
@@ -2555,6 +2591,20 @@ export interface CarveOutPeer {
   name: string;
   scope: RuleScope;
   rank: number;
+  /** The peer trigger's device filter, when it has one. Coverage is scope AND
+   *  filter — see peerCoversAsset. Optional so existing callers/tests that
+   *  build unfiltered peers stay valid. */
+  dimensionFilter?: Parameters<typeof deviceFilterMatch>[0];
+}
+
+/** Coverage test for a carve-out peer — the CarveOutPeer twin of
+ *  peerCoversAsset, kept beside it so the preview and the engine agree. */
+function carveOutPeerCovers(peer: CarveOutPeer, asset: ScopeAsset): boolean {
+  if (!scopeMatchesAsset(peer.scope, asset)) return false;
+  if (!peer.dimensionFilter) return true;
+  const rec = peer.dimensionFilter as Record<string, string | undefined>;
+  if (!DEVICE_FILTER_DIMENSIONS.some((d) => rec[d])) return true;
+  return deviceFilterMatch(peer.dimensionFilter, asset);
 }
 
 /** Pure carve-out aggregation: given the draft's rank, the assets its scope
@@ -2575,7 +2625,7 @@ export function carveOutAggregate(
   for (const a of scopeAssets) {
     let best: CarveOutPeer | null = null;
     for (const o of higher) {
-      if (scopeMatchesAsset(o.scope, a) && (!best || o.rank > best.rank)) best = o;
+      if (carveOutPeerCovers(o, a) && (!best || o.rank > best.rank)) best = o;
     }
     if (best) {
       excludedBy.set(a.id, { ruleId: best.id, ruleName: best.name });
@@ -2589,7 +2639,7 @@ export function carveOutAggregate(
   // from — the authoring warning "creating this removes N devices from X".
   const carvesFrom: NonNullable<CarveOutSummary["carvesFrom"]> = [];
   for (const o of lower) {
-    const hit = scopeAssets.filter((a) => scopeMatchesAsset(o.scope, a));
+    const hit = scopeAssets.filter((a) => carveOutPeerCovers(o, a));
     if (hit.length) {
       carvesFrom.push({ ruleId: o.id, ruleName: o.name, count: hit.length, sampleHostnames: hit.slice(0, 5).map((a) => a.hostname ?? a.id) });
     }
@@ -2619,7 +2669,16 @@ async function computeCarveOut(
   });
   const peers: CarveOutPeer[] = others
     .filter((o) => triggerSignature(o.trigger as unknown as Trigger) === sig)
-    .map((o) => ({ id: o.id, name: o.name, scope: (o.scope ?? {}) as RuleScope, rank: scopeRank((o.scope ?? {}) as RuleScope) }));
+    .map((o) => ({
+      id: o.id,
+      name: o.name,
+      scope: (o.scope ?? {}) as RuleScope,
+      rank: scopeRank((o.scope ?? {}) as RuleScope),
+      // A monitorStatus signature no longer pins the device filter, so peers in
+      // this group may be filtered differently from the draft — carry it so
+      // coverage is tested rather than assumed.
+      dimensionFilter: (o.trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] } | null)?.dimensionFilter,
+    }));
   if (peers.length === 0) return { excludedBy: new Map(), summary: {} };
 
   return carveOutAggregate(scopeRank(input.scope), scopeAssets, peers);

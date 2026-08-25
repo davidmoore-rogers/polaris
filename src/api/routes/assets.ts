@@ -431,7 +431,12 @@ function monitorClause(v: string): Record<string, unknown> | null {
     case "Warning":     return { monitored: true, dependencySuppressed: false, monitorStatus: "warning" };
     case "Down":        return { monitored: true, dependencySuppressed: false, monitorStatus: "down" };
     case "Recovering":  return { monitored: true, dependencySuppressed: false, monitorStatus: "recovering" };
-    case "Pending":     return { monitored: true, dependencySuppressed: false, monitorStatus: { notIn: ["up", "warning", "down", "recovering"] } };
+    case "Passive":     return { monitored: true, dependencySuppressed: false, monitorStatus: "passive" };
+    // "Pending" is the catch-all for everything without its own chip, so every
+    // named status must be excluded here or its rows filter under the wrong
+    // label — the rule this file already states: a row filters under exactly
+    // the label its pill shows.
+    case "Pending":     return { monitored: true, dependencySuppressed: false, monitorStatus: { notIn: ["up", "warning", "down", "recovering", "passive"] } };
     default:            return null;
   }
 }

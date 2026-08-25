@@ -63,7 +63,7 @@ describe("getStatusSummary", () => {
       .mockResolvedValueOnce(0); // maintenance-window count
 
     const r = await noc.getStatusSummary();
-    expect(r.statusCounts).toEqual({ total: 16, up: 10, down: 2, warning: 1, unknown: 3, recovering: 0, maintenance: 0 });
+    expect(r.statusCounts).toEqual({ total: 16, up: 10, down: 2, warning: 1, unknown: 3, recovering: 0, passive: 0, maintenance: 0 });
     // 7 / (7 + 1) = 87.5
     expect(r.uptimePercent).toBe(87.5);
     expect(r.activeAlertCount).toBe(3);
@@ -91,7 +91,7 @@ describe("getStatusSummary", () => {
       .mockResolvedValueOnce(2); // maintenance-window count
 
     const r = await noc.getStatusSummary();
-    expect(r.statusCounts).toEqual({ total: 13, up: 10, down: 1, warning: 0, unknown: 0, recovering: 0, maintenance: 2 });
+    expect(r.statusCounts).toEqual({ total: 13, up: 10, down: 1, warning: 0, unknown: 0, recovering: 0, passive: 0, maintenance: 2 });
     // Both groupBys must carry the maintenance exclusion.
     expect(groupBy).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({ status: { not: "maintenance" } }),
@@ -650,7 +650,7 @@ describe("getNocSummaryPayload", () => {
     const r = await noc.getNocSummaryPayload({
       feeds: null, canAssets: false, canEvents: false, assetTypes: null, regionNames: null, capLimit: null,
     });
-    expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: 0 });
+    expect(r.statusCounts).toEqual({ total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, passive: 0, maintenance: 0 });
     expect(r.downNodes).toEqual([]);
     expect(r.downNodesTotal).toBe(0);
     expect(r.activeAlerts).toEqual([]);

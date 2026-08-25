@@ -143,6 +143,8 @@ import { decodePortList, derivePortVlans, isVlanId, type PortVlanConfig, type Vl
 import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
+import { resolveDownThreshold } from "./downDetectionService.js";
+import { isConfigStatusEdge, runsHeavyCadences, type MonitorStatus } from "../utils/monitorStatus.js";
 import {
   type PollingMethod,
   type AssetSourceKind,
@@ -9567,11 +9569,11 @@ export async function recordProbeResult(
       }
     : loaded;
 
-  // Resolve effective settings through the hierarchy. failureThreshold doubles
-  // as the recovery threshold — we use it for both up→down and pending→up
-  // transitions. Same number of confirmations either direction.
+  // Resolve effective settings through the hierarchy. NOTE the down threshold
+  // is NOT read from here any more — `failureThreshold` on the settings tiers
+  // is dormant (see the deprecation note on MonitorTierSettings). This resolver
+  // still supplies the cadence and the probe timeout.
   const effective = await resolveMonitorSettings(asset);
-  const threshold = effective.failureThreshold;
 
   // Agent-mode response-time: the Polaris Agent runs on the host and pushes
   // its own samples (with real RTTs) through POST /api/v1/agents/samples.
@@ -9582,6 +9584,16 @@ export async function recordProbeResult(
   // so the agent's real samples DO drive the state machine.
   if (effective.responseTimePolling === "agent" && !opts?.fromAgent) return;
 
+  // WHO decides this device is down: the covering down-detection automation,
+  // most-specific-wins (business rule 18's ladder). null = no automation covers
+  // it, so we render no verdict at all and the asset reads "passive". Doubles
+  // as the recovery threshold, exactly as failureThreshold used to — the same
+  // number of confirmations either direction.
+  //
+  // One Map lookup in the steady state; see downDetectionService for why this
+  // is safe on a per-probe path at 2000 assets.
+  const threshold = await resolveDownThreshold(assetId);
+
   const now = new Date();
   const previousStatus = asset.monitorStatus ?? "unknown";
   // Counter update: success path zeroes failures + bumps successes; failure
@@ -9590,8 +9602,13 @@ export async function recordProbeResult(
   const newCf = result.success ? 0                                        : (asset.consecutiveFailures  ?? 0) + 1;
   const newCs = result.success ? (asset.consecutiveSuccesses ?? 0) + 1     : 0;
 
-  // Five-state machine. See CLAUDE.md "Monitor Settings Hierarchy" /
+  // Six-state machine. See CLAUDE.md "Monitor Settings Hierarchy" /
   // "Monitor status state machine" for the table.
+  //
+  //   passive           — no down-detection automation covers this asset, so
+  //                       Polaris renders NO verdict. Still polled, still
+  //                       sampled, still charted; the counters below still
+  //                       advance, they are simply never compared.
   //
   //   unknown / down + success → recovering (until cs ≥ threshold → up)
   //   recovering        + success → up if cs ≥ threshold else stay recovering
@@ -9605,20 +9622,28 @@ export async function recordProbeResult(
   // only exit from down and requires at least one success. The previous name
   // for this state was "pending"; the migrateMonitorStatusRename startup job
   // bumps any leftover "pending" rows to "recovering".
-  let nextStatus: "up" | "warning" | "recovering" | "down" | "unknown";
-  if (result.success) {
+  let nextStatus: MonitorStatus;
+  if (threshold === null) {
+    // PASSIVE. Note the counters are still advanced above: consecutiveFailures
+    // is itself an automatable asset_state field, it is what lets a surface say
+    // "passive and answering" vs "passive and dark", and keeping the run warm
+    // means an asset that LATER gains coverage converges on its very next probe
+    // instead of restarting from zero.
+    nextStatus = "passive";
+  } else if (result.success) {
     if (previousStatus === "up") {
       nextStatus = "up";
     } else if (previousStatus === "warning" || previousStatus === "recovering") {
       nextStatus = newCs >= threshold ? "up" : previousStatus;
     } else {
-      // unknown / down → start the recovery counter at recovering.
+      // unknown / down / passive → start the recovery counter at recovering.
       nextStatus = newCs >= threshold ? "up" : "recovering";
     }
   } else {
     if (newCf >= threshold) {
       nextStatus = "down";
-    } else if (previousStatus === "up" || previousStatus === "unknown") {
+    } else if (previousStatus === "up" || previousStatus === "unknown" || previousStatus === "passive") {
+      // Leaving passive is like leaving unknown: there was no prior verdict.
       nextStatus = "warning";
     } else if (previousStatus === "warning" || previousStatus === "recovering" || previousStatus === "down") {
       // Stay in the current state and let the counter march toward "down".
@@ -9709,6 +9734,16 @@ export async function recordProbeResult(
     });
   }
 
+  // Entering or leaving "passive" is a CONFIGURATION edge, not a device edge:
+  // it happens the instant an operator saves, rescopes or deletes a
+  // down-detection automation, and one such save can move thousands of assets
+  // across the line at once. Treating it as a device transition would burst one
+  // Event and one dependency propagation PER ASSET from a single click. The
+  // rule-CRUD audit trail (notification_rule.updated) already records the cause,
+  // and the fleet-wide "nothing is being judged" case gets its own one-shot
+  // Event from downDetectionService.
+  const configEdge = isConfigStatusEdge(previousStatus, nextStatus);
+
   // Edge-triggered audit events. We log on the transition INTO up / warning /
   // down — never per-poll (up→up, warning→warning, etc. don't fire because
   // previousStatus === nextStatus). This yields exactly: the first successful
@@ -9717,7 +9752,7 @@ export async function recordProbeResult(
   // intermediate and never logged. The propagate / retry side-effects below
   // stay gated to confirmed up/down only — a "warning" is not a confirmed
   // up/down edge for dependency suppression or queued-push retry.
-  if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "warning" || nextStatus === "down")) {
+  if (!configEdge && previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "warning" || nextStatus === "down")) {
     logEvent({
       action: "monitor.status_changed",
       resourceType: "asset",
@@ -9738,7 +9773,7 @@ export async function recordProbeResult(
     });
   }
 
-  if (previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "down")) {
+  if (!configEdge && previousStatus !== nextStatus && (nextStatus === "up" || nextStatus === "down")) {
     // Fire-and-forget latency hook: propagate the confirmed-up / confirmed-down
     // edge into descendant `dependencySuppressed` state immediately so heavy
     // cadences pause within milliseconds of the parent flipping to "down"
@@ -10934,9 +10969,17 @@ export async function computeDueWork(
     //     own probe still answers via a redundant path the response-time
     //     stream catches it; heavy walks against an unreachable upstream
     //     mostly time out and waste worker budget.
+    //   - "passive": no down-detection automation covers the asset, so there
+    //     is no verdict to consult. It is still being polled and its charts
+    //     are meant to keep filling, so we fall back to the raw signal we do
+    //     have — its last probe succeeded (consecutiveFailures === 0). Without
+    //     that fallback every passive device's CPU / interface / storage chart
+    //     would silently go flat, with nothing erroring.
     // The cheap probe keeps firing in every state so recovery can be
     // detected within one tick of the resolved cadence.
-    const isUp = a.monitorStatus === "up" && !a.dependencySuppressed;
+    // KEEP IN LOCKSTEP with the pg-boss publisher in jobs/monitorAssets.ts —
+    // both call the shared predicate for exactly that reason.
+    const isUp = runsHeavyCadences(a);
     if (probe      && enabled.has("probe"))                                      probes.push({ id: a.id, kind: "probe" });
     if (telemetry  && canTelemetry  && enabled.has("telemetry")  && isUp)        telemetries.push({ id: a.id, kind: "telemetry" });
     if (systemInfo && canSystemInfo && enabled.has("systemInfo") && isUp)        systemInfos.push({ id: a.id, kind: "systemInfo" });
@@ -11010,13 +11053,16 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
 
   // Asset-count gauges. Set every pass so the Grafana view stays current
   // even when the fleet size changes between ticks.
-  let upCount = 0, downCount = 0, unknownCount = 0;
+  let upCount = 0, downCount = 0, passiveCount = 0, unknownCount = 0;
   for (const a of candidates) {
     if (a.monitorStatus === "up") upCount++;
     else if (a.monitorStatus === "down") downCount++;
+    // Passive gets its own bucket: folding it into "unknown" would read as
+    // "never probed" about devices that are being polled perfectly well.
+    else if (a.monitorStatus === "passive") passiveCount++;
     else unknownCount++;
   }
-  setMonitoredAssets(candidates.length, { up: upCount, down: downCount, unknown: unknownCount });
+  setMonitoredAssets(candidates.length, { up: upCount, down: downCount, passive: passiveCount, unknown: unknownCount });
 
   // Per-asset resolved transport labels for the work-duration histogram and
   // per-probe histogram. Probe uses responseTimePolling; telemetry uses
