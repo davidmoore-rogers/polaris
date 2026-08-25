@@ -158,6 +158,11 @@ describe("API path allowlist", () => {
       "/dash/api/v1/me/dashboard",
       "/dash/api/v1/server-settings/pg-tuning",
       "/dash/api/v1/map/regions",
+      // Region geometry is readable at deviceMap:read on the MAIN listener so
+      // the map's "Show regions" button works for any viewer — but the
+      // unauthenticated wallboard cannot run the Device Map at all, so exposing
+      // it here would be a pure attack-surface increase.
+      "/dash/api/v1/map/region-overlay",
     ]) {
       const res = await request(app).get(path);
       expect(res.status, path).toBe(404);
