@@ -6149,20 +6149,16 @@ function credSummary(c) {
     return escapeHtml(url) + " · " + verifyTls;
   }
   if (c.type === "http") {
-    // Lead with the request line and the expectation, because that IS the
-    // credential — an operator scanning this list is asking "which check is
-    // this?", not "what auth does it use".
-    var scheme = cfg.useHttps === true ? "https" : "http";
-    var port = cfg.port ? ":" + cfg.port : "";
-    var line = scheme + "://<device>" + port + escapeHtml(cfg.path || "/");
-    var want = cfg.expectStatus ? String(cfg.expectStatus) : "2xx";
-    if (cfg.expectBody) {
-      want += " + " + (cfg.matchMode === "regex" ? "regex" : "text") + ' "' + escapeHtml(cfg.expectBody) + '"';
-      // Only worth saying when it changes the verdict — the strict reading is
-      // the default, so name the loose one.
-      if (cfg.failOnMismatch === false) want += " (advisory)";
-    }
-    return line + " · expect " + want;
+    // Summarize the AUTH, which is all this credential is since the check moved
+    // to a manufacturer widget. It used to lead with the request line and the
+    // expectation — with those fields stripped that rendered as a FICTIONAL
+    // "http://<device>/ · expect 2xx" for every row, describing a check the
+    // credential no longer defines.
+    var mode = httpAuthModeOf(cfg);
+    if (mode === "bearer") return "bearer token";
+    if (mode === "basic")  return escapeHtml(cfg.username || "") + " · basic";
+    if (mode === "digest") return escapeHtml(cfg.username || "") + " · digest";
+    return "no authentication";
   }
   return "";
 }
@@ -6476,7 +6472,7 @@ async function openCredentialModal(id, initialState) {
         '<option value="winrm"'   + (formType === "winrm"   ? ' selected' : '') + '>WinRM</option>' +
         '<option value="ssh"'     + (formType === "ssh"     ? ' selected' : '') + '>SSH</option>' +
         '<option value="restapi"' + (formType === "restapi" ? ' selected' : '') + '>REST API</option>' +
-        '<option value="http"'    + (formType === "http"    ? ' selected' : '') + '>HTTP Check</option>' +
+        '<option value="http"'    + (formType === "http"    ? ' selected' : '') + '>HTTP</option>' +
       '</select>' +
       (isNew ? '<p class="hint">Type cannot be changed after creation.</p>' : '') +
     '</div>' +
@@ -6548,8 +6544,8 @@ async function openCredentialModal(id, initialState) {
 // preserved (including any freshly-typed password) so the test result can
 // inform their next save.
 /**
- * The response an HTTP Check credential actually got back, rendered so the
- * operator can TAILOR the check against it. This is the whole reason the test
+ * The response an HTTP check actually got back, rendered so the operator can
+ * TAILOR the check against it. This is the whole reason the test
  * flow exists for this type: an HTTP check's expectation is a string that has to
  * be picked OUT of the device's response, and pass/fail gives you nothing to
  * pick from. The body is shown verbatim (escaped) in a selectable block.
@@ -7101,12 +7097,6 @@ function credRestApiForm(cfg) {
   );
 }
 
-/**
- * HTTP Check credential form. Unlike the other four this is mostly NOT auth —
- * it's the definition of a health check (where to GET, what counts as up), with
- * auth as an optional tail. The host deliberately isn't here: it comes from the
- * asset being probed, which is what lets one credential cover a fleet.
- */
 /**
  * The `http` credential form — AUTHENTICATION ONLY since 2026-08. Everything
  * that describes the check itself (scheme, port, path, expected status,

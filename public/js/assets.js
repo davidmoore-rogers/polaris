@@ -19722,7 +19722,7 @@ function _monsetOpenOverrideEditor(existing) {
   // sub-rows rendered by _classStreamSubtabHTML. Sub-row visibility rules:
   //   - credential row for a credtype shows when the picked method needs that
   //     credtype (snmp → snmp credrow, ssh → ssh credrow, winrm → winrm
-  //     credrow, http → HTTP Check credrow; rest_api / icmp / disabled → no
+  //     credrow; rest_api / icmp / disabled → no
   //     credrow)
   //   - MIB row shows when picked method is snmp
   var STREAMS_FULL = ["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"];

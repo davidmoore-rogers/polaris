@@ -254,7 +254,7 @@ const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   lldpPolling:           PollingMethodEnum.nullable().optional(),
   storagePolling:        PollingMethodEnum.nullable().optional(),
   // Per-asset request path for the "http" response-time check, overriding the
-  // path on the selected HTTP Check credential. Blank clears the override (see
+  // path used by an HTTP-check widget. Blank clears the override (see
   // the trim below) — it does NOT mean "/", so emptying the box returns the
   // device to the credential's path rather than repointing it at the web root.
   httpCheckPath:         z.string().max(1024).nullable().optional(),
