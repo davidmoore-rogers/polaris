@@ -21,6 +21,17 @@
   order: 99;
 }
 
+/* Read-only "Show regions" toggle. Deliberately the SAME order value as
+   #map-edit-regions: equal-order flex items fall back to DOM order, so this
+   lands immediately to its left without renumbering any existing rule. */
+#map-show-regions {
+  order: 99;
+}
+#map-show-regions[aria-pressed="true"] {
+  border-color: var(--color-accent, #4fc3f7);
+  color: var(--color-accent, #4fc3f7);
+}
+
 /* "My regions" - the region tags the signed-in operator is scoped to,
    read-only. It answers "which regions am I assigned to?", which nothing
    else on the page states; it is deliberately NOT a filter (the map already
@@ -599,6 +610,65 @@
   pointer-events: none;
 }
 #topology-edge-tooltip.visible { display: block; }
+
+/* The region tree rendered INSIDE that same tooltip (it is now the page's
+   shared hover tip, not only the topology graph's). The block above keeps
+   `white-space: pre-wrap` for the edge text's \n separators, which would
+   mangle a nested-div tree — so the tree opts back out. */
+#topology-edge-tooltip .rtree,
+#topology-edge-tooltip .rtree-tip {
+  white-space: normal;
+}
+.rtree-summary {
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: var(--color-text-secondary, #aab1bf);
+}
+.rtree-children {
+  padding-left: 14px;
+  border-left: 1px solid var(--color-border, #303542);
+  margin-left: 4px;
+}
+.rtree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 0;
+}
+.rtree-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+  background: var(--color-text-muted, #6b7280);
+}
+.rtree-level-badge {
+  font-size: 0.68rem;
+  opacity: 0.75;
+  flex: 0 0 auto;
+}
+.rtree-name { flex: 1 1 auto; }
+.rtree-count,
+.rtree-more,
+.rtree-empty {
+  font-size: 0.7rem;
+  color: var(--color-text-muted, #6b7280);
+}
+.rtree-warn {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--color-border, #303542);
+  font-size: 0.7rem;
+  color: var(--color-warning, #f59e0b);
+}
+
+/* Read-only region polygons (the Show-regions overlay). Fill opacity is much
+   lower than edit mode's because nesting STACKS it — three concentric regions
+   at the edit-mode value read as one opaque blob over the map. */
+.map-region-polygon-readonly {
+  fill-opacity: 0.06;
+  cursor: default;
+}
 
 /* Topology fullscreen — the .topology-fullscreen class drives the viewport-
    filling layout in BOTH modes: native fullscreen (requested on the document
