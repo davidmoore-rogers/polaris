@@ -1252,6 +1252,20 @@ const api = {
   },
 };
 
+// `api` above is a top-level `const`, and a top-level const/let in a classic
+// script lives in the global LEXICAL environment — it is NOT a property of
+// `window`. So the bare identifier `api` resolves everywhere, while
+// `window.api` is `undefined`, which is a trap for the shared modules that
+// legitimately have to feature-detect the client before using it: both
+// region-pills.js (the region catalogue behind every region pill and picker)
+// and app.js's `wireTotpState` guarded on `window.api` and therefore
+// short-circuited on EVERY page — the region picker reported "No map regions
+// defined yet" and filed every stored assignment under "Unknown region tags",
+// and the account menu's self-service 2FA row never rendered. Neither failed
+// loudly, because both were written to degrade quietly when the client is
+// absent. Publishing the object is what makes that guard mean what it says.
+window.api = api;
+
 async function uploadFile(path, category, file) {
   const formData = new FormData();
   formData.append("file", file);

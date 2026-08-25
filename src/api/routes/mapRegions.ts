@@ -22,6 +22,15 @@ import { Router } from "express";
 import { z } from "zod";
 import * as service from "../../services/mapRegionService.js";
 import { logEvent } from "./events.js";
+import {
+  renameRegionInPrincipalScopes,
+  principalsScopedToRegion,
+  type PrincipalScopeMoves,
+} from "../../services/regionScopeService.js";
+// The rename rewrites User/Role/GroupMapping region tags, which is exactly the
+// index notificationRecipientService caches for 30s — bumped from here because
+// that module imports regionScopeService and could not import it back.
+import { bumpRecipientIndex } from "../../services/notificationRecipientService.js";
 import { requirePermission } from "../middleware/permissions.js";
 
 const router = Router();
@@ -38,6 +47,27 @@ function reconcileMessage(summary: service.ReconcileSummary): string {
     `Region tags reconciled: assets +${summary.added} / -${summary.removed} (${assets} touched), ` +
     `networks +${summary.subnetsAdded} / -${summary.subnetsRemoved} (${nets} touched)`
   );
+}
+
+/**
+ * One line naming which principals a region-name change moved (or stranded).
+ * Names, not just counts: "3 users" tells an admin nothing they can act on,
+ * and region scope decides who sees which sites and who gets paged.
+ */
+function scopeMovesMessage(m: PrincipalScopeMoves): string {
+  // Capped, because the message renders in the Events list and a fleet-wide
+  // region can be on hundreds of accounts. The Event `details` carry the
+  // complete lists.
+  const NAMED = 10;
+  const list = (label: string, names: string[]): string | null => {
+    if (names.length === 0) return null;
+    const shown = names.slice(0, NAMED).join(", ");
+    const rest = names.length - NAMED;
+    return `${label} ${shown}${rest > 0 ? ` and ${rest} more` : ""}`;
+  };
+  return [list("users", m.users), list("roles", m.roles), list("group mappings", m.groupMappings)]
+    .filter(Boolean)
+    .join("; ");
 }
 
 /** The derived nesting facts for one region, for an Event's `details`. */
@@ -176,8 +206,15 @@ router.put("/:id", requirePermission("mapRegions", "write"), async (req, res, ne
     const { hierarchy: beforeLevels } = await service.getRegionHierarchy();
     const result = await service.updateRegion(id, input);
     let summary: service.ReconcileSummary;
+    // A rename carries the principal scope columns with it. Without this the
+    // region tag on every scoped user, role and IdP group mapping keeps the OLD
+    // name, matches no region, and silently stops scoping anything — see
+    // `renameRegionInPrincipalScopes`.
+    let scopeMoves: PrincipalScopeMoves | null = null;
     if (result.renamed) {
       summary = await service.applyRename(result.region, result.previousName);
+      scopeMoves = await renameRegionInPrincipalScopes(result.previousName, result.region.name);
+      if (scopeMoves.total > 0) bumpRecipientIndex();
     } else {
       summary = await service.applyOneRegion(result.region);
     }
@@ -197,8 +234,24 @@ router.put("/:id", requirePermission("mapRegions", "write"), async (req, res, ne
         vertices: result.region.polygon.length,
         ...(await levelDetails(result.region.id)),
         ...summary,
+        ...(scopeMoves ? { scopedPrincipalsMoved: scopeMoves.total } : {}),
       },
     });
+    if (scopeMoves && scopeMoves.total > 0) {
+      // Its own Event because it is an ACCESS change, not a tagging one: these
+      // rows decide which sites a scoped operator sees and who alerts route to.
+      logEvent({
+        action: "region.scope_tags_renamed",
+        resourceType: "map-region",
+        resourceId: result.region.id,
+        resourceName: result.region.name,
+        actor: req.session?.username,
+        message:
+          `Region scope assignments followed the rename "${result.previousName}" → "${result.region.name}": ` +
+          scopeMovesMessage(scopeMoves),
+        details: { previousName: result.previousName, ...scopeMoves },
+      });
+    }
     await logLevelShifts(beforeLevels, result.region.id, req.session?.username);
     if (summary.assetsTouched > 0 || summary.subnetsTouched > 0) {
       logEvent({
@@ -224,6 +277,11 @@ router.delete("/:id", requirePermission("mapRegions", "write"), async (req, res,
     const { hierarchy: beforeLevels } = await service.getRegionHierarchy();
     const removed = await service.deleteRegion(id);
     const summary = await service.applyDelete(removed);
+    // Deliberately a REPORT, not a strip: there is no new name to move these to,
+    // and a region is often redrawn under the same name — so the assignment is
+    // left in place (the Users page renders it as removable) and the operators
+    // now holding a tag that matches no region are named here instead.
+    const stranded = await principalsScopedToRegion(removed.name);
     logEvent({
       action: "region.deleted",
       resourceType: "map-region",
@@ -233,8 +291,22 @@ router.delete("/:id", requirePermission("mapRegions", "write"), async (req, res,
       message:
         `Map region "${removed.name}" deleted (${summary.removed} asset${summary.removed === 1 ? "" : "s"}, ` +
         `${summary.subnetsRemoved} network${summary.subnetsRemoved === 1 ? "" : "s"} untagged)`,
-      details: summary,
+      details: { ...summary, scopedPrincipalsStranded: stranded.total },
     });
+    if (stranded.total > 0) {
+      logEvent({
+        action: "region.scope_tags_stranded",
+        resourceType: "map-region",
+        resourceId: removed.id,
+        resourceName: removed.name,
+        actor: req.session?.username,
+        level: "warning",
+        message:
+          `Region "${removed.name}" was deleted while still assigned as scope to ` +
+          scopeMovesMessage(stranded) + " — those assignments now match no region",
+        details: { ...stranded },
+      });
+    }
     await logLevelShifts(beforeLevels, removed.id, req.session?.username);
     res.status(204).send();
   } catch (err) {
