@@ -2450,13 +2450,13 @@ router.put("/agents/server-url", requirePermission("serverSettingsSystem", "full
   } catch (err) { next(err); }
 });
 
-// ─── Agent code signing (Azure Trusted Signing) ────────────────────────────
+// ─── Agent code signing (internal-CA PKCS#12) ──────────────────────────────
 // Operator config for signing the two Windows agent binaries as a post-build
-// step in agentBuildService (jsign + Azure Trusted Signing; FAIL-OPEN — a
-// signing failure warns + stamps the sidebar-alert Setting but never blocks
-// the build). Secret discipline mirrors notificationChannelService: the
-// client secret is masked on read and preserved on write when the client
-// echoes the mask back.
+// step in agentBuildService (jsign against an internal-CA PKCS#12 keystore;
+// FAIL-OPEN — a signing failure warns + stamps the sidebar-alert Setting but
+// never blocks the build). Secret discipline mirrors notificationChannelService:
+// the keystore password is masked on read and preserved on write when the
+// client echoes the mask back, and it is NEVER written to the audit Event.
 
 router.get("/agents/signing", async (_req, res, next) => {
   try {
@@ -2468,15 +2468,21 @@ router.get("/agents/signing", async (_req, res, next) => {
 });
 
 const SigningConfigSchema = z.object({
-  enabled:      z.boolean().optional(),
-  endpoint:     z.string().trim().max(300).optional(),
-  accountName:  z.string().trim().max(200).optional(),
-  profileName:  z.string().trim().max(200).optional(),
-  tenantId:     z.string().trim().max(100).optional(),
-  clientId:     z.string().trim().max(100).optional(),
-  clientSecret: z.string().max(500).optional(),
-  jsignJarPath: z.string().trim().max(500).optional(),
+  enabled:          z.boolean().optional(),
+  keystorePath:     z.string().trim().max(500).optional(),
+  keystorePassword: z.string().max(500).optional(),
+  alias:            z.string().trim().max(200).optional(),
+  tsaUrl:           z.string().trim().max(300).optional(),
+  jsignJarPath:     z.string().trim().max(500).optional(),
 });
+
+/**
+ * Absolute POSIX path or Windows drive path. The keystore path must be
+ * absolute because the signing child is spawned from whatever cwd the build
+ * process happens to have, which differs between the single-process and
+ * split-role layouts — a relative path would resolve differently per role.
+ */
+const ABSOLUTE_PATH_RE = /^(\/|[A-Za-z]:[\\/])/;
 
 router.put("/agents/signing", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
@@ -2490,16 +2496,22 @@ router.put("/agents/signing", requirePermission("serverSettingsSystem", "fullwri
       return res.status(400).json({ error: parsed.error.issues[0]?.message ?? "invalid body" });
     }
     const input = parsed.data;
-    if (input.endpoint && !/^https:\/\//i.test(input.endpoint)) {
-      return res.status(400).json({ error: "endpoint must start with https://" });
+    if (input.keystorePath && !ABSOLUTE_PATH_RE.test(input.keystorePath)) {
+      return res.status(400).json({ error: "keystore path must be absolute" });
+    }
+    // http is legitimate for an RFC3161 TSA — the timestamp token is itself
+    // signed, so transport confidentiality buys nothing and most public TSAs
+    // publish an http endpoint only.
+    if (input.tsaUrl && !/^https?:\/\//i.test(input.tsaUrl)) {
+      return res.status(400).json({ error: "timestamp URL must start with http:// or https://" });
     }
 
     const before = await getSigningConfigRaw();
     const config = await updateSigningConfig(input);
-    const clientSecretChanged =
-      typeof input.clientSecret === "string" &&
-      input.clientSecret.trim() !== "" &&
-      input.clientSecret !== MASK;
+    const keystorePasswordChanged =
+      typeof input.keystorePassword === "string" &&
+      input.keystorePassword.trim() !== "" &&
+      input.keystorePassword !== MASK;
 
     await logEvent({
       action:       "agent.signing.config_updated",
@@ -2508,24 +2520,22 @@ router.put("/agents/signing", requirePermission("serverSettingsSystem", "fullwri
       resourceType: "polaris-agent",
       message:      `Agent code-signing config updated (${config.enabled ? "enabled" : "disabled"})`,
       details: {
-        enabled:            config.enabled,
-        wasEnabled:         before.enabled,
-        endpoint:           config.endpoint,
-        accountName:        config.accountName,
-        profileName:        config.profileName,
-        tenantId:           config.tenantId,
-        clientId:           config.clientId,
-        clientSecretChanged,
+        enabled:      config.enabled,
+        wasEnabled:   before.enabled,
+        keystorePath: config.keystorePath,
+        alias:        config.alias,
+        tsaUrl:       config.tsaUrl,
+        keystorePasswordChanged,
       },
     });
     res.json({ config, availability: await signingAvailability() });
   } catch (err) { next(err); }
 });
 
-// Dry-run validation: availability probe + a REAL Entra ID token fetch
-// (proves the tenant/client/secret triple without invoking jsign — there's
-// nothing to sign outside a build). Gated fullwrite because it exercises the
-// stored secret against Entra ID.
+// Dry-run validation: availability probe + a real keystore open via keytool
+// (proves the path/password pair and lists the aliases, without invoking
+// jsign — there's nothing to sign outside a build, and no TSA call is made).
+// Gated fullwrite because it exercises the stored keystore password.
 router.post("/agents/signing/test", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const { testSigningSetup } = await import("../../services/agentSigningService.js");

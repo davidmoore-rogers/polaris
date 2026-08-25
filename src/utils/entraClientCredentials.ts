@@ -2,12 +2,14 @@
  * src/utils/entraClientCredentials.ts — the Entra ID client-credentials
  * token REQUEST shape (URL + form body), shared by the Graph token fetch
  * (entraIdService, scope graph.microsoft.com/.default, cached, AppError
- * surfaces) and the Trusted Signing token fetch (agentSigningService,
- * scope codesigning.azure.net/.default, per-build, secret-scrubbed plain
- * errors). The two TRANSPORT policies differ deliberately and stay in
- * their services; only the request shape — the part that could silently
- * drift (endpoint version, grant fields) — is shared. Pure, unit-testable
- * without network.
+ * surfaces) and the Azure Resource Manager token fetch (azureArcService,
+ * scope management.azure.com/.default). The TRANSPORT policies differ
+ * deliberately and stay in their services; only the request shape — the
+ * part that could silently drift (endpoint version, grant fields) — is
+ * shared. Pure, unit-testable without network.
+ *
+ * Agent code signing was a third consumer until it moved to an internal-CA
+ * PKCS#12 keystore, which needs no token at all.
  */
 
 export function buildClientCredentialsTokenRequest(cfg: {

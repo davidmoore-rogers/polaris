@@ -125,7 +125,7 @@ if ((Test-Command "go") -and ((go version) -match "go1\.(2[2-9]|[3-9][0-9])")) {
 
 # ─── 1c. Install Java 17 (agent code signing — optional at runtime) ──────────
 # Used by the agent code-signing feature (Integrations → Polaris Agents →
-# Code signing): when Azure Trusted Signing is configured, the in-app agent
+# Code signing): when internal-CA code signing is configured, the in-app agent
 # build signs the two Windows binaries via jsign (a Java CLI). Opt-in —
 # missing Java only disables signing (the UI names what's missing), so
 # failures here warn instead of aborting the install. The Microsoft OpenJDK
@@ -287,7 +287,7 @@ New-Item -ItemType Directory -Force -Path $goCacheDir   | Out-Null
 Write-Info "Created agent build dirs: $agentDataDir, $goCacheDir"
 
 # ─── 4c. jsign jar (agent code signing — optional at runtime) ────────────────
-# SHA-256-pinned download for the Azure Trusted Signing feature. Failure only
+# SHA-256-pinned download for the agent code-signing feature. Failure only
 # warns — signing is opt-in and the UI names exactly what's missing.
 $jsignVersion = "7.4"
 $jsignSha256  = "2ABF2ADE9EA322ACC2D60C24794EADC465FF9380938FCA4C932D09E0B25F1C28"

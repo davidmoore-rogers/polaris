@@ -190,7 +190,7 @@ chown -R "$APP_USER:$APP_GROUP" "$APP_DIR/data/agents" "$APP_DIR/.cache"
 
 # ─── 3c. Java 17 + jsign (agent code signing — optional at runtime) ─────────
 # Used by the agent code-signing feature (Integrations → Polaris Agents →
-# Code signing): when Azure Trusted Signing is configured, the in-app agent
+# Code signing): when internal-CA code signing is configured, the in-app agent
 # build signs the two Windows binaries via jsign (a Java CLI). The feature is
 # opt-in — missing Java/jsign only disables signing and the UI names exactly
 # what's missing — so failures here warn instead of aborting the install.

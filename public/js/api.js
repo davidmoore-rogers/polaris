@@ -1000,7 +1000,7 @@ const api = {
     // first-use trust for that host — the recovery path after a rebuild.
     sshHostKeysList:          () => request("GET",    "/server-settings/agents/ssh-host-keys"),
     sshHostKeyDelete:         (id) => request("DELETE", "/server-settings/agents/ssh-host-keys/" + encodeURIComponent(id)),
-    // Agent code signing (Azure Trusted Signing) — masked secret config + dry-run test.
+    // Agent code signing (internal-CA PKCS#12) — masked secret config + dry-run test.
     agentSigningGet:          ()    => request("GET",  "/server-settings/agents/signing"),
     agentSigningSet:          (cfg) => request("PUT",  "/server-settings/agents/signing", cfg),
     agentSigningTest:         ()    => trackedRequest("Testing code signing", "POST", "/server-settings/agents/signing/test"),

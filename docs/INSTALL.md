@@ -1194,25 +1194,28 @@ It also decides whether **alert emails carry a one-click Acknowledge link** and 
 
 `POLARIS_PUBLIC_URL` is **also required for OIDC SSO** — Polaris derives the OIDC redirect URI from it (`${POLARIS_PUBLIC_URL}/api/v1/auth/oidc/callback`). OIDC login refuses with a clear error if it's unset.
 
-## Optional: Code signing for agent Windows binaries (Azure Trusted Signing)
+## Optional: Code signing for agent Windows binaries (internal CA)
 
-Freshly compiled, unsigned Go executables are a textbook match for Microsoft Defender's ML heuristics — and because every in-app agent build produces a new file hash, per-file reputation resets on every rebuild. Signing the two Windows agent binaries (`polaris-agent-windows-{amd64,arm64}.exe`) with **Azure Trusted Signing** gives them durable *publisher*-level trust. When configured, signing runs automatically as a post-build step of every in-app agent build.
+Freshly compiled, unsigned Go executables are a textbook match for Microsoft Defender's ML heuristics — and because every in-app agent build produces a new file hash, per-file reputation resets on every rebuild. Signing the two Windows agent binaries (`polaris-agent-windows-{amd64,arm64}.exe`) with your **organization's internal CA** lets you allow them by *publisher* once, instead of re-earning trust per hash. When configured, signing runs automatically as a post-build step of every in-app agent build.
 
-**Fail-open semantics:** a signing failure never blocks the build. The build completes, the binaries ship **unsigned**, a warning Event (`agent.build.sign_failed`) is written, and a dismissable sidebar alert appears for every user whose role can deploy agents (`assets` ≥ write). The alert clears on the next fully-signed build (or when signing is disabled). If you need signed-or-nothing, treat the alert as your gate before running agent installs/upgrades.
+**What this does and doesn't buy you.** An internal CA is unknown to Microsoft, so it contributes nothing to SmartScreen reputation. What it gives you is a *deterministic* allow on machines you manage — via a Defender for Endpoint certificate indicator or an App Control for Business publisher rule — rather than waiting on a cloud reputation service. On any host that does **not** trust your internal root (non-domain-joined, contractor, DMZ, not-yet-onboarded), the signature reads as **untrusted**, which can present worse than an unsigned binary. If you need public trust instead, that requires a publicly trusted CA (Azure Artifact Signing, or an OV certificate from a commercial CA) and a different keystore backend than the one documented here.
 
-### Azure-side setup (one-time)
+SmartScreen is usually not the constraint in the first place: it only fires on files carrying the Mark of the Web, which browsers and mail clients stamp. The agent installer fetches binaries server-side over the SSH/WinRM install path, so they never acquire MOTW.
 
-1. **Create a Trusted Signing account** (Azure portal → search "Trusted Signing Accounts" → Create; ~$10/month at the Basic tier). The **region** determines your endpoint, e.g. East US → `https://eus.codesigning.azure.net`. Note the **account name**.
-2. **Complete identity validation** (Trusted Signing account → Identity validations → New). For Public-Trust certificates Microsoft validates your legal organization — expect this to require an org with ≥3 years of verifiable history and someone authorized to attest.
-3. **Create a certificate profile** (Certificate profiles → Create → **Public Trust**), linked to the completed identity validation. Note the **profile name**. Trusted Signing certificates are short-lived (~3 days) and rotated automatically — this is why timestamping matters (jsign timestamps automatically for this service, so signatures outlive the cert).
-4. **Create an Entra app registration** for Polaris (Entra ID → App registrations → New): note the **tenant ID** and **client ID**, then create a **client secret** (Certificates & secrets).
-5. **Grant the app the signer role**: on the Trusted Signing account (or the specific certificate profile), Access control (IAM) → Add role assignment → **Trusted Signing Certificate Profile Signer** → your app registration.
+**Fail-open semantics:** a signing failure never blocks the build. The build completes, the binaries ship **unsigned**, a warning Event (`agent.build.sign_failed`) is written, and a dismissable sidebar alert appears for every user whose role can deploy agents (`assets` ≥ write). The alert clears on the next fully-signed build (or when signing is disabled). If you need signed-or-nothing, treat the alert as your gate before running agent installs.
 
-(Portal blade names current as of mid-2026; if Microsoft has moved things, search the portal for "Trusted Signing".)
+### PKI-side setup (one-time)
+
+1. **Issue a code-signing certificate** from your internal CA. On AD CS this is the **Code Signing** template (or a duplicate of it with a longer validity). The subject CN is what Defender and App Control rules will match on, so name it for the publisher rather than the host — e.g. `CN=Rogers Group Polaris Agent`.
+2. **Export it as a PKCS#12 file** (`.pfx` / `.p12`) *with* its private key, protected by a strong password. Include the issuing chain in the export if your CA offers the option — it makes the signature verifiable without a separate chain fetch.
+3. **Distribute trust to the fleet** — the internal root (and any intermediates) into **Trusted Root Certification Authorities**, via GPO or Intune. This has to land on a host *before* an agent installs there, or the signature will read as untrusted.
+4. **Add the allow rule.** In Defender → **Settings → Endpoints → Indicators**, add the **leaf** signing certificate (`.cer`/`.pem`) with action **Allow**. Two caveats: only leaf certificates are supported, so a certificate renewal needs a new indicator; and indicator changes take up to **3 hours** to propagate. If you run App Control for Business, a publisher rule is the stronger equivalent.
+
+> **Track the certificate's expiry.** When the signing certificate expires, builds start shipping unsigned — quietly, via the fail-open path — and the Defender indicator for the old leaf stops matching the new one. Put the expiry along with whatever your PKI team already uses for certificate renewals.
 
 ### Polaris host prerequisites
 
-The install scripts in this guide (and the Docker image) provision both pieces automatically: a headless **Java 17** runtime and the **jsign** jar (v7.4, SHA-256-pinned) at `<app dir>/tools/jsign.jar` (`/opt/polaris/tools/jsign.jar` on Linux, `C:\polaris\tools\jsign.jar` on Windows). Existing installs that predate this feature add them manually:
+The install scripts in this guide (and the Docker image) provision the toolchain automatically: a headless **Java 17** runtime and the **jsign** jar (v7.4, SHA-256-pinned) at `<app dir>/tools/jsign.jar` (`/opt/polaris/tools/jsign.jar` on Linux, `C:\polaris\tools\jsign.jar` on Windows). Existing installs that predate this feature add them manually:
 
 ```sh
 # RHEL/Rocky/Alma
@@ -1228,17 +1231,27 @@ echo "2abf2ade9ea322acc2d60c24794eadc465ff9380938fca4c932d09e0b25f1c28  /opt/pol
 
 On Windows Server: `winget install Microsoft.OpenJDK.17` (or the MSI from https://aka.ms/download-jdk) and drop `jsign-7.4.jar` at `C:\polaris\tools\jsign.jar`. No Polaris restart needed — the availability probe re-checks on every page load.
 
+**Then place the keystore.** Copy the `.pfx` onto the Polaris host and lock it down to the service account — it is a fleet-trusted signing key:
+
+```sh
+sudo install -o polaris -g polaris -m 0400 codesign.pfx /opt/polaris/tools/codesign.pfx
+```
+
+On RHEL with SELinux enforcing, `sudo restorecon -v /opt/polaris/tools/codesign.pfx`. The path must be **absolute** (the API rejects a relative one): the signing child inherits whatever working directory the build process has, which differs between the single-process and split-role layouts.
+
 ### Configure in Polaris
 
-Integrations → **Polaris Agents** → **Code signing (Azure Trusted Signing)**:
+Integrations → **Polaris Agents** → **Code signing (internal CA)**:
 
-1. Tick **Sign Windows agent binaries on build** and fill in endpoint, account name, certificate profile, tenant ID, client ID, client secret (the jar path is auto-detected; override it only for a non-standard location). Saving requires `serverSettingsSystem = fullwrite` (admin).
-2. Click **Test** — this checks Java + the jar and mints a real Entra ID token with the stored credentials, so it proves the tenant/client/secret triple and the role assignment path without signing anything.
+1. Tick **Sign Windows agent binaries on build** and fill in the **keystore path**, **keystore password**, and **timestamp URL**. Leave **key alias** blank unless the keystore holds more than one entry, and leave **jsign jar path** blank for auto-detection. Saving requires `serverSettingsSystem = fullwrite` (admin).
+2. Click **Test** — it checks Java and the jar, then opens the keystore with the stored password via `keytool` and lists the aliases it found. That proves the path/password pair and catches a mistyped alias, which otherwise only surfaces as a jsign error mid-build. It makes **no network call**, so it does not prove the timestamp authority is reachable.
 3. Run a build. The progress strip gains `sign-windows-amd64` / `sign-windows-arm64` rows after the six platform rows; the completed Event carries `signed: true`.
 
-Verify a signed binary with `osslsigncode verify` (Linux) or `Get-AuthenticodeSignature` (Windows); Explorer → Properties → Details also shows the embedded VERSIONINFO metadata (product name, version) that the agent binaries carry regardless of signing.
+Verify a signed binary with `osslsigncode verify` (Linux) or `Get-AuthenticodeSignature` (Windows) — run the latter on a machine that trusts your internal root, or it will correctly report an untrusted chain. Explorer → Properties → Details also shows the embedded VERSIONINFO metadata (product name, version) that the agent binaries carry regardless of signing.
 
-**Secret handling:** the client secret is stored in the `agent.codeSigning` Setting row, masked on read (the UI shows `••••••••`; leaving the field untouched on Save keeps the stored secret). The short-lived signing token reaches jsign via an environment variable, never on a command line.
+**Timestamping is required, not optional.** Unlike a hosted signing service, a PKCS#12 keystore gets no automatic countersignature, so Polaris always passes an explicit RFC3161 timestamp URL (default `http://timestamp.digicert.com`). A public TSA is correct even with an internal-CA certificate — a TSA attests to *when*, not *who* — and `http` is normal here because the timestamp token is itself signed. Without a countersignature, every signature in the fleet becomes invalid the moment the signing certificate expires, all at once. Clearing the field falls back to the default rather than silently disabling timestamping; on a closed network, point it at your own AD CS timestamping endpoint.
+
+**Secret handling:** the keystore password is stored in the `agent.codeSigning` Setting row, encrypted at rest when `POLARIS_SECRET_KEY` is set (the field name is registered in `src/utils/configSecretFields.ts`), masked on read (the UI shows `••••••••`; leaving the field untouched on Save keeps the stored password), and never written to the audit Event. It reaches jsign and keytool through an environment variable, never on a command line. The private key itself sits on disk, so its custody is the host's file permissions — treat the Polaris server as a signing system for access-review purposes.
 
 ## Authentication providers (OIDC / LDAP / SAML / App Proxy)
 

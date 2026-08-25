@@ -1,24 +1,52 @@
 /**
- * src/services/agentSigningService.ts — Azure Trusted Signing for agent binaries
+ * src/services/agentSigningService.ts — internal-CA code signing for agent binaries
  *
  * Owns the `agent.codeSigning` Setting (operator config for signing the two
- * Windows agent binaries with Azure Trusted Signing via jsign), the
- * `agent.signing.lastFailure` Setting (the durable failure stamp behind the
- * sidebar "unsigned binaries" alert — in-memory build state has a 1h TTL,
- * which is too short for an alert an operator may not see for days), and the
- * jsign invocation itself.
+ * Windows agent binaries with an organization-internal code-signing
+ * certificate via jsign), the `agent.signing.lastFailure` Setting (the durable
+ * failure stamp behind the sidebar "unsigned binaries" alert — in-memory build
+ * state has a 1h TTL, which is too short for an alert an operator may not see
+ * for days), and the jsign invocation itself.
  *
- * Secret discipline mirrors notificationChannelService: `clientSecret` is
- * masked (`••••••••` + `clientSecretSet`) on read and preserved on write when
- * the client echoes the mask or a blank back.
+ * ── Why an internal CA rather than a public one ────────────────────────────
+ * Freshly compiled Go binaries are a textbook match for Defender's ML
+ * heuristics, and every in-app build produces a new hash, so per-file
+ * reputation resets each time. Public trust (a hosted signing service, or an
+ * OV cert from a commercial CA) buys durable *publisher* reputation. An
+ * internal CA buys something different but sufficient for a managed fleet: a
+ * deterministic allow, via a Defender for Endpoint certificate indicator or an
+ * App Control for Business publisher rule, instead of waiting on a cloud
+ * reputation service to warm up on a hash that changes every build.
  *
- * Auth: client-credentials token minted directly against Entra ID
- * (login.microsoftonline.com, scope https://codesigning.azure.net/.default) —
- * no Azure CLI dependency. The token reaches jsign via `--storepass
- * env:POLARIS_SIGNING_TOKEN` (jsign's env: indirection), never via argv, so
- * it can't show up in process listings or error output. jsign auto-enables
- * RFC3161 timestamping for TRUSTEDSIGNING (the certs live ~3 days, so a
- * missing countersignature would expire the signature almost immediately).
+ * The trade, accepted deliberately: it covers only machines that trust the
+ * internal root. Unmanaged, contractor and not-yet-onboarded hosts see an
+ * UNTRUSTED signature, which can present worse than an unsigned binary.
+ *
+ * ── Keystore ───────────────────────────────────────────────────────────────
+ * A PKCS#12 (.pfx/.p12) file on the Polaris host holding the internal-CA
+ * issued code-signing cert plus its private key. The password reaches jsign
+ * via `--storepass env:POLARIS_SIGNING_PASSWORD` (jsign's env: indirection),
+ * never via argv, so it cannot appear in process listings or error output; the
+ * same indirection carries it to keytool's `-storepass:env` in the test path.
+ *
+ * The password is sealed at rest by the Prisma extension in src/db.ts — which
+ * is why the field is named `keystorePassword` AND that name is registered in
+ * utils/configSecretFields.ts. Renaming it without touching that set would
+ * silently store the password in plaintext.
+ *
+ * NOTE the private key lives on disk, so its custody rests on host hardening
+ * (0400, owned by the service user). A leaked internal signing key lets an
+ * attacker sign anything the fleet trusts — a materially worse blast radius
+ * than a hosted HSM service. Flagged here because the mitigation is
+ * operational and nothing in this module can enforce it.
+ *
+ * ── Timestamping is REQUIRED, not optional ─────────────────────────────────
+ * jsign auto-enables RFC3161 timestamping only for hosted store types. For
+ * PKCS12 it must be passed explicitly, so `tsaUrl` is part of
+ * `isSigningConfigured()`: without a countersignature every signature in the
+ * fleet goes invalid the moment the signing cert expires — all at once, on a
+ * date nobody is watching. A public RFC3161 TSA is valid with an internal-CA
+ * cert (a TSA attests to time, not identity) and is the shipped default.
  *
  * Signing is FAIL-OPEN by design (operator decision): a failure marks the
  * sign step failed + stamps the failure Setting + warns via Event, but the
@@ -27,13 +55,13 @@
 
 import { execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { stat } from "node:fs/promises";
+import { stat, access } from "node:fs/promises";
+import { constants as FS } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
 import { STATE_DIR } from "../utils/paths.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 import { asObject } from "../utils/object.js";
-import { buildClientCredentialsTokenRequest } from "../utils/entraClientCredentials.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -45,8 +73,19 @@ export const SIGNING_FAILURE_SETTING_KEY = "agent.signing.lastFailure";
 /** The shared UI mask sentinel — see src/utils/secretMask.ts. */
 export const MASK = SECRET_MASK;
 
-/** Env var jsign reads the access token from (`--storepass env:<name>`). */
-export const SIGNING_TOKEN_ENV = "POLARIS_SIGNING_TOKEN";
+/**
+ * Env var the keystore password is passed through, for BOTH jsign
+ * (`--storepass env:<name>`) and keytool (`-storepass:env <name>`). Never argv.
+ */
+export const SIGNING_PASSWORD_ENV = "POLARIS_SIGNING_PASSWORD";
+
+/**
+ * Default RFC3161 timestamp authority. A public TSA is correct even though the
+ * signing cert is internal — a TSA countersigns *when*, not *who*. Requires
+ * outbound access from the Polaris host; operators on a closed network point
+ * this at their own AD CS timestamping endpoint instead.
+ */
+export const DEFAULT_TSA_URL = "http://timestamp.digicert.com";
 
 /**
  * Where resolveJsignJar() looks when the operator hasn't set an explicit
@@ -65,31 +104,29 @@ export const JSIGN_JAR_CANDIDATES: string[] = [
 
 export interface AgentSigningConfig {
   enabled: boolean;
-  /** Trusted Signing endpoint, e.g. https://eus.codesigning.azure.net */
-  endpoint: string;
-  accountName: string;
-  /** Certificate profile name within the account. */
-  profileName: string;
-  tenantId: string;
-  clientId: string;
-  clientSecret: string;
+  /** Path to the PKCS#12 keystore holding the internal-CA cert + private key. */
+  keystorePath: string;
+  /** Keystore password. Sealed at rest — see configSecretFields.ts. */
+  keystorePassword: string;
+  /** Key alias. Only needed when the keystore holds more than one entry. */
+  alias: string;
+  /** RFC3161 timestamp authority URL. Required — see the header note. */
+  tsaUrl: string;
   /** Explicit jsign jar path; "" = probe JSIGN_JAR_CANDIDATES. */
   jsignJarPath: string;
 }
 
-export interface MaskedSigningConfig extends Omit<AgentSigningConfig, "clientSecret"> {
-  clientSecret: string; // MASK or ""
-  clientSecretSet: boolean;
+export interface MaskedSigningConfig extends Omit<AgentSigningConfig, "keystorePassword"> {
+  keystorePassword: string; // MASK or ""
+  keystorePasswordSet: boolean;
 }
 
 export const DEFAULT_SIGNING_CONFIG: AgentSigningConfig = {
   enabled: false,
-  endpoint: "",
-  accountName: "",
-  profileName: "",
-  tenantId: "",
-  clientId: "",
-  clientSecret: "",
+  keystorePath: "",
+  keystorePassword: "",
+  alias: "",
+  tsaUrl: DEFAULT_TSA_URL,
   jsignJarPath: "",
 };
 
@@ -97,32 +134,35 @@ function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-/** Mask the secret; report whether one is stored. Pure. */
+/** Mask the password; report whether one is stored. Pure. */
 export function maskSigningConfig(cfg: AgentSigningConfig): MaskedSigningConfig {
-  const set = cfg.clientSecret.length > 0;
-  return { ...cfg, clientSecret: set ? MASK : "", clientSecretSet: set };
+  const set = cfg.keystorePassword.length > 0;
+  return { ...cfg, keystorePassword: set ? MASK : "", keystorePasswordSet: set };
 }
 
 /**
  * Merge an incoming (possibly partial, possibly mask-echoing) config onto the
- * stored one. Blank/masked incoming secret keeps the stored secret; strings
- * are trimmed; the endpoint loses any trailing slash; UI-only `clientSecretSet`
- * never persists. Pure.
+ * stored one. Blank/masked incoming password keeps the stored password;
+ * strings are trimmed; UI-only `keystorePasswordSet` never persists.
+ *
+ * A blank incoming `tsaUrl` falls back to the DEFAULT rather than to empty:
+ * empty fails `isSigningConfigured` and would disable signing, and silently
+ * turning signing off because a field was cleared is worse than timestamping
+ * against the documented default. Pure.
  */
 export function mergeSigningConfig(
   incoming: Record<string, unknown>,
   current: AgentSigningConfig,
 ): AgentSigningConfig {
   const inc = asObject(incoming);
-  const secret = str(inc.clientSecret);
+  const secret = str(inc.keystorePassword);
+  const tsa = inc.tsaUrl !== undefined ? str(inc.tsaUrl) : current.tsaUrl;
   return {
     enabled: typeof inc.enabled === "boolean" ? inc.enabled : current.enabled,
-    endpoint: (inc.endpoint !== undefined ? str(inc.endpoint) : current.endpoint).replace(/\/+$/, ""),
-    accountName: inc.accountName !== undefined ? str(inc.accountName) : current.accountName,
-    profileName: inc.profileName !== undefined ? str(inc.profileName) : current.profileName,
-    tenantId: inc.tenantId !== undefined ? str(inc.tenantId) : current.tenantId,
-    clientId: inc.clientId !== undefined ? str(inc.clientId) : current.clientId,
-    clientSecret: secret === "" || isMaskedSecret(secret) ? current.clientSecret : secret,
+    keystorePath: inc.keystorePath !== undefined ? str(inc.keystorePath) : current.keystorePath,
+    keystorePassword: secret === "" || isMaskedSecret(secret) ? current.keystorePassword : secret,
+    alias: inc.alias !== undefined ? str(inc.alias) : current.alias,
+    tsaUrl: tsa === "" ? DEFAULT_TSA_URL : tsa.replace(/\/+$/, ""),
     jsignJarPath: inc.jsignJarPath !== undefined ? str(inc.jsignJarPath) : current.jsignJarPath,
   };
 }
@@ -207,49 +247,6 @@ export async function getSigningAlert(): Promise<{ failure: SigningFailure | nul
   }
 }
 
-// ─── Entra ID token (client credentials) ──────────────────────────────
-
-/** AAD resource scope for Azure Trusted Signing. */
-export const SIGNING_TOKEN_SCOPE = "https://codesigning.azure.net/.default";
-
-/** Shape the client-credentials request. Pure — unit-testable without network. */
-export function buildTokenRequest(cfg: Pick<AgentSigningConfig, "tenantId" | "clientId" | "clientSecret">): {
-  url: string;
-  body: URLSearchParams;
-} {
-  return buildClientCredentialsTokenRequest({ ...cfg, scope: SIGNING_TOKEN_SCOPE });
-}
-
-/**
- * Mint an access token for the Trusted Signing API. Errors surface the AAD
- * error code/description but never the client secret.
- */
-export async function fetchSigningToken(cfg: AgentSigningConfig): Promise<string> {
-  const { url, body } = buildTokenRequest(cfg);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch (err: any) {
-    throw new Error(`Entra ID token request failed: ${scrubSecrets(err?.message ?? String(err), [cfg.clientSecret])}`);
-  }
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = (await res.json()) as Record<string, unknown>;
-  } catch {
-    /* non-JSON error body — fall through to the status check */
-  }
-  if (!res.ok || typeof payload.access_token !== "string") {
-    const detail = str(payload.error_description) || str(payload.error) || `HTTP ${res.status}`;
-    throw new Error(`Entra ID token request rejected: ${scrubSecrets(detail, [cfg.clientSecret])}`);
-  }
-  return payload.access_token;
-}
-
 // ─── jsign availability + invocation ──────────────────────────────────
 
 /** First existing jar: explicit config path, else the candidate list. */
@@ -268,20 +265,20 @@ export async function resolveJsignJar(cfg: Pick<AgentSigningConfig, "jsignJarPat
 
 export interface SigningAvailability {
   enabled: boolean;
-  /** All required config fields present (endpoint/account/profile/tenant/client/secret). */
+  /** All required config fields present (keystore path + password + TSA). */
   configured: boolean;
   javaOk: boolean;
   javaVersion?: string;
   jarPath?: string;
-  /** enabled + configured + javaOk + jar found. */
+  /** The keystore file exists and is readable by this process. */
+  keystoreOk: boolean;
+  /** enabled + configured + javaOk + jar found + keystore readable. */
   ok: boolean;
   error?: string;
 }
 
 export function isSigningConfigured(cfg: AgentSigningConfig): boolean {
-  return Boolean(
-    cfg.endpoint && cfg.accountName && cfg.profileName && cfg.tenantId && cfg.clientId && cfg.clientSecret,
-  );
+  return Boolean(cfg.keystorePath && cfg.keystorePassword && cfg.tsaUrl);
 }
 
 /**
@@ -306,11 +303,30 @@ export async function signingAvailability(cfg?: AgentSigningConfig): Promise<Sig
 
   const jarPath = (await resolveJsignJar(config)) ?? undefined;
 
+  // Readability, not just existence: the keystore is deliberately 0400 and a
+  // wrong owner is the likeliest misconfiguration after a manual copy.
+  let keystoreOk = false;
+  if (config.keystorePath) {
+    try {
+      await access(config.keystorePath, FS.R_OK);
+      keystoreOk = (await stat(config.keystorePath)).isFile();
+    } catch {
+      keystoreOk = false;
+    }
+  }
+
   let error: string | undefined;
   if (!config.enabled) error = "Code signing is disabled";
-  else if (!configured) error = "Signing configuration is incomplete";
+  else if (!config.keystorePath) error = "No signing keystore configured";
+  else if (!config.keystorePassword) error = "Keystore password is not set";
+  else if (!config.tsaUrl) error = "No timestamp authority configured";
   else if (!javaOk) error = "Java runtime not found on PATH (install Java 17+ headless)";
-  else if (!jarPath) error = `jsign jar not found (looked at: ${(config.jsignJarPath ? [config.jsignJarPath] : JSIGN_JAR_CANDIDATES).join(", ")})`;
+  else if (!jarPath) {
+    const looked = (config.jsignJarPath ? [config.jsignJarPath] : JSIGN_JAR_CANDIDATES).join(", ");
+    error = `jsign jar not found (looked at: ${looked})`;
+  } else if (!keystoreOk) {
+    error = `Signing keystore not readable at ${config.keystorePath} (check path, owner and mode)`;
+  }
 
   return {
     enabled: config.enabled,
@@ -318,32 +334,39 @@ export async function signingAvailability(cfg?: AgentSigningConfig): Promise<Sig
     javaOk,
     javaVersion,
     jarPath,
-    ok: config.enabled && configured && javaOk && !!jarPath,
+    keystoreOk,
+    ok: config.enabled && configured && javaOk && !!jarPath && keystoreOk,
     error,
   };
 }
 
 /**
- * jsign argv for one file. The token is deliberately NOT part of the argv —
- * `--storepass env:POLARIS_SIGNING_TOKEN` makes jsign read it from the child
- * env, keeping it out of process listings. No --tsaurl: jsign auto-enables
- * RFC3161 timestamping for TRUSTEDSIGNING. Pure.
+ * jsign argv for one file. The keystore password is deliberately NOT part of
+ * the argv — `--storepass env:POLARIS_SIGNING_PASSWORD` makes jsign read it
+ * from the child env, keeping it out of process listings.
+ *
+ * `--tsmode RFC3161` is explicit because jsign's Authenticode default is the
+ * legacy mode, and unlike a hosted store type PKCS12 gets no automatic
+ * timestamping at all. `--alias` is omitted when unset so a single-entry
+ * keystore needs no configuration. Pure.
  */
 export function buildJsignArgs(opts: {
   jarPath: string;
-  endpoint: string;
-  accountName: string;
-  profileName: string;
+  keystorePath: string;
+  alias?: string;
+  tsaUrl: string;
   filePath: string;
 }): string[] {
-  return [
+  const args = [
     "-jar", opts.jarPath,
-    "--storetype", "TRUSTEDSIGNING",
-    "--keystore", opts.endpoint,
-    "--storepass", `env:${SIGNING_TOKEN_ENV}`,
-    "--alias", `${opts.accountName}/${opts.profileName}`,
-    opts.filePath,
+    "--storetype", "PKCS12",
+    "--keystore", opts.keystorePath,
+    "--storepass", `env:${SIGNING_PASSWORD_ENV}`,
   ];
+  if (opts.alias) args.push("--alias", opts.alias);
+  args.push("--tsaurl", opts.tsaUrl, "--tsmode", "RFC3161");
+  args.push(opts.filePath);
+  return args;
 }
 
 /** Remove secret material from text destined for step errors / Events / logs. Pure. */
@@ -376,7 +399,14 @@ export class SigningCancelledError extends Error {
 /** Sign one PE file in place with jsign. Mirrors runGoBuild's child handling. */
 export function signFile(
   slot: SigningProcessSlot,
-  opts: { jarPath: string; endpoint: string; accountName: string; profileName: string; token: string; filePath: string },
+  opts: {
+    jarPath: string;
+    keystorePath: string;
+    keystorePassword: string;
+    alias?: string;
+    tsaUrl: string;
+    filePath: string;
+  },
 ): Promise<void> {
   const args = buildJsignArgs(opts);
   return new Promise<void>((resolve, reject) => {
@@ -385,14 +415,14 @@ export function signFile(
       args,
       {
         timeout: 120_000,
-        env: { ...process.env, [SIGNING_TOKEN_ENV]: opts.token },
+        env: { ...process.env, [SIGNING_PASSWORD_ENV]: opts.keystorePassword },
         maxBuffer: 4 * 1024 * 1024,
       },
       (err, stdout, stderr) => {
         slot.activeChild = undefined;
         if (err) {
           if (slot.cancelled) return reject(new SigningCancelledError());
-          const detail = scrubSecrets((stderr || stdout || err.message || "").trim(), [opts.token]);
+          const detail = scrubSecrets((stderr || stdout || err.message || "").trim(), [opts.keystorePassword]);
           return reject(new Error(detail || "jsign exited non-zero"));
         }
         resolve();
@@ -402,26 +432,113 @@ export function signFile(
   });
 }
 
+/** Pull alias names out of `keytool -list` output. Pure. */
+export function parseKeytoolAliases(stdout: string): string[] {
+  const out: string[] = [];
+  for (const line of stdout.split("\n")) {
+    // "myalias, Jan 1, 2026, PrivateKeyEntry, " / "myalias, Jan 1, 2026, trustedCertEntry, "
+    const m = /^([^,]+),\s.*(?:PrivateKeyEntry|trustedCertEntry)/.exec(line.trim());
+    if (m?.[1]) out.push(m[1].trim());
+  }
+  return out;
+}
+
 /**
- * Test-button dry run: availability probe + a REAL token fetch (proves the
- * tenant/client/secret triple and that Entra ID is reachable). Doesn't invoke
- * jsign — there's nothing to sign outside a build.
+ * Does the stored password actually open the keystore, and what aliases does
+ * it hold? Uses keytool (`-storepass:env`, never argv) because it ships with
+ * the same JDK the availability probe already requires and needs no file to
+ * sign.
+ *
+ * keytool is absent from some minimal JREs, so a MISSING BINARY degrades to
+ * "unverified" rather than reporting a failure — telling the operator their
+ * password is wrong because a tool is missing would send them to the wrong
+ * field entirely.
+ */
+export async function verifyKeystore(
+  cfg: Pick<AgentSigningConfig, "keystorePath" | "keystorePassword">,
+): Promise<{ verified: boolean; aliases: string[]; error?: string }> {
+  try {
+    const { stdout } = await execFileAsync(
+      "keytool",
+      ["-list", "-storetype", "PKCS12", "-keystore", cfg.keystorePath, "-storepass:env", SIGNING_PASSWORD_ENV],
+      {
+        timeout: 15_000,
+        env: { ...process.env, [SIGNING_PASSWORD_ENV]: cfg.keystorePassword },
+      },
+    );
+    return { verified: true, aliases: parseKeytoolAliases(stdout) };
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return { verified: false, aliases: [], error: "keytool not available — password not verified" };
+    }
+    const detail = scrubSecrets((err?.stderr || err?.stdout || err?.message || "").trim(), [cfg.keystorePassword]);
+    return { verified: false, aliases: [], error: detail || "keystore could not be opened" };
+  }
+}
+
+/** Is this verifyKeystore() error the degraded "no keytool" case? Pure. */
+export function isKeytoolMissing(error?: string): boolean {
+  return Boolean(error && error.startsWith("keytool not available"));
+}
+
+/**
+ * Build the alias advisory for the test result. Pure so the wording is
+ * unit-testable: a configured-but-absent alias is the failure mode that
+ * otherwise only surfaces as a jsign error mid-build.
+ */
+export function aliasAdvisory(alias: string, aliases: string[]): string {
+  if (alias) {
+    return aliases.includes(alias)
+      ? ` Alias "${alias}" found.`
+      : ` WARNING: alias "${alias}" is NOT in this keystore (found: ${aliases.join(", ") || "none"}).`;
+  }
+  return aliases.length > 1
+    ? ` Keystore holds ${aliases.length} entries (${aliases.join(", ")}) — set an alias to pick one.`
+    : "";
+}
+
+/**
+ * Test-button dry run: availability probe + a real keystore open (proves the
+ * path/password pair and surfaces the aliases, which is what an operator needs
+ * in order to fill the alias field on a multi-entry keystore).
+ *
+ * Deliberately does NOT invoke jsign — there's nothing to sign outside a
+ * build — and makes no network call, so a pass here does not prove the TSA is
+ * reachable. The message says so rather than implying full coverage.
  */
 export async function testSigningSetup(): Promise<{ ok: boolean; message: string }> {
   const cfg = await getSigningConfigRaw();
   if (!isSigningConfigured(cfg)) {
-    return { ok: false, message: "Signing configuration is incomplete — fill in every field first" };
+    return {
+      ok: false,
+      message: "Signing configuration is incomplete — keystore path, password and timestamp URL are all required",
+    };
   }
   const avail = await signingAvailability(cfg);
   if (!avail.javaOk) return { ok: false, message: "Java runtime not found on PATH (install Java 17+ headless)" };
-  if (!avail.jarPath) return { ok: false, message: "jsign jar not found — set the jar path or install it to a default location" };
-  try {
-    await fetchSigningToken(cfg);
-  } catch (err: any) {
-    return { ok: false, message: err?.message ?? "Token request failed" };
+  if (!avail.jarPath) {
+    return { ok: false, message: "jsign jar not found — set the jar path or install it to a default location" };
   }
+  if (!avail.keystoreOk) return { ok: false, message: avail.error ?? "Signing keystore is not readable" };
+
+  const ks = await verifyKeystore(cfg);
+  if (!ks.verified) {
+    if (isKeytoolMissing(ks.error)) {
+      return {
+        ok: true,
+        message:
+          `Ready: ${avail.javaVersion ?? "java"} + ${avail.jarPath}, keystore readable. ` +
+          `Password NOT verified (keytool unavailable). Timestamping via ${cfg.tsaUrl}, which is not contacted by this test.`,
+      };
+    }
+    return { ok: false, message: `Keystore could not be opened: ${ks.error}` };
+  }
+
   return {
     ok: true,
-    message: `Ready: token acquired, ${avail.javaVersion ?? "java"} + ${avail.jarPath}. Signing runs on the next agent build.`,
+    message:
+      `Ready: keystore opened, ${avail.javaVersion ?? "java"} + ${avail.jarPath}.` +
+      `${aliasAdvisory(cfg.alias, ks.aliases)} Timestamping via ${cfg.tsaUrl} (not contacted by this test). ` +
+      `Signing runs on the next agent build.`,
   };
 }

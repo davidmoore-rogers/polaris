@@ -248,7 +248,7 @@
     // same separate-fetch pattern as the cert-pin pane above.
     var codeSigningSlot =
       '<div id="agent-code-signing" style="margin-top:0.75rem;padding-top:0.5rem;border-top:1px solid var(--color-border);font-size:0.85rem">' +
-        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (internal CA)</div>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.5rem 0">Loading signing config...</p>' +
       '</div>';
 
@@ -661,10 +661,10 @@
     });
   }
 
-  // Renders the Code signing pane (Azure Trusted Signing) in the slot
+  // Renders the Code signing pane (internal-CA PKCS#12) in the slot
   // reserved by renderAgentBuildInventory. Windows binaries only; runs as a
   // post-build step (FAIL-OPEN — a failure warns + ships unsigned, never
-  // blocks the build). The client secret follows the mask convention: the
+  // blocks the build). The keystore password follows the mask convention: the
   // server echoes bullets when one is stored; leaving the field untouched
   // (or blank) on Save preserves it.
   function renderAgentCodeSigning() {
@@ -701,43 +701,44 @@
       }
 
       slot.innerHTML =
-        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (internal CA)</div>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.3rem 0">' +
-          'Signs the two Windows agent binaries after every build so Microsoft Defender / SmartScreen trusts them. ' +
-          'Requires Java 17+ and the jsign jar on this Polaris server, plus an Azure Trusted Signing account ' +
-          '(see <code>docs/INSTALL.md</code> → "Optional: Code signing").' +
+          'Signs the two Windows agent binaries after every build with your internal CA, so Defender can be ' +
+          'told to trust them by publisher instead of re-evaluating a new file hash every build. ' +
+          'Requires Java 17+ and the jsign jar on this Polaris server, plus a PKCS#12 keystore holding an ' +
+          'internal-CA code-signing certificate (see <code>docs/INSTALL.md</code> → "Optional: Code signing").' +
+        '</p>' +
+        '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 0.3rem 0">' +
+          'Only machines that trust your internal root see a valid signature — unmanaged hosts will see an ' +
+          'UNTRUSTED one.' +
         '</p>' +
         statusLine +
         '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:0.85rem;margin-top:0.3rem">' +
           '<input type="checkbox" id="agent-signing-enabled" style="width:15px;height:15px;flex-shrink:0"' + (cfg.enabled ? " checked" : "") + '>' +
           '<span>Sign Windows agent binaries on build</span>' +
         '</label>' +
-        inputRow("agent-signing-endpoint",  "Endpoint",            cfg.endpoint,    "https://eus.codesigning.azure.net") +
-        inputRow("agent-signing-account",   "Account name",        cfg.accountName, "my-signing-account") +
-        inputRow("agent-signing-profile",   "Certificate profile", cfg.profileName, "polaris-agent") +
-        inputRow("agent-signing-tenant",    "Tenant ID",           cfg.tenantId,    "00000000-0000-0000-0000-000000000000") +
-        inputRow("agent-signing-client",    "Client ID",           cfg.clientId,    "app registration client ID") +
-        inputRow("agent-signing-secret",    "Client secret",       cfg.clientSecret, cfg.clientSecretSet ? "unchanged" : "client secret", "password") +
-        inputRow("agent-signing-jar",       "jsign jar path",      cfg.jsignJarPath, avail.jarPath || "auto-detect (tools/jsign.jar)") +
+        inputRow("agent-signing-keystore", "Keystore (.pfx) path", cfg.keystorePath, "/opt/polaris/tools/codesign.pfx") +
+        inputRow("agent-signing-password", "Keystore password",    cfg.keystorePassword, cfg.keystorePasswordSet ? "unchanged" : "keystore password", "password") +
+        inputRow("agent-signing-alias",    "Key alias",            cfg.alias,        "optional — only for a multi-entry keystore") +
+        inputRow("agent-signing-tsa",      "Timestamp URL",        cfg.tsaUrl,       "http://timestamp.digicert.com") +
+        inputRow("agent-signing-jar",      "jsign jar path",       cfg.jsignJarPath, avail.jarPath || "auto-detect (tools/jsign.jar)") +
         '<div style="display:flex;gap:0.5rem;margin-top:0.6rem">' +
           '<button class="btn btn-secondary" id="btn-agent-signing-save" style="padding:4px 14px;font-size:0.8rem">Save</button>' +
           '<button class="btn btn-secondary" id="btn-agent-signing-test" style="padding:4px 14px;font-size:0.8rem" ' +
-            'title="Checks Java + jsign and requests a real Entra ID token with the saved credentials">Test</button>' +
+            'title="Checks Java + jsign and opens the keystore with the saved password (no TSA call)">Test</button>' +
         '</div>';
 
       var saveBtn = document.getElementById("btn-agent-signing-save");
       if (saveBtn) {
         saveBtn.addEventListener("click", function () {
           var body = {
-            enabled:      !!document.getElementById("agent-signing-enabled").checked,
-            endpoint:     (document.getElementById("agent-signing-endpoint").value || "").trim(),
-            accountName:  (document.getElementById("agent-signing-account").value || "").trim(),
-            profileName:  (document.getElementById("agent-signing-profile").value || "").trim(),
-            tenantId:     (document.getElementById("agent-signing-tenant").value || "").trim(),
-            clientId:     (document.getElementById("agent-signing-client").value || "").trim(),
-            // Mask echo / blank both mean "keep the stored secret" server-side.
-            clientSecret: document.getElementById("agent-signing-secret").value || "",
-            jsignJarPath: (document.getElementById("agent-signing-jar").value || "").trim(),
+            enabled:          !!document.getElementById("agent-signing-enabled").checked,
+            keystorePath:     (document.getElementById("agent-signing-keystore").value || "").trim(),
+            // Mask echo / blank both mean "keep the stored password" server-side.
+            keystorePassword: document.getElementById("agent-signing-password").value || "",
+            alias:            (document.getElementById("agent-signing-alias").value || "").trim(),
+            tsaUrl:           (document.getElementById("agent-signing-tsa").value || "").trim(),
+            jsignJarPath:     (document.getElementById("agent-signing-jar").value || "").trim(),
           };
           saveBtn.disabled = true;
           api.serverSettings.agentSigningSet(body).then(function () {
@@ -765,7 +766,7 @@
       }
     }).catch(function (err) {
       slot.innerHTML =
-        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (Azure Trusted Signing)</div>' +
+        '<div style="color:var(--color-text-secondary);margin-bottom:0.3rem">Code signing (internal CA)</div>' +
         '<p style="font-size:0.78rem;color:var(--color-warning);margin:0.3rem 0">' +
           'Failed to load: ' + escapeHtml(err.message) +
         '</p>';

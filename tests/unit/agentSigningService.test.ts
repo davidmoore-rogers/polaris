@@ -1,15 +1,16 @@
 /**
  * tests/unit/agentSigningService.test.ts
  *
- * Pure + Setting-backed pieces of the Azure Trusted Signing service:
- * mask/merge secret discipline, token-request shaping, jsign argv building
- * (env: storepass indirection — token never on argv), jar resolution order,
- * secret scrubbing, failure-stamp persistence, and config-driven availability
- * gating.
+ * Pure + Setting-backed pieces of the internal-CA code-signing service:
+ * mask/merge secret discipline, jsign argv building (env: storepass
+ * indirection — the keystore password never on argv; explicit RFC3161
+ * timestamping), keytool output parsing, the alias advisory, jar resolution
+ * order, secret scrubbing, failure-stamp persistence, and config-driven
+ * availability gating.
  *
- * NOT testable here (needs Azure / a host toolchain — covered by the manual
- * verification steps instead): live Entra ID token fetch, an actual jsign
- * signing run, signature/timestamp validity, and the `java -version` probe.
+ * NOT testable here (needs a real keystore / host toolchain — covered by the
+ * manual verification steps instead): an actual jsign signing run, signature
+ * and timestamp validity, the `java -version` probe, and a live keytool open.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -22,8 +23,8 @@ vi.mock("../../src/db.js", () => ({
 
 import {
   MASK,
-  SIGNING_TOKEN_ENV,
-  SIGNING_TOKEN_SCOPE,
+  SIGNING_PASSWORD_ENV,
+  DEFAULT_TSA_URL,
   AGENT_SIGNING_SETTING_KEY,
   SIGNING_FAILURE_SETTING_KEY,
   JSIGN_JAR_CANDIDATES,
@@ -31,8 +32,10 @@ import {
   maskSigningConfig,
   mergeSigningConfig,
   isSigningConfigured,
-  buildTokenRequest,
   buildJsignArgs,
+  parseKeytoolAliases,
+  aliasAdvisory,
+  isKeytoolMissing,
   scrubSecrets,
   resolveJsignJar,
   getSigningConfigRaw,
@@ -51,12 +54,10 @@ const del = prisma.setting.delete as unknown as Mock;
 
 const FULL_CONFIG: AgentSigningConfig = {
   enabled: true,
-  endpoint: "https://eus.codesigning.azure.net",
-  accountName: "acme-signing",
-  profileName: "polaris-agent",
-  tenantId: "11111111-2222-3333-4444-555555555555",
-  clientId: "66666666-7777-8888-9999-000000000000",
-  clientSecret: "super-secret-value",
+  keystorePath: "/opt/polaris/tools/codesign.pfx",
+  keystorePassword: "super-secret-value",
+  alias: "",
+  tsaUrl: "http://timestamp.digicert.com",
   jsignJarPath: "",
 };
 
@@ -67,54 +68,58 @@ beforeEach(() => {
 });
 
 describe("maskSigningConfig", () => {
-  it("masks a stored secret and flags it set", () => {
+  it("masks a stored password and flags it set", () => {
     const m = maskSigningConfig(FULL_CONFIG);
-    expect(m.clientSecret).toBe(MASK);
-    expect(m.clientSecretSet).toBe(true);
-    expect(m.endpoint).toBe(FULL_CONFIG.endpoint); // non-secret fields pass through
+    expect(m.keystorePassword).toBe(MASK);
+    expect(m.keystorePasswordSet).toBe(true);
+    expect(m.keystorePath).toBe(FULL_CONFIG.keystorePath); // non-secret fields pass through
   });
 
-  it("reports empty secret as unset", () => {
-    const m = maskSigningConfig({ ...FULL_CONFIG, clientSecret: "" });
-    expect(m.clientSecret).toBe("");
-    expect(m.clientSecretSet).toBe(false);
+  it("reports empty password as unset", () => {
+    const m = maskSigningConfig({ ...FULL_CONFIG, keystorePassword: "" });
+    expect(m.keystorePassword).toBe("");
+    expect(m.keystorePasswordSet).toBe(false);
   });
 });
 
 describe("mergeSigningConfig", () => {
-  it("keeps the stored secret when incoming echoes the mask", () => {
-    const next = mergeSigningConfig({ clientSecret: MASK }, FULL_CONFIG);
-    expect(next.clientSecret).toBe("super-secret-value");
+  it("keeps the stored password when incoming echoes the mask", () => {
+    expect(mergeSigningConfig({ keystorePassword: MASK }, FULL_CONFIG).keystorePassword).toBe("super-secret-value");
   });
 
-  it("keeps the stored secret when incoming is blank", () => {
-    const next = mergeSigningConfig({ clientSecret: "  " }, FULL_CONFIG);
-    expect(next.clientSecret).toBe("super-secret-value");
+  it("keeps the stored password when incoming is blank", () => {
+    expect(mergeSigningConfig({ keystorePassword: "  " }, FULL_CONFIG).keystorePassword).toBe("super-secret-value");
   });
 
-  it("replaces the secret when a new one is typed", () => {
-    const next = mergeSigningConfig({ clientSecret: "new-secret" }, FULL_CONFIG);
-    expect(next.clientSecret).toBe("new-secret");
+  it("replaces the password when a new one is typed", () => {
+    expect(mergeSigningConfig({ keystorePassword: "new-pw" }, FULL_CONFIG).keystorePassword).toBe("new-pw");
   });
 
-  it("never persists the clientSecretSet UI marker", () => {
-    const next = mergeSigningConfig({ clientSecretSet: true }, FULL_CONFIG);
-    expect((next as Record<string, unknown>).clientSecretSet).toBeUndefined();
+  it("never persists the keystorePasswordSet UI marker", () => {
+    const next = mergeSigningConfig({ keystorePasswordSet: true }, FULL_CONFIG);
+    expect((next as Record<string, unknown>).keystorePasswordSet).toBeUndefined();
   });
 
-  it("trims strings and strips the endpoint's trailing slash", () => {
+  it("trims strings and strips the TSA's trailing slash", () => {
     const next = mergeSigningConfig(
-      { endpoint: " https://eus.codesigning.azure.net/ ", accountName: " acme " },
+      { keystorePath: " /srv/cs.pfx ", tsaUrl: " http://tsa.example.com/ " },
       DEFAULT_SIGNING_CONFIG,
     );
-    expect(next.endpoint).toBe("https://eus.codesigning.azure.net");
-    expect(next.accountName).toBe("acme");
+    expect(next.keystorePath).toBe("/srv/cs.pfx");
+    expect(next.tsaUrl).toBe("http://tsa.example.com");
+  });
+
+  // Clearing the TSA field must not silently disable signing (it's part of
+  // isSigningConfigured) — it falls back to the documented default instead.
+  it("falls back to the default TSA when the field is cleared", () => {
+    expect(mergeSigningConfig({ tsaUrl: "" }, FULL_CONFIG).tsaUrl).toBe(DEFAULT_TSA_URL);
+    expect(mergeSigningConfig({ tsaUrl: "   " }, FULL_CONFIG).tsaUrl).toBe(DEFAULT_TSA_URL);
   });
 
   it("leaves omitted fields at their current values", () => {
-    const next = mergeSigningConfig({ profileName: "other" }, FULL_CONFIG);
-    expect(next.profileName).toBe("other");
-    expect(next.tenantId).toBe(FULL_CONFIG.tenantId);
+    const next = mergeSigningConfig({ alias: "codesign" }, FULL_CONFIG);
+    expect(next.alias).toBe("codesign");
+    expect(next.keystorePath).toBe(FULL_CONFIG.keystorePath);
     expect(next.enabled).toBe(true);
   });
 
@@ -126,53 +131,113 @@ describe("mergeSigningConfig", () => {
 });
 
 describe("isSigningConfigured", () => {
-  it("true only when every credential field is present", () => {
+  it("requires keystore path, password and TSA", () => {
     expect(isSigningConfigured(FULL_CONFIG)).toBe(true);
-    for (const key of ["endpoint", "accountName", "profileName", "tenantId", "clientId", "clientSecret"] as const) {
+    for (const key of ["keystorePath", "keystorePassword", "tsaUrl"] as const) {
       expect(isSigningConfigured({ ...FULL_CONFIG, [key]: "" })).toBe(false);
     }
   });
-});
 
-describe("buildTokenRequest", () => {
-  it("targets the tenant's v2 token endpoint with the Trusted Signing scope", () => {
-    const { url, body } = buildTokenRequest(FULL_CONFIG);
-    expect(url).toBe(`https://login.microsoftonline.com/${FULL_CONFIG.tenantId}/oauth2/v2.0/token`);
-    expect(body.get("grant_type")).toBe("client_credentials");
-    expect(body.get("client_id")).toBe(FULL_CONFIG.clientId);
-    expect(body.get("client_secret")).toBe(FULL_CONFIG.clientSecret);
-    expect(body.get("scope")).toBe(SIGNING_TOKEN_SCOPE);
+  it("does NOT require alias or an explicit jar path", () => {
+    expect(isSigningConfigured({ ...FULL_CONFIG, alias: "", jsignJarPath: "" })).toBe(true);
   });
 });
 
 describe("buildJsignArgs", () => {
-  const args = buildJsignArgs({
+  const base = {
     jarPath: "/opt/polaris/tools/jsign.jar",
-    endpoint: "https://eus.codesigning.azure.net",
-    accountName: "acme-signing",
-    profileName: "polaris-agent",
-    filePath: "/data/agents/0.12.0/polaris-agent-windows-amd64.exe",
-  });
+    keystorePath: "/opt/polaris/tools/codesign.pfx",
+    tsaUrl: "http://timestamp.digicert.com",
+    filePath: "/data/agents/0.17.1/polaris-agent-windows-amd64.exe",
+  };
 
-  it("builds the TRUSTEDSIGNING argv with the file last", () => {
+  it("builds the PKCS12 argv with the file last", () => {
+    const args = buildJsignArgs(base);
     expect(args[0]).toBe("-jar");
     expect(args[1]).toBe("/opt/polaris/tools/jsign.jar");
-    expect(args).toContain("--storetype");
-    expect(args[args.indexOf("--storetype") + 1]).toBe("TRUSTEDSIGNING");
-    expect(args[args.indexOf("--keystore") + 1]).toBe("https://eus.codesigning.azure.net");
-    expect(args[args.indexOf("--alias") + 1]).toBe("acme-signing/polaris-agent");
-    expect(args[args.length - 1]).toBe("/data/agents/0.12.0/polaris-agent-windows-amd64.exe");
+    expect(args[args.indexOf("--storetype") + 1]).toBe("PKCS12");
+    expect(args[args.indexOf("--keystore") + 1]).toBe("/opt/polaris/tools/codesign.pfx");
+    expect(args[args.length - 1]).toBe(base.filePath);
   });
 
-  it("passes the token via env: indirection — never a literal token on argv", () => {
-    expect(args[args.indexOf("--storepass") + 1]).toBe(`env:${SIGNING_TOKEN_ENV}`);
+  it("passes the password via env: indirection — never a literal password on argv", () => {
+    const args = buildJsignArgs({ ...base, keystorePath: "/x.pfx" });
+    expect(args[args.indexOf("--storepass") + 1]).toBe(`env:${SIGNING_PASSWORD_ENV}`);
+    expect(args).not.toContain("super-secret-value");
+  });
+
+  // PKCS12 gets no automatic timestamping (unlike a hosted store type), so an
+  // explicit tsaurl + RFC3161 mode is what keeps signatures valid past cert
+  // expiry. Regressing this silently invalidates the whole fleet at once.
+  it("always sets an explicit RFC3161 timestamp authority", () => {
+    const args = buildJsignArgs(base);
+    expect(args[args.indexOf("--tsaurl") + 1]).toBe("http://timestamp.digicert.com");
+    expect(args[args.indexOf("--tsmode") + 1]).toBe("RFC3161");
+  });
+
+  it("omits --alias entirely when unset, and includes it when set", () => {
+    expect(buildJsignArgs(base)).not.toContain("--alias");
+    const withAlias = buildJsignArgs({ ...base, alias: "codesign" });
+    expect(withAlias[withAlias.indexOf("--alias") + 1]).toBe("codesign");
+  });
+});
+
+describe("parseKeytoolAliases", () => {
+  it("extracts private-key and trusted-cert alias names", () => {
+    const out = parseKeytoolAliases(
+      [
+        "Keystore type: PKCS12",
+        "Keystore provider: SUN",
+        "",
+        "Your keystore contains 2 entries",
+        "",
+        "codesign, Jan 1, 2026, PrivateKeyEntry, ",
+        "Certificate fingerprint (SHA-256): AB:CD",
+        "oldsign, Feb 2, 2025, trustedCertEntry, ",
+      ].join("\n"),
+    );
+    expect(out).toEqual(["codesign", "oldsign"]);
+  });
+
+  it("returns an empty list for output with no entries", () => {
+    expect(parseKeytoolAliases("Your keystore contains 0 entries")).toEqual([]);
+    expect(parseKeytoolAliases("")).toEqual([]);
+  });
+});
+
+describe("aliasAdvisory", () => {
+  // The failure this exists to surface: an alias that isn't in the keystore
+  // otherwise only shows up as a jsign error mid-build.
+  it("warns loudly when the configured alias is absent", () => {
+    const msg = aliasAdvisory("typo", ["codesign"]);
+    expect(msg).toContain("WARNING");
+    expect(msg).toContain("typo");
+    expect(msg).toContain("codesign");
+  });
+
+  it("confirms a configured alias that is present", () => {
+    expect(aliasAdvisory("codesign", ["codesign"])).toContain('Alias "codesign" found');
+  });
+
+  it("nudges toward setting an alias only for a multi-entry keystore", () => {
+    expect(aliasAdvisory("", ["a", "b"])).toContain("set an alias");
+    expect(aliasAdvisory("", ["only"])).toBe("");
+    expect(aliasAdvisory("", [])).toBe("");
+  });
+});
+
+describe("isKeytoolMissing", () => {
+  it("distinguishes the degraded no-keytool case from a real open failure", () => {
+    expect(isKeytoolMissing("keytool not available — password not verified")).toBe(true);
+    expect(isKeytoolMissing("keystore password was incorrect")).toBe(false);
+    expect(isKeytoolMissing(undefined)).toBe(false);
   });
 });
 
 describe("scrubSecrets", () => {
   it("redacts every occurrence of each secret", () => {
-    const out = scrubSecrets("failed: token abc123token in header abc123token", ["abc123token"]);
-    expect(out).not.toContain("abc123token");
+    const out = scrubSecrets("failed: pw abc123pass in header abc123pass", ["abc123pass"]);
+    expect(out).not.toContain("abc123pass");
     expect(out).toContain("[redacted]");
   });
 
@@ -200,6 +265,11 @@ describe("Setting persistence", () => {
     expect(await getSigningConfigRaw()).toEqual(DEFAULT_SIGNING_CONFIG);
   });
 
+  it("defaults ship signing disabled but with a usable TSA", () => {
+    expect(DEFAULT_SIGNING_CONFIG.enabled).toBe(false);
+    expect(DEFAULT_SIGNING_CONFIG.tsaUrl).toBe(DEFAULT_TSA_URL);
+  });
+
   it("tolerates a garbage row", async () => {
     findUnique.mockResolvedValue({ key: AGENT_SIGNING_SETTING_KEY, value: "oops" });
     expect(await getSigningConfigRaw()).toEqual(DEFAULT_SIGNING_CONFIG);
@@ -209,7 +279,7 @@ describe("Setting persistence", () => {
     findUnique.mockResolvedValue({ key: AGENT_SIGNING_SETTING_KEY, value: FULL_CONFIG });
     const masked = await updateSigningConfig({ enabled: false });
     expect(masked.enabled).toBe(false);
-    expect(masked.clientSecret).toBe(MASK); // secret preserved through the merge
+    expect(masked.keystorePassword).toBe(MASK); // password preserved through the merge
     expect(upsert).toHaveBeenCalledTimes(1);
     expect(upsert.mock.calls[0][0].where).toEqual({ key: AGENT_SIGNING_SETTING_KEY });
     // enabled true → false must clear the alert stamp
@@ -218,18 +288,25 @@ describe("Setting persistence", () => {
 
   it("updateSigningConfig does NOT clear the stamp when staying enabled", async () => {
     findUnique.mockResolvedValue({ key: AGENT_SIGNING_SETTING_KEY, value: FULL_CONFIG });
-    await updateSigningConfig({ profileName: "renamed" });
+    await updateSigningConfig({ alias: "renamed" });
     expect(del).not.toHaveBeenCalled();
+  });
+
+  it("persists the plaintext password (sealing is the db.ts extension's job)", async () => {
+    findUnique.mockResolvedValue({ key: AGENT_SIGNING_SETTING_KEY, value: FULL_CONFIG });
+    await updateSigningConfig({ keystorePassword: "typed-pw" });
+    const written = upsert.mock.calls[0][0].update.value as AgentSigningConfig;
+    expect(written.keystorePassword).toBe("typed-pw");
   });
 });
 
 describe("failure stamp", () => {
   const FAILURE = {
-    at: "2026-07-09T12:00:00.000Z",
+    at: "2026-08-25T12:00:00.000Z",
     buildId: "b-1",
-    version: "0.12.0",
+    version: "0.17.1",
     files: ["polaris-agent-windows-amd64.exe"],
-    error: "token expired",
+    error: "keystore password was incorrect",
   };
 
   it("recordSigningFailure upserts the stamp row", async () => {

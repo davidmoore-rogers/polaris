@@ -43,7 +43,6 @@ import {
 import {
   getSigningConfigRaw,
   signingAvailability,
-  fetchSigningToken,
   signFile,
   recordSigningFailure,
   clearSigningFailure,
@@ -577,8 +576,8 @@ async function doRun(state: BuildState): Promise<void> {
     }
   }
 
-  // Phase: signing (opt-in, FAIL-OPEN). When the operator has enabled Azure
-  // Trusted Signing, sign the two Windows binaries in place via jsign. A
+  // Phase: signing (opt-in, FAIL-OPEN). When the operator has enabled
+  // code signing, sign the two Windows binaries in place via jsign. A
   // failure marks the sign step failed, stamps the durable
   // `agent.signing.lastFailure` Setting (drives the sidebar alert for
   // assets:write roles), and emits a warning Event — but the build still
@@ -682,7 +681,7 @@ async function doRun(state: BuildState): Promise<void> {
   })();
 }
 
-// ─── Windows binary signing (Azure Trusted Signing via jsign) ─────────
+// ─── Windows binary signing (internal-CA PKCS#12 via jsign) ───────────
 
 /**
  * Sign the two Windows binaries in place, appending one `sign / windows-<arch>`
@@ -710,46 +709,38 @@ async function signWindowsBinaries(state: BuildState, versionDir: string): Promi
     state.steps.push({ platform: "sign", arch: "windows", status: "failed", error });
     failures.push({ file: "(preflight)", error });
   } else {
-    let token: string | null = null;
-    try {
-      token = await fetchSigningToken(cfg);
-    } catch (err: any) {
-      const error = truncate(err?.message ?? String(err), 800);
-      state.steps.push({ platform: "sign", arch: "windows", status: "failed", error });
-      failures.push({ file: "(token)", error });
-    }
-
-    if (token) {
-      for (const { os, arch } of PLATFORMS) {
-        if (os !== "windows") continue;
-        if (state.cancelled) throw new CancelledError();
-        const filename = `polaris-agent-${os}-${arch}.exe`;
-        const step: BuildStep = { platform: "sign", arch: `${os}-${arch}`, status: "running" };
-        state.steps.push(step);
-        const stepStart = Date.now();
-        try {
-          await signFile(state, {
-            jarPath:     avail.jarPath!,
-            endpoint:    cfg.endpoint,
-            accountName: cfg.accountName,
-            profileName: cfg.profileName,
-            token,
-            filePath:    resolvePath(versionDir, filename),
-          });
-          step.status    = "success";
-          step.elapsedMs = Date.now() - stepStart;
-        } catch (err: any) {
-          step.elapsedMs = Date.now() - stepStart;
-          if (err instanceof SigningCancelledError) {
-            step.status = "failed";
-            step.error  = "cancelled";
-            throw new CancelledError();
-          }
+    // No credential-exchange step: the PKCS#12 keystore is read directly by
+    // jsign, so unlike the hosted-service path there is no token to mint and
+    // therefore no whole-phase failure mode before the per-file loop.
+    for (const { os, arch } of PLATFORMS) {
+      if (os !== "windows") continue;
+      if (state.cancelled) throw new CancelledError();
+      const filename = `polaris-agent-${os}-${arch}.exe`;
+      const step: BuildStep = { platform: "sign", arch: `${os}-${arch}`, status: "running" };
+      state.steps.push(step);
+      const stepStart = Date.now();
+      try {
+        await signFile(state, {
+          jarPath:          avail.jarPath!,
+          keystorePath:     cfg.keystorePath,
+          keystorePassword: cfg.keystorePassword,
+          alias:            cfg.alias || undefined,
+          tsaUrl:           cfg.tsaUrl,
+          filePath:         resolvePath(versionDir, filename),
+        });
+        step.status    = "success";
+        step.elapsedMs = Date.now() - stepStart;
+      } catch (err: any) {
+        step.elapsedMs = Date.now() - stepStart;
+        if (err instanceof SigningCancelledError) {
           step.status = "failed";
-          step.error  = truncate(err?.message ?? String(err), 800);
-          failures.push({ file: filename, error: step.error });
-          // Fail-open: keep going — the other binary may still sign.
+          step.error  = "cancelled";
+          throw new CancelledError();
         }
+        step.status = "failed";
+        step.error  = truncate(err?.message ?? String(err), 800);
+        failures.push({ file: filename, error: step.error });
+        // Fail-open: keep going — the other binary may still sign.
       }
     }
   }
@@ -762,7 +753,7 @@ async function signWindowsBinaries(state: BuildState, versionDir: string): Promi
       actor:        state.actor,
       resourceType: "polaris-agent",
       resourceName: state.version,
-      message:      `Agent Windows binaries v${state.version} signed (Azure Trusted Signing)`,
+      message:      `Agent Windows binaries v${state.version} signed (internal CA)`,
       details:      { buildId: state.buildId, files: PLATFORMS.filter((p) => p.os === "windows").map((p) => `polaris-agent-windows-${p.arch}.exe`) },
     });
     return true;

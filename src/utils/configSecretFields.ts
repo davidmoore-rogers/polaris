@@ -44,7 +44,8 @@
  *                  accessToken (pushbullet), webhookUrl (slack, teams),
  *                  privateKey (web_push VAPID)
  *   Setting      — bindPassword (ldap), clientSecret (oidc),
- *                  privateKey / signingKey (agent signing),
+ *                  keystorePassword (agent signing keystore),
+ *                  privateKey / signingKey,
  *                  password / passphrase (event-archive SFTP, backupSchedule)
  */
 export const SECRET_CONFIG_KEYS: ReadonlySet<string> = new Set([
@@ -55,6 +56,7 @@ export const SECRET_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "clientSecret",
   "community",
   "fortigateApiToken",
+  "keystorePassword",
   "passphrase",
   "password",
   "privKey",

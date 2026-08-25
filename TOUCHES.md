@@ -422,22 +422,22 @@ build auto-prune + boot-time auto-build are layered on top.
   readers of `agent/VERSION` (not writers, but documenting here for
   proximity). 5s mtime-checked cache; format-validated; fallback
   `"0.0.0-no-version-file"`.
-- `src/services/agentSigningService.ts` — Azure Trusted Signing of the
+- `src/services/agentSigningService.ts` — internal-CA code signing of the
   two Windows binaries as a post-build step (opt-in via the
   `agent.codeSigning` Setting; Integrations → Polaris Agents → Code
-  signing). Owns the masked-secret config (clientSecret follows the
-  notificationChannelService MASK/merge discipline), the Entra ID
-  client-credentials token fetch, the `java -jar jsign.jar
-  --storetype TRUSTEDSIGNING` invocation (token via env
-  `POLARIS_SIGNING_TOKEN`, never argv), the `signingAvailability()`
-  probe (java on PATH + jar at `tools/jsign.jar` /
-  `/opt/polaris/tools/jsign.jar` / `STATE_DIR/tools/jsign.jar`), and
-  the durable `agent.signing.lastFailure` Setting behind the sidebar
-  alert. `agentBuildService.signWindowsBinaries()` calls it between the
-  platform loop and the manifest write; phase `"signing"`, steps
-  `sign / windows-<arch>`. **FAIL-OPEN:** a signing failure emits
-  `agent.build.sign_failed` (warning) + stamps the failure Setting but
-  the build completes and ships unsigned — never blocks agent rollout.
+  signing). Owns the masked-secret config (keystorePassword follows the
+  notificationChannelService MASK/merge discipline, and is registered in
+  `utils/configSecretFields.ts` so it is SEALED at rest — renaming it
+  without touching that set stores the password in plaintext), the
+  `java -jar jsign.jar --storetype PKCS12` invocation (password via env
+  `POLARIS_SIGNING_PASSWORD`, never argv) with an EXPLICIT `--tsaurl` +
+  `--tsmode RFC3161` (PKCS12 gets no automatic countersignature, so this
+  is what keeps signatures valid past cert expiry), the keytool-backed
+  keystore/alias check behind the Test button, the `signingAvailability()`
+  probe (java on PATH + jar candidates + keystore READABILITY), and the
+  durable `agent.signing.lastFailure` Setting behind the sidebar alert.
+  `agentBuildService.signWindowsBinaries()` calls it between the platform
+  loop and the manifest write; phase `"signing"`, steps `sign / windows-<arch>`. **FAIL-OPEN:** a failure emits `agent.build.sign_failed` (warning) + stamps the failure Setting but the build completes and ships unsigned — never blocks agent rollout.
   A fully-signed build (or disabling signing) clears the stamp. Routes:
   `GET/PUT /server-settings/agents/signing` (PUT =
   `serverSettingsSystem:fullwrite`) + `POST .../signing/test`
