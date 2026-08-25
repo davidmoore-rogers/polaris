@@ -7140,17 +7140,14 @@ function credHttpForm(cfg) {
       // precisely what an operator would otherwise hunt for on this form.
       _httpAuthAlert("bearer",
         '<strong>The token is sent in cleartext</strong> unless the assets using this credential are checked over HTTPS. ' +
-        'A bearer token rides the <code>Authorization</code> header verbatim, so anyone on the path can read it and reuse it.') +
+        'Bearer sends it verbatim in the <code>Authorization</code> header, so anyone on the path can read it and reuse it.') +
       _httpAuthAlert("basic",
         '<strong>The username and password are sent in cleartext</strong> unless the assets using this credential are checked over HTTPS. ' +
-        'HTTP Basic only base64-encodes the pair, which is encoding rather than encryption and is reversed trivially.') +
+        'Basic sends them base64-encoded — encoding, not encryption — so anyone on the path can read them and reuse them.') +
       _httpAuthAlert("digest",
-        '<strong>The hash is readable</strong> unless the assets using this credential are checked over HTTPS. ' +
-        'Digest never sends the password itself, so this is a smaller exposure than Basic — but the username travels in the clear, ' +
-        'and a captured hash can be attacked offline or replayed until the nonce expires.') +
-      // Only meaningful once there are two modes sharing one carrier, so it is
-      // hidden for bearer — which has no such ambiguity to explain.
-      '<p class="hint" data-http-auth="basic digest">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default.</p>' +
+        '<strong>The password hash is readable</strong> unless the assets using this credential are checked over HTTPS. ' +
+        'Digest sends a hash instead of the password, so anyone on the path can attack it offline or replay it until the nonce expires ' +
+        '— along with the username, which travels in the clear.') +
     '</div>' +
     '<div class="form-group" data-http-auth="bearer"><label>Bearer token</label>' +
       '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
