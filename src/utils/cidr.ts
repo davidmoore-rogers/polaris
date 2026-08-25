@@ -478,6 +478,177 @@ export function packIntoAnchor<T extends { prefixLength: number }>(
   return null;
 }
 
+// ─── Active-scan target expansion ────────────────────────────────────────────
+//
+// A **Discovery** (business rule 34) is configured as a handful of operator-typed
+// targets and executed as an ordered list of addresses to probe. That expansion
+// lives here rather than in the scan service for the reason at the top of this
+// file: it is IP math, and it needs ipToInt/intToIp, which are private to it.
+
+/** One operator-typed scan target. */
+export interface ScanTarget {
+  kind: "cidr" | "range" | "single";
+  /** "10.4.0.0/24" | "10.4.0.10-10.4.0.60" | "10.4.0.7" */
+  value: string;
+}
+
+/** Why an address the operator asked for is not going to be probed. */
+export type ScanTargetDropReason =
+  | "invalid"        // unparseable, or not IPv4
+  | "excluded"       // loopback / link-local / multicast / unspecified
+  | "cap";           // over maxTargets
+
+export interface ExpandScanTargetsResult {
+  /** Ordered, deduped, ready to probe. */
+  addresses: string[];
+  /** addresses.length — the number actually scannable. */
+  total: number;
+  /** How many the operator asked for that aren't in `addresses`. */
+  dropped: number;
+  /** dropped, broken out, so the UI can say WHY rather than just "some". */
+  droppedBy: Record<ScanTargetDropReason, number>;
+  /** Per-target verdicts, in input order, for the step-2 preview. */
+  perTarget: { target: ScanTarget; count: number; error?: string }[];
+}
+
+/**
+ * Hard ceiling on one scan's address count. A /16 is 65k probes; nothing an
+ * operator means by "scan my network" needs more, and the cap is what keeps a
+ * fat-fingered /8 from becoming a 16-million-address sweep. Overflow is
+ * REPORTED (droppedBy.cap), never silently truncated — see business rule 34(c).
+ */
+export const SCAN_MAX_TARGETS = 65536;
+
+/**
+ * Addresses that are never probed, whatever the operator typed. This is
+ * netGuard's blocklist MINUS its RFC1918 allowance, because RFC1918 is the
+ * entire point of a Discovery. Link-local matters most: 169.254.169.254 is the
+ * cloud-metadata address, and a scan that dialled it from a cloud-hosted
+ * Polaris would be asking the hypervisor for credentials.
+ */
+function isExcludedScanTarget(ip: string): boolean {
+  const o = ip.split(".").map(Number);
+  if (o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  if (o[0] === 0) return true;                        // 0.0.0.0/8 unspecified
+  if (o[0] === 127) return true;                      // loopback
+  if (o[0] === 169 && o[1] === 254) return true;      // link-local incl. metadata
+  if (o[0] >= 224) return true;                       // multicast + reserved + broadcast
+  return false;
+}
+
+/**
+ * Expand one target to its addresses, or throw with an operator-facing reason.
+ *
+ * A CIDR drops its network and broadcast addresses — probing them finds
+ * nothing and, for the broadcast, is the one address in the range that can
+ * provoke replies from every host at once. /31 and /32 keep every address
+ * (RFC 3021), matching what usableHostCount already says about them.
+ */
+function expandOneTarget(t: ScanTarget): string[] {
+  const value = (t.value || "").trim();
+  if (!value) throw new Error("Empty target");
+
+  if (t.kind === "single") {
+    if (!isValidIpv4(value)) throw new Error(`Not an IPv4 address: ${value}`);
+    return [value];
+  }
+
+  if (t.kind === "range") {
+    const parts = value.split("-").map((s) => s.trim());
+    if (parts.length !== 2) throw new Error(`Not a range (expected "start-end"): ${value}`);
+    if (!isValidIpv4(parts[0]) || !isValidIpv4(parts[1])) {
+      throw new Error(`Range endpoints must be IPv4 addresses: ${value}`);
+    }
+    const from = ipToInt(parts[0]);
+    const to = ipToInt(parts[1]);
+    if (to < from) throw new Error(`Range runs backwards: ${value}`);
+    // Bounded here as well as at the caller: a 10.0.0.1-10.255.255.254 range
+    // would otherwise materialise 16M strings before the cap could drop them.
+    if (to - from + 1 > SCAN_MAX_TARGETS) {
+      throw new Error(`Range covers more than ${SCAN_MAX_TARGETS} addresses: ${value}`);
+    }
+    const out: string[] = [];
+    for (let n = from; n <= to; n++) out.push(intToIp(n));
+    return out;
+  }
+
+  // kind === "cidr"
+  if (!isValidCidr(value) || detectIpVersion(value) !== "v4") {
+    throw new Error(`Not an IPv4 CIDR: ${value}`);
+  }
+  const block = new Netmask(value);
+  if (block.size > SCAN_MAX_TARGETS + 2) {
+    throw new Error(`${normalizeCidr(value)} covers more than ${SCAN_MAX_TARGETS} addresses`);
+  }
+  const first = ipToInt(block.base);
+  // Derived from size, NOT from block.broadcast: the netmask package leaves
+  // `broadcast` undefined for /31 and /32 (there is no broadcast address at
+  // those prefix lengths), so reading it would collapse a /31 to one address.
+  const last = first + block.size - 1;
+  const out: string[] = [];
+  if (block.bitmask >= 31) {
+    for (let n = first; n <= last; n++) out.push(intToIp(n));
+    return out;
+  }
+  for (let n = first + 1; n < last; n++) out.push(intToIp(n));
+  return out;
+}
+
+/**
+ * Expand operator-typed scan targets into the ordered, deduped address list a
+ * Discovery run probes.
+ *
+ * Pure. Ordering is numeric by address (via compareIpv4) rather than by input
+ * order, so overlapping targets read as one sweep and the run's progress
+ * advances through the network rather than jumping about. Dedup is what makes
+ * overlapping targets safe to type: "10.4.0.0/24" plus "10.4.0.50" is 254
+ * probes, not 255.
+ *
+ * Nothing here throws — a bad target is reported in `perTarget[].error` and
+ * counted in `droppedBy.invalid`, because one mistyped row must not cost the
+ * operator the other nine.
+ */
+export function expandScanTargets(
+  targets: ScanTarget[],
+  maxTargets: number = SCAN_MAX_TARGETS,
+): ExpandScanTargetsResult {
+  const cap = Math.max(1, Math.min(maxTargets, SCAN_MAX_TARGETS));
+  const seen = new Set<string>();
+  const droppedBy: Record<ScanTargetDropReason, number> = { invalid: 0, excluded: 0, cap: 0 };
+  const perTarget: { target: ScanTarget; count: number; error?: string }[] = [];
+
+  for (const target of targets || []) {
+    let expanded: string[];
+    try {
+      expanded = expandOneTarget(target);
+    } catch (err) {
+      droppedBy.invalid += 1;
+      perTarget.push({ target, count: 0, error: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
+    let kept = 0;
+    for (const ip of expanded) {
+      if (isExcludedScanTarget(ip)) { droppedBy.excluded += 1; continue; }
+      // A duplicate is not a drop — the operator asked for it twice and gets
+      // it once, which is the point of deduping rather than a loss to report.
+      if (seen.has(ip)) continue;
+      if (seen.size >= cap) { droppedBy.cap += 1; continue; }
+      seen.add(ip);
+      kept += 1;
+    }
+    perTarget.push({ target, count: kept });
+  }
+
+  const addresses = Array.from(seen).sort(compareIpv4);
+  return {
+    addresses,
+    total: addresses.length,
+    dropped: droppedBy.invalid + droppedBy.excluded + droppedBy.cap,
+    droppedBy,
+    perTarget,
+  };
+}
+
 function ipToInt(ip: string): number {
   return ip
     .split(".")
