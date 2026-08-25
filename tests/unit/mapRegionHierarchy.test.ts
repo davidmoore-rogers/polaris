@@ -34,8 +34,12 @@ const settingFindUnique = vi.fn(async (args: any) => {
   return row ? { ...row } : null;
 });
 
-vi.mock("../../src/db.js", () => ({
-  prisma: {
+// Declared up front so $transaction's interactive form can hand the same stub
+// back as the transaction client.
+const prismaStub: any = {};
+
+vi.mock("../../src/db.js", () => {
+  Object.assign(prismaStub, {
     setting: {
       findUnique: settingFindUnique,
       upsert: vi.fn(async (args: any) => {
@@ -60,9 +64,21 @@ vi.mock("../../src/db.js", () => ({
       createMany: vi.fn(async () => ({ count: 0 })),
       deleteMany: vi.fn(async () => ({ count: 0 })),
     },
-    $transaction: vi.fn(async (ops: any[]) => Promise.all(ops)),
-  },
-}));
+    // Both $transaction shapes, because the region writers use the INTERACTIVE
+    // callback form (to hold a pg_advisory_xact_lock across the blob's
+    // read-modify-write) while other callers pass an array of promises. A mock
+    // that only understood one silently broke the other.
+    //
+    // Note what this fake canNOT verify: the advisory lock itself is a real
+    // database behaviour, so the serialization guarantee is covered by
+    // tests/integration/mapRegionConcurrentWrites.test.ts, not here.
+    $executeRaw: vi.fn(async () => 0),
+    $transaction: vi.fn(async (arg: any) =>
+      typeof arg === "function" ? arg(prismaStub) : Promise.all(arg),
+    ),
+  });
+  return { prisma: prismaStub };
+});
 
 const {
   createRegion,
