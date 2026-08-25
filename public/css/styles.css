@@ -4990,6 +4990,17 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   flex-direction: column;
   height: 232px;
 }
+/* Compact variant, for a preview whose whole answer is a line or two — the
+   scan-target preview is a count plus any mistyped-row errors. The fixed 232px
+   above exists because the automations Devices preview lists up to 100 matched
+   devices and must not resize the step while the operator is still typing in
+   it; a box that only ever holds a couple of lines pays that as dead space
+   instead. min-height still pins the common states ("Checking…" and the
+   result are both one line) so the box doesn't flicker between them. */
+.aw-preview-box.aw-preview-compact {
+  height: auto;
+  min-height: 2.5rem;
+}
 .aw-preview-head {
   flex: 0 0 auto;
   margin: 0 0 4px;

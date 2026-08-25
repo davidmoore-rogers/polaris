@@ -282,10 +282,14 @@ describe("PolarisAssetDiscovery — targets step", () => {
     expect(doc.querySelectorAll("#nd-targets .nd-target-row").length).toBe(1);
   });
 
-  it("renders every preview state through one shell so the box can't resize", async () => {
+  it("renders every preview state through one shell, in the COMPACT box", async () => {
     await load().open();
     const box = doc.getElementById("nd-target-preview")!;
     expect(box.classList.contains("aw-preview-box")).toBe(true);
+    // Compact: this preview's whole answer is a count plus any mistyped-row
+    // errors, so the shared 232px height (sized for the automations Devices
+    // step's 100-device list) would be dead space.
+    expect(box.classList.contains("aw-preview-compact")).toBe(true);
     expect(box.querySelector(".aw-preview-head")).toBeTruthy();
     expect(box.querySelector(".aw-preview-body")).toBeTruthy();
   });
