@@ -411,56 +411,219 @@
     return bits.length ? bits.join(" + ") : "—";
   }
 
-  // ─── Tab surface ──────────────────────────────────────────────────────────
+  // ─── Shared table renderer (both surfaces) ─────────────────────────────────
 
-  async function renderTab() {
-    var host = document.getElementById("contacts-list");
-    if (!host) return;
-    host.innerHTML = '<p class="empty-state">Loading…</p>';
+  /**
+   * ONE table for the tab and the picker. The surfaces differ only in their
+   * COLUMNS — the picker adds a checkbox and drops the management columns — so
+   * they share the cell builders instead of each writing its own <td> for
+   * name/email/description/source and drifting on one of them.
+   *
+   * `cols` is an ordered list of { label?, width?, cls?, cell(entry) } specs;
+   * `cell` returns the cell's INNER html. `hint` is pre-rendered html appended
+   * under the table, because each surface decides emptiness differently (the
+   * picker's panes always carry their dynamic rows, so `entries.length` is the
+   * question there, not the row count).
+   */
+  function abTable(cols, entries, hint) {
+    var head = cols.map(function (c) {
+      return "<th" + (c.width ? ' style="width:' + c.width + '"' : "") + ">" + (c.label || "") + "</th>";
+    }).join("");
+    var body = entries.map(function (en) {
+      return "<tr>" + cols.map(function (c) {
+        return "<td" + (c.cls ? ' class="' + c.cls + '"' : "") + ">" + (c.cell(en) || "") + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+    return '<div class="table-wrapper"><table><thead><tr>' + head + "</tr></thead><tbody>" +
+      body + "</tbody></table></div>" + (hint || "");
+  }
+
+  /** The four cells every address-book row has, whichever surface renders it. */
+  var AB_CELLS = {
+    name: { label: "Name", width: "220px", cell: function (en) { return escapeHtml(en.name || "—"); } },
+    email: { label: "Email", width: "250px", cls: "mono", cell: function (en) { return escapeHtml(en.email || ""); } },
+    description: { label: "Description", cell: function (en) { return escapeHtml(en.description || ""); } },
+    source: { label: "Source", width: "110px", cell: function (en) { return sourceBadge(en.source); } },
+  };
+
+  // ─── Tab surface ───────────────────────────────────────────────────────────
+
+  /**
+   * The tab renders the SAME two panes the wizard's picker does — People
+   * (searched: contacts, Polaris user accounts and, where the integrations opted
+   * in, the org directory) and Regions (browsed) — minus the checkboxes and the
+   * Add-to-To/Cc/Bcc footer, which only mean something while composing a Notify
+   * action. It previously listed stored contacts alone, so the page an operator
+   * opens to ask "who can Polaris email?" answered a narrower question than the
+   * modal did.
+   *
+   * Stored contacts are rendered from GET /contacts rather than out of the
+   * search payload, for two things that payload can't carry: the row's
+   * `createdBy` and device filter (the Devices + Added by columns, and the
+   * per-row ownership check behind Edit/Delete), and completeness — search
+   * returns at most 50 deduped hits ordered users-first, so on an install with
+   * more than 50 accounts the contacts would fall off the end of the very page
+   * that manages them. A search hit whose address a contact already holds is
+   * dropped, so one mailbox stays one row.
+   */
+
+  // Survives a re-render (the Refresh button, a save from the editor) so the
+  // operator's search term isn't silently thrown away under them.
+  var _tab = { term: "" };
+
+  function tabBodyHtml() {
+    return '' +
+      '<div class="page-tabs" id="ab-tab-tabs" style="margin-bottom:10px">' +
+        '<button type="button" class="page-tab active" data-ab-ttab="people">People</button>' +
+        '<button type="button" class="page-tab" data-ab-ttab="regions">Regions</button>' +
+      '</div>' +
+      '<div data-ab-tpane="people">' +
+        '<div class="form-group" style="margin-bottom:8px">' +
+          '<input type="text" class="input" id="ab-tab-search" autocomplete="off" spellcheck="false" ' +
+                 'placeholder="Search people, contacts and lists…" value="' + escapeHtml(_tab.term) + '">' +
+        '</div>' +
+        '<div id="ab-tab-results"><p class="empty-state">Loading…</p></div>' +
+      '</div>' +
+      '<div data-ab-tpane="regions" style="display:none">' +
+        '<p class="hint" style="margin-top:0">Regions come from the polygons drawn on the Device Map. ' +
+          'An automation’s <strong>Notify</strong> action can route to a region to reach every user tagged ' +
+          'with it, or to the region of the device that triggered the alert. Nothing here is edited on this ' +
+          'page — draw or rename a region on the Device Map, and tag users with it under Users.</p>' +
+        '<div id="ab-tab-regions"><p class="empty-state">Loading…</p></div>' +
+      '</div>';
+  }
+
+  function tabPeopleCols() {
+    return [
+      AB_CELLS.name,
+      AB_CELLS.email,
+      AB_CELLS.description,
+      {
+        label: "Devices",
+        width: "180px",
+        cell: function (en) { return escapeHtml(en.contact ? targetSummary(en.contact) : "—"); },
+      },
+      AB_CELLS.source,
+      {
+        label: "Added by",
+        width: "120px",
+        cell: function (en) { return escapeHtml((en.contact && en.contact.createdBy) || "—"); },
+      },
+      {
+        width: "120px",
+        cell: function (en) {
+          if (!en.contact || !canEditRow(en.contact)) return "";
+          return '<button class="btn btn-secondary btn-sm" data-ab-edit="' + escapeHtml(en.contact.id) + '">Edit</button> ' +
+            '<button class="btn btn-danger btn-sm" data-ab-del="' + escapeHtml(en.contact.id) + '">Delete</button>';
+        },
+      },
+    ];
+  }
+
+  function matchesTerm(c, lower) {
+    if (!lower) return true;
+    return String(c.email || "").toLowerCase().indexOf(lower) >= 0 ||
+      String(c.name || "").toLowerCase().indexOf(lower) >= 0;
+  }
+
+  async function loadTabPeople() {
+    var box = document.getElementById("ab-tab-results");
+    if (!box) return;
+    var term = _tab.term;
+    var lower = term.toLowerCase();
     var contacts;
+    var entries;
     try {
-      contacts = (await api.contacts.list()).contacts || [];
+      var res = await Promise.all([api.contacts.list(), api.contacts.search(term, true)]);
+      contacts = ((res[0] && res[0].contacts) || []).filter(function (c) { return matchesTerm(c, lower); });
+      entries = (res[1] && res[1].entries) || [];
     } catch (err) {
-      host.innerHTML = '<p class="empty-state">' + escapeHtml((err && err.message) || "Failed to load the address book") + "</p>";
+      if (term !== _tab.term) return;
+      box.innerHTML = '<p class="empty-state">' +
+        escapeHtml((err && err.message) || "Failed to load the address book") + "</p>";
       return;
     }
-    if (!contacts.length) {
-      host.innerHTML = '<p class="empty-state">No contacts yet. Add one to route alerts to an address that has no Polaris account — ' +
-        'a distribution list, an on-call rotation, a vendor NOC.</p>';
-      return;
-    }
-    host.innerHTML =
-      '<div class="table-wrapper"><table><thead><tr>' +
-        '<th style="width:220px">Name</th>' +
-        '<th style="width:260px">Email</th>' +
-        '<th>Description</th>' +
-        '<th style="width:200px">Devices</th>' +
-        '<th style="width:120px">Added by</th>' +
-        '<th style="width:120px"></th>' +
-      '</tr></thead><tbody>' +
-      contacts.map(function (c) {
-        var editable = canEditRow(c);
-        return '<tr>' +
-          "<td>" + escapeHtml(c.name || "—") + "</td>" +
-          '<td class="mono">' + escapeHtml(c.email) + "</td>" +
-          "<td>" + escapeHtml(c.description || "") + "</td>" +
-          "<td>" + escapeHtml(targetSummary(c)) + "</td>" +
-          "<td>" + escapeHtml(c.createdBy || "—") + "</td>" +
-          '<td>' + (editable
-            ? '<button class="btn btn-secondary btn-sm" data-ab-edit="' + escapeHtml(c.id) + '">Edit</button> ' +
-              '<button class="btn btn-danger btn-sm" data-ab-del="' + escapeHtml(c.id) + '">Delete</button>'
-            : "") + "</td>" +
-        "</tr>";
-      }).join("") +
-      "</tbody></table></div>";
+    if (term !== _tab.term) return; // a later keystroke already owns the pane
 
-    if (host._wired) return;
-    host._wired = true;
+    // Contacts first, and a search hit sharing one of their addresses drops:
+    // the contact row is the manageable one, and the picker's own dedupe
+    // already treats one mailbox as one entry.
+    var held = {};
+    contacts.forEach(function (c) { held[String(c.email || "").toLowerCase()] = true; });
+    var rows = contacts.map(function (c) {
+      return {
+        source: "contact", id: c.id, email: c.email, name: c.name,
+        description: c.description, kind: "person", contact: c,
+      };
+    }).concat(entries.filter(function (en) {
+      return !en.email || !held[String(en.email).toLowerCase()];
+    }));
+
+    var hint = "";
+    if (!rows.length) {
+      hint = '<p class="hint" style="margin:8px 0 0">' + (term
+        ? "No people match that search."
+        : "No contacts yet, and no Polaris account carries an email address. Add a contact to route alerts to an " +
+          "address that has no Polaris account — a distribution list, an on-call rotation, a vendor NOC.") +
+        "</p>";
+    } else if (!term && !contacts.length) {
+      // The rows are all Polaris accounts and directory hits. Say what's missing
+      // rather than let a populated table imply the address book is set up.
+      hint = '<p class="hint" style="margin:8px 0 0">No contacts yet — every row above is a Polaris account. ' +
+        "Add a contact to route alerts to an address that has no Polaris account — a distribution list, " +
+        "an on-call rotation, a vendor NOC.</p>";
+    } else if (entries.length >= 50) {
+      // searchAddressBook caps at 50 — say so rather than let a truncated list
+      // read as "that's everyone".
+      hint = '<p class="hint" style="margin:8px 0 0">Showing the first 50 matches — narrow the search to see more.</p>';
+    }
+    box.innerHTML = abTable(tabPeopleCols(), rows, hint);
+  }
+
+  function loadTabRegions() {
+    var box = document.getElementById("ab-tab-regions");
+    if (!box) return;
+    var cols = [AB_CELLS.name, AB_CELLS.description, AB_CELLS.source];
+    return loadFilterSchema().then(function (schema) {
+      var regions = ((schema.options && schema.options.regions) || []).map(function (name) {
+        return { source: "region", id: name, name: name, description: "Every user tagged with this region" };
+      });
+      box.innerHTML = abTable(cols, regions, regions.length ? "" :
+        '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>');
+    }).catch(function (err) {
+      box.innerHTML = '<p class="empty-state">' +
+        escapeHtml((err && err.message) || "Failed to load the region catalogue") + "</p>";
+    });
+  }
+
+  function wireTab(host) {
+    host.querySelectorAll("[data-ab-ttab]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var want = btn.getAttribute("data-ab-ttab");
+        host.querySelectorAll("[data-ab-ttab]").forEach(function (b) { b.classList.toggle("active", b === btn); });
+        host.querySelectorAll("[data-ab-tpane]").forEach(function (pane) {
+          pane.style.display = pane.getAttribute("data-ab-tpane") === want ? "" : "none";
+        });
+      });
+    });
+
+    var timer = null;
+    var search = host.querySelector("#ab-tab-search");
+    if (search) {
+      search.addEventListener("input", function () {
+        _tab.term = this.value.trim();
+        clearTimeout(timer);
+        timer = setTimeout(function () { loadTabPeople(); }, 250);
+      });
+    }
+
     host.addEventListener("click", async function (ev) {
       var ed = ev.target.closest && ev.target.closest("[data-ab-edit]");
       if (ed) {
-        var row = (await api.contacts.list()).contacts.find(function (x) { return x.id === ed.getAttribute("data-ab-edit"); });
-        if (row) { await openEditor(row); renderTab(); }
+        var row = ((await api.contacts.list()).contacts || []).find(function (x) {
+          return x.id === ed.getAttribute("data-ab-edit");
+        });
+        if (row) { await openEditor(row); loadTabPeople(); }
         return;
       }
       var del = ev.target.closest && ev.target.closest("[data-ab-del]");
@@ -470,9 +633,25 @@
           await api.contacts.delete(del.getAttribute("data-ab-del"));
           showToast("Contact deleted", "success");
         } catch (err) { showToast((err && err.message) || "Delete failed", "error"); }
-        renderTab();
+        loadTabPeople();
       }
     });
+  }
+
+  /**
+   * Paint (or repaint) the tab. The shell is built ONCE — rebuilding it on every
+   * load would blur the search box mid-keystroke — and both panes then refresh
+   * from the server, so Refresh and a save from the editor land the same way.
+   */
+  async function renderTab() {
+    var host = document.getElementById("contacts-list");
+    if (!host) return;
+    if (!host._abShell) {
+      host.innerHTML = tabBodyHtml();
+      host._abShell = true;
+      wireTab(host);
+    }
+    await Promise.all([loadTabPeople(), loadTabRegions()]);
   }
 
   // ─── Picker surface (opened from the wizard's recipient fields) ───────────
@@ -614,35 +793,41 @@
       var defBtn = root.querySelector('[data-ab="add-' + field + '"]');
       if (defBtn) { defBtn.classList.remove("btn-secondary"); defBtn.classList.add("btn-primary"); }
 
-      /** One selectable row, shared by both panes so a region reads like a person. */
-      function pickRow(en) {
-        var key = pickKey(en);
-        return '<tr>' +
-          '<td><input type="checkbox" data-ab-pick="' + escapeHtml(key) + '"' + (chosen[key] ? " checked" : "") + "></td>" +
-          "<td>" + escapeHtml(en.name || "—") + "</td>" +
-          '<td class="mono">' + escapeHtml(en.email || "") + "</td>" +
-          "<td>" + escapeHtml(en.description || "") + "</td>" +
-          "<td>" + sourceBadge(en.source) + "</td>" +
-          "<td>" + (en.source === "contact" && en.owned !== false && canWrite()
-            ? '<button class="btn btn-secondary btn-sm" data-ab-pedit="' + escapeHtml(en.id) + '">Edit</button>'
-            : "") + "</td>" +
-        "</tr>";
-      }
-
-      function pickTable(rows) {
-        return '<div class="table-wrapper"><table><thead><tr>' +
-          '<th style="width:36px"></th><th style="width:220px">Name</th><th style="width:250px">Email</th>' +
-          '<th>Description</th><th style="width:110px">Source</th><th style="width:110px"></th>' +
-          '</tr></thead><tbody>' + rows.join("") + "</tbody></table></div>";
+      /**
+       * The picker's columns: the shared four, wrapped in a selection checkbox
+       * and an Edit cell. Both panes use them, so a region reads like a person.
+       */
+      function pickCols() {
+        return [
+          {
+            width: "36px",
+            cell: function (en) {
+              var key = pickKey(en);
+              return '<input type="checkbox" data-ab-pick="' + escapeHtml(key) + '"' +
+                (chosen[key] ? " checked" : "") + ">";
+            },
+          },
+          AB_CELLS.name,
+          AB_CELLS.email,
+          AB_CELLS.description,
+          AB_CELLS.source,
+          {
+            width: "110px",
+            cell: function (en) {
+              return en.source === "contact" && en.owned !== false && canWrite()
+                ? '<button class="btn btn-secondary btn-sm" data-ab-pedit="' + escapeHtml(en.id) + '">Edit</button>'
+                : "";
+            },
+          },
+        ];
       }
 
       function render() {
         var box = q("#ab-pick-results");
         // The dynamic entry heads the list unconditionally — it is not a search
         // result, so a query that matches nobody must not hide it.
-        var rows = PEOPLE_DYNAMIC.map(pickRow).concat(entries.map(pickRow));
-        box.innerHTML = pickTable(rows) +
-          (entries.length ? "" : '<p class="hint" style="margin:8px 0 0">No people match that search.</p>');
+        box.innerHTML = abTable(pickCols(), PEOPLE_DYNAMIC.concat(entries),
+          entries.length ? "" : '<p class="hint" style="margin:8px 0 0">No people match that search.</p>');
       }
 
       /**
@@ -653,11 +838,13 @@
       function renderRegions() {
         var box = q("#ab-pick-regions");
         if (!box) return;
-        var rows = regionDynamicEntries(regionMaxLevel).map(pickRow).concat(regionEntries.map(pickRow));
-        box.innerHTML = pickTable(rows) +
-          (regionEntries.length
+        box.innerHTML = abTable(
+          pickCols(),
+          regionDynamicEntries(regionMaxLevel).concat(regionEntries),
+          regionEntries.length
             ? ""
-            : '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>');
+            : '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>',
+        );
       }
 
       async function load(term) {

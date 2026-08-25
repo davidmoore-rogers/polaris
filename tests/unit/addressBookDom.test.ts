@@ -50,6 +50,17 @@ function flush(times = 3) {
   return p;
 }
 
+/**
+ * Wait out the tab search box's 250ms debounce, then let the fetch settle.
+ * A microtask flush can't: the timer is real, and a debounce still pending when
+ * the test ends repaints the NEXT test's freshly-rebuilt pane from the old
+ * module instance's search term.
+ */
+async function settleDebounce() {
+  await new Promise((r) => setTimeout(r, 320));
+  await flush();
+}
+
 function click(el: unknown) {
   (el as { dispatchEvent: (e: unknown) => void }).dispatchEvent(new win.Event("click", { bubbles: true }));
 }
@@ -89,7 +100,17 @@ beforeAll(() => {
   g.api = {
     contacts: {
       list: async () => ({ contacts }),
-      search: async () => ({ entries: searchEntries }),
+      // Filters on the query the way searchAddressBook does (email or name
+      // contains), so a test can tell the client-side half of the tab's
+      // filtering from the server's.
+      search: async (q: string) => ({
+        entries: searchEntries.filter((e) => {
+          const term = String(q ?? "").toLowerCase();
+          if (!term) return true;
+          return String(e.email ?? "").toLowerCase().includes(term) ||
+            String(e.name ?? "").toLowerCase().includes(term);
+        }),
+      }),
       preview: async (body: Record<string, unknown>) => { previewed.push(body); return { matchCount: 0, sample: [] }; },
       // The device-filter builder's vocabulary. Deliberately includes one field
       // automations doesn't have (location) so a drift there shows up here.
@@ -164,23 +185,72 @@ beforeEach(() => {
 });
 
 describe("renderTab", () => {
-  it("renders one row per contact with a device summary", async () => {
+  /** Rows in the People pane (the Regions pane has its own table). */
+  function peopleRows() {
+    return Array.from(doc.querySelectorAll("#ab-tab-results tbody tr"));
+  }
+
+  it("renders the contacts with a device summary, and the searchable people beside them", async () => {
+    // Picker parity: the tab lists contacts AND the Polaris accounts /
+    // directory hits the wizard's picker offers, not contacts alone.
     await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
     await flush();
-    const rows = doc.querySelectorAll("#contacts-list tbody tr");
-    expect(rows).toHaveLength(2);
+    // 2 contacts + Jane; the search's own copy of mine@example.com is deduped
+    // away in favour of the manageable contact row.
+    expect(peopleRows()).toHaveLength(3);
     const text = (doc.getElementById("contacts-list") as unknown as { textContent: string }).textContent;
     expect(text).toContain("mine@example.com");
+    expect(text).toContain("jane@example.com");
+    expect(text.match(/mine@example\.com/g)).toHaveLength(1);
     // The filter + pins are summarized rather than dumped.
     expect(text).toContain("1 condition + 2 pinned devices");
+    // Source badges, so "Polaris user" and "Contact" are told apart.
+    expect(text).toContain("Polaris user");
+    expect(text).toContain("Contact");
+  });
+
+  it("browses the region catalogue in its own pane", async () => {
+    await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+    await flush();
+    const regions = doc.getElementById("ab-tab-regions") as unknown as { textContent: string };
+    expect(regions.textContent).toContain("Ashfield");
+    expect(regions.textContent).toContain("Memphis");
+    // Read-only: regions are drawn on the Device Map, never edited here.
+    expect(doc.querySelectorAll("#ab-tab-regions [data-ab-edit]")).toHaveLength(0);
+  });
+
+  it("narrows the people list from the search box", async () => {
+    await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+    await flush();
+    const box = doc.getElementById("ab-tab-search") as unknown as
+      { value: string; dispatchEvent: (e: unknown) => void };
+    // The server filters its own half; the stored contacts are filtered here,
+    // because they're rendered from GET /contacts rather than out of the search.
+    box.value = "theirs";
+    box.dispatchEvent(new win.Event("input", { bubbles: true }));
+    await settleDebounce();
+    const emails = peopleRows().map((r) => (r as unknown as { textContent: string }).textContent);
+    expect(emails.some((t) => t.includes("theirs@example.com"))).toBe(true);
+    expect(emails.some((t) => t.includes("mine@example.com"))).toBe(false);
   });
 
   it("shows an empty state rather than a bare table", async () => {
     contacts = [];
+    searchEntries = [];
     await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
     await flush();
     expect((doc.getElementById("contacts-list") as unknown as { textContent: string }).textContent)
       .toMatch(/no contacts yet/i);
+  });
+
+  it("says the address book is empty even when Polaris accounts fill the table", async () => {
+    // A populated table of user accounts must not read as "contacts are set up".
+    contacts = [];
+    await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+    await flush();
+    const text = (doc.getElementById("contacts-list") as unknown as { textContent: string }).textContent;
+    expect(peopleRows().length).toBeGreaterThan(0);
+    expect(text).toMatch(/no contacts yet/i);
   });
 
   it("at fullwrite offers Edit/Delete on EVERY row", async () => {
