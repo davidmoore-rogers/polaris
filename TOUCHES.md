@@ -1688,11 +1688,11 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** The SCHEDULED half of the GAL story (business rule 35) — the exclusion filter's normalization and decision, and the projection of a contact's directory-owned fields from its provenance rows. Its live sibling `directorySearchService` persists nothing; this one is why `Contact.origin` and `DirectoryContactSource` exist.
 
-**Public API:** `normalizeDirectorySyncFilter`, `directoryExclusionReason` (PURE), `projectContactFromSources` (PURE), plus the `DirectoryPerson` / `DirectorySyncFilter` types the two bulk readers produce and consume.
+**Public API:** `runDirectorySync` (the pass), `purgeDirectoryContacts`, `directorySyncAvailable`, `deleteExceedsGuard`, `normalizeDirectorySyncFilter`, `directoryExclusionReason` (PURE), `projectContactFromSources` (PURE), plus the `DirectoryPerson` / `DirectorySyncFilter` / `DirectorySyncSummary` types the two bulk readers produce and consume.
 
 **Cross-service deps:** `utils/integrationFilter` (`matchesWildcard` — the canonical glob-lite matcher every device/VM/interface filter already uses, so an operator who has configured one knows how this behaves).
 
-**Used by:** `entraIdService.listDirectoryPeople` and `activeDirectoryService.listDirectoryPeople` (the bulk readers, which import the types), and the discovery engine's post-sync pass.
+**Used by:** `entraIdService.listDirectoryPeople` and `activeDirectoryService.listDirectoryPeople` (the bulk readers, which import the types); `discoveryEngine`'s FOURTH post-sync pass (last in the `assetsOnly` block, gated on the two directory types plus `config.enableDirectorySync`); and `api/routes/integrations.ts`, whose PUT calls `purgeDirectoryContacts` when the sync is switched off or the integration disabled, and whose DELETE calls it BEFORE deleting the row — there is no FK on `integrationId`, so this is the only cleanup.
 
 **Invariants:**
 
@@ -1700,6 +1700,9 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - **`mailboxKind: "unknown"` is not a claim.** Graph cannot report a mailbox type in bulk, so the Entra reader says `"unknown"` for every user; `directoryExclusionReason` excludes only on a POSITIVE identification. Treating unknown as shared would drop a whole tenant.
 - **The projection must be order-independent.** It is a projection precisely so two directories that disagree cannot ping-pong the row on alternating runs. A test asserts `project([a,b]) === project([b,a])` — keep it.
 - **Include wins over exclude** for OU and domain, matching `filterDevices`.
+- **The deletion half is refused wholesale on an ambiguous read.** `scanned === 0`, or a delete set over `deleteExceedsGuard` (`max(50, 20%)` — the FLOOR matters: on a small book 20% is one row, and the failure being guarded against is categorical, not incremental), skips deletion entirely and raises the Event to warning. A revoked grant must not empty the address book.
+- **A contact dies only when its LAST provenance row goes.** Every delete is `origin: { not: "manual" }` AND `directorySources: { none: {} }`, which makes removing an adopted or hand-added row structurally impossible even on a bug.
+- **The steady state must stay free.** The diff compares the stored `observed` blob and skips anything identical, so an unchanged directory issues zero writes. A test asserts it; keep it, or every discovery cycle rewrites the whole roster.
 
 **When changing this:** adding a field to `DirectoryPerson` means adding it to BOTH readers (a field only one populates projects as null wherever the other ranks first) and deciding whether it belongs on the `Contact` row — anything that lands there is employee PII in every backup. Adding an exclusion means adding it to `normalizeDirectorySyncFilter`, to the Zod block in `integrations.ts`, and to the Directory tab in `integrations.js`, or the control exists in exactly one of the three places.
 

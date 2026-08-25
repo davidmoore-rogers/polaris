@@ -6,6 +6,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
+import { purgeDirectoryContacts } from "../../services/directorySyncService.js";
+import { bumpDirectoryCache } from "../../services/directorySearchService.js";
 import { requirePermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgActivityForIntegration } from "../../services/fmgActivityService.js";
@@ -650,6 +652,30 @@ const WindowsServerConfigSchema = z.object({
   verboseLogging: z.boolean().optional().default(false),
 }).superRefine(refineConfigHost);
 
+/**
+ * The GAL sync's exclusion filter. Shared verbatim by the Entra and AD config
+ * schemas — the two directories differ in what they can ANSWER, not in what an
+ * operator wants to exclude, so one shape keeps the Directory tab identical
+ * between them.
+ *
+ * Defaults live in normalizeDirectorySyncFilter, not here: the service is
+ * reached by the discovery pass reading a stored config that may predate any
+ * given field, so it cannot rely on route validation having filled them in.
+ */
+const DirectorySyncFilterSchema = z.object({
+  excludeDisabled:        z.boolean().optional(),
+  excludeSharedMailboxes: z.boolean().optional(),
+  includeGroups:          z.boolean().optional(),
+  includeOrgContacts:     z.boolean().optional(),
+  ouInclude:     z.array(z.string().max(512)).max(100).optional(),
+  ouExclude:     z.array(z.string().max(512)).max(100).optional(),
+  groupExclude:  z.array(z.string().max(512)).max(50).optional(),
+  domainInclude: z.array(z.string().max(253)).max(50).optional(),
+  domainExclude: z.array(z.string().max(253)).max(50).optional(),
+  nameExclude:   z.array(z.string().max(200)).max(100).optional(),
+  maxEntries:    z.number().int().min(1).max(50_000).optional(),
+}).optional().default({});
+
 const EntraIdConfigSchema = z.object({
   tenantId:      z.string().optional().default(""),
   clientId:      z.string().optional().default(""),
@@ -667,6 +693,14 @@ const EntraIdConfigSchema = z.object({
   // required — without them every keystroke would 403. See
   // src/services/directorySearchService.ts.
   enableDirectorySearch: z.boolean().optional().default(false),
+  // Address-book GAL SYNC (scheduled; stores the roster). Deliberately a
+  // SEPARATE toggle from the search above: they need the same directory
+  // grants, but they are not the same decision, because one reads and one
+  // stores. Default OFF — switching it on puts employee names, addresses,
+  // titles, departments and phone numbers in the database and in every
+  // backup. See business rule 35 and src/services/directorySyncService.ts.
+  enableDirectorySync: z.boolean().optional().default(false),
+  directorySync: DirectorySyncFilterSchema,
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
@@ -777,6 +811,14 @@ const ActiveDirectoryConfigSchema = z.object({
   // required — without them every keystroke would 403. See
   // src/services/directorySearchService.ts.
   enableDirectorySearch: z.boolean().optional().default(false),
+  // Address-book GAL SYNC (scheduled; stores the roster). Deliberately a
+  // SEPARATE toggle from the search above: they need the same directory
+  // grants, but they are not the same decision, because one reads and one
+  // stores. Default OFF — switching it on puts employee names, addresses,
+  // titles, departments and phone numbers in the database and in every
+  // backup. See business rule 35 and src/services/directorySyncService.ts.
+  enableDirectorySync: z.boolean().optional().default(false),
+  directorySync: DirectorySyncFilterSchema,
   workstationMonitor: WorkstationServerClassMonitorSchema,
   serverMonitor:      WorkstationServerClassMonitorSchema,
   // Per-integration verbose debug logging.
@@ -1293,6 +1335,29 @@ router.put("/:id", async (req, res, next) => {
 
     logEvent({ action: "integration.updated", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, message: `Integration "${updated.name}" updated` });
 
+    // Switching the directory sync off (or disabling the integration) removes
+    // the contacts it created. Leaving them would be worse than either state:
+    // an employee roster nothing can refresh and nothing will ever remove,
+    // still routing alerts and still in every backup, with no owner. Business
+    // rule 35 — the sync only ever deletes what it wrote, and this is the
+    // other half of that promise.
+    const wasSyncing = existing.enabled && (existing.config as Record<string, unknown>)?.enableDirectorySync === true;
+    const stillSyncing = updated.enabled && ((updated.config as Record<string, unknown>) || {}).enableDirectorySync === true;
+    if (wasSyncing && !stillSyncing) {
+      await purgeDirectoryContacts(
+        req.params.id as string,
+        updated.enabled ? "directory sync switched off" : "integration disabled",
+        req.session?.username,
+      ).catch((err: any) => {
+        logEvent({ action: "contact.directory_sync.purge_failed", resourceType: "integration", resourceId: req.params.id, resourceName: updated.name, actor: req.session?.username, level: "error", message: `Could not remove directory-synced contacts for "${updated.name}": ${err?.message || "Unknown error"}` });
+      });
+    }
+    // The opted-in set is cached for 60s; a config change must not leave a
+    // just-disabled directory servable from it. (bumpDirectoryCache had no
+    // callers at all before this — the header claimed a config change dropped
+    // the cache and nothing did it.)
+    if (existing.type === "entraid" || existing.type === "activedirectory") bumpDirectoryCache();
+
     const finalConfig = (updated.config as Record<string, unknown>) || {};
     const response: Record<string, unknown> = stripSecret(updated);
 
@@ -1321,8 +1386,16 @@ router.delete("/:id", async (req, res, next) => {
   try {
     const existing = await prisma.integration.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new AppError(404, "Integration not found");
+    // BEFORE the row goes. DirectoryContactSource deliberately has no FK on
+    // integrationId (a cascade would strip the provenance and strand the
+    // contacts it justified), so this is the only thing that cleans up.
+    await purgeDirectoryContacts(req.params.id as string, "integration deleted", req.session?.username)
+      .catch((err: any) => {
+        logEvent({ action: "contact.directory_sync.purge_failed", resourceType: "integration", resourceId: req.params.id, resourceName: existing.name, actor: req.session?.username, level: "error", message: `Could not remove directory-synced contacts for "${existing.name}": ${err?.message || "Unknown error"}` });
+      });
     await prisma.integration.delete({ where: { id: req.params.id } });
     invalidateMonitorSettingsCache({ integrationId: req.params.id });
+    if (existing.type === "entraid" || existing.type === "activedirectory") bumpDirectoryCache();
     logEvent({ action: "integration.deleted", resourceType: "integration", resourceId: req.params.id, resourceName: existing.name, actor: req.session?.username, message: `Integration "${existing.name}" deleted` });
     res.status(204).send();
   } catch (err) {

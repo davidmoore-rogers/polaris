@@ -78,6 +78,7 @@ import * as autoMonitor from "../autoMonitorInterfacesService.js";
 import * as autoMonitorStorage from "../autoMonitorStorageService.js";
 import * as agentAutoDeploy from "../agentAutoDeployService.js";
 import * as presenceVerification from "../presenceVerificationService.js";
+import * as directorySync from "../directorySyncService.js";
 import { recomputeDependencyTree } from "../dependencyTreeService.js";
 import { collectManagementAccess, type DeviceAccessGroup } from "../fortinetManagementAccessService.js";
 import { runDescriptionSyncForIntegration } from "../descriptionSyncService.js";
@@ -877,9 +878,11 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       }
     }
 
-    // This one line gates all three post-sync passes below — agent
-    // auto-deploy, interface/storage auto-monitor, and presence verification
-    // — i.e. the entire per-class Monitoring tab for an asset-only type.
+    // This one line gates the four post-sync passes below — agent
+    // auto-deploy, interface/storage auto-monitor, presence verification and
+    // the address-book directory sync — i.e. the entire per-class Monitoring
+    // tab for an asset-only type. (The fourth is narrower still: only the two
+    // DIRECTORY types have a directory of people to sync.)
     const assetsOnly = integration.type === "entraid" || integration.type === "activedirectory"
       || integration.type === "vcenter" || integration.type === "azurearc";
 
@@ -915,6 +918,37 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
           })
           .catch((err: any) => {
             logEvent({ action: "integration.presence_verification.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Presence verification failed for "${integrationName}": ${err?.message || "Unknown error"}` });
+          });
+      }
+      // 4) Address-book directory (GAL) sync — business rule 35. LAST, so a
+      //    directory outage or a revoked Graph grant can never affect the
+      //    asset passes above; and only for the two integration types that
+      //    have a directory of PEOPLE (vCenter and Arc do not).
+      //
+      //    Opt-in (config.enableDirectorySync, default off) and deliberately
+      //    NOT its own scheduler job: the run it belongs to already holds the
+      //    credentials, already has an interval an operator chose, and already
+      //    reports its progress — a second timer would be a second thing to
+      //    reason about for no gain.
+      if (
+        (integration.type === "entraid" || integration.type === "activedirectory") &&
+        (config as Record<string, unknown>).enableDirectorySync === true
+      ) {
+        const galStart = Date.now();
+        await directorySync
+          .runDirectorySync({
+            integrationId,
+            integrationName,
+            integrationType: integration.type,
+            config: config as Record<string, unknown>,
+            actor,
+            signal: ac.signal,
+          })
+          .then(() => observeDiscoveryPhase(integrationType, "gal-sync", (Date.now() - galStart) / 1000))
+          .catch((err: any) => {
+            // The message may carry a transport error but never a person: the
+            // readers log integration ids, not directory content.
+            logEvent({ action: "integration.directory_sync.error", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level: "error", message: `Address-book directory sync failed for "${integrationName}": ${err?.message || "Unknown error"}` });
           });
       }
     }
