@@ -6667,16 +6667,18 @@ function credHttpCheckFields() {
         '<p class="hint">Leave blank to accept any 2xx. Redirects are never followed, so set this to 301/302 only if the redirect itself is the healthy answer.</p>' +
       '</div>' +
       '<div class="form-group"><label>Match</label>' +
-        '<select id="f-tchk-matchmode" style="max-width:240px">' +
-          '<option value="contains" selected>Contains this text</option>' +
-          '<option value="regex">Matches this regular expression</option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="form-group">' +
-        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-          '<input type="checkbox" id="f-tchk-casesensitive">' +
-          '<span>Case sensitive</span>' +
-        '</label>' +
+        // flex-wrap so the checkbox drops below the select on a narrow modal
+        // rather than being clipped out of reach.
+        '<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">' +
+          '<select id="f-tchk-matchmode" style="max-width:240px">' +
+            '<option value="contains" selected>Contains this text</option>' +
+            '<option value="regex">Matches this regular expression</option>' +
+          '</select>' +
+          '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">' +
+            '<input type="checkbox" id="f-tchk-casesensitive">' +
+            '<span>Case sensitive</span>' +
+          '</label>' +
+        '</div>' +
       '</div>' +
       '<div class="form-group"><label>Expected content</label>' +
         '<input type="text" id="f-tchk-body" placeholder="e.g. OK">' +
@@ -8061,14 +8063,17 @@ function _widgetHttpCheckForm(check, credentialId) {
         '<select class="mfg-http-matchmode" style="width:100%;font-size:0.82rem">' +
           '<option value="contains"' + (mode === "contains" ? " selected" : "") + '>Contains</option>' +
           '<option value="regex"' + (mode === "regex" ? " selected" : "") + '>Regex</option>' +
-        '</select>') +
+        '</select>' +
+        '<label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:0.8rem;margin-top:4px">' +
+          '<input type="checkbox" class="mfg-http-casesensitive"' + (c.caseSensitive === true ? " checked" : "") + '>' +
+          '<span>Case sensitive</span>' +
+        '</label>') +
       _widgetFormField("Expected content",
         '<input type="text" class="mfg-http-body" value="' + escapeHtml(c.expectBody || "") + '" placeholder="e.g. OK" style="width:100%;font-size:0.82rem">') +
     '</div>' +
     '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:0.8rem">' +
       '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-https"' + (c.useHttps === true ? " checked" : "") + '><span>Use HTTPS</span></label>' +
       '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-verifytls"' + (c.verifyTls === true ? " checked" : "") + '><span>Verify TLS</span></label>' +
-      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-casesensitive"' + (c.caseSensitive === true ? " checked" : "") + '><span>Case sensitive</span></label>' +
     '</div>' +
     '<p class="hint" style="margin-top:8px">Records a pass/fail 0/1 (alertable as <strong>Custom state value</strong>) plus the response time — a wrong status code or missing content is recorded as a failure, and it is an <strong>automation</strong> that decides whether that means the device is down. Leave <strong>Model regex</strong> above blank to check every ' + '' + 'device of this manufacturer. Dial the check in against a real device from <strong>Credentials → Test Connection</strong> first.</p>';
 }
