@@ -559,9 +559,37 @@
       source: "deviceRegion",
       id: "deviceRegion",
       name: "Asset’s Region Users",
-      description: "Every user whose region tags match the triggering device’s own region: tag",
+      description: "Every user whose region tags match the triggering device’s own region: tag (any level)",
     },
   ];
+
+  /**
+   * The dynamic Regions entries for an install whose regions are NESTED: one
+   * per asset-relative level, so an operator can put front-line staff on the
+   * trigger and the division's managers on the escalation.
+   *
+   * Offered ONLY when something is actually nested (`maxLevel >= 2`). On a flat
+   * catalogue "L1 Region Users" is a synonym for the entry above, and offering
+   * it would invite a rule that quietly changes meaning the day someone draws
+   * a containing polygon.
+   */
+  function regionDynamicEntries(maxLevel) {
+    var out = REGION_DYNAMIC.slice();
+    var top = typeof maxLevel === "number" ? maxLevel : 1;
+    if (top < 2) return out;
+    for (var n = 1; n <= top; n++) {
+      out.push({
+        source: "deviceRegionLevel",
+        id: "deviceRegionLevel:" + n,
+        level: n,
+        name: "Asset’s L" + n + " Region Users",
+        description: n === 1
+          ? "The device’s own most-specific region"
+          : "The region " + (n - 1) + " level" + (n - 1 === 1 ? "" : "s") + " out from the device’s own region",
+      });
+    }
+    return out;
+  }
 
   function pickerBodyHtml() {
     return '' +
@@ -581,7 +609,9 @@
       '</div>' +
       '<div data-ab-pane="regions" style="display:none">' +
         '<p class="hint" style="margin-top:0">Pick a region to reach every user tagged with it, or ' +
-          '<strong>Asset’s Region Users</strong>, which resolves from the region of the device that triggered the alert.</p>' +
+          '<strong>Asset’s Region Users</strong>, which resolves from the region of the device that triggered the alert. ' +
+          'Where regions are nested, <strong>L1</strong> is the device’s own region and higher levels are the regions ' +
+          'that contain it — so L1 reaches the local team and L2 reaches whoever covers the division.</p>' +
         '<div id="ab-pick-regions"><p class="empty-state">Loading…</p></div>' +
       '</div>';
   }
@@ -591,7 +621,7 @@
       : src === "contact" ? "Contact"
         : src === "entra" ? "Entra"
           : src === "region" ? "Region"
-            : (src === "deviceRegion" || src === "assetContacts") ? "Dynamic"
+            : (src === "deviceRegion" || src === "deviceRegionLevel" || src === "assetContacts") ? "Dynamic"
               : "Directory";
     return '<span class="badge" style="font-size:0.7rem">' + escapeHtml(label) + "</span>";
   }
@@ -618,6 +648,7 @@
       var settled = null;
       var entries = [];       // People pane (search results)
       var regionEntries = []; // Regions pane (one row per map region)
+      var regionMaxLevel = 1;  // how deep nesting goes — decides the level entries
 
       var ui = buildOverlay(
         Z_PICKER,
@@ -678,7 +709,7 @@
       function renderRegions() {
         var box = q("#ab-pick-regions");
         if (!box) return;
-        var rows = REGION_DYNAMIC.map(pickRow).concat(regionEntries.map(pickRow));
+        var rows = regionDynamicEntries(regionMaxLevel).map(pickRow).concat(regionEntries.map(pickRow));
         box.innerHTML = pickTable(rows) +
           (regionEntries.length
             ? ""
@@ -724,7 +755,7 @@
         var key = cb.getAttribute("data-ab-pick");
         // Both panes' pools, so a selection survives switching tabs — every
         // paint re-reads the checkbox state from `chosen`.
-        var pool = entries.concat(PEOPLE_DYNAMIC, REGION_DYNAMIC, regionEntries);
+        var pool = entries.concat(PEOPLE_DYNAMIC, regionDynamicEntries(regionMaxLevel), regionEntries);
         var entry = null;
         for (var i = 0; i < pool.length; i++) if (pickKey(pool[i]) === key) entry = pool[i];
         if (cb.checked && entry) chosen[key] = entry;
@@ -770,6 +801,8 @@
         regionEntries = ((schema.options && schema.options.regions) || []).map(function (name) {
           return { source: "region", id: name, name: name, description: "Every user tagged with this region" };
         });
+        var lv = schema.options && schema.options.regionLevels;
+        regionMaxLevel = lv && typeof lv.maxLevel === "number" ? lv.maxLevel : 1;
         renderRegions();
       }).catch(function () {
         renderRegions(); // degrade to the two dynamic entries — they need no catalogue
