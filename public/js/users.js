@@ -1597,15 +1597,41 @@ function regionPillsHtml(names) { return window.PolarisRegionPills.html(names); 
 // same color. Click toggles. Region tags previously assigned by hand that no
 // longer exist in the catalogue are shown at the top in gray with a remove ×
 // so admins can clean them up without losing the assignment data.
+//
+// Two things this must NOT do, both of which read to an operator as "my
+// assignments were wiped":
+//
+//  - Call a tag unknown on a CASE difference. The catalogue is keyed by the
+//    region's stored name, and every matcher on both sides of the wire
+//    compares case-insensitively (selSet here, `normalizeNeedle` in
+//    notificationRecipientService, `key()` in regionHierarchyService), so a
+//    user tagged "southeast" against a region named "Southeast" is scoped
+//    correctly and was being listed as an orphan AND as a selected pill.
+//  - Call a tag unknown when the CATALOGUE never loaded. `GET /map/regions`
+//    needs mapRegions=read, so a user administrator without it gets an empty
+//    map -- which is not evidence about any tag. Absent a catalogue the
+//    assignments render as neutral chips under a note saying so, because
+//    "no longer in the map" would be a claim we cannot support.
 function regionPickerHtml(idPrefix, selected) {
   var sel = Array.isArray(selected) ? selected.slice() : [];
   var selSet = {};
   sel.forEach(function (n) { selSet[n.toLowerCase()] = true; });
 
-  var orphans = sel.filter(function (n) { return !_regionByName.hasOwnProperty(n); });
+  var catalogLoaded = !!(window.PolarisRegionPills && window.PolarisRegionPills.isLoaded());
+  var known = {};
+  Object.keys(_regionByName).forEach(function (n) { known[n.toLowerCase()] = true; });
+
+  // With no catalogue nothing can be judged missing, so every assignment is
+  // carried in the same chip row -- kept, removable, and honestly labeled.
+  var orphans = catalogLoaded
+    ? sel.filter(function (n) { return !known[String(n).toLowerCase()]; })
+    : sel.slice();
+  var orphanNote = catalogLoaded
+    ? 'Unknown region tags (no longer in the map). Click × to remove.'
+    : 'Assigned region tags. The map-region list could not be read (requires Map Regions read), so these cannot be matched against it here.';
   var orphanHtml = orphans.length
     ? '<div style="margin-bottom:0.5rem">' +
-        '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-bottom:0.25rem">Unknown region tags (no longer in the map). Click × to remove.</div>' +
+        '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-bottom:0.25rem">' + escapeHtml(orphanNote) + '</div>' +
         orphans.map(function (n) {
           return '<span class="badge region-chip" data-region="' + escapeHtml(n) + '" data-selected="1" style="display:inline-flex;align-items:center;gap:0.35rem;background:rgba(158,158,158,0.18);color:#9e9e9e;border:1px solid rgba(158,158,158,0.45);padding:0.2rem 0.5rem;margin:0.15rem 0.25rem 0.15rem 0">' +
             escapeHtml(n) +
@@ -1615,8 +1641,13 @@ function regionPickerHtml(idPrefix, selected) {
       '</div>'
     : '';
 
+  // Same distinction: an empty catalogue is only "none drawn yet" when we
+  // actually read it.
+  var emptyNote = catalogLoaded
+    ? 'No map regions defined yet. Create regions on the Device Map first.'
+    : 'Map regions unavailable. Listing them requires Map Regions read; existing assignments above are unaffected.';
   var available = _regionList.length === 0
-    ? '<div style="font-size:0.85rem;color:var(--color-text-tertiary);padding:0.5rem;border:1px dashed var(--color-border);border-radius:6px">No map regions defined yet. Create regions on the Device Map first.</div>'
+    ? '<div style="font-size:0.85rem;color:var(--color-text-tertiary);padding:0.5rem;border:1px dashed var(--color-border);border-radius:6px">' + escapeHtml(emptyNote) + '</div>'
     : '<div class="region-pill-grid" style="display:flex;flex-wrap:wrap;gap:0.4rem">' +
         _regionList.map(function (n) {
           var hex = regionColorFor(n);

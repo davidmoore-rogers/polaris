@@ -9,11 +9,16 @@
  * Group-derived tags are re-resolved live from the user's last-seen SSO
  * groups (never persisted onto the user's own columns), so a GroupMapping
  * edit takes effect without re-login.
+ *
+ * It also owns the WRITE side of the same three columns: carrying a map-region
+ * rename into them, and reporting who a region delete strands. See the section
+ * comment further down for why that lives here and not in mapRegionService.
  */
 
 import { prisma } from "../db.js";
+import type { Prisma } from "../generated/prisma/client.js";
 import { resolveGroupsToAccess, mappingProviderForAuthProvider } from "./groupMappingService.js";
-import { unionTags } from "../utils/tagNormalize.js";
+import { unionTags, renameTagInList } from "../utils/tagNormalize.js";
 
 export interface TagScope {
   user: string[];
@@ -86,4 +91,125 @@ export async function getEffectiveRegionTags(userId: string): Promise<string[]> 
   if (!u) return [];
   const scopes = await resolveTagScopesForUser(u);
   return scopes.regionTags.effective;
+}
+
+// ─── The write side: a region's name changing, or going away ────────────────
+//
+// The three principal scope columns (`User.regionTags`, `Role.regionTags`,
+// `GroupMapping.regionTags`) hold BARE region names and are deliberately not
+// FK'd to any registry, so nothing in the database ties them to the region they
+// name. `mapRegionService` rewrites asset tags, subnet tags and the `Tag`
+// registry on a rename and never touched these — which meant a rename revoked
+// every scoped operator's region without a word: the tag stayed in the column,
+// matched no region, and the Users page filed it under "Unknown region tags (no
+// longer in the map)".
+//
+// They live HERE rather than in mapRegionService because this module already
+// owns the principal side of region scope (it is the one place that reads all
+// three columns), and because mapRegionService is imported by jobs that have no
+// business pulling in group-mapping resolution.
+
+/** What a rename moved, named for the audit Event. */
+export interface PrincipalScopeMoves {
+  /** Usernames whose own scope was rewritten. */
+  users: string[];
+  /** Role names whose scope was rewritten. */
+  roles: string[];
+  /** `provider:groupKey` for each IdP mapping rewritten. */
+  groupMappings: string[];
+  total: number;
+}
+
+const emptyMoves = (): PrincipalScopeMoves => ({ users: [], roles: [], groupMappings: [], total: 0 });
+
+/**
+ * Carry a region rename into every principal's region scope.
+ *
+ * Matching is case-insensitive because every consumer that resolves a region
+ * tag compares that way (`normalizeNeedle` in notificationRecipientService,
+ * `key()` in regionHierarchyService, the Users page picker), so a tag differing
+ * only in case is a live assignment and must move too.
+ *
+ * Scale: three `findMany`s over principal tables — users, roles and IdP group
+ * mappings are operator-created and number in the tens to low hundreds even on
+ * a 2000-asset install, so this reads them whole and filters in memory rather
+ * than pushing a case-insensitive array predicate into SQL. Only rows that
+ * actually change are written, batched into one transaction.
+ *
+ * Callers must invalidate the recipient index afterwards
+ * (`notificationRecipientService.bumpRecipientIndex`) — imported there, not
+ * here, because that module imports this one.
+ */
+export async function renameRegionInPrincipalScopes(
+  previousName: string,
+  nextName: string,
+): Promise<PrincipalScopeMoves> {
+  const from = String(previousName ?? "").trim();
+  const to = String(nextName ?? "").trim();
+  if (!from || !to || from.toLowerCase() === to.toLowerCase()) return emptyMoves();
+
+  const [users, roles, mappings] = await Promise.all([
+    prisma.user.findMany({ select: { id: true, username: true, regionTags: true } }),
+    prisma.role.findMany({ select: { id: true, name: true, regionTags: true } }),
+    prisma.groupMapping.findMany({ select: { id: true, provider: true, groupKey: true, regionTags: true } }),
+  ]);
+
+  const moves = emptyMoves();
+  const writes: Prisma.PrismaPromise<unknown>[] = [];
+
+  for (const u of users) {
+    const next = renameTagInList(u.regionTags, from, to);
+    if (!next) continue;
+    moves.users.push(u.username);
+    writes.push(prisma.user.update({ where: { id: u.id }, data: { regionTags: next } }));
+  }
+  for (const r of roles) {
+    const next = renameTagInList(r.regionTags, from, to);
+    if (!next) continue;
+    moves.roles.push(r.name);
+    writes.push(prisma.role.update({ where: { id: r.id }, data: { regionTags: next } }));
+  }
+  for (const m of mappings) {
+    const next = renameTagInList(m.regionTags, from, to);
+    if (!next) continue;
+    moves.groupMappings.push(`${m.provider}:${m.groupKey}`);
+    writes.push(prisma.groupMapping.update({ where: { id: m.id }, data: { regionTags: next } }));
+  }
+
+  if (writes.length > 0) await prisma.$transaction(writes);
+  moves.total = moves.users.length + moves.roles.length + moves.groupMappings.length;
+  return moves;
+}
+
+/**
+ * Which principals are scoped to `name` — the DELETE counterpart, which
+ * deliberately only REPORTS.
+ *
+ * A delete is not a rename: there is no new name to move the assignment to, and
+ * stripping it would destroy an operator's statement of who is answerable for
+ * that area with nothing to restore it from (a region redrawn under the same
+ * name is common). So the tag is left in place — the Users page already renders
+ * it as removable — and the deletion Event names who is now holding a tag that
+ * matches no region, which is the part that was invisible.
+ */
+export async function principalsScopedToRegion(name: string): Promise<PrincipalScopeMoves> {
+  const key = String(name ?? "").trim().toLowerCase();
+  if (!key) return emptyMoves();
+  const holds = (tags: string[] | null) =>
+    Array.isArray(tags) && tags.some((t) => String(t ?? "").trim().toLowerCase() === key);
+
+  const [users, roles, mappings] = await Promise.all([
+    prisma.user.findMany({ select: { username: true, regionTags: true } }),
+    prisma.role.findMany({ select: { name: true, regionTags: true } }),
+    prisma.groupMapping.findMany({ select: { provider: true, groupKey: true, regionTags: true } }),
+  ]);
+
+  const moves = emptyMoves();
+  moves.users = users.filter((u) => holds(u.regionTags)).map((u) => u.username);
+  moves.roles = roles.filter((r) => holds(r.regionTags)).map((r) => r.name);
+  moves.groupMappings = mappings
+    .filter((m) => holds(m.regionTags))
+    .map((m) => `${m.provider}:${m.groupKey}`);
+  moves.total = moves.users.length + moves.roles.length + moves.groupMappings.length;
+  return moves;
 }

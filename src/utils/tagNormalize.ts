@@ -84,3 +84,50 @@ export function unionTags(...lists: (readonly string[] | null | undefined)[]): s
   }
   return Array.from(seen.values()).sort((a, b) => a.localeCompare(b));
 }
+
+/**
+ * Replace one tag with another in a principal's tag list, case-insensitively.
+ * Returns `null` when the list does not carry `from` — so a caller can update
+ * only the rows that actually change.
+ *
+ * Exists for region RENAME. A map region's name is the ONLY thing tying a
+ * `User`/`Role`/`GroupMapping` region tag to the region it means: the scope
+ * columns are deliberately not FK'd to a registry (a region can be pre-assigned
+ * before its polygon is drawn), so a rename that does not carry them silently
+ * revokes the scope — the tag stays in the column, matches no region, and every
+ * consumer that resolves by name (Device Map "My regions", the dashboard region
+ * filter, `recipientDeviceRegion` and level-scoped alert routing) quietly
+ * reaches nothing. Following the rename preserves what the operator said; the
+ * alternative preserves only the string they typed.
+ *
+ * Position is kept (the picker renders in stored order) and the result is
+ * deduped case-insensitively, because the principal may already hold the new
+ * name — a rename must not be able to grow the list.
+ */
+export function renameTagInList(
+  tags: readonly string[] | null | undefined,
+  from: string,
+  to: string,
+): string[] | null {
+  if (!Array.isArray(tags) || tags.length === 0) return null;
+  const fromKey = String(from ?? "").trim().toLowerCase();
+  const target = String(to ?? "").trim();
+  if (!fromKey || !target) return null;
+
+  let hit = false;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of tags) {
+    if (typeof raw !== "string") continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const matched = trimmed.toLowerCase() === fromKey;
+    if (matched) hit = true;
+    const value = matched ? target : trimmed;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return hit ? out : null;
+}

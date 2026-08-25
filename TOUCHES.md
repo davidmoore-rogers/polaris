@@ -1828,19 +1828,22 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ## services/regionScopeService.ts
 
-**What it owns:** The shared effective-tag resolver — `union(role, user, group)` for region + other tags.
+**What it owns:** The principal side of region scope — both directions. READ: the shared effective-tag resolver, `union(role, user, group)` for region + other tags. WRITE: carrying a region RENAME into `User.regionTags` / `Role.regionTags` / `GroupMapping.regionTags`, and reporting who a region DELETE strands.
 
-**Public API:** `resolveTagScopesForUser(u)`, `getEffectiveRegionTags(userId)`, `TagScope`/`UserTagScopes`.
+**Public API:** `resolveTagScopesForUser(u)`, `getEffectiveRegionTags(userId)`, `TagScope`/`UserTagScopes`, `renameRegionInPrincipalScopes(previousName, nextName)`, `principalsScopedToRegion(name)`, `PrincipalScopeMoves`.
 
-**Cross-service deps:** `prisma` (user + role), `groupMappingService.resolveGroupsToAccess`, `tagNormalize.unionTags`.
+**Cross-service deps:** `prisma` (user + role + groupMapping), `groupMappingService.resolveGroupsToAccess`, `tagNormalize.unionTags` + `tagNormalize.renameTagInList` (pure rewrite; unit-tested in tests/unit/regionScopeRename.test.ts).
 
-**Used by:** `src/api/routes/auth.ts` (`GET /auth/me`), `src/api/routes/notifications.ts` (region-scoped list via `getEffectiveRegionTags`).
+**Used by:** `src/api/routes/auth.ts` (`GET /auth/me`), `src/api/routes/notifications.ts` (region-scoped list via `getEffectiveRegionTags`), `src/api/routes/mapRegions.ts` (`PUT` rename → `renameRegionInPrincipalScopes`, `DELETE` → `principalsScopedToRegion`).
 
 **Invariants:**
 - Group-derived tags are re-resolved live from `ssoGroups` each call — never persisted onto the user's own columns.
 - Empty effective tags means "unrestricted" downstream.
+- **A rename must follow the principal columns; a delete must NOT strip them.** The three scope columns hold BARE region names with no FK to any registry, so the name is the only link to the region it means: a rename that leaves them behind revokes the scope silently (tag present, matches no region, every name-resolving consumer reaches nothing), which is exactly what happened before this existed. A delete has no new name to move an assignment to and a region is routinely redrawn under the same name, so the assignment survives and the deletion Event names the holders instead.
+- Rename matching is CASE-INSENSITIVE, because every consumer that resolves a region tag compares that way (`normalizeNeedle` here-adjacent in notificationRecipientService, `key()` in regionHierarchyService, the Users page picker). A case-only rename is a no-op — `updateRegion` does not consider it a rename either.
+- `renameTagInList` returns `null` when nothing changed, so only rows that actually move are written, and it dedupes case-insensitively — a rename onto a name the principal already holds must not grow the list.
 
-**When changing this:** `/auth/me` and the notifications list must stay on this helper so the operator-visible scope and the enforced scope can't drift.
+**When changing this:** `/auth/me` and the notifications list must stay on this helper so the operator-visible scope and the enforced scope can't drift. The rename's caller must call `notificationRecipientService.bumpRecipientIndex()` — that module imports THIS one, so the bump cannot live here; it sits in the route. Scale: the write path reads users/roles/mappings whole and filters in memory (tens to low hundreds of operator-created rows even on a 2000-asset install) rather than pushing a case-insensitive array predicate into SQL.
 
 ---
 
@@ -2213,6 +2216,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `applyOneRegion` adds the tag BEFORE recording provenance — a crash between the two leaves a tagged-but-unrecorded target, which reads as operator-owned. The reverse order would record a tag never written and strip it on the next pass.
 - Manually removing a region tag from an in-polygon asset will be re-added on the next reconcile (polygon membership is authoritative in the additive direction).
 - Tag-registry rows under category "Map Regions" stay in 1:1 correspondence with region names (create upserts; rename rotates; delete removes).
+- **The rename's reach does NOT end at this service.** `applyRename` rewrites asset tags, subnet tags and the `Tag` registry; the RBAC scope columns (`User`/`Role`/`GroupMapping.regionTags`) are rewritten by `regionScopeService.renameRegionInPrincipalScopes`, called from the route beside `applyRename`. It lives there, not here, because jobs import this service and have no business pulling in group-mapping resolution. A new rename path must call both, or it revokes every scoped operator's region in silence.
 - Subnet region tags obey the SAME provenance-bounded contract as asset tags, and `Subnet.tags` has no other system writer (`tagAssignmentService` targets assets only; `subnet` is a criteria FIELD there, not a target) — an operator editing a network in the IPAM form can drop the inherited tag, and the next reconcile re-adds it.
 
 **When changing this:**
