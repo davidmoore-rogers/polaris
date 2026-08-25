@@ -1474,7 +1474,9 @@ function _assetsUpdateBulkBar() {
     var hasQuarantined = selected.some(function (a) { return a.status === "quarantined"; });
     var bQ  = document.getElementById("assets-bulk-quarantine-btn");
     var bUQ = document.getElementById("assets-bulk-unquarantine-btn");
-    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable ? "" : "none";
+    // Quarantine (but not Release) additionally needs push enabled on some
+    // integration — see _quarantinePushAvailable().
+    if (bQ)  bQ.style.display  = count > 0 && hasQuarantineable && _quarantinePushAvailable() ? "" : "none";
     if (bUQ) bUQ.style.display = count > 0 && hasQuarantined    ? "" : "none";
   }
 }
@@ -1618,6 +1620,39 @@ function _renderLeaseBody(r, ctx) {
   '</div>';
 }
 
+// ─── Quarantine push availability ───────────────────────────────────────────
+//
+// Quarantine push is per-integration (`config.pushQuarantine`, the DHCP-Push-
+// style toggle on the Quarantine Push tab of the FortiManager / FortiGate
+// integration) and OFF by default. With it off, quarantineAsset() skips every
+// sighting's integration, lands on zero targets and throws a 502 reading
+// "0/0 FortiGate(s) accepted the push" — a device-shaped failure for what is
+// really an unconfigured feature. So the verbs are hidden instead of offered:
+// GET /assets/quarantine-availability answers whether ANY enabled Fortinet
+// integration carries the toggle.
+//
+// `null` means "not answered yet or the probe failed" and reads as AVAILABLE:
+// fail-open, because the fetch resolves in the first moment of the page while
+// the affordances are only built on a click/panel-open, and hiding a verb an
+// operator needs on a transient error is worse than surfacing the push's own
+// error. Release is never gated — releaseQuarantine unpushes from the targets
+// recorded on the asset without consulting the toggle, so an asset quarantined
+// before push was switched off must stay releasable.
+var _qtnPushEnabled = null;
+
+function _quarantinePushAvailable() { return _qtnPushEnabled !== false; }
+
+if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "function") {
+  userReady.then(function () {
+    // Only roles that can act on it ask — the route is read-gated on the same
+    // key, so a viewer without it would just collect a 403 per page load.
+    if (!canQuarantineAssets()) return null;
+    return api.assets.quarantineAvailability().then(function (r) {
+      _qtnPushEnabled = !!(r && r.pushEnabled);
+    });
+  }).catch(function () { _qtnPushEnabled = null; });
+}
+
 /**
  * Quarantine verbs for one asset row, as row-context-menu items (0 or 1 of them).
  *
@@ -1634,6 +1669,8 @@ function _renderLeaseBody(r, ctx) {
  *  - Fortinet infrastructure (firewall / switch / access point) can never be
  *    quarantined: blocking the device that enforces the block would lock the
  *    operator out of their own network.
+ *  - No enabled Fortinet integration has quarantine push turned on → nothing
+ *    to push to, so no verb (_quarantinePushAvailable).
  */
 /**
  * Every verb offered for one asset row, in menu order:
@@ -1678,6 +1715,9 @@ function _quarantineMenuItems(a) {
     }];
   }
   if (a.assetType === 'firewall' || a.assetType === 'switch' || a.assetType === 'access_point') return [];
+  // No enabled integration has quarantine push turned on — the verb can only
+  // 502 with "0/0 FortiGate(s) accepted the push".
+  if (!_quarantinePushAvailable()) return [];
   return [{
     label: "Quarantine…",
     danger: true,
@@ -5048,7 +5088,10 @@ async function openViewModal(id) {
     // Gated on assetsQuarantine, NOT assets — see canQuarantineAssets() in
     // app.js. A role may hold either key without the other, and every route the
     // tab calls checks the quarantine key.
-    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ))) {
+    // ...and only offered on a not-yet-quarantined asset when quarantine push
+    // is enabled somewhere (_quarantinePushAvailable); an already-quarantined
+    // asset keeps the tab regardless so Release + the push targets stay visible.
+    if (canQuarantineAssets() && (a.status === "quarantined" || (hasMac && !isInfraQ && _quarantinePushAvailable()))) {
       tabs.push({ key: "quarantine", label: a.status === "quarantined" ? "Quarantine ⚠" : "Quarantine", html: _assetQuarantineTabHTML(a) });
     }
     // Events tab — audit history scoped to this asset (resourceType=asset,

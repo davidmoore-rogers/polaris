@@ -581,7 +581,17 @@
         loadTelemetry(asset.id, st);
       });
     });
-    // Quarantine / release action button (hero).
+    // Quarantine / release action button (hero). The button renders
+    // synchronously (fail-open); the availability probe re-renders the wrap if
+    // it comes back saying no integration can be pushed to.
+    var qWarm = warmQuarantinePushAvailability();
+    if (qWarm) qWarm.then(function () {
+      if (_openId !== asset.id || quarantinePushAvailable()) return;
+      var wrap = document.getElementById("asset-quarantine-btn-wrap");
+      if (!wrap) return;
+      wrap.innerHTML = quarantineButtonHtml(asset);
+      wireQuarantineButton(asset, st);
+    });
     wireQuarantineButton(asset, st);
 
     // Back/refresh now live in the sheet header (wired once in ensureSheet).
@@ -1562,6 +1572,24 @@
     return (_PERM_RANK[have] || 0) >= _PERM_RANK.write;
   }
 
+  // Quarantine push is per-integration (`config.pushQuarantine`, off by
+  // default) — with it off on every enabled Fortinet integration the push
+  // resolves to zero targets and fails with "0/0 FortiGate(s) accepted the
+  // push", so the button is withheld rather than offered. Mirrors
+  // _quarantinePushAvailable() in assets.js, including fail-open on an
+  // unanswered/failed probe and never gating Release (releaseQuarantine
+  // unpushes from the targets recorded on the asset, toggle or not).
+  var _qtnPushEnabled = null;
+  var _qtnPushProbe = null;
+  function quarantinePushAvailable() { return _qtnPushEnabled !== false; }
+  function warmQuarantinePushAvailability() {
+    if (_qtnPushProbe || !canQuarantine()) return _qtnPushProbe;
+    _qtnPushProbe = api.assets.quarantineAvailability().then(function (r) {
+      _qtnPushEnabled = !!(r && r.pushEnabled);
+    }).catch(function () { _qtnPushEnabled = null; });
+    return _qtnPushProbe;
+  }
+
   function quarantineButtonHtml(asset) {
     if (!asset || !canQuarantine()) return "";
     if (asset.status === "quarantined") {
@@ -1569,7 +1597,7 @@
     }
     var isInfra = asset.assetType === "firewall" || asset.assetType === "switch" || asset.assetType === "access_point";
     var hasMac = !!(asset.macAddress || (asset.macAddresses && asset.macAddresses.length));
-    if (hasMac && !isInfra) {
+    if (hasMac && !isInfra && quarantinePushAvailable()) {
       return '<button class="btn btn-error btn-block" style="margin-top:12px;" id="asset-quarantine-btn" data-q="quarantine"><svg viewBox="0 0 24 24"><use href="#i-shield"/></svg>Quarantine</button>';
     }
     return "";

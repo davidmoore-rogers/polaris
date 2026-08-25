@@ -2744,11 +2744,13 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Push/pull FortiGate MAC quarantine via persistent `user.quarantine.targets` CMDB tree; orchestrates multi-FortiGate best-effort with per-device all-or-nothing atomicity.
 
-**Public API:** `quarantineAsset(), releaseQuarantine(), verifyAssetQuarantine(), buildTransportForIntegration(), pushQuarantineToFortigate(), unpushQuarantineFromFortigate(), normalizeMac(), quarantineTargetName()`
+**Public API:** `quarantineAsset(), releaseQuarantine(), verifyAssetQuarantine(), getQuarantinePushAvailability(), buildTransportForIntegration(), pushQuarantineToFortigate(), unpushQuarantineFromFortigate(), normalizeMac(), quarantineTargetName()`
 
 **Cross-service deps:** `assetSightingService.ts` (for candidate targeting).
 
-**Used by:** `src/api/routes/assets.ts,2115,2130,2168,2189 — quarantine/release/verify endpoints (4 routes)`, `src/services/discovery/discoveryEngine.ts — auto-quarantine post-discovery on new FortiGate sighting`
+**Used by:** `src/api/routes/assets.ts — quarantine/release/verify endpoints + GET /assets/quarantine-availability`, `src/services/discovery/discoveryEngine.ts — auto-quarantine post-discovery on new FortiGate sighting`
+
+**Availability probe readers (the UI gate):** `public/js/assets.js` (`_quarantinePushAvailable()` — row menu, bulk-bar Quarantine button, asset-details tab visibility), `public/js/mobile/asset-detail.js` (`quarantinePushAvailable()` — hero button), `public/js/api.js` (`api.assets.quarantineAvailability`)
 
 **Invariants:**
 - Infrastructure assets (firewall/switch/access_point) rejected at `quarantineAsset()` entry; release does NOT enforce type guard (operator can orphan old entries).
@@ -2758,11 +2760,14 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Standalone FortiGate + FMG (proxy/direct) both supported via `buildTransportForIntegration()` parity.
 - `quarantineTargets` JSON tracks per-target status: `"synced"` (verified), `"drift"` (missing on later verify), `"failed"` (push error); only `"synced"` eligible for drift-flip on verify.
 - Token-scoped quarantine (bearer token) filters sightings by integration before push; release refuses outright if quarantine touches out-of-scope integrations (no partial release).
+- **Push is per-integration and OFF by default** (`config.pushQuarantine`, the Quarantine Push tab on both Fortinet integration types), and `quarantineAsset()` silently SKIPS every sighting whose integration has it off. With it off fleet-wide the run lands on zero targets and throws `502 … 0/0 FortiGate(s) accepted the push` — a device-shaped error for a feature that was never enabled. `getQuarantinePushAvailability()` is the frontends' pre-check so the verb is withheld instead: install-wide (never per-asset — the row menu asks per row over a 2000-asset table), so on a mixed install it is the OPTIMISTIC answer and the push stays the authority.
+- **Release is never gated on that toggle**, and no UI surface may gate it: `releaseQuarantine()` unpushes from the targets recorded on the ASSET without consulting the integration config, so a device quarantined before an operator switched push off must stay releasable (the desktop tab likewise stays visible for an already-quarantined asset so Release + the recorded targets are reachable). The availability gate is also FAIL-OPEN — an unanswered or failed probe reads as available, since hiding a containment verb on a transient error is worse than surfacing the push's own error.
 
 **When changing this:**
 - Audit `fortigateService.ts` + `fortimanagerService.ts` transport compatibility if FortiOS version bumps or endpoint changes.
 - Check infrastructure-asset type list (firewall/switch/access_point) against the `BUILT_IN_ASSET_TYPES` constant in `src/utils/assetTypes.ts` + discovery source-kind tagging. (Custom operator-added AssetTypeDef rows DO NOT receive infrastructure special-casing — they fall through to "other"-like generic behavior.)
 - Verify `getSightingSettings()` Settings key and max-age filter alignment with caller expectations.
+- Adding another surface that STARTS a quarantine: gate it on `canQuarantineAssets()` (the `assetsQuarantine` key, seeded `write` for the built-in `assetsadmin` and `fullwrite` for `admin`) AND on the availability probe; `tests/unit/assetQuarantineGates.test.ts` + `tests/unit/assetRowMenu.test.ts` pin both, including that Release stays ungated.
 - Review rollback/error-logging in event payload (event action names: asset.quarantine.succeeded/partial/failed/released/unpush.failed).
 
 ---
