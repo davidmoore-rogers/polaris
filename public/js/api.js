@@ -916,6 +916,25 @@ const api = {
     update:  (id, b) => request("PUT", `/contacts/${id}`, b),
     delete:  (id)    => request("DELETE", `/contacts/${id}`),
   },
+  // Network Discovery — saved active scans of operator-supplied IP ranges
+  // ("+ Add Asset(s)" → Discovery on the Assets page). Every path is behind a
+  // networkScan:read floor; `adopt` additionally needs assets:write, so a
+  // caller may legitimately reach `run` and 403 on `adopt`.
+  networkScans: {
+    list:           ()          => request("GET",    "/network-scans"),
+    get:            (id)        => request("GET",    `/network-scans/${id}`),
+    create:         (body)      => request("POST",   "/network-scans", body),
+    update:         (id, body)  => request("PUT",    `/network-scans/${id}`, body),
+    delete:         (id)        => request("DELETE", `/network-scans/${id}`),
+    // 202 + the run row; the wizard then polls `run` until it goes terminal.
+    run:            (id)        => request("POST",   `/network-scans/${id}/run`, {}),
+    cancelRun:      (runId)     => request("POST",   `/network-scans/runs/${runId}/cancel`, {}),
+    getRun:         (runId)     => request("GET",    `/network-scans/runs/${runId}`),
+    adopt:          (runId, b)  => request("POST",   `/network-scans/runs/${runId}/adopt`, b),
+    // Pure IP math server-side (plus a known-address count) — no packets, so
+    // it is safe to call on every keystroke behind the usual debounce.
+    previewTargets: (body)      => request("POST",   "/network-scans/preview-targets", body),
+  },
   deliveryChannels: {
     list:        ()       => request("GET",    "/delivery-channels"),
     get:         (id)     => request("GET",    `/delivery-channels/${id}`),

@@ -182,6 +182,10 @@
   <!-- Network Discovery wizard, behind "+ Add Asset(s)" → Discovery.
        assets.js reads window.PolarisAssetDiscovery lazily at click time, so
        loading after it is fine; api.js + app.js above are hard requirements. -->
-  <script src="/js/assets-discovery.js"></script>
+  <script src="/js/assets-discovery.js"></script>
+  <!-- .discovery.json export / import. After the wizard, which reads
+       window.PolarisDiscoveryPortability guardedly (a page without it just
+       hides the Import/Export affordances). -->
+  <script src="/js/discovery-portability.js"></script>
 </body>
 </html>
