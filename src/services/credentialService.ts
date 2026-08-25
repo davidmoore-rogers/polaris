@@ -382,9 +382,12 @@ const CHECK_DEFINITION_FIELDS = [
  *    from a probe error column instead of the form they typed it into.
  *  - `path` is canonicalized (leading slash) so the stored value is what the
  *    request line will actually carry.
- *  - `caseSensitive` / `failOnMismatch` are only meaningful alongside an
- *    `expectBody`; a lone toggle is accepted rather than rejected (harmless,
- *    and rejecting it would 400 a form the operator is mid-way through).
+ *  - `caseSensitive` is only meaningful alongside an `expectBody`; a lone
+ *    toggle is accepted rather than rejected (harmless, and rejecting it would
+ *    400 a form the operator is mid-way through).
+ *  - `failOnMismatch` is STRIPPED. A mismatch now always fails (see
+ *    utils/httpCheck.ts), so a stored `false` would silently mean something the
+ *    UI can no longer express and the evaluator no longer honours.
  */
 export function validateHttpCheckDefinition(config: Record<string, unknown>): void {
   if (config.useHttps !== undefined && typeof config.useHttps !== "boolean") {
@@ -426,11 +429,15 @@ export function validateHttpCheckDefinition(config: Record<string, unknown>): vo
       throw new AppError(400, `HTTP check regex is invalid: ${err?.message || "unparseable"}`);
     }
   }
-  for (const flag of ["caseSensitive", "failOnMismatch", "verifyTls"]) {
+  for (const flag of ["caseSensitive", "verifyTls"]) {
     if (config[flag] !== undefined && typeof config[flag] !== "boolean") {
       throw new AppError(400, `HTTP check ${flag} must be a boolean`);
     }
   }
+  // Retired knob — see the doc comment. Dropped rather than rejected so an
+  // existing widget re-saves cleanly instead of 400-ing on a field the form
+  // never sent.
+  delete config.failOnMismatch;
 }
 
 export function validateConfig(type: CredentialType, config: Record<string, unknown>): void {

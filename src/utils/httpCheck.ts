@@ -1,9 +1,10 @@
 /**
  * src/utils/httpCheck.ts
  *
- * Pure evaluation core for the "http" polling method — an HTTP GET against a
- * device that decides "up" from the STATUS CODE and, optionally, from a string
- * the response body must contain. Everything here is side-effect free so the
+ * Pure evaluation core for the HTTP CHECK — an HTTP GET against a device whose
+ * result is decided by the STATUS CODE and, optionally, by a string the response
+ * body must contain. It ran as a polling method until 2026-08 and is now a
+ * manufacturer custom widget (business rule 33). Everything here is side-effect free so the
  * decision can be unit-tested without a socket; `probeHttp` in
  * monitoringService.ts owns the transport and calls `evaluateHttpCheck` with
  * what came back.
@@ -13,13 +14,17 @@
  * Neither proves the thing the device exists to do still works: a web server
  * that has lost its backend still completes the TCP handshake and still
  * returns 200 — with an error page in the body. So the body match is the
- * load-bearing half of this method, and `failOnMismatch` (default TRUE) is what
- * makes it load-bearing: a 200 whose body doesn't match reads as DOWN, with the
- * reason naming the content that was missing rather than a generic failure.
- * Operators who want reachability-only semantics turn that toggle off and get
- * the mismatch recorded in the probe's error text while the probe still
- * succeeds — a deliberate middle state, not a no-op: it keeps the evidence
- * without alerting on it.
+ * load-bearing half of this check: a 200 whose body doesn't match FAILS, with
+ * the reason naming the content that was missing rather than a generic failure.
+ *
+ * There was a `failOnMismatch` toggle that let a mismatch pass anyway. It made
+ * sense while this drove `monitorStatus` and an operator might want
+ * reachability-only semantics — but the check is a manufacturer widget now: it
+ * records an outcome and an automation decides what "down" means. A mismatch
+ * recorded as a PASS would make "expected content" decorative, since nothing
+ * downstream could tell the two apart. So a mismatch always fails, and an
+ * operator who wants a laxer rule simply leaves `expectBody` empty and judges
+ * on the status code.
  *
  * ── Deliberate non-features ──────────────────────────────────────────────────
  * REDIRECTS ARE NOT FOLLOWED. A 302 to a login page is the single most common
@@ -55,14 +60,6 @@ export const MAX_EXCERPT_CHARS = 4 * 1024;
 /** How `expectBody` is compared against the response body. */
 export type HttpMatchMode = "contains" | "regex";
 
-/**
- * The check definition. Stored on an `http`-typed Credential (so it is
- * selectable at the asset / class-override / integration tiers and its
- * `apiToken` / `password` are sealed at rest), except for `path`, which an
- * asset may override via `Asset.httpCheckPath` — one credential describes the
- * shape of the check, a per-device path handles the device whose health
- * endpoint sits somewhere else.
- */
 /**
  * The AUTHENTICATION half — what an `http`-typed Credential stores, and all it
  * stores.
@@ -116,8 +113,6 @@ export interface HttpCheckConfig {
   matchMode?: HttpMatchMode;
   /** Default false — `contains` and `regex` both fold case unless this is on. */
   caseSensitive?: boolean;
-  /** Default TRUE — a content mismatch fails the probe. See header note. */
-  failOnMismatch?: boolean;
   /** Default false, matching the restapi credential (self-signed device certs). */
   verifyTls?: boolean;
 }
@@ -299,11 +294,7 @@ export function describeHttpTarget(host: string, target: ResolvedHttpTarget): st
 export interface HttpCheckOutcome {
   /** Whether the probe counts as a success. */
   ok: boolean;
-  /**
-   * Populated whenever something was off — INCLUDING on `ok: true`, which is
-   * the `failOnMismatch: false` content-mismatch case. The probe path surfaces
-   * it as the probe's error text so the evidence survives without alerting.
-   */
+  /** Populated whenever something was off. */
   error?: string;
   /** true/false when a body expectation existed, null when none did. */
   matched: boolean | null;
@@ -348,8 +339,9 @@ export function evaluateHttpCheck(args: {
     ? `the first ${Math.floor(MAX_BODY_BYTES / 1024)} KB of the response body`
     : "the response body";
   const kind = config.matchMode === "regex" ? "pattern" : "text";
-  const detail = `Expected ${kind} not found in ${where} (HTTP ${statusCode})`;
-  // failOnMismatch defaults to true — an absent value is the strict reading.
-  if (config.failOnMismatch === false) return { ok: true, error: detail, matched: false };
-  return { ok: false, error: detail, matched: false };
+  return {
+    ok: false,
+    error: `Expected ${kind} not found in ${where} (HTTP ${statusCode})`,
+    matched: false,
+  };
 }

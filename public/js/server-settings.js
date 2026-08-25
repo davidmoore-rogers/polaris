@@ -6550,10 +6550,11 @@ async function openCredentialModal(id, initialState) {
  * be picked OUT of the device's response, and pass/fail gives you nothing to
  * pick from. The body is shown verbatim (escaped) in a selectable block.
  *
- * The match verdict is stated separately from the pass/fail above it, because
- * with `failOnMismatch` off those two legitimately disagree — the probe
- * succeeds while the content did not match, and that is exactly the case an
- * operator needs to see spelled out rather than inferred.
+ * The match verdict is stated separately from the pass/fail above it because it
+ * is THREE-valued: matched, not matched, or nothing configured to match. The
+ * last is the state every operator is in on their first test, and collapsing it
+ * into the pass/fail line would read as a failed match and send them hunting
+ * for a problem with the device instead of typing an expectation.
  */
 function credHttpDiagnosticsHTML(diag, cfg, check) {
   if (!diag) return "";
@@ -6578,10 +6579,8 @@ function credHttpDiagnosticsHTML(diag, cfg, check) {
       '✓ Expected content found in the response body.' +
     '</div>';
   } else {
-    var lenient = check && check.failOnMismatch === false;
     verdict = '<div style="font-size:0.8rem;margin-top:0.4rem;color:var(--color-warning,#d68910)">' +
-      '⚠ Expected content NOT found in the response body' +
-      (lenient ? ' — the probe still counts as up, because "treat a content mismatch as down" is off.' : '.') +
+      '⚠ Expected content NOT found in the response body — the check fails.' +
     '</div>';
   }
 
@@ -6643,14 +6642,22 @@ function credHttpCheckFields() {
     '<div style="margin-top:0.9rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
       '<div style="font-weight:600;font-size:0.85rem;margin-bottom:0.5rem">Check to run</div>' +
       '<p class="hint" style="margin-top:0">These describe the request, not the credential. Once they are right, save them on the matching <strong>Manufacturer Profile → Custom Widget</strong>; this modal never persists them.</p>' +
-      '<div class="form-group">' +
+      '<div class="form-group" style="margin-top:1rem">' +
         '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
           '<input type="checkbox" id="f-tchk-https">' +
           '<span>Use HTTPS</span>' +
         '</label>' +
       '</div>' +
-      '<div class="form-group"><label>Port</label>' +
-        '<input type="number" id="f-tchk-port" min="1" max="65535" placeholder="default (80 / 443)" style="max-width:200px">' +
+      // Port is an opt-in override: the scheme already implies one (80 / 443),
+      // so an always-editable box invites typing the value that was already
+      // going to be used. Disabled rather than hidden so it is visible that a
+      // port exists and is being defaulted.
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<input type="checkbox" id="f-tchk-customport">' +
+          '<span>Custom port</span>' +
+        '</label>' +
+        '<input type="number" id="f-tchk-port" min="1" max="65535" placeholder="default (80)" style="max-width:200px;margin-top:4px" disabled>' +
       '</div>' +
       '<div class="form-group"><label>Path</label>' +
         '<input type="text" id="f-tchk-path" placeholder="/healthz">' +
@@ -6658,10 +6665,6 @@ function credHttpCheckFields() {
       '<div class="form-group"><label>Expected status code</label>' +
         '<input type="number" id="f-tchk-status" min="100" max="599" placeholder="any 2xx" style="max-width:200px">' +
         '<p class="hint">Leave blank to accept any 2xx. Redirects are never followed, so set this to 301/302 only if the redirect itself is the healthy answer.</p>' +
-      '</div>' +
-      '<div class="form-group"><label>Expected content</label>' +
-        '<input type="text" id="f-tchk-body" placeholder="e.g. OK">' +
-        '<p class="hint">Text the response body must carry. This is what separates "the web server answered" from "the service still works" — a device serving an error page still returns 200. Leave blank to judge on the status code alone.</p>' +
       '</div>' +
       '<div class="form-group"><label>Match</label>' +
         '<select id="f-tchk-matchmode" style="max-width:240px">' +
@@ -6675,12 +6678,9 @@ function credHttpCheckFields() {
           '<span>Case sensitive</span>' +
         '</label>' +
       '</div>' +
-      '<div class="form-group">' +
-        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-          '<input type="checkbox" id="f-tchk-failonmismatch" checked>' +
-          '<span>Treat a content mismatch as down</span>' +
-        '</label>' +
-        '<p class="hint">On (recommended): a 200 whose body doesn\'t match counts as down, and the error names the missing content. Off: any accepted status counts as up and the mismatch is advisory only.</p>' +
+      '<div class="form-group"><label>Expected content</label>' +
+        '<input type="text" id="f-tchk-body" placeholder="e.g. OK">' +
+        '<p class="hint">Text the response body must carry. This is what separates "the web server answered" from "the service still works" — a device serving an error page still returns 200. Leave blank to judge on the status code alone.</p>' +
       '</div>' +
       '<div class="form-group">' +
         '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
@@ -6698,15 +6698,18 @@ function readHttpCheckFields() {
     var v = (document.getElementById(id).value || "").trim();
     return v ? Number(v) : null;
   }
+  // A disabled Custom port sends null rather than whatever is left in the box,
+  // so un-ticking it actually returns the check to the scheme default instead
+  // of silently keeping the last typed value.
+  var customPort = document.getElementById("f-tchk-customport").checked;
   return {
     useHttps:       document.getElementById("f-tchk-https").checked,
-    port:           numOrNull("f-tchk-port"),
+    port:           customPort ? numOrNull("f-tchk-port") : null,
     path:           (document.getElementById("f-tchk-path").value || "").trim(),
     expectStatus:   numOrNull("f-tchk-status"),
     expectBody:     document.getElementById("f-tchk-body").value,
     matchMode:      document.getElementById("f-tchk-matchmode").value,
     caseSensitive:  document.getElementById("f-tchk-casesensitive").checked,
-    failOnMismatch: document.getElementById("f-tchk-failonmismatch").checked,
     verifyTls:      document.getElementById("f-tchk-verifytls").checked,
   };
 }
@@ -6798,6 +6801,22 @@ function openCredentialTestModal(state) {
       setTimeout(function () { focusEl.focus(); }, 0);
     });
   }
+  // Port controls (http only): Custom port gates the field, and Use HTTPS
+  // relabels its placeholder so the default on offer is the real one.
+  var httpsBox  = document.getElementById("f-tchk-https");
+  var customBox = document.getElementById("f-tchk-customport");
+  var portInput = document.getElementById("f-tchk-port");
+  if (httpsBox && customBox && portInput) {
+    function syncPort() {
+      portInput.disabled = !customBox.checked;
+      portInput.placeholder = "default (" + (httpsBox.checked ? "443" : "80") + ")";
+      portInput.style.opacity = customBox.checked ? "" : "0.5";
+    }
+    httpsBox.addEventListener("change", syncPort);
+    customBox.addEventListener("change", syncPort);
+    syncPort();
+  }
+
   hostInput.addEventListener("input", syncRunEnabled);
   hostInput.addEventListener("keydown", function (e) {
     if (e.key === "Enter" && !runBtn.disabled) { e.preventDefault(); runBtn.click(); }
@@ -7555,9 +7574,7 @@ var METRIC_KEY_LABELS = {
 
 function manufacturerProfilesCardHTML() {
   var html = '<div class="settings-card">' +
-    '<h4 style="display:flex;align-items:center;gap:8px">Manufacturer Profiles' +
-      '<span style="font-size:0.7rem;font-weight:normal;background:rgba(34,197,94,0.15);color:#16a34a;padding:1px 6px;border-radius:3px">EDITABLE</span>' +
-    '</h4>' +
+    '<h4>Manufacturer Profiles</h4>' +
     '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:0.75rem">' +
       'Per-manufacturer SNMP telemetry profile — pick which MIB symbol Polaris walks ' +
       'for each System-tab metric, with optional per-model exceptions. Seeded from the ' +
@@ -8022,35 +8039,38 @@ function _widgetHttpCheckForm(check, credentialId) {
     opts += '<option value="' + escapeHtml(x.id) + '"' + (credentialId === x.id ? " selected" : "") + '>' + escapeHtml(x.name) + '</option>';
   });
   var mode = c.matchMode === "regex" ? "regex" : "contains";
-  // failOnMismatch defaults TRUE server-side, so an absent value renders CHECKED
-  // — otherwise the form would show the loose reading while the stored widget
-  // enforces the strict one.
-  var strict = c.failOnMismatch !== false;
   return '' +
     '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px">' +
       _widgetFormField("Credential",
         '<select class="mfg-http-cred" style="width:100%;font-size:0.82rem">' + opts + '</select>') +
       _widgetFormField("Path",
         '<input type="text" class="mfg-http-path" value="' + escapeHtml(c.path || "") + '" placeholder="/healthz" style="width:100%;font-size:0.82rem">') +
+      // Same opt-in shape as the Test Connection modal: the scheme implies a
+      // port, so the field is disabled until an operator says otherwise. A
+      // stored port IS a custom port, which is what pre-ticks the box.
       _widgetFormField("Port",
-        '<input type="number" class="mfg-http-port" value="' + escapeHtml(c.port ? String(c.port) : "") + '" min="1" max="65535" placeholder="default (80 / 443)" style="width:100%;font-size:0.82rem">') +
+        '<label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:0.8rem;margin-bottom:3px">' +
+          '<input type="checkbox" class="mfg-http-customport"' + (c.port ? " checked" : "") + '><span>Custom port</span>' +
+        '</label>' +
+        '<input type="number" class="mfg-http-port" value="' + escapeHtml(c.port ? String(c.port) : "") + '" min="1" max="65535" ' +
+          'placeholder="default (' + (c.useHttps === true ? "443" : "80") + ')" style="width:100%;font-size:0.82rem"' +
+          (c.port ? "" : " disabled") + '>') +
       _widgetFormField("Expected status",
         '<input type="number" class="mfg-http-status" value="' + escapeHtml(c.expectStatus ? String(c.expectStatus) : "") + '" min="100" max="599" placeholder="any 2xx" style="width:100%;font-size:0.82rem">') +
-      _widgetFormField("Expected content",
-        '<input type="text" class="mfg-http-body" value="' + escapeHtml(c.expectBody || "") + '" placeholder="e.g. OK" style="width:100%;font-size:0.82rem">') +
       _widgetFormField("Match",
         '<select class="mfg-http-matchmode" style="width:100%;font-size:0.82rem">' +
           '<option value="contains"' + (mode === "contains" ? " selected" : "") + '>Contains</option>' +
           '<option value="regex"' + (mode === "regex" ? " selected" : "") + '>Regex</option>' +
         '</select>') +
+      _widgetFormField("Expected content",
+        '<input type="text" class="mfg-http-body" value="' + escapeHtml(c.expectBody || "") + '" placeholder="e.g. OK" style="width:100%;font-size:0.82rem">') +
     '</div>' +
     '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:0.8rem">' +
       '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-https"' + (c.useHttps === true ? " checked" : "") + '><span>Use HTTPS</span></label>' +
       '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-verifytls"' + (c.verifyTls === true ? " checked" : "") + '><span>Verify TLS</span></label>' +
       '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-casesensitive"' + (c.caseSensitive === true ? " checked" : "") + '><span>Case sensitive</span></label>' +
-      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-failonmismatch"' + (strict ? " checked" : "") + '><span>Mismatch = failed</span></label>' +
     '</div>' +
-    '<p class="hint" style="margin-top:8px">Records a pass/fail 0/1 (alertable as <strong>Custom state value</strong>) plus the response time. Leave <strong>Model regex</strong> above blank to check every ' + '' + 'device of this manufacturer. Dial the check in against a real device from <strong>Credentials → Test Connection</strong> first.</p>';
+    '<p class="hint" style="margin-top:8px">Records a pass/fail 0/1 (alertable as <strong>Custom state value</strong>) plus the response time — a wrong status code or missing content is recorded as a failure, and it is an <strong>automation</strong> that decides whether that means the device is down. Leave <strong>Model regex</strong> above blank to check every ' + '' + 'device of this manufacturer. Dial the check in against a real device from <strong>Credentials → Test Connection</strong> first.</p>';
 }
 
 /** Collect the HTTP-check sub-form. Blank numbers mean "use the default". */
@@ -8060,13 +8080,14 @@ function _readWidgetHttpCheck(scope) {
   function numOrNull(cls) { var v = (val(cls) || "").trim(); return v ? Number(v) : null; }
   return {
     useHttps:       chk(".mfg-http-https"),
-    port:           numOrNull(".mfg-http-port"),
+    // Un-ticked Custom port sends null, so clearing the override actually
+    // returns the check to the scheme default.
+    port:           chk(".mfg-http-customport") ? numOrNull(".mfg-http-port") : null,
     path:           (val(".mfg-http-path") || "").trim(),
     expectStatus:   numOrNull(".mfg-http-status"),
     expectBody:     val(".mfg-http-body"),
     matchMode:      val(".mfg-http-matchmode") || "contains",
     caseSensitive:  chk(".mfg-http-casesensitive"),
-    failOnMismatch: chk(".mfg-http-failonmismatch"),
     verifyTls:      chk(".mfg-http-verifytls"),
   };
 }
@@ -8685,6 +8706,22 @@ function wireManufacturerProfileControls() {
       if (!cardWT) return;
       _mfgWidgetEditType[_widgetCardKey(cardWT)] = target.value;
       _mfgRerenderPreserving(target);
+      return;
+    }
+    // Port controls on an http widget. Handled here rather than by a re-render
+    // because nothing about the payload changes — only whether the field is
+    // editable and which default its placeholder names.
+    if (target.classList.contains("mfg-http-customport") || target.classList.contains("mfg-http-https")) {
+      var cardHP = target.closest(".mfg-widget-edit-card, .mfg-widget-add-card");
+      if (!cardHP) return;
+      var cpBox = cardHP.querySelector(".mfg-http-customport");
+      var tlsBox = cardHP.querySelector(".mfg-http-https");
+      var pInput = cardHP.querySelector(".mfg-http-port");
+      if (cpBox && pInput) {
+        pInput.disabled = !cpBox.checked;
+        pInput.style.opacity = cpBox.checked ? "" : "0.5";
+        pInput.placeholder = "default (" + (tlsBox && tlsBox.checked ? "443" : "80") + ")";
+      }
       return;
     }
     if (target.classList.contains("mfg-widget-widgettype")) {

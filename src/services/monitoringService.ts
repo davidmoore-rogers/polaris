@@ -3363,13 +3363,10 @@ export async function probeHttp(
     };
   }
 
-  // On the failOnMismatch=false path the outcome carries an error string
-  // alongside ok:true. ProbeResult has no slot for "succeeded, but note this",
-  // so the note is dropped here rather than being smuggled into a success —
-  // the operator's own choice was that a mismatch is not a failure, and a
-  // success carrying failure text would confuse the status pill and the alert
-  // email alike. It stays visible on the Test Connection modal, which reports
-  // the outcome directly.
+  // An outcome can in principle carry error text alongside ok:true; ProbeResult
+  // has no slot for "succeeded, but note this", so such a note is dropped here
+  // rather than being smuggled into a success. The Test Connection modal reports
+  // the outcome directly and so still shows it.
   if (!outcome.ok) {
     // `authNote` explains WHY the status is 401 when the digest handshake
     // could not be completed; without it the operator sees only the code.

@@ -117,9 +117,14 @@ describe("http CHECK DEFINITION — accepted shapes", () => {
   it("accepts a valid regex", () => {
     expect(() => check({ expectBody: '"state"\\s*:\\s*"up"', matchMode: "regex" })).not.toThrow();
   });
-  it("tolerates a lone caseSensitive/failOnMismatch toggle with no expectBody", () => {
+  it("tolerates a lone caseSensitive toggle with no expectBody", () => {
     // Harmless, and rejecting it would 400 a form mid-edit.
-    expect(() => check({ caseSensitive: true, failOnMismatch: false })).not.toThrow();
+    expect(() => check({ caseSensitive: true })).not.toThrow();
+  });
+  it("strips a leftover failOnMismatch rather than rejecting it", () => {
+    // Dropped, not 400'd, so a widget stored while the toggle existed re-saves
+    // cleanly instead of failing on a field the form no longer sends.
+    expect(check({ failOnMismatch: false }).failOnMismatch).toBeUndefined();
   });
   it("keeps a query string on the path — legitimate on a health endpoint", () => {
     expect(check({ path: "/axis-cgi/param.cgi?action=list" }).path)
