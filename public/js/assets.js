@@ -562,8 +562,20 @@ document.addEventListener("DOMContentLoaded", async function () {
   // re-fetch to re-order the page.
   wireFavoriteClicks("assets-tbody", function () { fetchAssetsPage(); });
 
+  // "+ Add Asset(s)" is a menu, not a single action — the two things behind it
+  // (an asset form, a network Discovery) are governed by DIFFERENT function
+  // keys, which is also why the button carries data-perm-any rather than
+  // data-manage-assets. Items come from the pure _addAssetMenuItems() so the
+  // per-row gating is unit-testable.
   var addBtn = document.getElementById("btn-add-asset");
-  if (addBtn) addBtn.addEventListener("click", openCreateModal);
+  if (addBtn) addBtn.addEventListener("click", function () {
+    var items = _addAssetMenuItems();
+    // Belt-and-braces: the button is already hidden when nothing is
+    // reachable, but a cached-then-refreshed role can only ever HIDE (see
+    // hideAdminOnlyElements), so never pop an empty menu.
+    if (!items.length) return;
+    showRowMenu(addBtn, items, { label: "Add asset menu", align: "end" });
+  });
   // ── Import items in the merged Import / Export dropdown ──
   // The dropdown's toggle / outside-close / stopPropagation wiring lives with
   // the export items (module-level IIFE below); this block only wires the
@@ -1646,6 +1658,50 @@ function _renderLeaseBody(r, ctx) {
  * the verbs it can actually use. Separators are pushed only immediately before
  * a group that has items, so no divider can ever render with nothing after it.
  */
+/**
+ * The "+ Add Asset(s)" menu's rows.
+ *
+ * Each row is gated by the key ITS OWN routes check, per TEMPLATES.md -> "Row
+ * context menu": the hand-typed form is `assets:write` (POST /assets), while a
+ * Discovery is the separate `networkScan` key (an active sweep of
+ * operator-supplied ranges is a capability an admin may want to withhold from
+ * someone who may still edit inventory).
+ *
+ * A row the role can never reach is OMITTED rather than rendered disabled.
+ * That template's disabled-with-a-reason rule is for a verb that can't apply
+ * *right now*; a missing grant is not a transient state, and a permanently
+ * greyed row only advertises something the operator cannot be given.
+ *
+ * Pure: reads the permission matrix and nothing else, so the three interesting
+ * shapes are unit-testable without the DOM.
+ */
+function _addAssetMenuItems() {
+  var items = [];
+  if (canManageAssets()) {
+    items.push({
+      label: "Single asset…",
+      title: "Add one asset by hand",
+      onSelect: function () { openCreateModal(); },
+    });
+  }
+  var D = window.PolarisAssetDiscovery;
+  if (D && permAtLeast("networkScan", "write")) {
+    items.push({
+      label: "New discovery…",
+      title: "Scan IP ranges for devices that answer, then choose what to add",
+      onSelect: function () { D.open(); },
+    });
+  }
+  if (D && permAtLeast("networkScan", "read")) {
+    items.push({
+      label: "Saved discoveries…",
+      title: "Re-run, edit or export a saved Discovery",
+      onSelect: function () { D.openList(); },
+    });
+  }
+  return items;
+}
+
 function _assetMenuItems(a) {
   var items = [{ label: "Open", onSelect: function () { openViewModal(a.id); } }];
   if (canManageAssets()) {

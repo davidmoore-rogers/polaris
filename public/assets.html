@@ -45,7 +45,9 @@
           <input type="file" id="import-pdf-input" accept=".pdf" style="display:none">
           <button class="btn btn-secondary" id="btn-maintenance" data-maintenance-mgmt title="Maintenance schedules — pause monitoring + notifications on matched assets">Maintenance</button>
           <button class="btn btn-secondary" id="btn-monitoring-settings" data-admin-only title="Asset lifecycle settings + manual monitoring tier + class overrides"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" style="vertical-align:middle;margin-right:4px"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>Settings</button>
-          <button class="btn btn-primary" id="btn-add-asset" data-manage-assets>+ Add Asset</button>
+          <button class="btn btn-primary" id="btn-add-asset" aria-haspopup="menu"
+                  data-perm-any="assets:write,networkScan:read"
+                  title="Add one asset by hand, or run a network Discovery">+ Add Asset(s)</button>
         </div>
       </div>
 
@@ -177,5 +179,9 @@
        After assets.js, which mounts it from openCreateModal. -->
   <script src="/js/assets-ipcontext.js"></script>
   <script src="/js/assets-masspin.js"></script>
+  <!-- Network Discovery wizard, behind "+ Add Asset(s)" → Discovery.
+       assets.js reads window.PolarisAssetDiscovery lazily at click time, so
+       loading after it is fine; api.js + app.js above are hard requirements. -->
+  <script src="/js/assets-discovery.js"></script>
 </body>
 </html>

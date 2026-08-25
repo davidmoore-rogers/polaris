@@ -2955,6 +2955,20 @@ function hideAdminOnlyElements() {
   document.querySelectorAll("[data-review-conflicts]").forEach(function (el) {
     if (!canReviewConflicts()) el.style.display = "none";
   });
+  // Generic multi-key gate: `data-perm-any="assets:write,networkScan:read"`
+  // hides the element unless AT LEAST ONE pair holds — the element-level twin
+  // of the sidebar's `anyPerm` (see NAV_ITEMS). The single-key attributes
+  // above stay as they are: each names one capability. This one exists for a
+  // control that fronts two SEPARATELY gated things and so can't be expressed
+  // by any of them — the Assets page's "+ Add Asset(s)" menu, whose two rows
+  // are an asset form (`assets`) and a network Discovery (`networkScan`).
+  document.querySelectorAll("[data-perm-any]").forEach(function (el) {
+    var ok = (el.getAttribute("data-perm-any") || "").split(",").some(function (spec) {
+      var parts = spec.trim().split(":");
+      return parts.length === 2 && permAtLeast(parts[0].trim(), parts[1].trim());
+    });
+    if (!ok) el.style.display = "none";
+  });
 }
 
 // ─── Client-side Auto-Logout ──────────────────────────────────────────────
