@@ -2554,6 +2554,22 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 #channels-list > .empty-state-card {
   grid-column: 1 / -1;
 }
+/* Automations - Delivery tab: ONE card grid for the whole tab. The Web Push
+   capability card and the channel destinations live in separate containers (one
+   is an on/off toggle, the other a rendered list), so both collapse to
+   display:contents and their cards become items of this grid - otherwise Web
+   Push spans the full page width above a two-column list. */
+.delivery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+.delivery-grid > #web-push-card,
+.delivery-grid > #channels-list { display: contents; }
+/* The "no channels configured" card is a card like any other here, so it takes
+   one column beside Web Push instead of spanning under it. */
+.delivery-grid > #channels-list > .empty-state-card { grid-column: auto; }
 .integration-card {
   background: var(--color-bg-primary);
   border: 1px solid var(--color-border);

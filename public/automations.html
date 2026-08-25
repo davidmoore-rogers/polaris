@@ -86,11 +86,17 @@
         <p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">
           Configure where notifications are delivered. Add SMTP / Microsoft 365 email, Pushbullet, Slack or Microsoft Teams channels, then reference them from an automation's <strong>Notify</strong> action. In-app alerts (the Alerts tab) are always on.
         </p>
-        <!-- Web Push is a server capability rather than a destination, so it
-             gets a plain on/off card instead of a channel form. Who receives a
-             given push is chosen per Notify action when an automation is built. -->
-        <div id="web-push-card"></div>
-        <div id="channels-list"><p class="empty-state">Loading...</p></div>
+        <!-- One two-column card grid for the whole tab: the Web Push card and
+             every channel card are siblings in it (both containers are
+             display:contents), so the capability toggle sits in a column beside
+             the destinations instead of spanning the page above them. -->
+        <div class="delivery-grid">
+          <!-- Web Push is a server capability rather than a destination, so it
+               gets a plain on/off card instead of a channel form. Who receives a
+               given push is chosen per Notify action when an automation is built. -->
+          <div id="web-push-card"></div>
+          <div id="channels-list"><p class="empty-state">Loading...</p></div>
+        </div>
       </div>
 
       <!-- ─── Scripts tab ───────────────────────────────────────────────────

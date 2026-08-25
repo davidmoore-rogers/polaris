@@ -731,12 +731,15 @@ function renderWebPushCard(state) {
         'Chosen per automation — add a <strong>Notify</strong> action and pick who receives it' +
       '</span></div>' +
     '</div>' +
-  '</div>' +
-  (on && count === 0
-    ? '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0.4rem 0 1rem">' +
-      'Users enable push per device from the sidebar (desktop) or More → Push notifications (mobile). ' +
-      'An automation targeting users who haven\'t enrolled delivers nothing.</p>'
-    : '<div style="margin-bottom:1rem"></div>');
+    // Inside the card, not after it: this container is display:contents inside
+    // the tab's two-column card grid, so a sibling paragraph would claim a whole
+    // grid cell of its own next to the first channel.
+    (on && count === 0
+      ? '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0.75rem 0 0">' +
+        'Users enable push per device from the sidebar (desktop) or More → Push notifications (mobile). ' +
+        'An automation targeting users who haven\'t enrolled delivers nothing.</p>'
+      : '') +
+  '</div>';
 
   var testBtn = document.getElementById("wp-test");
   if (testBtn) {
