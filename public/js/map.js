@@ -2954,17 +2954,29 @@
     }
     setStatus("Saving " + dirty.length + " region change" + (dirty.length === 1 ? "" : "s") + "…");
     var failures = 0;
-    await Promise.all(dirty.map(function (poly) {
+    // SEQUENTIAL, not Promise.all. Every region write is a read-modify-write of
+    // the whole mapRegions blob, so the server serializes them on an advisory
+    // lock anyway (see withRegionBlobLock) — firing them concurrently just
+    // parks N requests on that lock, each holding a DB connection while it
+    // waits, which at a couple of dozen dragged polygons can starve the pool
+    // for everything else. Wall-clock is essentially the same because the work
+    // was already serial; what changes is that we stop holding the connections.
+    //
+    // It also makes the order deterministic and lets a failure be attributed to
+    // the polygon that caused it.
+    for (var di = 0; di < dirty.length; di++) {
+      var poly = dirty[di];
       var pairs = polygonLatLngsToPairs(poly);
-      return api.mapRegions.update(poly._polarisRegionId, { polygon: pairs }).then(function () {
+      try {
+        await api.mapRegions.update(poly._polarisRegionId, { polygon: pairs });
         poly._polarisSavedPolygon = pairs;
         poly._polarisDirty = false;
-      }).catch(function (err) {
+      } catch (err) {
         failures++;
         // Per-polygon alert so the operator knows exactly which one failed.
         showToast("Failed to save region \"" + (poly._polarisRegionName || "") + "\": " + (err && err.message ? err.message : err), "error");
-      });
-    }));
+      }
+    }
     if (failures > 0) {
       setStatus(failures + " region" + (failures === 1 ? "" : "s") + " failed to save — still in edit mode, click Save Regions to retry or Discard Changes to abandon.");
       return;
@@ -3045,9 +3057,10 @@
 
   // Turns on leaflet-draw's per-polygon vertex/midpoint handles immediately
   // (no Edit-toolbar round-trip). Every vertex drag fires `editvertex` on the
-  // polygon; we debounce-save 800ms after the last change so a rapid sequence
-  // of drags becomes a single PUT. Failures restore the prior shape so the
-  // map matches the server.
+  // polygon, which only marks it DIRTY — there is no autosave. Saving is
+  // explicit (Save Regions writes every dirty polygon; Discard Changes reverts
+  // them to _polarisSavedPolygon), which is what keeps a half-dragged shape
+  // from reaching the server.
   function enablePolygonVertexEdit(poly) {
     if (!poly || !poly.editing) return;
     poly.editing.enable();
