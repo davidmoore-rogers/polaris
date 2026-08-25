@@ -1,4 +1,4 @@
-/* global api, escapeHtml, showToast, showConfirm, _trapFocus, _focusFirstIn, permAtLeast, _ensureLockButton, isPanelLocked, flashModalCloseBtn */
+/* global api, escapeHtml, showToast, showConfirm, permAtLeast, buildOverlay */
 /**
  * public/js/automations-address-book.js
  *
@@ -63,65 +63,9 @@
 
   // ─── Standalone overlay (the stacked-modal pattern) ────────────────────────
 
-  /**
-   * Build a dismissible overlay above any open modal. Returns { overlay, close }.
-   * `onClose` fires for backdrop click / Escape / close button.
-   */
-  function buildOverlay(z, title, bodyHtml, footerHtml, onClose, wide) {
-    var overlay = document.createElement("div");
-    overlay.className = "modal-overlay";
-    overlay.style.zIndex = String(z);
-    overlay.innerHTML =
-      '<div class="modal' + (wide ? " modal-large" : " modal-wide") + '" role="dialog" aria-modal="true" tabindex="-1">' +
-        '<div class="modal-header"><h3>' + escapeHtml(title) + '</h3>' +
-          '<button class="btn-icon modal-close" type="button" aria-label="Close dialog">&times;</button></div>' +
-        '<div class="modal-body">' + bodyHtml + '</div>' +
-        '<div class="modal-footer">' + footerHtml + '</div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-
-    var dialog = overlay.querySelector(".modal");
-    var prevFocus = document.activeElement;
-    var closed = false;
-    var teardownTrap = _trapFocus(dialog, function () { close(); });
-
-    function close() {
-      if (closed) return;
-      closed = true;
-      teardownTrap();
-      overlay.classList.remove("open");
-      // Remove on transition end, with a timer fallback for reduced-motion.
-      overlay.addEventListener("transitionend", function () {
-        if (overlay.parentNode) overlay.remove();
-      }, { once: true });
-      setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
-      if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch (_) {} }
-      if (onClose) onClose();
-    }
-
-    // Panel lock: one global switch governs EVERY modal, so these stacked
-    // overlays take the same toggle app.js injects into the shared #modal-overlay
-    // (its MutationObserver only looks at that one element, hence the direct
-    // call) and honor it the same way — an off-click while locked flashes the X
-    // + bloom instead of dismissing. Guarded so the module still works on a page
-    // that somehow loads without app.js.
-    var closeBtn = overlay.querySelector(".modal-close");
-    if (typeof _ensureLockButton === "function") {
-      _ensureLockButton(overlay.querySelector(".modal-header"), "modal");
-    }
-    closeBtn.addEventListener("click", close);
-    overlay.addEventListener("click", function (ev) {
-      if (ev.target !== overlay) return;
-      if (typeof isPanelLocked === "function" && isPanelLocked("modal")) {
-        if (typeof flashModalCloseBtn === "function") flashModalCloseBtn(closeBtn);
-        return;
-      }
-      close();
-    });
-    requestAnimationFrame(function () { overlay.classList.add("open"); _focusFirstIn(dialog); });
-
-    return { overlay: overlay, dialog: dialog, close: close };
-  }
+  // buildOverlay now lives in app.js (loaded on every page) so surfaces outside
+  // this file — the automations code editor, which the wizard opens on pages that
+  // never load the address book — can stack a dialog over an open modal too.
 
   // ─── Editor (add / edit one contact) ──────────────────────────────────────
 

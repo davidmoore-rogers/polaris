@@ -2265,6 +2265,80 @@ if (typeof window !== "undefined") {
   window.closeRowMenu = closeRowMenu;
 }
 
+// ─── Stacked Overlay (a dialog above an open modal) ───────────────────────────
+
+/**
+ * Build a dismissible overlay ABOVE any open modal — the stacked-modal pattern.
+ * Returns { overlay, dialog, close }; `onClose` fires for backdrop click,
+ * Escape and the close button.
+ *
+ * Why this exists rather than calling openModal: openModal creates and then
+ * REUSES one shared #modal-overlay, overwriting its .modal-body innerHTML — so
+ * calling it from inside an open modal destroys that modal's form DOM and loses
+ * whatever the operator had typed. Layer rungs: 1300 over a base modal, 1320
+ * when a third layer must sit over the second.
+ *
+ * Lives here (rather than in the file that first needed it) because every
+ * dependency is in app.js and app.js loads on every page: the automations code
+ * editor opens from the wizard, which loads on five pages, only one of which
+ * loads the address book.
+ */
+function buildOverlay(z, title, bodyHtml, footerHtml, onClose, wide) {
+  var overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.style.zIndex = String(z);
+  overlay.innerHTML =
+    '<div class="modal' + (wide ? " modal-large" : " modal-wide") + '" role="dialog" aria-modal="true" tabindex="-1">' +
+      '<div class="modal-header"><h3>' + escapeHtml(title) + '</h3>' +
+        '<button class="btn-icon modal-close" type="button" aria-label="Close dialog">&times;</button></div>' +
+      '<div class="modal-body">' + bodyHtml + '</div>' +
+      '<div class="modal-footer">' + footerHtml + '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  var dialog = overlay.querySelector(".modal");
+  var prevFocus = document.activeElement;
+  var closed = false;
+  var teardownTrap = _trapFocus(dialog, function () { close(); });
+
+  function close() {
+    if (closed) return;
+    closed = true;
+    teardownTrap();
+    overlay.classList.remove("open");
+    // Remove on transition end, with a timer fallback for reduced-motion.
+    overlay.addEventListener("transitionend", function () {
+      if (overlay.parentNode) overlay.remove();
+    }, { once: true });
+    setTimeout(function () { if (overlay.parentNode) overlay.remove(); }, 400);
+    if (prevFocus && typeof prevFocus.focus === "function") { try { prevFocus.focus(); } catch (_) {} }
+    if (onClose) onClose();
+  }
+
+  // Panel lock: one global switch governs EVERY modal, so these stacked
+  // overlays take the same toggle app.js injects into the shared #modal-overlay
+  // (its MutationObserver only looks at that one element, hence the direct
+  // call) and honor it the same way — an off-click while locked flashes the X
+  // + bloom instead of dismissing. Guarded so the module still works on a page
+  // that somehow loads without app.js.
+  var closeBtn = overlay.querySelector(".modal-close");
+  if (typeof _ensureLockButton === "function") {
+    _ensureLockButton(overlay.querySelector(".modal-header"), "modal");
+  }
+  closeBtn.addEventListener("click", close);
+  overlay.addEventListener("click", function (ev) {
+    if (ev.target !== overlay) return;
+    if (typeof isPanelLocked === "function" && isPanelLocked("modal")) {
+      if (typeof flashModalCloseBtn === "function") flashModalCloseBtn(closeBtn);
+      return;
+    }
+    close();
+  });
+  requestAnimationFrame(function () { overlay.classList.add("open"); _focusFirstIn(dialog); });
+
+  return { overlay: overlay, dialog: dialog, close: close };
+}
+
 // ─── Confirm Dialog ───────────────────────────────────────────────────────────
 
 function showConfirm(message) {

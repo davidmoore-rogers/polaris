@@ -21,6 +21,7 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
+import { installAppOverlay } from "../fixtures/appOverlay.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
@@ -77,6 +78,11 @@ beforeAll(() => {
   };
   g._trapFocus = () => () => {};
   g._focusFirstIn = () => {};
+  // buildOverlay lives in app.js now (it is shared with the automations code
+  // editor, which opens on pages that never load the address book). Load the
+  // REAL one rather than stubbing it: these tests assert on overlay structure
+  // and the z-index rungs, which a stub would trivially satisfy.
+  installAppOverlay();
   g.currentUsername = "alice";
   (win as unknown as Record<string, unknown>).currentUsername = "alice";
 

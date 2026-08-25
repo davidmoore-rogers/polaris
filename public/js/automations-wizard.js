@@ -1118,8 +1118,14 @@ async function openAutomationWizard(existing, opts) {
   // the affected-devices preview's self-exclusion, the draft stash — then does
   // the right thing without a second condition. Only the copy and the
   // all-steps-unlocked behaviour need to know about cloning explicitly.
-  var cloning = !!(opts && opts.clone) && !!existing;
+  // An IMPORT is a clone whose source was a file rather than a row, so it
+  // rides the same path: detached deep copy, saved as a CREATE, created
+  // disabled, all steps unlocked. Only the labels and the banner differ.
+  var importing = !!(opts && opts.import) && !!existing;
+  var cloning = importing || (!!(opts && opts.clone) && !!existing);
   var editing = cloning ? null : (existing || null);
+  // What the imported file said it needs, and what it could not carry.
+  var importInfo = importing ? (opts.importInfo || {}) : null;
 
   // ── Draft (rule-shape v2) ──────────────────────────────────────────────
   var draft;
@@ -1147,7 +1153,7 @@ async function openAutomationWizard(existing, opts) {
     };
   }
   if (cloning) {
-    draft.name = (opts && opts.name) || (draft.name + " (copy)");
+    draft.name = (opts && opts.name) || (importing ? draft.name : draft.name + " (copy)");
     // A clone starts DISABLED, and that is deliberate. Business rule 18: two
     // automations watching the same thing at the same scope rank BOTH fire, and
     // a clone is by construction identical to its source — so saving it enabled
@@ -1662,27 +1668,190 @@ async function openAutomationWizard(existing, opts) {
     '<button class="btn btn-secondary" id="aw-cancel">Cancel</button>' +
     '<button class="btn btn-secondary" id="aw-back" style="display:none">&larr; Back</button>' +
     '<button class="btn btn-primary" id="aw-next">Next &rarr;</button>' +
-    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : cloning ? "Create clone" : "Create automation") + '</button>';
+    '<button class="btn btn-primary" id="aw-save" style="display:none">' + (editing ? "Save changes" : cloning && !importing ? "Create clone" : "Create automation") + '</button>';
 
-  openModal(editing ? "Edit automation" : cloning ? "Clone automation" : "New automation", body, footer, { wide: true });
+  openModal(editing ? "Edit automation" : importing ? "Imported automation" : cloning ? "Clone automation" : "New automation", body, footer, { wide: true });
+
+  // ── Export / import / view-code (public/js/automations-portability.js) ──
+  // Guarded on the global: the wizard is standalone and loads on five pages,
+  // so a page that omits the module degrades to hiding these affordances.
+  function portability() {
+    return (typeof window !== "undefined" && window.PolarisAutomationPortability) || null;
+  }
+
+  /** The catalogs the strip needs to turn ids into readable names. All are
+   *  already fetched for the builder's own pickers, so this costs no request. */
+  function portabilityCatalogs() {
+    return {
+      channels: _ruleChannels || [],
+      scripts: _awScripts || [],
+      users: _ruleRecipientUsers || [],
+      roles: (_awScopeOptions && _awScopeOptions.roles) || [],
+      regions: (_awScopeOptions && _awScopeOptions.regions) || [],
+      stateProbes: (s && s.stateProbes) || [],
+      tags: _ruleTagList || [],
+      assetTypes: _ruleAssetTypes || [],
+      assets: [],
+    };
+  }
 
   // ── Step 1: Name & description ─────────────────────────────────────────
+  /** What an imported file needs that this install may not have, and what the
+   *  file could not carry. Rendered on step 1 because it is the first thing the
+   *  operator sees and it says which later steps need attention. */
+  function importNoteHtml() {
+    if (!importing) return '';
+    var P = portability();
+    var deps = (importInfo && importInfo.dependencies) || [];
+    var checked = P ? P.checkDependencies(deps, portabilityCatalogs()) : [];
+    var missing = checked.filter(function (c) { return c.present === false; });
+    var unknown = checked.filter(function (c) { return c.present === null; });
+    var present = checked.filter(function (c) { return c.present === true; });
+
+    // Every import loses its delivery wiring by design (an exported file
+    // carries no channel, recipient or script ids), so Actions always needs a
+    // look. The other two only when the file says so.
+    var todo = ['<strong>Actions</strong> \u2014 the imported file carries no delivery wiring, so this automation is in-app only until you add some'];
+    if (importInfo && importInfo.needsDevices) {
+      todo.push('<strong>Devices</strong> \u2014 the device filter named specific devices, which do not travel between installs');
+    }
+    if (importInfo && (importInfo.blankedDimensions || []).length) {
+      todo.push('<strong>Trigger</strong> \u2014 pick the state probe or widget again; without it the trigger would watch every one on the device');
+    }
+
+    function depLine(c) {
+      return escapeHtml(c.name) + ' <span style="color:var(--color-text-tertiary)">(' + escapeHtml(c.kind) + ')</span>';
+    }
+
+    var depHtml = '';
+    if (checked.length) {
+      depHtml = '<div style="margin-top:0.5rem">This automation expects:</div><ul style="margin:0.25rem 0 0;padding-left:1.1rem">' +
+        present.map(function (c) { return '<li>\u2713 ' + depLine(c) + '</li>'; }).join('') +
+        missing.map(function (c) { return '<li><strong>\u2717 not in this install:</strong> ' + depLine(c) + '</li>'; }).join('') +
+        unknown.map(function (c) { return '<li>? ' + depLine(c) + '</li>'; }).join('') +
+        '</ul>';
+    }
+
+    var problems = ((importInfo && importInfo.problems) || []).map(function (m) {
+      return '<div style="margin-top:0.35rem"><strong>' + escapeHtml(m) + '</strong></div>';
+    }).join('');
+
+    return '<div class="aw-clone-note" style="font-size:0.85rem;margin:0 0 1rem;padding:0.5rem 0.65rem;' +
+      'border-left:3px solid var(--color-warning, #b7791f);background:var(--color-bg-subtle, rgba(183,121,31,0.08))">' +
+      'Imported from a file. It will be created <strong>disabled</strong> \u2014 review it, then enable it from the list.' +
+      problems +
+      '<div style="margin-top:0.5rem">Still to do:</div><ul style="margin:0.25rem 0 0;padding-left:1.1rem">' +
+      todo.map(function (t) { return '<li>' + t + '</li>'; }).join('') + '</ul>' +
+      depHtml +
+      '</div>';
+  }
+
   function step1Html() {
     // Cloning: say up front that the copy is inert and why, because the wizard
     // has no enabled control to show it — that lives on the list toggle.
-    var cloneNote = cloning
+    var cloneNote = cloning && !importing
       ? '<p class="aw-clone-note" style="font-size:0.85rem;margin:0 0 1rem;padding:0.5rem 0.65rem;' +
         'border-left:3px solid var(--color-warning, #b7791f);background:var(--color-bg-subtle, rgba(183,121,31,0.08))">' +
         'Copied from <strong>' + escapeHtml((existing && existing.name) || "") + '</strong>. ' +
         'It will be created <strong>disabled</strong> — an identical automation watching the same thing would ' +
         'alert alongside the original. Change what you need, save, then enable it from the list.</p>'
       : "";
+    // Import is offered when CREATING only \u2014 replacing the automation an
+    // operator opened to edit would be a data-loss trap, not a feature.
+    var importRow = (!editing && !cloning && portability() && permAtLeast("automationManagement", "fullwrite"))
+      ? '<div style="display:flex;align-items:center;gap:0.5rem;margin:0 0 1rem;flex-wrap:wrap">' +
+          '<button class="btn btn-secondary" id="aw-import-btn" type="button">Import from file\u2026</button>' +
+          '<span style="font-size:0.8rem;color:var(--color-text-tertiary);flex:1 1 16rem">Start from an exported automation. The file\u2019s name becomes this automation\u2019s name.</span>' +
+          '<input type="file" id="aw-import-input" accept=".json,.automation.json,application/json" style="display:none">' +
+        '</div>'
+      : '';
     return '<h3 style="margin:0 0 0.25rem">What is this automation?</h3>' +
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 1rem">Name it and describe what it watches for. (Severity is set with the trigger on the next steps.)</p>' +
+      importNoteHtml() +
+      importRow +
       cloneNote +
       '<div class="form-group"><label>Name</label><input type="text" id="aw-name" value="' + escapeHtml(draft.name || "") + '" placeholder="e.g. Switch temperature high"></div>' +
       '<div class="form-group"><label>Description (optional)</label><input type="text" id="aw-desc" value="' + escapeHtml(draft.description || "") + '"></div>';
   }
+  /**
+   * Wire the Import control. Reading the file is done in the BROWSER — nothing
+   * is uploaded — and the parsed rule is handed to a fresh wizard in `import`
+   * mode, which then saves through the ordinary POST /automations. The server's
+   * ruleInputSchema + assertActionRefs stay the authority.
+   */
+  function wireStep1() {
+    var btn = document.getElementById("aw-import-btn");
+    var input = document.getElementById("aw-import-input");
+    if (!btn || !input) return;
+
+    btn.addEventListener('click', function () {
+      // Reset first: picking the SAME file twice must still fire `change`.
+      input.value = "";
+      input.click();
+    });
+
+    input.addEventListener('change', async function () {
+      var file = this.files && this.files[0];
+      input.value = "";
+      if (!file) return;
+      var P = portability();
+      if (!P) return;
+
+      // Refuse without reading: a rule is a few KB.
+      if (file.size > P.MAX_IMPORT_BYTES) {
+        showToast("That file is too large to be an automation.", "error");
+        return;
+      }
+
+      // Anything typed so far is about to be replaced, and the stash is only
+      // written by the Cancel button — so ask rather than silently discarding.
+      collectStep1();
+      if (draft.name || draft.description) {
+        var ok = await showConfirm("Replace what you have started with the imported automation?");
+        if (!ok) return;
+      }
+
+      var parsedFile;
+      try {
+        var text = await file.text();
+        parsedFile = P.parseImportFile(text, file.name, triggerTypeNames());
+      } catch (err) {
+        showToast((err && err.message) || "That file could not be read as an automation.", "error");
+        return;
+      }
+
+      // A preview in flight from THIS wizard would otherwise land in the new
+      // one and paint the old draft's device count into it.
+      if (scopePreviewTimer) { clearTimeout(scopePreviewTimer); scopePreviewTimer = null; }
+      if (trigPreviewTimer) { clearTimeout(trigPreviewTimer); trigPreviewTimer = null; }
+
+      // Reopen rather than mutate: steps 1-3 were rendered once at open, so
+      // swapping `draft` underneath them would leave stale DOM. openModal
+      // replaces the shared overlay's body, so there is no need to close first
+      // (and closing would blank the screen for three catalogue re-fetches).
+      openAutomationWizard(parsedFile.rule, {
+        import: true,
+        name: parsedFile.name,
+        importInfo: {
+          dependencies: parsedFile.dependencies,
+          needsDevices: parsedFile.needsDevices,
+          blankedDimensions: parsedFile.blankedDimensions,
+          problems: parsedFile.problems,
+        },
+      }).catch(function (err) {
+        showToast((err && err.message) || "Failed to open the imported automation", "error");
+      });
+    });
+  }
+
+  /** Trigger type names from the schema, so an unknown type in a file is
+   *  refused before it can throw mid-render. */
+  function triggerTypeNames() {
+    return ((s && s.triggerTypes) || []).map(function (t) {
+      return typeof t === "string" ? t : t.type;
+    }).filter(Boolean);
+  }
+
   function collectStep1() {
     draft.name = document.getElementById("aw-name").value.trim();
     draft.description = document.getElementById("aw-desc").value.trim() || null;
@@ -2752,7 +2921,26 @@ async function openAutomationWizard(existing, opts) {
     var hasWindow = leaves.some(function (l) { return tgLeafWindowedRatio(l) && Number(l.windowSec) > 0; });
     return hasWindow ? Math.round((Number(tr.forDurationSec) || 0) / 60) : 0;
   }
+  /** Metrics whose reading is meaningless without an id-valued dimension: the
+   *  filter is optional in the schema, so leaving it blank silently watches
+   *  EVERY probe / widget on the device rather than the one intended. */
+  var REQUIRED_DIM_BY_METRIC = {
+    customStateValue: { key: "stateProbeId", label: "state probe" },
+    customWidgetValue: { key: "widgetId", label: "custom widget" },
+  };
+
+  function tgValidateRequiredDimension(leaf, label) {
+    var need = REQUIRED_DIM_BY_METRIC[leaf && leaf.metric];
+    if (!need) return null;
+    var df = leaf.dimensionFilter || {};
+    if (df[need.key]) return null;
+    return label + ": choose a " + need.label + ". Without one this would watch every " +
+      need.label + " on the device, not just the one you mean.";
+  }
+
   function tgValidateLeaf(leaf, label) {
+    var dimProblem = tgValidateRequiredDimension(leaf, label);
+    if (dimProblem) return dimProblem;
     if (leaf.type === "asset_state") {
       if (leaf.value == null || String(leaf.value).trim() === "") return label + ": choose or enter a value.";
       return null;
@@ -4061,11 +4249,75 @@ async function openAutomationWizard(existing, opts) {
   }
 
   // ── Step 6: Summary + affected devices ─────────────────────────────────
+  /** Export / View code, offered on the Summary card. Both are read-level:
+   *  they only re-serialize what the operator is already looking at. The code
+   *  editor's SAVE is gated separately, inside openCodeModal. */
+  function codeButtonsHtml() {
+    if (!portability()) return '';
+    return '<button class="btn btn-secondary" id="aw-view-code" type="button" style="padding:2px 10px;font-size:0.8rem">View code</button>' +
+      '<button class="btn btn-secondary" id="aw-export" type="button" style="padding:2px 10px;font-size:0.8rem">Export</button>';
+  }
+
+  function wireCodeButtons() {
+    var P = portability();
+    if (!P) return;
+
+    var exportBtn = document.getElementById('aw-export');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', function () {
+        // No collect needed: goToStep already collected every step passed
+        // through, and buildPayload is a pure function of the draft.
+        var body = buildPayload({ nameFallback: 'Untitled automation' });
+        var file = P.buildExportFile(body, portabilityCatalogs(), {
+          polarisVersion: (window.polarisVersion || undefined),
+        });
+        var missing = (file.dependencies || []).length;
+        window.downloadJson(file, P.filenameForExport(body.name));
+        showToast(missing
+          ? 'Exported. The file lists ' + missing + ' thing' + (missing === 1 ? '' : 's') + ' it needs — delivery wiring is not included.'
+          : 'Exported.', 'success');
+      });
+    }
+
+    var viewBtn = document.getElementById('aw-view-code');
+    if (viewBtn) {
+      viewBtn.addEventListener('click', function () {
+        var canSave = permAtLeast('automationManagement', 'fullwrite');
+        P.openCodeModal({
+          title: 'Automation code',
+          body: buildPayload({ nameFallback: 'Untitled automation' }),
+          canSave: canSave,
+          onSave: canSave ? async function (edited) {
+            // Apply to the draft, then save through the ONE save path so
+            // validation, the POST-vs-PUT choice and the toast stay shared.
+            applyPayloadToDraft(edited);
+            var ok = await saveAutomation(null);
+            if (!ok) throw new Error('The automation was not saved — see the message above.');
+          } : null,
+        });
+      });
+    }
+  }
+
+  /** Edited JSON -> draft. Mirrors _awDraftFromRule, but for a body that came
+   *  out of buildPayload rather than off the API. */
+  function applyPayloadToDraft(p) {
+    var next = _awDraftFromRule(p);
+    // buildPayload omits `enabled` semantics the draft needs, so carry the
+    // edited value when present and otherwise keep what the draft had.
+    if (typeof p.enabled === 'boolean') next.enabled = p.enabled;
+    else next.enabled = draft.enabled;
+    Object.keys(next).forEach(function (k) { draft[k] = next[k]; });
+  }
+
   function renderStep6() {
     var panel = document.getElementById("aw-step-6");
     panel.innerHTML = '<h3 style="margin:0 0 0.25rem">Review &amp; save</h3>' +
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
-        '<label style="font-weight:600;margin:0 0 6px;display:block">Summary</label>' +
+        '<div style="display:flex;align-items:center;gap:0.5rem;margin:0 0 6px;flex-wrap:wrap">' +
+          '<label style="font-weight:600;margin:0;flex:1 1 auto">Summary</label>' +
+          codeButtonsHtml() +
+        '</div>' +
         '<div id="aw-summary"></div>' +
       '</div>' +
       '<div class="form-group" style="border:1px solid var(--color-border);border-radius:6px;padding:0.75rem">' +
@@ -4082,6 +4334,7 @@ async function openAutomationWizard(existing, opts) {
         : "");
     renderSummary();
     renderAffectedDevices();
+    wireCodeButtons();
     if (permAtLeast("automationManagement", "fullwrite")) renderTestDelivery();
   }
 
@@ -4265,23 +4518,13 @@ async function openAutomationWizard(existing, opts) {
   }
 
   /** The DRAFT as the test endpoint wants it — what's on screen, not what's saved. */
+  /** The draft as a preview body. This was a near-copy of buildPayload,
+   *  differing only in the name fallback and three omitted keys — and
+   *  `previewInputSchema`'s base is a plain z.object (not .strict()), so
+   *  `enabled` / `channels` / `emailComposition` are stripped rather than
+   *  rejected. One builder, so the two can no longer drift. */
   function testDeliveryPayload() {
-    return {
-      name: draft.name || "Untitled automation",
-      description: draft.description,
-      severity: draft.severity,
-      trigger: draft.trigger,
-      scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
-      reset: draft.reset,
-      actions: draft.actions,
-      cooldownSec: draft.cooldownSec,
-      messageTemplate: draft.messageTemplate,
-      requireAckNote: draft.requireAckNote === true,
-      escalation: draft.escalation,
-      severityBands: bandsApplicable(draft.trigger) ? payloadBands() : null,
-      bandNotify: bandsApplicable(draft.trigger) && draft.severityBands && draft.severityBands.length ? (draft.bandNotify || null) : null,
-      resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
-    };
+    return buildPayload({ nameFallback: "Untitled automation" });
   }
   async function renderAffectedDevices() {
     var box = document.getElementById("aw-affected");
@@ -5781,19 +6024,18 @@ async function openAutomationWizard(existing, opts) {
     closeModal();
   });
 
-  document.getElementById("aw-save").addEventListener("click", async function () {
-    COLLECT[step]();
-    // Validate every step; jump to the first failing one.
-    for (var i = 1; i <= STEPS.length; i++) {
-      var problem = VALIDATE[i]();
-      if (problem) {
-        if (i !== step) goToStep(i, { skipCollect: true });
-        showToast(problem, "error");
-        return;
-      }
-    }
-    var payload = {
-      name: draft.name,
+  /**
+   * The wire shape, derived purely from `draft` — no DOM reads, so export and
+   * the code viewer can call it from any step (goToStep has already collected
+   * every step the operator passed through). Extracted from the save handler so
+   * save / export / view-code cannot drift apart.
+   *
+   * `nameFallback` exists for the test-delivery caller, whose draft may not be
+   * named yet.
+   */
+  function buildPayload(o) {
+    return {
+      name: draft.name || ((o && o.nameFallback) || ""),
       description: draft.description,
       enabled: draft.enabled,
       severity: draft.severity,
@@ -5816,21 +6058,51 @@ async function openAutomationWizard(existing, opts) {
       // server schema is strict.
       resetActions: draft.resetActions && draft.resetActions.length ? stripMirrorMarks(draft.resetActions) : null,
     };
-    this.disabled = true;
+  }
+
+  /**
+   * Validate every step, then POST or PUT. Returns true on success. The
+   * validate-all loop lives HERE rather than in buildPayload, because export and
+   * the code viewer must work on an incomplete draft.
+   */
+  async function saveAutomation(btn) {
+    COLLECT[step]();
+    // Validate every step; jump to the first failing one.
+    for (var i = 1; i <= STEPS.length; i++) {
+      var problem = VALIDATE[i]();
+      if (problem) {
+        if (i !== step) goToStep(i, { skipCollect: true });
+        showToast(problem, "error");
+        return false;
+      }
+    }
+    var payload = buildPayload();
+    if (btn) btn.disabled = true;
     try {
       if (editing) await api.automations.update(editing.id, payload);
       else await api.automations.create(payload);
       _awDraftStash = null;
       closeModal();
       showToast(editing ? "Automation saved"
+        : importing ? "Automation imported — it starts disabled, enable it when you're ready"
         : cloning ? "Automation cloned — it starts disabled, enable it when you're ready"
         : "Automation created", "success");
       if (window._reloadRules) window._reloadRules();
-    } catch (err) { this.disabled = false; showToast(err.message || "Save failed", "error"); }
+      return true;
+    } catch (err) {
+      if (btn) btn.disabled = false;
+      showToast(err.message || "Save failed", "error");
+      return false;
+    }
+  }
+
+  document.getElementById("aw-save").addEventListener("click", function () {
+    saveAutomation(this);
   });
 
   // ── First render ───────────────────────────────────────────────────────
   // (Severity moved off step 1 onto the trigger step — wired in wireStep3.)
+  wireStep1();
   wireStep2();
   wireStep3();
   updateStepper();
