@@ -1007,6 +1007,13 @@ export const CHANNEL_TYPE_META: Record<ChannelType, { label: string; transport: 
   },
 };
 
+/**
+ * How far OUT a notify action may reach from the triggering device's own
+ * region. 8 is a ceiling, not an expectation: an install with more than eight
+ * levels of nested regions has a drawing problem, not a routing one.
+ */
+export const MAX_DEVICE_REGION_LEVELS = 8;
+
 export const deliveryTargetSchema = z.object({
   channelId: z.string().min(1).max(100),
   // Recipient sources (combine freely; only meaningful for recipient-routed
@@ -1015,6 +1022,21 @@ export const deliveryTargetSchema = z.object({
   addresses: z.array(z.string().email().max(320)).max(100).optional(), // custom email addresses (email channels)
   recipientScopeRegion: z.boolean().optional(), // users whose region tags match the rule's scope region tag(s)
   recipientDeviceRegion: z.boolean().optional(), // users whose region tags match the TRIGGERING asset's region: tag(s)
+  // Route to users whose region tags match the triggering asset's regions at
+  // specific ASSET-RELATIVE levels: 1 = the device's own innermost region,
+  // 2 = the division containing it, and so on outward. Independent of
+  // recipientDeviceRegion (which stays "every region the asset carries, any
+  // level") rather than a modifier of it, so no stored rule changes meaning and
+  // the two can sit on DIFFERENT actions — a region-users trigger and an
+  // L2-users escalation, which is the whole point.
+  //
+  // NOT asked as a global level: levels count outward from the leaves and have
+  // gaps on an uneven tree, so filtering on a global level would reach nobody
+  // for a device whose branch skips it. See regionHierarchyService.
+  recipientDeviceRegionLevels: z
+    .array(z.number().int().min(1).max(MAX_DEVICE_REGION_LEVELS))
+    .max(MAX_DEVICE_REGION_LEVELS)
+    .optional(),
   recipientAssetContacts: z.boolean().optional(), // address-book contacts owning the TRIGGERING asset (email only)
   // Every user holding one of these ROLES. Stored as role IDS, not names: a
   // role can be renamed, and User.roleId / ApiToken / GroupMapping all key on
@@ -1164,6 +1186,12 @@ export const notifyActionSchema = z
     // scope). The engine threads the asset's stripped region snapshot into
     // the expander (Notification.regionTags on the escalation sweep).
     recipientDeviceRegion: z.boolean().optional(),
+    // Asset-relative level routing — see deliveryTargetSchema for why levels
+    // are counted outward from the DEVICE rather than globally.
+    recipientDeviceRegionLevels: z
+      .array(z.number().int().min(1).max(MAX_DEVICE_REGION_LEVELS))
+      .max(MAX_DEVICE_REGION_LEVELS)
+      .optional(),
     // Route to the address-book contacts RESPONSIBLE for the triggering asset
     // (Contact.assetCriteria ∪ Contact.assetIds). Same union semantics as
     // recipientDeviceRegion and works with any device filter — the difference
@@ -1576,6 +1604,7 @@ export function targetsToNotifyActions(
     ...(t.addresses?.length ? { addresses: t.addresses } : {}),
     ...(t.recipientScopeRegion !== undefined ? { recipientScopeRegion: t.recipientScopeRegion } : {}),
     ...(t.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: t.recipientDeviceRegion } : {}),
+    ...(t.recipientDeviceRegionLevels?.length ? { recipientDeviceRegionLevels: t.recipientDeviceRegionLevels } : {}),
     ...(t.recipientAssetContacts !== undefined ? { recipientAssetContacts: t.recipientAssetContacts } : {}),
     ...(t.recipientRoles?.length ? { recipientRoles: t.recipientRoles } : {}),
     ...(t.recipientAllUsers !== undefined ? { recipientAllUsers: t.recipientAllUsers } : {}),
@@ -1598,6 +1627,9 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.addresses?.length ? { addresses: a.addresses } : {}),
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
       ...(a.recipientDeviceRegion !== undefined ? { recipientDeviceRegion: a.recipientDeviceRegion } : {}),
+      // Without this line the field validates, persists, renders in the wizard
+      // and routes to NOBODY — expandDeliveries only ever sees the target shape.
+      ...(a.recipientDeviceRegionLevels?.length ? { recipientDeviceRegionLevels: a.recipientDeviceRegionLevels } : {}),
       ...(a.recipientAssetContacts !== undefined ? { recipientAssetContacts: a.recipientAssetContacts } : {}),
       ...(a.recipientRoles?.length ? { recipientRoles: a.recipientRoles } : {}),
       ...(a.recipientAllUsers !== undefined ? { recipientAllUsers: a.recipientAllUsers } : {}),

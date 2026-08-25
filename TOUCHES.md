@@ -1660,6 +1660,7 @@ Listed alphabetically.
 **Two tag namespaces in the recipient index (`notificationRecipientService`).** `IndexedUser` carries BOTH `matchSet` (region ∪ other tags, flattened) and `regionSet` (region tags only). They are not interchangeable:
 - `resolveRecipientUsers` (legacy free-form `recipientTags`) and `recipientDeviceRegion` / `recipientScopeRegion` use **`matchSet`** — changing that would alter delivery for existing rules.
 - `resolveUsersByRegions` / `resolveUsersInAnyRegion` (the push broadcast modes, where an operator picks a region BY NAME from the map-region catalogue) use **`regionSet`**. A user whose unrelated *other* tag happens to read "Atlanta" must not receive Atlanta's alerts, which is exactly what the flattened set would do.
+- `recipientDeviceRegionLevels` (asset-relative level routing) uses **`regionSet`** via `resolveUsersByRegions`, because those names are resolved FROM the map-region catalogue by `regionHierarchyService.deviceRegionsAtLevels` and are regions by construction. **The resulting asymmetry with `recipientDeviceRegion` (which stays on `matchSet`) is deliberate — do NOT unify them.** Retro-fitting `recipientDeviceRegion` onto `regionSet` is a behavior change: any user whose non-region tag coincidentally matches a region name would silently stop receiving alerts they get today, with no UI signal. If that should ever be fixed it needs its own commit, with a pre-flight query listing the affected (user, tag) pairs for a human to review.
 Also note the two storage conventions: user/role/group `regionTags` are stored **bare** ("Atlanta"), asset tags carry the **`region:` prefix**. `normalizeNeedle` strips the prefix, so either form may be passed in — but store bare names in `recipientRegions`.
 
 **Invariants:**
@@ -1844,7 +1845,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Routing a fired notification to concrete delivery recipients, and expanding a rule's `targets[]` into `NotificationDelivery` rows.
 
-**Public API:** `resolveRecipientUsers(recipientTags)`, `resolveRecipientUsersByIds(ids)`, `resolveEmailRecipients({recipientUserIds?, addresses?})`, `dedupeEmailRecipients(to, cc, bcc)` (pure), `listRecipientUsers()` (builder picker), `scopeRegionTagsOf(scope)`, `expandDeliveries(notificationId, targets, opts {scopeRegionTags?, assetRegionTags?, composedEmail?, escalation?})`, `ExpandDeliveriesOptions` + `ComposedEmail` types, `bumpRecipientIndex()`.
+**Public API:** `resolveRecipientUsers(recipientTags)`, `resolveRecipientUsersByIds(ids)`, `resolveEmailRecipients({recipientUserIds?, addresses?})`, `dedupeEmailRecipients(to, cc, bcc)` (pure), `listRecipientUsers()` (builder picker), `scopeRegionTagsOf(scope)`, `expandDeliveries(notificationId, targets, opts {scopeRegionTags?, assetRegionTags?, composedEmail?, escalation?})` (the level-routing index it needs is resolved through a closure memoized per NOTIFICATION, so a rule with three notify actions reads it once and a rule that never opts in pays nothing), `ExpandDeliveriesOptions` + `ComposedEmail` types, `bumpRecipientIndex()`.
 
 **Cross-service deps:** `regionScopeService.resolveTagScopesForUser` (effective tags per user), `notificationService.stripRegionPrefix`, `notificationTypes.CHANNEL_TRANSPORT` (channel type → transport), `prisma` (notificationChannel lookup + users + pushSubscriptions + notificationDelivery).
 
@@ -2208,6 +2209,29 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - The subnet half of membership is a plain `fortigateDevice IN (controllerIdentityKeys)` match, so a subnet whose serving gate is unknown/blank NEVER inherits a region — that is correct (no gate, no polygon) and must not be widened to CIDR containment against a region-tagged subnet, which would make one region bleed into overlapping RFC1918 space behind a different gate.
 - Because the reconcile now STRIPS, membership transients matter: it runs on the discovery-end hook, so a gate whose coordinates or controller stamps are transiently absent mid-run takes its subtree out of the region for one pass and back in on the next — tag churn, not a wrong steady state. If that churn ever bites (e.g. automations keyed on `region:` scope flapping), the fix is to gate the strip on N consecutive misses, not to drop provenance.
 - Polygon antimeridian crossings are documented out-of-scope; if Polaris ever supports global polygons, audit `pointInPolygon` for that case.
+
+---
+
+## services/regionHierarchyService.ts
+
+**What it owns:** The ALERT-ROUTING view of map-region nesting — translating the region tags a TRIGGERING asset carries into the region names to notify at each **asset-relative** level (1 = the device's own innermost region, 2 = the division containing it, and so on outward).
+
+**Public API:** `regionLevelIndex()` (name → {parentName, level} + maxLevel, built from `mapRegionService.getRegionHierarchy`), `deviceRegionsAtLevels(assetRegionNames, levels, index)` (pure; unit-tested in tests/unit/regionLevelRouting.test.ts), `RegionLevelEntry` / `RegionLevelIndex`, and a re-export of `MAX_DEVICE_REGION_LEVELS`.
+
+**Cross-service deps:** `mapRegionService.getRegionHierarchy` (the derived forest), `utils/tagNormalize.stripRegionPrefix`, `notificationTypes.MAX_DEVICE_REGION_LEVELS`.
+
+**Used by:** `notificationRecipientService.expandDeliveries` (the `recipientDeviceRegionLevels` arm of `usersForTarget`, through a closure memoized per notification), `notificationRuleService.listScopeOptions` (publishes `regionLevels.maxLevel` so both recipient pickers know how many level entries to offer).
+
+**Invariants:**
+- **Levels are ASSET-RELATIVE, never global.** Global levels count outward from the leaves and therefore have GAPS on an uneven tree: a division holding one bare leaf and one 3-deep chain is L4 with children at L1 and L3. Filtering a snapshot on `level === 2` reaches NOBODY for a device in the bare leaf while reaching a mid-chain region for a device in the deep branch — one automation paging a division manager for one alert and a local tech for the next. Level 1 is therefore "the innermost region(s) the asset carries" and each step out follows a containment edge.
+- **Level 1 excludes containers the asset also carries.** A reconciled asset is tagged with its own region AND every region enclosing it, so without the ancestor filter the division would be indistinguishable from the leaf.
+- **The outward walk does NOT require the parent's tag to be in the snapshot.** `computeMembership` tags each region independently, so a division's tag can be one reconcile behind; an escalation must not fall silent for that. Seed from snapshot ∩ catalogue, then follow edges.
+- A tag outside the catalogue (hand-typed, or a region renamed since the alert fired) contributes nothing. That is the same pre-existing gap plain `recipientDeviceRegion` has and is deliberately not fixed here — fixing it means storing region IDS in `Notification.regionTags`, a separate migration.
+- Resolution happens at SEND time from the live catalogue, so a region re-nested between fire and escalation escalates to the NEW division's users. That is correct: an escalation asks whoever is responsible now.
+- **No second TTL cache, deliberately.** `getRegionHierarchy` is already memoized per `Setting.updatedAt`; the remaining indexed `findUnique` per call is what makes a region edit visible immediately in the monitor process (Polaris runs split-role), and callers on a fan-out path memoize the RESULT per notification.
+- Imports `stripRegionPrefix` from `utils/tagNormalize`, **not** from `notificationService` (which re-exports it): that file imports `notificationRuleService`, which imports this module, so the short path would close a runtime cycle.
+
+**When changing this:** the name-normalization rule must stay identical to `normalizeNeedle` in `notificationRecipientService` (prefix-stripped, lower-cased) or level routing and every other region source will disagree about who a name means. Raising `MAX_DEVICE_REGION_LEVELS` means raising it in `notificationTypes` (both recipient schemas enforce it) and re-checking the ancestor-walk hop ceiling here.
 
 ---
 
