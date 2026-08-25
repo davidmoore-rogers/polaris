@@ -918,7 +918,7 @@ const api = {
   },
   // Network Discovery — saved active scans of operator-supplied IP ranges
   // ("+ Add Asset(s)" → Discovery on the Assets page). Every path is behind a
-  // networkScan:read floor; `adopt` additionally needs assets:write, so a
+  // networkScan read-level floor; `adopt` additionally needs assets write, so a
   // caller may legitimately reach `run` and 403 on `adopt`.
   networkScans: {
     list:           ()          => request("GET",    "/network-scans"),
