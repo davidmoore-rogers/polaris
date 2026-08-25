@@ -7118,7 +7118,11 @@ function credHttpForm(cfg) {
     // renders immediately above this host element), because the first thing to
     // establish is what this credential does NOT contain — operators arriving
     // from the old combined form look for the path here.
-    '<p class="hint" style="margin-top:0">What this credential is used to check — the path, the status code, the content the body must carry — is configured per manufacturer and model under <strong>Manufacturer Profiles → Custom Widgets</strong>. Use <strong>Test Connection</strong> below to try a check against a device before saving it there.</p>' +
+    // The global reset (styles.css `* { margin: 0 }`) zeroes margins on a bare
+    // <p>, and `.hint` only gets spacing via `.form-group .hint` — which this
+    // is not, sitting above the first group rather than inside one. So the
+    // bottom margin is explicit, matching `.form-group`'s own 1rem rhythm.
+    '<p class="hint" style="margin:0 0 1rem">What this credential is used to check — the path, the status code, the content the body must carry — is configured per manufacturer and model under <strong>Manufacturer Profiles → Custom Widgets</strong>. Use <strong>Test Connection</strong> below to try a check against a device before saving it there.</p>' +
     '<div class="form-group"><label>Authentication</label>' +
       '<select id="f-http-authmode" style="max-width:280px">' +
         '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
