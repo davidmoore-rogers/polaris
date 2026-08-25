@@ -12,24 +12,40 @@
  * asset source, with the most permissive matrix (any method) since the
  * operator chooses the credential when adding the asset.
  *
- *   FortiManager      → REST API, HTTP, SNMP, SSH, ICMP          (no WinRM — FortiOS doesn't run it; no Agent — appliance)
- *   FortiGate         → REST API, HTTP, SNMP, SSH, ICMP          (same — FortiOS again)
- *   Active Directory  → HTTP, ICMP, WinRM, SSH, Agent            (no REST API — AD-bound hosts have no shared API)
- *   Entra ID / Intune → HTTP, ICMP, WinRM, SSH, Agent            (same — cloud-managed Windows / mobile)
- *   Windows Server    → HTTP, ICMP, WinRM, SSH, Agent            (DHCP discovery surfaces Windows hosts)
- *   Azure Arc         → HTTP, ICMP, WinRM, SSH, Agent            (Arc-enabled servers are ordinary Windows/Linux
+ *   FortiManager      → REST API, SNMP, SSH, ICMP                (no WinRM — FortiOS doesn't run it; no Agent — appliance)
+ *   FortiGate         → REST API, SNMP, SSH, ICMP                (same — FortiOS again)
+ *   Active Directory  → ICMP, WinRM, SSH, Agent                  (no REST API — AD-bound hosts have no shared API)
+ *   Entra ID / Intune → ICMP, WinRM, SSH, Agent                  (same — cloud-managed Windows / mobile)
+ *   Windows Server    → ICMP, WinRM, SSH, Agent                  (DHCP discovery surfaces Windows hosts)
+ *   Azure Arc         → ICMP, WinRM, SSH, Agent                  (Arc-enabled servers are ordinary Windows/Linux
  *                                                                 hosts — the Connected Machine agent is a cloud
  *                                                                 control-plane link, not a Polaris transport)
- *   vCenter           → HTTP, ICMP, SNMP, WinRM, SSH, Agent,     (VMs are guest OSes → the directory-set methods
+ *   vCenter           → ICMP, SNMP, WinRM, SSH, Agent,           (VMs are guest OSes → the directory-set methods
  *                       vCenter                                   apply; ESXi hosts answer SNMP/SSH; "vcenter" is
  *                                                                 the hypervisor-view cpuMemory stream — see below)
  *   Manual            → any                                       (operator-chosen)
  *
- * "http" is on EVERY source because the question it answers — does this thing
- * still serve the page it exists to serve — is asked of appliances and hosts
- * alike (a FortiGate's admin UI, an IIS box, an ESXi host, a PDU's web panel).
- * It is responseTime-only (isMethodValidForStream), so widening the source
- * matrix costs nothing on the other streams.
+ * ── The retired "http" method (2026-08) ──────────────────────────────────────
+ * There WAS an `http` polling method here: a responseTime-only GET that decided
+ * up/down from a status code and a body match. It is gone, and the HTTP check
+ * it performed now lives as a MANUFACTURER CUSTOM WIDGET instead
+ * (`ManufacturerCustomWidget.widgetType = "http"`).
+ *
+ * The move is about where a check DEFINITION belongs. As a polling method the
+ * definition had to ride an `http`-typed Credential, which made a credential —
+ * the thing that answers "how do I authenticate to this vendor" — also carry
+ * "which path, expecting what", so one path per credential meant one credential
+ * per path. As a widget it is keyed by manufacturer + optional model, which is
+ * the axis a check actually varies on: every Axis camera answers the same
+ * VAPIX path, and the credential goes back to being only the login. The
+ * credential type survives, stripped to authentication (bearer / basic /
+ * digest — see utils/httpCheck.ts).
+ *
+ * Consequence worth knowing: an HTTP check no longer moves `monitorStatus`.
+ * It writes a 0/1 to AssetStateSample (alertable through the existing
+ * `customStateValue` metric) plus a response-time gauge, so up/down for such a
+ * device comes from whatever transport its responseTime stream uses — usually
+ * ICMP.
  *
  * The "agent" method represents a Polaris-managed agent installed locally
  * on the target host (Linux/macOS/Windows × amd64/arm64) that pushes samples
@@ -53,20 +69,11 @@
  * source" flag through the hot-loop resolver was rejected — it would cost
  * an AssetSource lookup per asset per tick.
  *
- * The "http" method is an operator-defined HTTP GET health check: one request
- * to a path on the asset's own IP, up/down decided by the status code and
- * optionally by a string the response body must contain. Its definition lives
- * on an `http`-typed Credential (so it is selectable at every tier and its
- * bearer token / basic password are sealed at rest) with a per-asset path
- * override on `Asset.httpCheckPath`; the pure decision logic is
- * utils/httpCheck.ts. Like "vcenter" it is stream-scoped rather than
- * source-scoped — see isMethodValidForStream.
- *
  * Locked with the user during the design exchange; see CLAUDE.md
  * "Polling-method compatibility matrix".
  */
 
-export type PollingMethod = "rest_api" | "http" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent" | "vcenter";
+export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent" | "vcenter";
 
 /** Streams resolved independently by the four-tier monitor settings hierarchy. */
 export type Stream =
@@ -88,7 +95,7 @@ export type AssetSourceKind =
   | "azurearc"
   | "manual";
 
-const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"];
+const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"];
 
 // Each entry is the full set of valid methods for that source. A `Set` is
 // O(1) lookup which matters for the resolver running in the hot monitor
@@ -97,23 +104,23 @@ const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "http", "snmp", "
 // "agent" is allowed wherever Polaris can install software (everything
 // except the Fortinet appliance sources).
 const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>>> = {
-  fortimanager:    new Set<PollingMethod>(["rest_api", "http", "snmp", "ssh", "icmp", "disabled"]),
-  fortigate:       new Set<PollingMethod>(["rest_api", "http", "snmp", "ssh", "icmp", "disabled"]),
+  fortimanager:    new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
+  fortigate:       new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
   // "vcenter" on the directory sources covers VMs those integrations
   // discovered FIRST that a vCenter sync merged into — see header note.
-  activedirectory: new Set<PollingMethod>(["http", "icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
-  entraid:         new Set<PollingMethod>(["http", "icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
-  windowsserver:   new Set<PollingMethod>(["http", "icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  activedirectory: new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  entraid:         new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  windowsserver:   new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   // Arc-enabled machines are ordinary Windows/Linux hosts, so they take the
   // same set as the directory sources. "vcenter" is included for the same
   // reason it is there — an Arc machine can also be a vCenter-merged VM, and
   // in fact the Arc↔vCenter vmUuid cross-link makes that MORE likely, not
   // less. No rest_api (no shared host API) and no snmp.
-  azurearc:        new Set<PollingMethod>(["http", "icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  azurearc:        new Set<PollingMethod>(["icmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   // Union across the two vCenter classes: VMs are guest OSes (icmp / winrm /
   // ssh / agent like the directory sources), ESXi hosts answer snmp/ssh, and
   // "vcenter" delivers the hypervisor-view cpuMemory stream for VMs.
-  vcenter:         new Set<PollingMethod>(["http", "icmp", "snmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
+  vcenter:         new Set<PollingMethod>(["icmp", "snmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
   manual:          new Set<PollingMethod>(ALL_METHODS),
 };
 
@@ -181,13 +188,6 @@ export function isPollingMethodCompatible(source: AssetSourceKind, method: Polli
  */
 export function isMethodValidForStream(stream: Stream, method: PollingMethod): boolean {
   if (method === "vcenter") return stream === "cpuMemory";
-  // "http" is an up/down + response-time check: one GET, a status code, and
-  // optionally a string the body must carry (utils/httpCheck.ts). There is no
-  // CPU figure, interface list, sensor reading or mount table to be had from
-  // it, so it is responseTime-only — expressed here rather than as a per-stream
-  // STREAM_METHODS entry for the same reason "vcenter" is, so the unrestricted
-  // streams keep allowing every other method.
-  if (method === "http") return stream === "responseTime";
   const allowed = STREAM_METHODS[stream];
   return allowed ? allowed.has(method) : true;
 }
@@ -217,7 +217,6 @@ export function isPollingMethod(v: unknown): v is PollingMethod {
 export function pollingMethodLabel(method: PollingMethod): string {
   switch (method) {
     case "rest_api": return "REST API";
-    case "http":     return "HTTP Check";
     case "snmp":     return "SNMP";
     case "winrm":    return "WinRM";
     case "ssh":      return "SSH";

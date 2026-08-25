@@ -214,7 +214,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "http", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -3121,14 +3121,10 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
       // (UpdateAssetSchema's polling enum currently excludes "vcenter", so
       // through THIS route the rejection happens at the schema — this guard
       // is defense in depth for the monitor-settings pathway shape.)
-      // "http" is one GET returning a status code and a body — there is no CPU
-      // figure, interface list, sensor reading or mount table in that, so it is
-      // response-time-only. Rejected here rather than left to fall through at
-      // resolution time for the reason the whole block exists: a silently
-      // ignored setting reads to the operator as a broken save.
-      if (value === "http" && name !== "responseTimePolling") {
-        throw new AppError(400, `HTTP Check polling only applies to the Response Time stream (field: ${name})`);
-      }
+      // NOTE: the "http" polling method was retired (2026-08) — the HTTP check
+      // it performed is now a manufacturer custom widget, so there is no
+      // per-stream guard for it here any more. The schema enum rejects the
+      // value outright.
       if (value === "vcenter") {
         if (name !== "cpuMemoryPolling") {
           throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);

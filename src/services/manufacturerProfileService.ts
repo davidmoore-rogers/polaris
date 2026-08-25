@@ -19,6 +19,7 @@ import {
   type CombinerKind,
 } from "../utils/symbolTransforms.js";
 import { AppError } from "../utils/errors.js";
+import { validateHttpCheckDefinition } from "./credentialService.js";
 import { logger } from "../utils/logger.js";
 import {
   normalizeStateMap,
@@ -103,10 +104,12 @@ export interface MetricRow {
 export interface CustomWidgetRow {
   id:             string;
   name:           string;
-  symbol:         string;
-  mibId:          string;
+  /** NULL on an "http" widget, which names a request rather than an OID. */
+  symbol:         string | null;
+  /** NULL on an "http" widget — there is no MIB behind a URL. */
+  mibId:          string | null;
   type:           "scalar" | "table";
-  widgetType:     "gauge" | "line" | "table" | "state";
+  widgetType:     "gauge" | "line" | "table" | "state" | "http";
   transform:      TransformKind | null;
   displayOptions: Record<string, unknown>;
   order:          number;
@@ -115,6 +118,10 @@ export interface CustomWidgetRow {
   stateMap:       StateMap | null;
   /** Sibling symbol supplying table-row names (state probes only). */
   labelSymbol:    string | null;
+  /** The check definition; null on every non-http widget. */
+  httpCheck:      Record<string, unknown> | null;
+  /** `http`-typed Credential supplying auth; null = unauthenticated check. */
+  credentialId:   string | null;
 }
 
 export interface ProfileSummary {
@@ -160,9 +167,46 @@ function asMetricRowType(value: unknown): MetricRowType {
 // "state" is the 0/1 probe (see src/utils/stateProbes.ts): same walk, but the
 // reading is mapped to a boolean at scrape time and lands in AssetStateSample
 // instead of AssetCustomWidgetSample, which is what makes it alertable per row.
-function asWidgetType(value: unknown): "gauge" | "line" | "table" | "state" {
-  if (value === "gauge" || value === "line" || value === "table" || value === "state") return value;
-  throw new AppError(400, "Invalid widgetType — expected gauge | line | table | state");
+function asWidgetType(value: unknown): "gauge" | "line" | "table" | "state" | "http" {
+  if (value === "gauge" || value === "line" || value === "table" || value === "state" || value === "http") return value;
+  throw new AppError(400, "Invalid widgetType — expected gauge | line | table | state | http");
+}
+
+/**
+ * An "http" widget is the odd one out: it carries a check definition instead of
+ * an OID, so `symbol` and `mibId` are null on it and required on everything
+ * else. That asymmetry is enforced here rather than by a column constraint,
+ * because the requirement is per-widgetType and the DB cannot express it.
+ *
+ * The check itself is validated by the SAME function the credential Test
+ * Connection flow uses, which is what stops a check passing a live test and
+ * then being rejected when the operator tries to save it.
+ */
+async function httpFieldsForWrite(
+  widgetType: string,
+  httpCheck: unknown,
+  credentialId: string | null | undefined,
+): Promise<{ httpCheck: Record<string, unknown> | null; credentialId: string | null }> {
+  if (widgetType !== "http") return { httpCheck: null, credentialId: null };
+
+  const check: Record<string, unknown> =
+    httpCheck && typeof httpCheck === "object" && !Array.isArray(httpCheck)
+      ? { ...(httpCheck as Record<string, unknown>) }
+      : {};
+  validateHttpCheckDefinition(check);
+
+  const credId = credentialId ? String(credentialId) : null;
+  if (credId) {
+    // Verified at save so a mistyped or deleted id fails in the form rather
+    // than once per asset per interval, which is the same reasoning behind
+    // compiling the regex here.
+    const cred = await prisma.credential.findUnique({ where: { id: credId }, select: { id: true, type: true } });
+    if (!cred) throw new AppError(400, "The selected HTTP credential no longer exists");
+    if (cred.type !== "http") {
+      throw new AppError(400, "An HTTP check widget needs an HTTP-typed credential");
+    }
+  }
+  return { httpCheck: check, credentialId: credId };
 }
 
 function asWidgetSymbolType(value: unknown): "scalar" | "table" {
@@ -178,7 +222,7 @@ function asWidgetSymbolType(value: unknown): "scalar" | "table" {
  * behind that a later type flip would resurrect.
  */
 function stateFieldsForWrite(
-  widgetType: "gauge" | "line" | "table" | "state",
+  widgetType: "gauge" | "line" | "table" | "state" | "http",
   stateMap: unknown,
   labelSymbol: unknown,
 ): { stateMap: StateMap | null; labelSymbol: string | null } {
@@ -825,23 +869,30 @@ export async function createWidget(
     modelPattern?:  string | null;
     stateMap?:      unknown;
     labelSymbol?:   string | null;
+    httpCheck?:     unknown;
+    credentialId?:  string | null;
     createdBy?:     string | null;
   },
 ): Promise<CustomWidgetRow> {
   if (!input.name || !input.name.trim()) throw new AppError(400, "Widget name is required");
-  if (!input.symbol || !input.symbol.trim()) throw new AppError(400, "symbol is required");
-  if (!input.mibId) throw new AppError(400, "mibId is required for custom widgets");
+  const widgetType = asWidgetType(input.widgetType);
+  // An http widget names a request, not an OID, so the SNMP pair is required
+  // for every OTHER type rather than universally.
+  if (widgetType !== "http") {
+    if (!input.symbol || !input.symbol.trim()) throw new AppError(400, "symbol is required");
+    if (!input.mibId) throw new AppError(400, "mibId is required for custom widgets");
+  }
   if (input.modelPattern) {
     assertValidModelPattern(input.modelPattern);
   }
-  const widgetType = asWidgetType(input.widgetType);
   const state = stateFieldsForWrite(widgetType, input.stateMap, input.labelSymbol);
+  const http = await httpFieldsForWrite(widgetType, input.httpCheck, input.credentialId);
   const created = await (prisma as any).manufacturerCustomWidget.create({
     data: {
       profileId,
       name:           input.name.trim(),
-      symbol:         input.symbol.trim(),
-      mibId:          input.mibId,
+      symbol:         widgetType === "http" ? null : (input.symbol as string).trim(),
+      mibId:          widgetType === "http" ? null : input.mibId,
       type:           asWidgetSymbolType(input.type ?? "scalar"),
       widgetType,
       transform:      asTransformForType(input.transform ?? null, "scalar") as TransformKind | null,
@@ -850,6 +901,8 @@ export async function createWidget(
       modelPattern:   input.modelPattern ?? null,
       stateMap:       state.stateMap as any,
       labelSymbol:    state.labelSymbol,
+      httpCheck:      http.httpCheck as any,
+      credentialId:   http.credentialId,
       createdBy:      input.createdBy ?? null,
     },
   });
@@ -872,6 +925,8 @@ export async function updateWidget(
     modelPattern?:  string | null;
     stateMap?:      unknown;
     labelSymbol?:   string | null;
+    httpCheck?:     unknown;
+    credentialId?:  string | null;
   },
 ): Promise<CustomWidgetRow> {
   const existing = await (prisma as any).manufacturerCustomWidget.findUnique({ where: { id: widgetId } });
@@ -901,12 +956,28 @@ export async function updateWidget(
         : ((input.labelSymbol ?? "").trim() || null),
     };
   }
+  // Same EFFECTIVE-type reasoning as the state fields above: an edit that does
+  // not mention widgetType keeps the stored check, one that flips a widget away
+  // from http clears it, and one that flips a widget TO http must supply a
+  // check (an empty definition validates to "GET / expecting any 2xx", which is
+  // a legitimate check, so this cannot fail closed on a partial edit).
+  const httpWrite = effectiveType !== "http"
+    ? { httpCheck: null, credentialId: null }
+    : await httpFieldsForWrite(
+        effectiveType,
+        input.httpCheck === undefined ? (existing.httpCheck ?? {}) : input.httpCheck,
+        input.credentialId === undefined ? (existing.credentialId ?? null) : input.credentialId,
+      );
+
   const updated = await (prisma as any).manufacturerCustomWidget.update({
     where: { id: widgetId },
     data: {
       name:           input.name === undefined           ? undefined : input.name.trim(),
-      symbol:         input.symbol === undefined         ? undefined : input.symbol.trim(),
-      mibId:          input.mibId === undefined          ? undefined : input.mibId,
+      // An http widget has no OID; flipping a widget to http clears the pair
+      // rather than leaving a stale symbol that a later flip back would silently
+      // resurrect (the stateMap precedent directly above).
+      symbol:         effectiveType === "http" ? null : (input.symbol === undefined ? undefined : input.symbol.trim()),
+      mibId:          effectiveType === "http" ? null : (input.mibId === undefined ? undefined : input.mibId),
       type:           input.type === undefined           ? undefined : asWidgetSymbolType(input.type),
       widgetType:     input.widgetType === undefined     ? undefined : asWidgetType(input.widgetType),
       transform:      input.transform === undefined      ? undefined : (asTransformForType(input.transform, "scalar") as TransformKind | null ?? null),
@@ -914,6 +985,8 @@ export async function updateWidget(
       order:          input.order === undefined          ? undefined : Number(input.order),
       modelPattern:   input.modelPattern === undefined   ? undefined : (input.modelPattern ?? null),
       ...stateWrite,
+      httpCheck:      httpWrite.httpCheck as any,
+      credentialId:   httpWrite.credentialId,
     },
   });
   await touchProfile(existing.profileId);
@@ -955,6 +1028,8 @@ function shapeWidget(w: any): CustomWidgetRow {
     // usable mapping instead of throwing on the telemetry hot path.
     stateMap:       widgetType === "state" ? normalizeStateMap(w.stateMap ?? {}) : null,
     labelSymbol:    widgetType === "state" ? (w.labelSymbol ?? null) : null,
+    httpCheck:      widgetType === "http" ? ((w.httpCheck ?? {}) as Record<string, unknown>) : null,
+    credentialId:   widgetType === "http" ? (w.credentialId ?? null) : null,
   };
 }
 

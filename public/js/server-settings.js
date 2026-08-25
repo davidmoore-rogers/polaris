@@ -6123,7 +6123,7 @@ function credTypeLabel(t) {
   if (t === "winrm")   return "WinRM";
   if (t === "ssh")     return "SSH";
   if (t === "restapi") return "REST API";
-  if (t === "http")    return "HTTP Check";
+  if (t === "http")    return "HTTP";
   return t;
 }
 
@@ -6559,7 +6559,7 @@ async function openCredentialModal(id, initialState) {
  * succeeds while the content did not match, and that is exactly the case an
  * operator needs to see spelled out rather than inferred.
  */
-function credHttpDiagnosticsHTML(diag, cfg) {
+function credHttpDiagnosticsHTML(diag, cfg, check) {
   if (!diag) return "";
   var muted = "color:var(--color-text-secondary)";
   function row(label, value) {
@@ -6582,7 +6582,7 @@ function credHttpDiagnosticsHTML(diag, cfg) {
       '✓ Expected content found in the response body.' +
     '</div>';
   } else {
-    var lenient = cfg && cfg.failOnMismatch === false;
+    var lenient = check && check.failOnMismatch === false;
     verdict = '<div style="font-size:0.8rem;margin-top:0.4rem;color:var(--color-warning,#d68910)">' +
       '⚠ Expected content NOT found in the response body' +
       (lenient ? ' — the probe still counts as up, because "treat a content mismatch as down" is off.' : '.') +
@@ -6628,6 +6628,93 @@ function credHttpDiagnosticsHTML(diag, cfg) {
     '</div>';
 }
 
+/**
+ * The CHECK-definition fields, rendered inside the Test Connection modal for
+ * `http` credentials.
+ *
+ * These used to live on the credential form. They moved to the manufacturer
+ * custom widget that owns the check — but the test flow still needs them,
+ * because tailoring a check is inherently iterative: you cannot know which
+ * string to expect until you have seen what the device returns. So the modal
+ * carries a full, unsaved check definition, and the loop is: point it at a
+ * device, read the body that comes back, paste a distinctive string into
+ * Expected content, re-test — then save the settled values onto the widget.
+ *
+ * Nothing here is persisted by the test.
+ */
+function credHttpCheckFields() {
+  return '' +
+    '<div style="margin-top:0.9rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
+      '<div style="font-weight:600;font-size:0.85rem;margin-bottom:0.5rem">Check to run</div>' +
+      '<p class="hint" style="margin-top:0">These describe the request, not the credential. Once they are right, save them on the matching <strong>Manufacturer Profile → Custom Widget</strong>; this modal never persists them.</p>' +
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<input type="checkbox" id="f-tchk-https">' +
+          '<span>Use HTTPS</span>' +
+        '</label>' +
+      '</div>' +
+      '<div class="form-group"><label>Port</label>' +
+        '<input type="number" id="f-tchk-port" min="1" max="65535" placeholder="default (80 / 443)" style="max-width:200px">' +
+      '</div>' +
+      '<div class="form-group"><label>Path</label>' +
+        '<input type="text" id="f-tchk-path" placeholder="/healthz">' +
+      '</div>' +
+      '<div class="form-group"><label>Expected status code</label>' +
+        '<input type="number" id="f-tchk-status" min="100" max="599" placeholder="any 2xx" style="max-width:200px">' +
+        '<p class="hint">Leave blank to accept any 2xx. Redirects are never followed, so set this to 301/302 only if the redirect itself is the healthy answer.</p>' +
+      '</div>' +
+      '<div class="form-group"><label>Expected content</label>' +
+        '<input type="text" id="f-tchk-body" placeholder="e.g. OK">' +
+        '<p class="hint">Text the response body must carry. This is what separates "the web server answered" from "the service still works" — a device serving an error page still returns 200. Leave blank to judge on the status code alone.</p>' +
+      '</div>' +
+      '<div class="form-group"><label>Match</label>' +
+        '<select id="f-tchk-matchmode" style="max-width:240px">' +
+          '<option value="contains" selected>Contains this text</option>' +
+          '<option value="regex">Matches this regular expression</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<input type="checkbox" id="f-tchk-casesensitive">' +
+          '<span>Case sensitive</span>' +
+        '</label>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<input type="checkbox" id="f-tchk-failonmismatch" checked>' +
+          '<span>Treat a content mismatch as down</span>' +
+        '</label>' +
+        '<p class="hint">On (recommended): a 200 whose body doesn\'t match counts as down, and the error names the missing content. Off: any accepted status counts as up and the mismatch is advisory only.</p>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
+          '<input type="checkbox" id="f-tchk-verifytls">' +
+          '<span>Verify TLS certificate</span>' +
+        '</label>' +
+        '<p class="hint">Only applies with HTTPS. Off by default — device management certs are usually self-signed.</p>' +
+      '</div>' +
+    '</div>';
+}
+
+/** Collect the modal's check definition. Blank number fields mean "default". */
+function readHttpCheckFields() {
+  function numOrNull(id) {
+    var v = (document.getElementById(id).value || "").trim();
+    return v ? Number(v) : null;
+  }
+  return {
+    useHttps:       document.getElementById("f-tchk-https").checked,
+    port:           numOrNull("f-tchk-port"),
+    path:           (document.getElementById("f-tchk-path").value || "").trim(),
+    expectStatus:   numOrNull("f-tchk-status"),
+    expectBody:     document.getElementById("f-tchk-body").value,
+    matchMode:      document.getElementById("f-tchk-matchmode").value,
+    caseSensitive:  document.getElementById("f-tchk-casesensitive").checked,
+    failOnMismatch: document.getElementById("f-tchk-failonmismatch").checked,
+    verifyTls:      document.getElementById("f-tchk-verifytls").checked,
+  };
+}
+
 function openCredentialTestModal(state) {
   var typeLabel = credTypeLabel(state.type);
   var title = "Test Credential" + (state.name ? " — " + state.name : "");
@@ -6657,8 +6744,9 @@ function openCredentialTestModal(state) {
     '<div id="f-cred-test-selected" data-test-mode="asset" style="display:none;padding:0.6rem 0.75rem;border:1px solid var(--color-border);border-radius:4px;margin-bottom:0.75rem;background:var(--color-surface-alt,rgba(127,127,127,0.05))"></div>' +
     '<div class="form-group" data-test-mode="manual" style="display:none"><label>IP address or hostname</label>' +
       '<input type="text" id="f-cred-test-host" autocomplete="off" spellcheck="false" placeholder="10.20.30.40">' +
-      '<p class="hint">Just the host — no scheme, port or path. Those come from the credential itself, so a pasted URL is refused rather than silently trimmed down to something that dials differently from what you typed. Nothing is saved; this only picks the target for one probe.</p>' +
+      '<p class="hint">Just the host — no scheme, port or path. Those are part of the check below, so a pasted URL is refused rather than silently trimmed down to something that dials differently from what you typed. Nothing is saved; this only picks the target for one probe.</p>' +
     '</div>' +
+    (state.type === 'http' ? credHttpCheckFields() : '') +
     '<div id="f-cred-test-result" style="display:none"></div>';
   var footer =
     (state.fromList ? '' : '<button class="btn btn-secondary" id="btn-cred-test-back" style="margin-right:auto">&larr; Back</button>') +
@@ -6822,6 +6910,8 @@ function openCredentialTestModal(state) {
     if (mode === "asset") body.assetId = selectedAsset.id;
     else body.host = typedHost;
     if (state.id) body.id = state.id;
+    // The check definition is per-test, not part of the credential.
+    if (state.type === "http") body.check = readHttpCheckFields();
     try {
       var res = await api.credentials.test(body);
       var ok = !!res.success;
@@ -6837,7 +6927,7 @@ function openCredentialTestModal(state) {
           '<div style="font-size:0.85rem;margin-top:0.25rem">' + escapeHtml(detail) + '</div>' +
           (res.host ? '<div style="font-size:0.78rem;color:var(--color-text-secondary);margin-top:0.25rem">Host: ' + escapeHtml(res.host) + '</div>' : '') +
         '</div>' +
-        credHttpDiagnosticsHTML(res.httpDiagnostics, state.config);
+        credHttpDiagnosticsHTML(res.httpDiagnostics, state.config, body.check);
     } catch (err) {
       resultBox.innerHTML =
         '<div style="margin-top:0.75rem;padding:0.75rem;border:1px solid var(--color-danger,#c0392b);border-radius:4px">' +
@@ -7017,64 +7107,25 @@ function credRestApiForm(cfg) {
  * auth as an optional tail. The host deliberately isn't here: it comes from the
  * asset being probed, which is what lets one credential cover a fleet.
  */
+/**
+ * The `http` credential form — AUTHENTICATION ONLY since 2026-08. Everything
+ * that describes the check itself (scheme, port, path, expected status,
+ * expected content, match mode, TLS verification) moved to the manufacturer
+ * custom widget that owns the check, and is additionally settable ad hoc in the
+ * Test Connection modal so a check can be dialled in before it is saved.
+ *
+ * There is no "None" option: a credential exists to authenticate, and an
+ * unauthenticated check is expressed by a widget with no credential attached.
+ */
 function credHttpForm(cfg) {
-  var mode = cfg.matchMode === "regex" ? "regex" : "contains";
   var authMode = httpAuthModeOf(cfg);
-  // failOnMismatch defaults TRUE server-side, so an absent value must render as
-  // checked — otherwise the form would show the loose reading while the stored
-  // credential enforces the strict one.
-  var strict = cfg.failOnMismatch !== false;
+  // A pre-split credential can resolve to "none" (it authenticated nothing).
+  // The select has no such option, so land it on bearer rather than rendering a
+  // dropdown whose value silently isn't in its own list.
+  if (authMode === "none") authMode = "bearer";
   return (
-    '<div class="form-group">' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-        '<input type="checkbox" id="f-http-https"' + (cfg.useHttps === true ? " checked" : "") + '>' +
-        '<span>Use HTTPS</span>' +
-      '</label>' +
-    '</div>' +
-    '<div class="form-group"><label>Port</label>' +
-      '<input type="number" id="f-http-port" min="1" max="65535" value="' + escapeHtml(cfg.port ? String(cfg.port) : "") + '" placeholder="default (80 / 443)" style="max-width:200px">' +
-    '</div>' +
-    '<div class="form-group"><label>Path</label>' +
-      '<input type="text" id="f-http-path" value="' + escapeHtml(cfg.path || "") + '" placeholder="/healthz">' +
-      '<p class="hint">Requested against each monitored device\'s own address — the host is never part of the credential, which is what lets one check cover a whole fleet. A single device whose endpoint differs can override just this path on its Monitoring tab.</p>' +
-    '</div>' +
-    '<div class="form-group"><label>Expected status code</label>' +
-      '<input type="number" id="f-http-status" min="100" max="599" value="' + escapeHtml(cfg.expectStatus ? String(cfg.expectStatus) : "") + '" placeholder="any 2xx" style="max-width:200px">' +
-      '<p class="hint">Leave blank to accept any 2xx. Redirects are never followed, so set this to 301/302 only if the redirect itself is the healthy answer.</p>' +
-    '</div>' +
-    '<div class="form-group"><label>Expected content</label>' +
-      '<input type="text" id="f-http-body" value="' + escapeHtml(cfg.expectBody || "") + '" placeholder="e.g. OK">' +
-      '<p class="hint">Text the response body must carry. This is what separates "the web server answered" from "the service still works" — a device serving an error page still returns 200. Leave blank to judge on the status code alone.</p>' +
-    '</div>' +
-    '<div class="form-group"><label>Match</label>' +
-      '<select id="f-http-matchmode" style="max-width:240px">' +
-        '<option value="contains"' + (mode === "contains" ? " selected" : "") + '>Contains this text</option>' +
-        '<option value="regex"' + (mode === "regex" ? " selected" : "") + '>Matches this regular expression</option>' +
-      '</select>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-        '<input type="checkbox" id="f-http-casesensitive"' + (cfg.caseSensitive === true ? " checked" : "") + '>' +
-        '<span>Case sensitive</span>' +
-      '</label>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-        '<input type="checkbox" id="f-http-failonmismatch"' + (strict ? " checked" : "") + '>' +
-        '<span>Treat a content mismatch as down</span>' +
-      '</label>' +
-      '<p class="hint">On (recommended): a 200 whose body doesn\'t match counts as down, and the probe error names the missing content. Off: any accepted status counts as up and the mismatch is advisory only — reachability semantics, close to what ICMP already gives you.</p>' +
-    '</div>' +
-    '<div class="form-group">' +
-      '<label style="display:flex;align-items:center;gap:6px;cursor:pointer">' +
-        '<input type="checkbox" id="f-http-verifytls"' + (cfg.verifyTls === true ? " checked" : "") + '>' +
-        '<span>Verify TLS certificate</span>' +
-      '</label>' +
-      '<p class="hint">Only applies with HTTPS. Off by default — device management certs are usually self-signed.</p>' +
-    '</div>' +
     '<div class="form-group"><label>Authentication</label>' +
       '<select id="f-http-authmode" style="max-width:280px">' +
-        '<option value="none"' +   (authMode === "none"   ? " selected" : "") + '>None</option>' +
         '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
         '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic</option>' +
         '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest</option>' +
@@ -7090,7 +7141,8 @@ function credHttpForm(cfg) {
     '</div>' +
     '<div class="form-group" data-http-auth="basic digest"><label>Password</label>' +
       '<input type="password" id="f-http-pass" value="' + escapeHtml(cfg.password || "") + '">' +
-    '</div>'
+    '</div>' +
+    '<p class="hint" style="margin-top:0.75rem">What this credential is used to check — the path, the status code, the content the body must carry — is configured per manufacturer and model under <strong>Manufacturer Profiles → Custom Widgets</strong>. Use <strong>Test Connection</strong> below to try a check against a device before saving it there.</p>'
   );
 }
 
@@ -7166,31 +7218,19 @@ function readCredentialForm(type) {
     };
   }
   if (type === "http") {
-    var h = {
-      useHttps:       document.getElementById("f-http-https").checked,
-      path:           (document.getElementById("f-http-path").value || "").trim(),
-      expectBody:     document.getElementById("f-http-body").value,
-      matchMode:      document.getElementById("f-http-matchmode").value,
-      caseSensitive:  document.getElementById("f-http-casesensitive").checked,
-      failOnMismatch: document.getElementById("f-http-failonmismatch").checked,
-      verifyTls:      document.getElementById("f-http-verifytls").checked,
-      authMode:       document.getElementById("f-http-authmode").value,
-      apiToken:       document.getElementById("f-http-token").value,
-      username:       (document.getElementById("f-http-user").value || "").trim(),
-      password:       document.getElementById("f-http-pass").value,
-    };
+    // AUTH ONLY. The check definition moved to the manufacturer custom widget,
+    // so this form no longer collects a path, status or body expectation.
     // NOTE: the carriers the selected mode does not send are stripped
     // SERVER-side (validateHttpConfig), not here. Blanking a secret field in
     // this payload means "keep the stored value" to
     // mergeConfigPreservingSecrets, so clearing it client-side would silently
     // preserve exactly the credential it looks like it is removing.
-    // Blank port / status mean "use the default" and "any 2xx" — send null
-    // rather than 0 or "", which the validator would reject as out of range.
-    var hp = num(document.getElementById("f-http-port").value);
-    h.port = hp === undefined ? null : hp;
-    var hs = num(document.getElementById("f-http-status").value);
-    h.expectStatus = hs === undefined ? null : hs;
-    return h;
+    return {
+      authMode: document.getElementById("f-http-authmode").value,
+      apiToken: document.getElementById("f-http-token").value,
+      username: (document.getElementById("f-http-user").value || "").trim(),
+      password: document.getElementById("f-http-pass").value,
+    };
   }
   var s = {
     username: document.getElementById("f-ssh-user").value,
@@ -7664,8 +7704,11 @@ function renderProfileDetail(detail) {
 // fields per row here would force wrapping that breaks scan-ability.
 // Each card has a compact view mode and an inline-expanded edit mode.
 
-var WIDGET_TYPE_LABELS = { gauge: "Gauge", line: "Line chart", table: "Table", state: "State (0/1)" };
-var WIDGET_TYPE_ORDER  = ["gauge", "line", "table", "state"];
+var WIDGET_TYPE_LABELS = {
+  gauge: "Gauge", line: "Line chart", table: "Table",
+  state: "State (0/1)", http: "HTTP check",
+};
+var WIDGET_TYPE_ORDER  = ["gauge", "line", "table", "state", "http"];
 
 // ─── State probes (widgetType "state") ──────────────────────────────────
 // A status-shaped OID rather than a gauge: an alarm bit, a PSU present flag, a
@@ -7783,6 +7826,8 @@ function renderWidgetEditCard(profileId, w, manufacturer) {
     displayOptions:   w.displayOptions || {},
     stateMap:         w.stateMap || null,
     labelSymbol:      w.labelSymbol || "",
+    httpCheck:        w.httpCheck || null,
+    credentialId:     w.credentialId || "",
     manufacturer:     manufacturer,
     saveBtnClass:     "mfg-widget-save",
     cancelBtnClass:   "mfg-widget-cancel",
@@ -7811,6 +7856,8 @@ function renderAddWidgetCard(profileId, manufacturer) {
     displayOptions:   {},
     stateMap:         null,
     labelSymbol:      "",
+    httpCheck:        null,
+    credentialId:     "",
     manufacturer:     manufacturer,
     saveBtnClass:     "mfg-widget-add-save",
     cancelBtnClass:   "mfg-widget-add-cancel",
@@ -7823,6 +7870,7 @@ function renderAddWidgetCard(profileId, manufacturer) {
 // class (mfg-widget-edit-card vs mfg-widget-add-card) instead of unique
 // per-field selectors.
 function _renderWidgetFormCard(o) {
+  var snmpHidden = o.widgetTypeSelected === "http";
   var html = '<div class="' + o.formClass + '" data-profile-id="' + escapeHtml(o.profileId) + '"' + o.dataAttrs + ' style="border:1px solid var(--color-primary,#4fc3f7);border-radius:6px;padding:10px 12px;margin-bottom:6px;background:var(--color-bg-secondary,rgba(127,127,127,0.04))">' +
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
       '<span style="font-weight:600;font-size:0.85rem">' + escapeHtml(o.title) + '</span>' +
@@ -7836,14 +7884,18 @@ function _renderWidgetFormCard(o) {
         '<input type="text" class="mfg-widget-name" value="' + escapeHtml(o.nameValue) + '" placeholder="e.g. Connected wireless clients" style="width:100%;font-size:0.82rem">') +
       _widgetFormField("Widget type",
         _widgetTypeSelectHTML("mfg-widget-widgettype", o.widgetTypeSelected)) +
+      // The SNMP quartet is hidden (not removed) on an http widget: the check
+      // names a request, not an OID. Hidden rather than removed so a
+      // typed-then-reconsidered symbol survives flipping the type back and
+      // forth before save — the same reasoning as the monitor-settings rows.
       _widgetFormField("MIB *",
-        renderMibSelect(o.mibSelected, "mfg-widget-mib", o.manufacturer, true)) +
+        renderMibSelect(o.mibSelected, "mfg-widget-mib", o.manufacturer, true), snmpHidden) +
       _widgetFormField("Symbol type",
-        renderWidgetTypeSelect(o.typeSelected, "mfg-widget-type")) +
+        renderWidgetTypeSelect(o.typeSelected, "mfg-widget-type"), snmpHidden) +
       _widgetFormField("Symbol *",
-        renderSymbolPicker(o.symbolValue, o.mibSelected, "mfg-widget-symbol", o.typeSelected)) +
+        renderSymbolPicker(o.symbolValue, o.mibSelected, "mfg-widget-symbol", o.typeSelected), snmpHidden) +
       _widgetFormField("Transform",
-        renderTransformSelect(o.transformValue, "mfg-widget-transform")) +
+        renderTransformSelect(o.transformValue, "mfg-widget-transform"), snmpHidden) +
       _widgetFormField("Model regex (optional)",
         '<input type="text" class="mfg-widget-model" value="' + escapeHtml(o.modelValue) + '" placeholder="e.g. FortiAP-231F" style="width:100%;font-size:0.82rem">') +
       _widgetFormField("Order",
@@ -7853,7 +7905,10 @@ function _renderWidgetFormCard(o) {
     // options — the mapping is what makes the probe alertable, so it takes the
     // prominent slot rather than hiding behind a gauge's min/max.
     '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--color-border)">' +
-      (o.widgetTypeSelected === "state"
+      (o.widgetTypeSelected === "http"
+        ? '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">HTTP check</div>' +
+          _widgetHttpCheckForm(o.httpCheck, o.credentialId)
+        : o.widgetTypeSelected === "state"
         ? '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">State mapping</div>' +
           _widgetStateOptionsForm(o.stateMap, o.labelSymbol, o.typeSelected)
         : '<div style="font-size:0.78rem;font-weight:600;margin-bottom:6px">Display options</div>' +
@@ -7903,11 +7958,86 @@ function _widgetStateOptionsForm(stateMap, labelSymbol, symbolType) {
   '</p>';
 }
 
-function _widgetFormField(label, controlHTML) {
-  return '<label style="display:flex;flex-direction:column;gap:2px;font-size:0.74rem;color:var(--color-text-secondary)">' +
+function _widgetFormField(label, controlHTML, hidden) {
+  // `hidden` keeps a field in the DOM but out of sight — used for the SNMP
+  // quartet on an http widget, which names a request rather than an OID.
+  // Hidden rather than omitted so the shadow store still finds the inputs and a
+  // typed-then-reconsidered symbol survives flipping the type back and forth
+  // before save (the monitor-settings precedent).
+  var style = 'display:flex;flex-direction:column;gap:2px;font-size:0.74rem;color:var(--color-text-secondary)';
+  if (hidden) style = 'display:none';
+  return '<label style="' + style + '">' +
     '<span>' + escapeHtml(label) + '</span>' +
     controlHTML +
   '</label>';
+}
+
+/**
+ * The HTTP-check sub-form — the check definition that used to live on an `http`
+ * credential. It sits on the manufacturer profile because a check varies by
+ * vendor AND MODEL (every Axis camera answers the same VAPIX path) while a
+ * login varies by vendor or site; keeping both on a credential meant a second
+ * path needed a second copy of the same password.
+ *
+ * "Applies to" is the existing `modelPattern` field in the grid above — blank
+ * means every asset of this manufacturer, which is the common case and is why
+ * the hint says so rather than leaving an empty box to interpret.
+ */
+function _widgetHttpCheckForm(check, credentialId) {
+  var c = check || {};
+  var creds = (_credentialCache.list || []).filter(function (x) { return x.type === "http"; });
+  var opts = '<option value="">None — unauthenticated</option>';
+  creds.forEach(function (x) {
+    opts += '<option value="' + escapeHtml(x.id) + '"' + (credentialId === x.id ? " selected" : "") + '>' + escapeHtml(x.name) + '</option>';
+  });
+  var mode = c.matchMode === "regex" ? "regex" : "contains";
+  // failOnMismatch defaults TRUE server-side, so an absent value renders CHECKED
+  // — otherwise the form would show the loose reading while the stored widget
+  // enforces the strict one.
+  var strict = c.failOnMismatch !== false;
+  return '' +
+    '<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px">' +
+      _widgetFormField("Credential",
+        '<select class="mfg-http-cred" style="width:100%;font-size:0.82rem">' + opts + '</select>') +
+      _widgetFormField("Path",
+        '<input type="text" class="mfg-http-path" value="' + escapeHtml(c.path || "") + '" placeholder="/healthz" style="width:100%;font-size:0.82rem">') +
+      _widgetFormField("Port",
+        '<input type="number" class="mfg-http-port" value="' + escapeHtml(c.port ? String(c.port) : "") + '" min="1" max="65535" placeholder="default (80 / 443)" style="width:100%;font-size:0.82rem">') +
+      _widgetFormField("Expected status",
+        '<input type="number" class="mfg-http-status" value="' + escapeHtml(c.expectStatus ? String(c.expectStatus) : "") + '" min="100" max="599" placeholder="any 2xx" style="width:100%;font-size:0.82rem">') +
+      _widgetFormField("Expected content",
+        '<input type="text" class="mfg-http-body" value="' + escapeHtml(c.expectBody || "") + '" placeholder="e.g. OK" style="width:100%;font-size:0.82rem">') +
+      _widgetFormField("Match",
+        '<select class="mfg-http-matchmode" style="width:100%;font-size:0.82rem">' +
+          '<option value="contains"' + (mode === "contains" ? " selected" : "") + '>Contains</option>' +
+          '<option value="regex"' + (mode === "regex" ? " selected" : "") + '>Regex</option>' +
+        '</select>') +
+    '</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:8px;font-size:0.8rem">' +
+      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-https"' + (c.useHttps === true ? " checked" : "") + '><span>Use HTTPS</span></label>' +
+      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-verifytls"' + (c.verifyTls === true ? " checked" : "") + '><span>Verify TLS</span></label>' +
+      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-casesensitive"' + (c.caseSensitive === true ? " checked" : "") + '><span>Case sensitive</span></label>' +
+      '<label style="display:flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="mfg-http-failonmismatch"' + (strict ? " checked" : "") + '><span>Mismatch = failed</span></label>' +
+    '</div>' +
+    '<p class="hint" style="margin-top:8px">Records a pass/fail 0/1 (alertable as <strong>Custom state value</strong>) plus the response time. Leave <strong>Model regex</strong> above blank to check every ' + '' + 'device of this manufacturer. Dial the check in against a real device from <strong>Credentials → Test Connection</strong> first.</p>';
+}
+
+/** Collect the HTTP-check sub-form. Blank numbers mean "use the default". */
+function _readWidgetHttpCheck(scope) {
+  function val(cls) { var el = scope.querySelector(cls); return el ? el.value : ""; }
+  function chk(cls) { var el = scope.querySelector(cls); return !!(el && el.checked); }
+  function numOrNull(cls) { var v = (val(cls) || "").trim(); return v ? Number(v) : null; }
+  return {
+    useHttps:       chk(".mfg-http-https"),
+    port:           numOrNull(".mfg-http-port"),
+    path:           (val(".mfg-http-path") || "").trim(),
+    expectStatus:   numOrNull(".mfg-http-status"),
+    expectBody:     val(".mfg-http-body"),
+    matchMode:      val(".mfg-http-matchmode") || "contains",
+    caseSensitive:  chk(".mfg-http-casesensitive"),
+    failOnMismatch: chk(".mfg-http-failonmismatch"),
+    verifyTls:      chk(".mfg-http-verifytls"),
+  };
 }
 
 function _widgetTypeSelectHTML(cls, current) {
@@ -9094,18 +9224,25 @@ function _readWidgetFormPayload(scope) {
   var transform      = (scope.querySelector(".mfg-widget-transform")   || {}).value || "";
 
   if (!name.trim())   { showToast("Widget name is required", "error");                 return null; }
-  // Backend requires a real MibFile UUID — std:* keys aren't acceptable
-  // because the asset-side collector needs an enumerable symbol directory
-  // to walk against on the device.
+
+  // An http widget names a request, not an OID, so the MIB/symbol pair is
+  // required for every OTHER type. Mirrors the same split in
+  // manufacturerProfileService.createWidget.
+  var isHttp = widgetType === "http";
   var mibSplit = splitMibSelection(mibSel);
-  if (!mibSplit.mibId) { showToast("Pick an uploaded MIB (Standard MIBs aren't supported for widgets)", "error"); return null; }
-  if (!symbol.trim()) { showToast("Symbol is required", "error");                       return null; }
+  if (!isHttp) {
+    // Backend requires a real MibFile UUID — std:* keys aren't acceptable
+    // because the asset-side collector needs an enumerable symbol directory
+    // to walk against on the device.
+    if (!mibSplit.mibId) { showToast("Pick an uploaded MIB (Standard MIBs aren't supported for widgets)", "error"); return null; }
+    if (!symbol.trim()) { showToast("Symbol is required", "error");                     return null; }
+  }
 
   var displayOptions = _readWidgetDisplayOptions(scope, widgetType);
   var payload = {
     name:           name.trim(),
-    symbol:         symbol.trim(),
-    mibId:          mibSplit.mibId,
+    symbol:         isHttp ? null : symbol.trim(),
+    mibId:          isHttp ? null : mibSplit.mibId,
     type:           typeSel,
     widgetType:     widgetType,
     transform:      transform || null,
@@ -9113,6 +9250,10 @@ function _readWidgetFormPayload(scope) {
     order:          Number(orderRaw) || 0,
     modelPattern:   modelPattern.trim() ? modelPattern.trim() : null,
   };
+  if (isHttp) {
+    payload.httpCheck    = _readWidgetHttpCheck(scope);
+    payload.credentialId = (scope.querySelector(".mfg-http-cred") || {}).value || null;
+  }
   if (widgetType === "state") {
     var mode      = (scope.querySelector(".mfg-widget-statemode")    || {}).value || "nonzero";
     var valuesRaw = (scope.querySelector(".mfg-widget-statevalues")  || {}).value || "";

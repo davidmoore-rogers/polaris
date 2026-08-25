@@ -50,6 +50,12 @@ const TestSchema = z.object({
   type:    CredentialTypeEnum,
   config:  z.record(z.unknown()),
   id:      z.string().uuid().optional(),
+  // `http` only: the check to exercise (path / expected status / expected body
+  // / TLS). It is supplied per-test rather than read off the credential because
+  // the credential carries authentication only — and supplying it here is what
+  // lets an operator dial a check in against a real device before saving it to
+  // a manufacturer widget.
+  check:   z.record(z.unknown()).optional(),
 }).refine((v) => !!v.assetId || !!v.host || v.type === "restapi", {
   // restapi is the exception it has always been: the credential carries its own
   // baseUrl, so it needs no target of either kind.
@@ -181,8 +187,12 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
       );
     }
 
+    // The check definition is validated with the same function the widget uses,
+    // so a check cannot pass here and be rejected when it is saved.
+    const check: Record<string, unknown> = { ...(input.check || {}) };
     try {
       credentialService.validateConfig(input.type, config);
+      if (input.type === "http") credentialService.validateHttpCheckDefinition(check);
     } catch (err: any) {
       // Surface validation errors as the test result rather than a 4xx so
       // the modal renders them inline like a probe failure.
@@ -200,7 +210,7 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
     // a string the operator has to pick OUT of the response, and pass/fail
     // alone gives them nothing to pick from. Nothing else fills this.
     const probeOut: { diag?: HttpProbeDiagnostics } = {};
-    const result = await probeCredentialAgainstHost(host || "", input.type, config, probeOut);
+    const result = await probeCredentialAgainstHost(host || "", input.type, config, probeOut, check);
     // A typed target has no asset to name, so the host IS the label. Keeping the
     // asset's own label when there is one means the audit trail reads the same
     // as it always has for the inventory path.

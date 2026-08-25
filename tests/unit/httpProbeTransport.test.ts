@@ -60,14 +60,35 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
+/**
+ * Since the 2026-08 split, the credential carries AUTH and the check definition
+ * is supplied separately (it lives on a manufacturer widget, or comes from the
+ * Test Connection form). These cases predate that and were written as one blob,
+ * so the helper divides it the way the two owners now do — which keeps each
+ * test asserting exactly what it always did.
+ */
+const AUTH_KEYS = new Set(["authMode", "apiToken", "username", "password"]);
+
+function splitConfig(config: Record<string, unknown>) {
+  const auth: Record<string, unknown> = {};
+  const check: Record<string, unknown> = { port };
+  for (const [k, v] of Object.entries(config)) {
+    if (AUTH_KEYS.has(k)) auth[k] = v;
+    else check[k] = v;
+  }
+  return { auth, check };
+}
+
 function probe(config: Record<string, unknown>) {
-  return probeCredentialAgainstHost("127.0.0.1", "http", { port, ...config });
+  const { auth, check } = splitConfig(config);
+  return probeCredentialAgainstHost("127.0.0.1", "http", auth, undefined, check);
 }
 
 /** Same probe, capturing the operator-facing diagnostics. */
 async function probeWithDiag(config: Record<string, unknown>) {
   const out: { diag?: HttpProbeDiagnostics } = {};
-  const result = await probeCredentialAgainstHost("127.0.0.1", "http", { port, ...config }, out);
+  const { auth, check } = splitConfig(config);
+  const result = await probeCredentialAgainstHost("127.0.0.1", "http", auth, out, check);
   return { result, diag: out.diag };
 }
 

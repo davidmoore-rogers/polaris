@@ -63,6 +63,40 @@ export type HttpMatchMode = "contains" | "regex";
  * shape of the check, a per-device path handles the device whose health
  * endpoint sits somewhere else.
  */
+/**
+ * The AUTHENTICATION half — what an `http`-typed Credential stores, and all it
+ * stores.
+ *
+ * Split out from the check definition in 2026-08, when the HTTP check moved
+ * from a polling method to a manufacturer custom widget. The two halves vary on
+ * different axes and belong to different owners: a login is per-vendor (or
+ * per-site), while "which path, expecting what" is per-vendor-and-model. Keeping
+ * them on one row meant a second path needed a second copy of the same
+ * password, and changing the password meant editing every path.
+ */
+export interface HttpAuthConfig {
+  /**
+   * Which auth scheme to present. ABSENT is not "none" — it means the row
+   * predates this field, and `resolveHttpAuthMode` infers the pre-existing
+   * behaviour from whichever carrier is populated. See that function.
+   */
+  authMode?: HttpAuthMode;
+  /** Sent as `Authorization: Bearer <token>`. Sealed at rest. */
+  apiToken?: string;
+  /** With `password`, sent as HTTP Basic or Digest per `authMode`. */
+  username?: string;
+  /** Sealed at rest. */
+  password?: string;
+}
+
+/**
+ * The CHECK definition — which request to make and what answer counts as
+ * healthy. Owned by a `ManufacturerCustomWidget` with `widgetType: "http"`
+ * (keyed by manufacturer + optional model), and accepted ad hoc by the
+ * credential Test Connection flow so a check can be dialled in before it is
+ * saved anywhere. `Asset.httpCheckPath` overrides just the path, for the one
+ * device whose endpoint sits somewhere else.
+ */
 export interface HttpCheckConfig {
   /** https when true, http otherwise. Default false (plain HTTP). */
   useHttps?: boolean;
@@ -86,18 +120,6 @@ export interface HttpCheckConfig {
   failOnMismatch?: boolean;
   /** Default false, matching the restapi credential (self-signed device certs). */
   verifyTls?: boolean;
-  /**
-   * Which auth scheme to present. ABSENT is not "none" — it means the row
-   * predates this field, and `resolveHttpAuthMode` infers the pre-existing
-   * behaviour from whichever carrier is populated. See that function.
-   */
-  authMode?: HttpAuthMode;
-  /** Sent as `Authorization: Bearer <token>`. Sealed at rest. */
-  apiToken?: string;
-  /** With `password`, sent as HTTP Basic or Digest per `authMode`. */
-  username?: string;
-  /** Sealed at rest. */
-  password?: string;
 }
 
 /**
@@ -112,6 +134,20 @@ export interface HttpCheckConfig {
  */
 export type HttpAuthMode = "none" | "bearer" | "basic" | "digest";
 
+/**
+ * Modes an `http` CREDENTIAL may be saved with. "none" is deliberately absent:
+ * a credential exists to authenticate, and a credential that authenticates
+ * nothing is an empty row that reads as configuration. Unauthenticated checks
+ * are expressed by a widget selecting NO credential at all, which is the same
+ * outcome without the misleading artefact.
+ */
+export const HTTP_CREDENTIAL_AUTH_MODES: readonly HttpAuthMode[] = ["bearer", "basic", "digest"];
+
+/**
+ * Every mode the PROBE can execute. "none" stays here because it is the state
+ * of a widget with no credential attached — the probe must be able to express
+ * "send no Authorization header".
+ */
 export const HTTP_AUTH_MODES: readonly HttpAuthMode[] = ["none", "bearer", "basic", "digest"];
 
 /**
@@ -122,7 +158,7 @@ export const HTTP_AUTH_MODES: readonly HttpAuthMode[] = ["none", "bearer", "basi
  * through here so a stored row cannot mean one thing to the validator and
  * another to the socket.
  */
-export function resolveHttpAuthMode(config: HttpCheckConfig): HttpAuthMode {
+export function resolveHttpAuthMode(config: HttpAuthConfig): HttpAuthMode {
   const declared = config.authMode;
   if (declared && (HTTP_AUTH_MODES as readonly string[]).includes(declared)) return declared;
   if (typeof config.apiToken === "string" && config.apiToken) return "bearer";
