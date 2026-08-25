@@ -1290,6 +1290,27 @@ export const escalationV2Schema = z
   })
   .strict();
 
+/**
+ * Repeat the alert's notifications while it stays unhandled.
+ *
+ * `stopOn` mirrors escalation's: "acknowledge" stops on acknowledge OR clear;
+ * "clear" ignores acknowledgement and only stops when the alert clears.
+ *
+ * There is deliberately NO maxRepeats — unbounded-until-handled is the point.
+ * `stopAfterHours` is an optional, blank-by-default absolute cut-off so an
+ * unacknowledged holiday weekend doesn't require an emergency edit to a live
+ * automation.
+ */
+export const repeatConfigSchema = z
+  .object({
+    everyMin: z.number().int().min(5).max(1440),
+    stopOn: z.enum(["acknowledge", "clear"]).default("acknowledge"),
+    stopAfterHours: z.number().int().min(1).max(720).optional().nullable(),
+  })
+  .strict();
+
+export type RepeatConfig = z.infer<typeof repeatConfigSchema>;
+
 // ─── Per-action escalation (escalatable actions) ────────────────────────────
 // A rule's top-level actions and each severity band's actions may carry their
 // OWN escalation chain — "notify team A, and if unhandled 15 min later notify
@@ -1528,6 +1549,9 @@ const ruleInputBaseSchema = z.object({
   // resolvedActions stay bare). Absent/null = nothing happens on reset, which
   // is what every stored automation keeps until someone edits and saves it.
   resetActions: z.array(actionSchema).max(20).optional().nullable(),
+  // Re-send this alert's notifications while it stays unhandled. Absent/null =
+  // never repeats, which is every pre-feature automation.
+  repeat: repeatConfigSchema.optional().nullable(),
 });
 
 type RuleInputRaw = z.infer<typeof ruleInputBaseSchema>;
@@ -1557,6 +1581,8 @@ export interface RuleInput {
   bandNotify: BandNotify | null;
   /** Actions to run when the alert ENDS; null = nothing happens on reset. */
   resetActions: AutomationAction[] | null;
+  /** Re-send while unhandled; null = never repeats. */
+  repeat: RepeatConfig | null;
 }
 
 /** Preview input = RuleInput with trigger optional (scope-only preview mode).
@@ -1675,6 +1701,7 @@ function normalizeRuleInputCore(raw: Omit<RuleInputRaw, "trigger">): Omit<RuleIn
     bandNotify: raw.bandNotify ?? null,
     // Anything not copied here is silently dropped by the transform.
     resetActions: raw.resetActions?.length ? raw.resetActions : null,
+    repeat: raw.repeat ?? null,
   };
 }
 
@@ -1723,13 +1750,51 @@ function validateSeverityBands(
   });
 }
 
+/**
+ * A repeat only ever re-runs NOTIFY actions (REPEATABLE_ACTION_TYPES), so an
+ * automation that has none anywhere would save a repeat interval that can never
+ * send anything — a dead setting that looks alive in the wizard. Refuse it at
+ * save rather than letting an operator discover the silence during an incident.
+ *
+ * Band actions count: a banded automation whose notifies live only on its
+ * severity bands still has something to re-send once it is firing in a band.
+ */
+function validateRepeat(
+  v: { repeat?: RepeatConfig | null; actions?: AutomationAction[] | null; severityBands?: SeverityBand[] | null },
+  ctx: z.RefinementCtx,
+): void {
+  if (!v.repeat) return;
+  const repeatable = new Set<string>(REPEATABLE_ACTION_TYPES);
+  const hasNotify =
+    (v.actions ?? []).some((a) => repeatable.has(a.type)) ||
+    (v.severityBands ?? []).some((b) => (b.actions ?? []).some((a) => repeatable.has(a.type)));
+  if (!hasNotify) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["repeat"],
+      message:
+        "Repeating an alert re-sends its notifications, so the automation needs at least one Notify action. " +
+        "API calls and scripts deliberately run only once, when the alert first fires.",
+    });
+  }
+}
+
 function validateRuleV2(
-  v: { trigger?: Trigger; reset: ResetConfig; severity?: Severity; severityBands?: SeverityBand[] | null; bandNotify?: BandNotify | null },
+  v: {
+    trigger?: Trigger;
+    reset: ResetConfig;
+    severity?: Severity;
+    severityBands?: SeverityBand[] | null;
+    bandNotify?: BandNotify | null;
+    actions?: AutomationAction[] | null;
+    repeat?: RepeatConfig | null;
+  },
   ctx: z.RefinementCtx,
 ): void {
   const { trigger, reset } = v;
   if (trigger?.type === "composite") validateCompositeTrigger(trigger, ctx);
   validateSeverityBands(v, ctx);
+  validateRepeat(v, ctx);
   if (reset.mode === "timed" && reset.afterSec == null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
   }
@@ -1867,6 +1932,8 @@ export interface RuleV2View {
   bandNotify: BandNotify | null;
   /** Actions to run when the alert ENDS; null = nothing happens on reset. */
   resetActions: AutomationAction[] | null;
+  /** Re-send while unhandled; null = never repeats. */
+  repeat: RepeatConfig | null;
 }
 
 /** Legacy escalation tier → v2 tier of one notify action. Tier-level template
@@ -1940,6 +2007,7 @@ export function normalizeRuleToV2(row: {
   severityBands?: unknown;
   bandNotify?: unknown;
   resetActions?: unknown;
+  repeat?: unknown;
 }): RuleV2View {
   const storedReset = row.reset ? resetSchema.safeParse(row.reset) : null;
   const reset = storedReset?.success
@@ -1990,7 +2058,13 @@ export function normalizeRuleToV2(row: {
     : [];
   const resetActions = resetParsed.length ? resetParsed : null;
 
-  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify, resetActions };
+  // Defensive parse, like the bands above: a hand-edited or restored row that
+  // no longer matches the schema reads as "never repeats" rather than throwing
+  // on the engine's hot path.
+  const repeatParsed = row.repeat ? repeatConfigSchema.safeParse(row.repeat) : null;
+  const repeat = repeatParsed?.success ? repeatParsed.data : null;
+
+  return { reset, actions, escalation: normalizeEscalationToV2(row.escalation), severityBands, bandNotify, resetActions, repeat };
 }
 
 // ─── Canonical action walk + escalation-chain selection ─────────────────────
@@ -2078,6 +2152,35 @@ export function escalationTierStateKey(chainKey: string, tierIdx: number): strin
 }
 
 /**
+ * Where the repeat pass keeps its progress inside
+ * `Notification.escalationState.tiers`.
+ *
+ * Shares that map with the escalation tiers, and is collision-free by
+ * construction: the level chain produces bare numerics ("0", "1"), per-action
+ * chains produce "a<i>:t<j>", and neither can ever be this string.
+ */
+export const REPEAT_STATE_KEY = "repeat";
+
+/**
+ * Which action types a REPEAT re-runs.
+ *
+ * Notify only, and the asymmetry with escalation is deliberate. An escalation
+ * tier's actions were authored AS a follow-up; the base action list was
+ * authored as "what happens when this fires", and in this codebase that list
+ * routinely contains "open a ticket" (api_call) and "run the remediation
+ * script" (script — the Polaris service account on the server, LocalSystem or
+ * the agent user on the device). Repeats are unbounded, so re-running those
+ * every N minutes on an alert nobody has looked at yet is how a weekend
+ * produces 300 tickets and 300 script executions. The blast radius is not
+ * symmetric with an extra email.
+ *
+ * `event` is excluded too, and would be a no-op anyway: executeActions treats
+ * it as one (the engine's fire path owns the audit Event), so including it would
+ * only mislead a reader.
+ */
+export const REPEATABLE_ACTION_TYPES = ["notify"] as const;
+
+/**
  * All escalation chains active at a given alert severity — mirrors the
  * engine's tierForSeverity band semantics: at a band severity, the band's
  * actions (else the base actions — the band fallback) carry the per-action
@@ -2085,19 +2188,36 @@ export function escalationTierStateKey(chainKey: string, tierIdx: number): strin
  * Shared by the escalation sweep; band transitions reset escalationState, so
  * per-action keys never collide across bands.
  */
+/**
+ * The action list in force at a given alert severity: a band's own actions when
+ * it has any, else the rule's.
+ *
+ * Extracted because the repeat pass needs exactly this rule too, and the band
+ * fallback ("only when band.actions is non-empty") was already written out in
+ * more than one place. A second copy is how a reminder would come to notify a
+ * different set of people than the alert did.
+ */
+export function effectiveActionsForSeverity(
+  rule: RuleActionCarrier & { severity: string },
+  severity: string,
+): EscalatableAction[] {
+  if (severity !== rule.severity) {
+    const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
+    if (band?.actions?.length) return band.actions;
+  }
+  return rule.actions ?? [];
+}
+
 export function escalationChainsForSeverity(
   rule: RuleActionCarrier & { severity: string },
   severity: string,
 ): EscalationChain[] {
-  let effActions = rule.actions ?? [];
+  const effActions = effectiveActionsForSeverity(rule, severity);
   let levelEsc = normalizeEscalationToV2(rule.escalation);
   if (severity !== rule.severity) {
     const band = (rule.severityBands ?? []).find((b) => b.severity === severity);
-    if (band) {
-      if (band.actions?.length) effActions = band.actions;
-      const bandEsc = normalizeEscalationToV2(band.escalation);
-      if (bandEsc?.tiers.length) levelEsc = bandEsc;
-    }
+    const bandEsc = band ? normalizeEscalationToV2(band.escalation) : null;
+    if (bandEsc?.tiers.length) levelEsc = bandEsc;
   }
   const chains: EscalationChain[] = [];
   if (levelEsc?.tiers.length) chains.push({ key: "", escalation: levelEsc });
@@ -2580,6 +2700,19 @@ export function buildSchemaCatalog() {
     // perAction: escalation chains attach to individual actions (top-level +
     // per-band); tier actions themselves can't nest another chain.
     escalationMeta: { maxTiers: 5, minRepeatEveryMin: 5, maxActionsPerTier: 10, perAction: true },
+    // The repeat-until-handled control's vocabulary. `unbounded: true` and the
+    // action-type list are here rather than hardcoded in the wizard because
+    // both are things its COPY has to state — an operator must be told that
+    // reminders never stop on their own, and that API calls and scripts are not
+    // re-run.
+    repeatMeta: {
+      minEveryMin: 5,
+      maxEveryMin: 1440,
+      unbounded: true,
+      actionTypes: REPEATABLE_ACTION_TYPES,
+      stopOnOptions: ["acknowledge", "clear"],
+      maxStopAfterHours: 720,
+    },
     // Severity-band vocabulary for the wizard's per-severity action sections.
     bandMeta: {
       maxBands: 4,

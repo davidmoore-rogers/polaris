@@ -63,6 +63,11 @@ export interface ActionExecContext {
   ruleEmailComposition?: EmailComposition | null;
   /** Set by the escalation sweep: stamps delivery meta + audit details. */
   escalation?: { tier: number; attempt: number };
+  /** Set by the sweep's REPEAT pass: this is a RE-SEND of the initial
+   *  notification, not an escalation tier. Mutually exclusive with
+   *  `escalation` — a reminder must never be labelled an escalation, since the
+   *  two mean different things to whoever is reading the alert. */
+  repeat?: { attempt: number };
   /** Audit actor; defaults to "system:automation". */
   actor?: string;
 }
@@ -113,6 +118,7 @@ export async function executeActions(
           ...(action.recipientAssetContacts ? { assetContactEmails: await assetContactEmails() } : {}),
           composedEmail: composed,
           escalation: exec.escalation,
+          repeat: exec.repeat,
         });
         if (rows > 0) executed++;
       } else if (action.type === "api_call") {
@@ -188,6 +194,21 @@ function composeForNotify(
   exec: ActionExecContext,
   ctx: Record<string, string>,
 ): ComposedEmail | undefined {
+  // A REPEAT is a re-send of the initial email, not a tier override, so it
+  // takes the normal-fire composition path (the action's composition wholesale,
+  // falling back to the rule's) rather than escalation's per-field tier→rule
+  // merge. The only difference from a first send is the subject prefix, and
+  // that mirrors "[ESCALATION n]" exactly: applied ONLY when nobody set a
+  // subject template, so an operator who wrote their own keeps it verbatim and
+  // can use the {repeat.attempt} token instead.
+  if (exec.repeat && !exec.escalation) {
+    const comp = actionComp ?? exec.ruleEmailComposition ?? {};
+    const composed = buildComposedEmail(comp, ctx);
+    if (!comp.subjectTemplate || !comp.subjectTemplate.trim()) {
+      composed.subject = `[REMINDER ${exec.repeat.attempt}] ${composed.subject}`;
+    }
+    return composed;
+  }
   if (!exec.escalation) {
     // ALWAYS compose. Before the rich default body this returned undefined
     // when nobody had customized anything, dropping those alerts onto the

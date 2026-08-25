@@ -501,6 +501,7 @@ export async function createRule(input: RuleInput, actor?: string) {
       severityBands: (input.severityBands ?? undefined) as any,
       bandNotify: (input.bandNotify ?? undefined) as any,
       resetActions: (input.resetActions ?? undefined) as any,
+      repeat: (input.repeat ?? undefined) as any,
       createdBy: actor ?? null,
     },
   });
@@ -565,6 +566,7 @@ export async function updateRule(id: string, input: RuleInput, actor?: string) {
       severityBands: jsonOrClear(input.severityBands),
       bandNotify: jsonOrClear(input.bandNotify),
       resetActions: jsonOrClear(input.resetActions),
+      repeat: jsonOrClear(input.repeat),
     },
   });
   // The trigger now describes a different condition — the old state rows (and
