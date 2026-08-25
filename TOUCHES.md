@@ -4850,6 +4850,35 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/networkScanRunner.ts
+
+**What it owns:** Execution of ONE network **Discovery** (business rule 34) — expand the operator's targets, subtract what inventory already has, ICMP for liveness, then the enabled methods in the operator's order for identification. Owns the run row's transitions (`running` → `completed` / `aborted` / `error`), its counters, its heartbeat, and the `hits` blob the wizard's Results step reads. Owns the pacing constants (`SCAN_PING_CONCURRENCY` 64 / `SCAN_PING_TIMEOUT_MS` 1500 / `SCAN_IDENTIFY_CONCURRENCY` 12 / `SCAN_WALK_MAX_ROWS` 800 / `SCAN_MAX_HITS` 2000 / `SCAN_PROGRESS_FLUSH_MS` 2000) — constants rather than env vars because a Discovery is an explicit, cancellable, progress-visible action with no steady-state tuning problem.
+
+**Public API:** `runScan(runId, actor)` (never throws — a failed run is a `status:"error"` row, because the row IS the wizard's view of it), `identifyAddress(address, methods, creds, opts)` (the per-address method/credential cascade; returns null when nothing answered), `parseStoredTargets` / `parseStoredMethods` (JSON-column normalizers), `loadKnownAddresses`, `SCAN_METHODS`, and the pacing constants. Types `ScanMethod` / `ScanMethodType` / `ScanHit`.
+
+**Reads:** `NetworkScan` + `NetworkScanRun` (its own row), `Asset.ipAddress` + `AssetAssociatedIp.ip` (the known-address set — note the column on that table is `ip`, not `ipAddress`), `Credential` via `credentialService.getCredential(id, {revealSecrets:true})`.
+
+**Writes:** `NetworkScanRun` (counters / status / hits / heartbeat), `NetworkScan.lastRunAt`, and `network_scan.started|completed|aborted|error` Events. **Creates no assets** — adoption is a separate operator action on a separate route with `assets:write` chained.
+
+**Depends on:** `utils/cidr.expandScanTargets` (all IP math lives there), `utils/icmpPing.pingHost`, `utils/concurrency.mapSettledWithConcurrency` (the ONE bounded mapper — do not hand-roll a sixth), `monitoringService.probeCredentialAgainstHost` + `snmpWalkRaw`, `utils/snmpIdentity`, `utils/snmpInventory`.
+
+**Invariants:**
+- **Nothing calls `withSnmpGate` here, and that is correct** — both `probeCredentialAgainstHost("snmp")` and `snmpWalkRaw` acquire the per-(host, port) gate internally, so the scan already FIFOs behind the monitor loop on any host Polaris polls. Wrapping again would deadlock against a gate the callee also wants.
+- **Known addresses are subtracted BEFORE any packet.** "New addresses only" means the scan has no reason to touch a device Polaris already knows; not probing it is cheaper and quieter, and `skippedKnownCount` is what keeps "nothing new" distinguishable from "nothing there".
+- **The operator's method order is a PRIORITY order.** The first method that answers with a credential owns the identity; later methods record that they answered but never overwrite it. Credentials within a method stop at the first success.
+- **An address that answered something keeps the other methods' failure reasons** (`ScanHit.errors`) — "answered ICMP, refused every community" is the most common shape and names the credential to fix. A method with no credential says so rather than reading as silent.
+- A per-address failure is a recorded nothing, never an aborted sweep; a failed WALK costs detail, never the responder.
+- **Progress is throttled** (`SCAN_PROGRESS_FLUSH_MS`), and the cancel check rides the same tick — a /16 must not become 65k UPDATEs plus 65k SELECTs on a row the wizard polls every 2s.
+- The cancel clock is **per run**, not module-scope: two concurrent Discoveries must not share it.
+- `hits` is capped at `SCAN_MAX_HITS` with a **loud** warn — a silently truncated responder list would read as a smaller network.
+
+**When changing this:**
+- Scale-check at both ends: a /29 (6 addresses) and the `SCAN_MAX_TARGETS` ceiling of 65536. The ping stage's concurrency is what decides whether a /16 of empty space takes ~25 minutes or four hours; the identify stage's is what decides how loud the scan is.
+- If a new method is added, add it to `SCAN_METHODS`, to `probeCredentialAgainstHost`'s union, and to the wizard's step 3 — and decide whether it can supply an identity (only SNMP does today).
+- Never make the runner create or update an Asset. Adoption is `networkScanService` + a route chaining `assets:write`; keeping the sweep read-only is what lets a `networkScan`-only role run it.
+
+---
+
 ## services/arpPrimeService.ts
 
 **What it owns:** The ARP-priming presence sweep — fire-and-forget UDP datagrams at reserved IPs so a FortiGate is forced to ARP-resolve each target right before discovery reads its ARP table. Owns the sweep constants (port 33434, batch 256 / pause 25ms, cap 4096, `ARP_SETTLE_MS` 2s). Sends packets; never reads or writes the DB.
