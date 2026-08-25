@@ -7114,22 +7114,39 @@ function credHttpForm(cfg) {
   // dropdown whose value silently isn't in its own list.
   if (authMode === "none") authMode = "bearer";
   return (
+    // Sits directly under the credential Type dropdown (which the modal shell
+    // renders immediately above this host element), because the first thing to
+    // establish is what this credential does NOT contain — operators arriving
+    // from the old combined form look for the path here.
+    '<p class="hint" style="margin-top:0">What this credential is used to check — the path, the status code, the content the body must carry — is configured per manufacturer and model under <strong>Manufacturer Profiles → Custom Widgets</strong>. Use <strong>Test Connection</strong> below to try a check against a device before saving it there.</p>' +
     '<div class="form-group"><label>Authentication</label>' +
       '<select id="f-http-authmode" style="max-width:280px">' +
         '<option value="bearer"' + (authMode === "bearer" ? " selected" : "") + '>Bearer token</option>' +
         '<option value="basic"' +  (authMode === "basic"  ? " selected" : "") + '>Basic (cleartext)</option>' +
         '<option value="digest"' + (authMode === "digest" ? " selected" : "") + '>Digest (hashed)</option>' +
       '</select>' +
-      '<p class="hint">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default. "Hashed" describes the credential only — Digest sends a hash of the password plus a server nonce, never the password itself, though the username still goes in the clear.</p>' +
-      // Shown for bearer alone, via the same data-http-auth mechanism that
-      // shows/hides the carrier fields. The exposure is real but conditional:
-      // HTTPS is configured per CHECK on the widget, not on the credential, so
-      // the warning names where to go rather than implying it can be fixed here.
-      '<div class="alert alert-warning" data-http-auth="bearer" style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);border:1px solid var(--color-warning,#d68910);color:var(--color-text);font-size:0.82rem;margin-bottom:0.75rem">' +
+      // One alert per mode, all three riding the same data-http-auth mechanism
+      // that shows/hides the carrier fields below — so exactly one is on screen
+      // and none can drift out of sync with the selection.
+      //
+      // Every mode gets one because every mode is exposed over plain HTTP; what
+      // differs is WHAT leaks. All three name Manufacturer Profiles rather than
+      // offering a fix here, because `useHttps` is configured per CHECK on the
+      // widget: a credential cannot control its own exposure, and that is
+      // precisely what an operator would otherwise hunt for on this form.
+      _httpAuthAlert("bearer",
         '<strong>The token is sent in cleartext</strong> unless the assets using this credential are checked over HTTPS. ' +
-        'Bearer tokens ride the <code>Authorization</code> header verbatim, so anyone on the path can read and reuse one. ' +
-        'HTTPS is set per check — tick <strong>Use HTTPS</strong> on the HTTP-check widget under Manufacturer Profiles → Custom Widgets.' +
-      '</div>' +
+        'A bearer token rides the <code>Authorization</code> header verbatim, so anyone on the path can read it and reuse it.') +
+      _httpAuthAlert("basic",
+        '<strong>The username and password are sent in cleartext</strong> unless the assets using this credential are checked over HTTPS. ' +
+        'HTTP Basic only base64-encodes the pair, which is encoding rather than encryption and is reversed trivially.') +
+      _httpAuthAlert("digest",
+        '<strong>The hash is readable</strong> unless the assets using this credential are checked over HTTPS. ' +
+        'Digest never sends the password itself, so this is a smaller exposure than Basic — but the username travels in the clear, ' +
+        'and a captured hash can be attacked offline or replayed until the nonce expires.') +
+      // Only meaningful once there are two modes sharing one carrier, so it is
+      // hidden for bearer — which has no such ambiguity to explain.
+      '<p class="hint" data-http-auth="basic digest">Basic and Digest carry the same username and password, so this has to be stated rather than guessed: trying Basic first would send the password in cleartext to a device that wanted Digest. Embedded devices — cameras, PDUs, older BMCs — commonly require Digest, and Axis OS 11+ disables Basic by default.</p>' +
     '</div>' +
     '<div class="form-group" data-http-auth="bearer"><label>Bearer token</label>' +
       '<input type="password" id="f-http-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
@@ -7140,9 +7157,23 @@ function credHttpForm(cfg) {
     '</div>' +
     '<div class="form-group" data-http-auth="basic digest"><label>Password</label>' +
       '<input type="password" id="f-http-pass" value="' + escapeHtml(cfg.password || "") + '">' +
-    '</div>' +
-    '<p class="hint" style="margin-top:0.75rem">What this credential is used to check — the path, the status code, the content the body must carry — is configured per manufacturer and model under <strong>Manufacturer Profiles → Custom Widgets</strong>. Use <strong>Test Connection</strong> below to try a check against a device before saving it there.</p>'
+    '</div>'
   );
+}
+
+/**
+ * One mode-scoped warning box. Factored out so the three differ only in the
+ * mode they belong to and the sentence they carry — the styling is the file's
+ * existing `alert alert-warning` convention.
+ */
+function _httpAuthAlert(mode, bodyHTML) {
+  return '<div class="alert alert-warning" data-http-auth="' + mode + '" ' +
+    'style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);' +
+    'border:1px solid var(--color-warning,#d68910);color:var(--color-text);' +
+    'font-size:0.82rem;margin:0.5rem 0 0.75rem">' +
+      bodyHTML +
+      ' HTTPS is set per check — tick <strong>Use HTTPS</strong> on the HTTP-check widget under Manufacturer Profiles → Custom Widgets.' +
+    '</div>';
 }
 
 /**
