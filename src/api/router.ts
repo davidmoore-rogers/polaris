@@ -187,6 +187,14 @@ router.use("/search", searchRouter);
 // topology (switches, APs, wireless stations, LLDP neighbours). The nav entry
 // was ungated too, so the only thing resembling access control was the UI.
 // The layout writes inside mapRouter escalate to deviceMap=write on top of this.
+//
+// NOTE the deliberate asymmetry that follows from these two lines: region CRUD
+// needs mapRegions, but `GET /map/region-overlay` — read-only region polygons +
+// the derived containment tree, for the map's "Show regions" button — lives in
+// mapRouter and is therefore reachable at deviceMap=read. That is intentional
+// (the button is for anyone who can look at the map) and is documented at the
+// route itself. Do not "tidy" it under /map/regions: that would re-gate it on
+// mapRegions and break the button for exactly the viewers it exists for.
 router.use("/map/regions", requirePermission("mapRegions", "read"), mapRegionsRouter);
 router.use("/map", requirePermission("deviceMap", "read"), mapRouter);
 // Application Map: process-connectivity graph + shared layout. Per-route

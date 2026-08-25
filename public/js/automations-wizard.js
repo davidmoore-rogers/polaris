@@ -73,12 +73,30 @@ function _looksLikeDeviceId(tag) {
  */
 var DYNAMIC_PILL_KINDS = { deviceRegion: "recipientDeviceRegion", assetContacts: "recipientAssetContacts" };
 
+/**
+ * The level-scoped device-region pill. Unlike the two above, its VALUE carries
+ * information (the asset-relative level as a string), so several can coexist
+ * and it can't be a flag keyed by kind alone.
+ */
+var DYNAMIC_LEVEL_KIND = "deviceRegionLevel";
+
+/** Is this pill one of the dynamic "resolve from the triggering device" kinds? */
+function isDynamicKind(kind) {
+  return !!DYNAMIC_PILL_KINDS[kind] || kind === DYNAMIC_LEVEL_KIND;
+}
+
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
-  var userIds = [], addresses = [], roles = [], regions = [];
+  var userIds = [], addresses = [], roles = [], regions = [], levels = [];
   var out = {};
   (pills || []).forEach(function (p) {
     if (!p || !p.value) return;
+    // Checked BEFORE the flag kinds: this one is keyed by value, not by kind.
+    if (p.kind === DYNAMIC_LEVEL_KIND) {
+      var lv = Number(p.value);
+      if (Number.isInteger(lv) && lv >= 1 && levels.indexOf(lv) === -1) levels.push(lv);
+      return;
+    }
     if (DYNAMIC_PILL_KINDS[p.kind]) { out[DYNAMIC_PILL_KINDS[p.kind]] = true; return; }
     if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
     else if (p.kind === "role") { if (roles.indexOf(p.value) === -1) roles.push(p.value); }
@@ -92,13 +110,14 @@ function pillsToRecipients(pills) {
   if (addresses.length) out.addresses = addresses;
   if (roles.length) out.recipientRoles = roles;
   if (regions.length) out.recipientRegions = regions;
+  if (levels.length) out.recipientDeviceRegionLevels = levels.slice().sort(function (a, b) { return a - b; });
   return out;
 }
 
 /** The payload halves → pills. A user id with no matching account is KEPT as an
  *  "unknown" pill rather than silently dropped on the next save — losing a
  *  recipient because their account was renamed is worse than showing a stub. */
-function recipientsToPills(rec, users, roles) {
+function recipientsToPills(rec, users, roles, maxLevel) {
   var byId = {};
   (users || []).forEach(function (u) { byId[u.id] = u; });
   var roleById = {};
@@ -113,6 +132,19 @@ function recipientsToPills(rec, users, roles) {
   if (rec && rec.recipientAssetContacts) {
     out.push({ kind: "assetContacts", value: "1", label: "Asset’s Responsible Contacts" });
   }
+  // A stored level that no longer exists (someone removed the containing
+  // polygon) is KEPT as an unknown pill, never dropped — the same contract as
+  // an unknown user or role, and for the same reason: losing a recipient
+  // silently is worse than showing a stub the operator can remove.
+  ((rec && rec.recipientDeviceRegionLevels) || []).forEach(function (n) {
+    var top = typeof maxLevel === "number" ? maxLevel : 0;
+    out.push({
+      kind: DYNAMIC_LEVEL_KIND,
+      value: String(n),
+      label: "Asset’s L" + n + " Region Users",
+      unknown: top > 0 && n > top,
+    });
+  });
   ((rec && rec.recipientRegions) || []).forEach(function (name) {
     out.push({ kind: "region", value: name, label: name });
   });
@@ -3348,10 +3380,35 @@ async function openAutomationWizard(existing, opts) {
   }
 
   // ── Step 5: Actions + escalation + summary ─────────────────────────────
+  /**
+   * Who a collapsed notify row reaches, in a few words.
+   *
+   * Added because the pairing this feature exists for — front-line staff on the
+   * trigger, the division's managers on the escalation — is two notify actions
+   * on the SAME channel, which read identically as "Notify via Email" when
+   * folded. The dynamic recipients are named explicitly and everything else is
+   * counted, so the line stays short.
+   */
+  function notifySuffix(a) {
+    var bits = [];
+    if (a.recipientAllUsers) bits.push("all users");
+    else if (a.recipientAllRegions) bits.push("all region users");
+    (a.recipientDeviceRegionLevels || []).forEach(function (n) { bits.push("L" + n + " region users"); });
+    if (a.recipientDeviceRegion) bits.push("device’s region users");
+    if (a.recipientAssetContacts) bits.push("responsible contacts");
+    var regions = (a.recipientRegions || []).length;
+    if (regions) bits.push(regions + " region" + (regions === 1 ? "" : "s"));
+    var roles = (a.recipientRoles || []).length;
+    if (roles) bits.push(roles + " role" + (roles === 1 ? "" : "s"));
+    var named = (a.recipientUserIds || []).length + (a.addresses || []).length;
+    if (named) bits.push(named + " recipient" + (named === 1 ? "" : "s"));
+    return bits.length ? " — " + bits.join(", ") : "";
+  }
+
   function actionSummary(a) {
     if (a.type === "notify") {
       var ch = chanById(a.channelId);
-      return "Notify via " + (ch ? ch.name : "…");
+      return "Notify via " + (ch ? ch.name : "…") + notifySuffix(a);
     }
     if (a.type === "api_call") return (a.method || "POST") + " " + (a.url || "…");
     if (a.type === "script") {
@@ -4641,6 +4698,12 @@ async function openAutomationWizard(existing, opts) {
 
   /** Role catalogue for the recipient tokens (from /automations/scope-options). */
   function awRoles() { return (_awScopeOptions && _awScopeOptions.roles) || []; }
+  /** How deep region nesting goes. 1 (or absent) = nothing is nested, so the
+   *  picker offers no level entries and a STORED level renders as unknown. */
+  function awRegionMaxLevel() {
+    var lv = _awScopeOptions && _awScopeOptions.regionLevels;
+    return lv && typeof lv.maxLevel === "number" ? lv.maxLevel : 1;
+  }
 
   /**
    * Roles matching the typed fragment, as suggestion entries. Local — the role
@@ -4660,10 +4723,14 @@ async function openAutomationWizard(existing, opts) {
   // What each pill kind prints ahead of its label, and what its tooltip says.
   // The qualifier is what keeps a region called "Ashfield" from reading like a
   // person called "Ashfield" in a list that mixes both.
-  var PILL_QUALIFIER = { role: "role:", region: "region:", deviceRegion: "dynamic:", assetContacts: "dynamic:" };
+  var PILL_QUALIFIER = {
+    role: "role:", region: "region:", deviceRegion: "dynamic:",
+    deviceRegionLevel: "dynamic:", assetContacts: "dynamic:",
+  };
   var PILL_TITLE = {
     region: "Every user tagged with this region",
-    deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region",
+    deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region (any level)",
+    deviceRegionLevel: "At fire time: the users tagged with the region this many levels out from the TRIGGERING device’s own region",
     assetContacts: "At fire time: the address-book contacts whose device filter covers the TRIGGERING device",
   };
 
@@ -4673,7 +4740,9 @@ async function openAutomationWizard(existing, opts) {
       ? (p.unknown ? "This user account no longer exists" : "Polaris user account")
       : p.kind === "role"
         ? (p.unknown ? "This role no longer exists" : "Every user holding this role")
-        : PILL_TITLE[p.kind] || p.value;
+        : p.kind === DYNAMIC_LEVEL_KIND && p.unknown
+          ? "No region is nested this deep any more — this reaches nobody"
+          : PILL_TITLE[p.kind] || p.value;
     // The save affordance only makes sense for a typed address that isn't
     // already in the book, and only for someone who may add one.
     var showSave = p.kind === "address" && canAddContacts() &&
@@ -4701,7 +4770,7 @@ async function openAutomationWizard(existing, opts) {
    * would look like it worked and then send to nobody.
    */
   function pillAllowedInField(kind, field) {
-    return !DYNAMIC_PILL_KINDS[kind] || field === "to";
+    return !isDynamicKind(kind) || field === "to";
   }
 
   /**
@@ -4713,6 +4782,7 @@ async function openAutomationWizard(existing, opts) {
     if (!e) return null;
     if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
     if (e.source === "deviceRegion") return { kind: "deviceRegion", value: "1", label: e.name };
+    if (e.source === "deviceRegionLevel") return { kind: DYNAMIC_LEVEL_KIND, value: String(e.level), label: e.name };
     if (e.source === "assetContacts") return { kind: "assetContacts", value: "1", label: e.name };
     if (e.source === "user") return { kind: "user", value: e.id, label: e.name || e.email };
     if (!e.email) return null;
@@ -5065,7 +5135,7 @@ async function openAutomationWizard(existing, opts) {
           // email…" disclosure, which is where they used to hide.
           var comp0 = action.emailComposition || {};
           h = '<div class="na-recips">' +
-            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles()), canReadContacts()) +
+            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts()) +
             recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers, awRoles()), false) +
             recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers, awRoles()), false) +
             "</div>" +
@@ -5347,6 +5417,7 @@ async function openAutomationWizard(existing, opts) {
         // The two dynamic pills — on an email action these REPLACE the old
         // checkboxes, so they're collected from the To field and nowhere else.
         if (to.recipientDeviceRegion) a.recipientDeviceRegion = true;
+        if (to.recipientDeviceRegionLevels) a.recipientDeviceRegionLevels = to.recipientDeviceRegionLevels;
         if (to.recipientAssetContacts) a.recipientAssetContacts = true;
       }
       // Push broadcast modes. "All users" subsumes everything, so the narrower

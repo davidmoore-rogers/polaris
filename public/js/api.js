@@ -1225,6 +1225,11 @@ const api = {
     create: (name, polygon, color) => request("POST",   "/map/regions", color ? { name, polygon, color } : { name, polygon }),
     update: (id, body)             => request("PUT",    `/map/regions/${id}`, body),
     delete: (id)                   => request("DELETE", `/map/regions/${id}`),
+    // Read-only geometry + the derived containment tree for the map's "Show
+    // regions" button. A DIFFERENT endpoint from list() on purpose: this one
+    // lives under the /map mount and is reachable at deviceMap:read, whereas
+    // list() needs mapRegions:read — see the route's own comment.
+    overlay: ()                    => request("GET",    "/map/region-overlay"),
   },
   auth: {
     me: () => request("GET", "/auth/me"),
