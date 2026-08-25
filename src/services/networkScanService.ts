@@ -413,8 +413,11 @@ export interface TargetPreview {
   dropped: number;
   droppedBy: { invalid: number; excluded: number; cap: number };
   perTarget: { count: number; error?: string }[];
-  /** First N addresses, so the operator can see they typed what they meant. */
-  sample: string[];
+  /**
+   * Deliberately NO address list. The preview answers "did I type what I
+   * meant?", and the COUNT plus the per-target verdicts answer that; shipping
+   * a sample (or a range summary of one) was noise on every keystroke.
+   */
   /** How many of those addresses inventory already carries. */
   alreadyKnown: number;
   cap: number;
@@ -426,7 +429,7 @@ export interface TargetPreview {
  * Read-level on purpose: it is pure IP math plus one indexed read, and a role
  * allowed to look at a Discovery must be able to see what its targets mean.
  */
-export async function previewTargets(targets: ScanTarget[], sampleSize = 12): Promise<TargetPreview> {
+export async function previewTargets(targets: ScanTarget[]): Promise<TargetPreview> {
   const expanded = expandScanTargets(targets ?? []);
   let alreadyKnown = 0;
   if (expanded.total) {
@@ -438,7 +441,6 @@ export async function previewTargets(targets: ScanTarget[], sampleSize = 12): Pr
     dropped: expanded.dropped,
     droppedBy: expanded.droppedBy,
     perTarget: expanded.perTarget.map((t) => ({ count: t.count, ...(t.error ? { error: t.error } : {}) })),
-    sample: expanded.addresses.slice(0, Math.max(0, sampleSize)),
     alreadyKnown,
     cap: SCAN_MAX_TARGETS,
   };

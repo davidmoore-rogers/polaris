@@ -88,7 +88,7 @@ function load(opts: { scan?: "none" | "read" | "write"; assets?: boolean; scans?
     credentials: { list: async () => ({ credentials: [{ id: "c1", name: "public", type: "snmp" }] }) },
     networkScans: {
       list: async () => ({ scans: opts.scans ?? [] }),
-      previewTargets: async () => ({ total: 6, dropped: 0, droppedBy: { invalid: 0, excluded: 0, cap: 0 }, perTarget: [{ count: 6 }], sample: ["10.4.0.1"], alreadyKnown: 0, cap: 65536 }),
+      previewTargets: async () => ({ total: 6, dropped: 0, droppedBy: { invalid: 0, excluded: 0, cap: 0 }, perTarget: [{ count: 6 }], alreadyKnown: 0, cap: 65536 }),
       getRun: async () => ({ run: { id: "r1", status: "completed", totalTargets: 6, scannedCount: 6, hitCount: 0, hits: [] } }),
       run: async () => ({ run: { id: "r1", status: "queued", totalTargets: 0, scannedCount: 0, hitCount: 0 } }),
       create: async () => ({ scan: { id: "s1" } }),

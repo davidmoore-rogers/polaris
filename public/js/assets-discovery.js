@@ -368,7 +368,7 @@
       if (!targets.length) { box.innerHTML = previewShell("Enter a target to see what it covers.", ""); return; }
       box.innerHTML = previewShell("Checking…", "");
       try {
-        var r = await api.networkScans.previewTargets({ targets: targets, sampleSize: 24 });
+        var r = await api.networkScans.previewTargets({ targets: targets });
         var head = '<strong>' + r.total + '</strong> address' + (r.total === 1 ? "" : "es") + ' to scan';
         if (r.alreadyKnown) head += ' · <strong>' + r.alreadyKnown + '</strong> already in inventory (skipped)';
         if (r.dropped) {
@@ -381,13 +381,10 @@
         var errs = (r.perTarget || []).map(function (t, i) {
           return t.error ? '<div style="color:var(--color-danger);font-size:0.82rem">Target ' + (i + 1) + ': ' + escapeHtml(t.error) + '</div>' : "";
         }).join("");
-        var sample = (r.sample || []).length
-          ? '<div style="font-family:monospace;font-size:0.8rem;line-height:1.5">' +
-              (r.sample || []).map(function (a) { return escapeHtml(a); }).join(", ") +
-              (r.total > r.sample.length ? ", …" : "") +
-            '</div>'
-          : "";
-        box.innerHTML = previewShell(head, errs + sample);
+        // No address list: the question this preview answers is "did I type
+        // what I meant?", and the COUNT answers it. Listing 254 addresses (or
+        // a summary of them) was noise on every keystroke.
+        box.innerHTML = previewShell(head, errs);
       } catch (err) {
         box.innerHTML = previewShell("Preview unavailable", '<div class="hint">' + escapeHtml((err && err.message) || String(err)) + '</div>');
       }

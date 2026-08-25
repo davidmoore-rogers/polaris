@@ -98,7 +98,6 @@ const saveSchema = z.object({
 
 const previewSchema = z.object({
   targets: z.array(targetSchema).max(MAX_SCAN_TARGET_ROWS),
-  sampleSize: z.number().int().min(0).max(200).optional(),
 });
 
 const adoptSchema = z.object({
@@ -119,7 +118,7 @@ router.get("/", async (_req, res, next) => {
 router.post("/preview-targets", async (req, res, next) => {
   try {
     const body = previewSchema.parse(req.body ?? {});
-    res.json(await previewTargets(body.targets, body.sampleSize));
+    res.json(await previewTargets(body.targets));
   } catch (err) { next(err); }
 });
 
