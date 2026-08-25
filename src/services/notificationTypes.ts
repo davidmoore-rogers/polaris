@@ -2046,6 +2046,23 @@ export function escalationTierStateKey(chainKey: string, tierIdx: number): strin
 }
 
 /**
+ * The tiers of one chain that outrank tier `idx` — "higher escalation" for the
+ * sweep's highest-tier-wins recipient suppression (see
+ * notificationEscalationService): a person several tiers would reach is paged
+ * only at the last of these.
+ *
+ * Higher means FIRES LATER (greater afterMin), with array position only as a
+ * tie-break. Position alone would be wrong — nothing validates that tiers are
+ * authored in ascending order, so a 5-minute tier saved last would otherwise
+ * read as the chain's highest and silence every tier above it.
+ */
+export function higherEscalationTiers<T extends { afterMin: number }>(tiers: T[], idx: number): T[] {
+  const cur = tiers[idx];
+  if (!cur) return [];
+  return tiers.filter((t, j) => t.afterMin > cur.afterMin || (t.afterMin === cur.afterMin && j > idx));
+}
+
+/**
  * All escalation chains active at a given alert severity — mirrors the
  * engine's tierForSeverity band semantics: at a band severity, the band's
  * actions (else the base actions — the band fallback) carry the per-action

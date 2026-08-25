@@ -419,6 +419,105 @@ export function composedAckRecipient(
   return owners.get(to[0]!) ?? null;
 }
 
+/** The two region-tag sources a target can route by — passed down from the
+ *  fire/sweep call site (the rule's scope regions, the triggering asset's). */
+export interface RegionRoutingContext {
+  scopeRegionTags?: string[];
+  assetRegionTags?: string[];
+}
+
+/**
+ * Recipient users for ONE delivery target = union of: specific user ids +
+ * roles + named regions + (if opted in) users in the TRIGGERING asset's
+ * region(s) + (if opted in) users in the rule's scope region(s) + legacy
+ * tag-routing. Deduped by id.
+ *
+ * Module-level rather than a closure inside expandDeliveries because
+ * resolveReachableUserIds has to answer "who would this target reach?" with
+ * exactly the same union — a second copy is how the escalation suppression
+ * would come to disagree with the delivery it suppresses.
+ */
+export async function resolveTargetUsers(
+  t: DeliveryTarget,
+  ctx: RegionRoutingContext = {},
+): Promise<RecipientUser[]> {
+  const { scopeRegionTags, assetRegionTags } = ctx;
+  const map = new Map<string, RecipientUser>();
+  const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
+  // Broadcast modes first — recipientAllUsers subsumes every other source, so
+  // resolving it short-circuits the rest rather than unioning redundantly.
+  if (t.recipientAllUsers) return await resolveAllUsers();
+  if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
+  if (t.recipientRegions?.length) addUsers(await resolveUsersByRegions(t.recipientRegions));
+  if (t.recipientRoles?.length) addUsers(await resolveUsersByRoles(t.recipientRoles));
+  if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
+  if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
+  if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
+  if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
+  return Array.from(map.values());
+}
+
+/**
+ * Which USERS these targets would actually deliver to — the escalation sweep's
+ * "a higher tier will reach this person" test (notificationEscalationService).
+ *
+ * REACHABLE, not merely named, because the suppression it feeds SILENCES an
+ * earlier tier for that person: counting someone a later tier cannot actually
+ * deliver to would drop them out of the ladder entirely. So a disabled or
+ * missing channel contributes nobody (expandDeliveries skips it too), a user
+ * with no email address contributes nobody to an email target, and a web_push
+ * target contributes only users with at least one enrolled device — push is
+ * opt-in per browser, so a push-only higher tier reaches nobody who never
+ * enrolled.
+ *
+ * Address-book contacts and typed addresses are deliberately NOT considered:
+ * they are addresses, not accounts, so there is no user id to suppress, and an
+ * address an operator typed by hand is an explicit choice to page that mailbox.
+ * Slack / Teams / Pushbullet are fixed-destination — they reach a room, not a
+ * person, so they never satisfy "this user hears about it later".
+ */
+export async function resolveReachableUserIds(
+  targets: DeliveryTarget[] | undefined,
+  ctx: RegionRoutingContext = {},
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!targets || targets.length === 0) return out;
+  const ids = Array.from(new Set(targets.map((t) => t.channelId).filter(Boolean)));
+  if (ids.length === 0) return out;
+  const channels = await prisma.notificationChannel.findMany({
+    where: { id: { in: ids }, enabled: true },
+    select: { id: true, type: true },
+  });
+  const byId = new Map(channels.map((c) => [c.id, c]));
+
+  const pushCandidates = new Set<string>();
+  for (const t of targets) {
+    const channel = byId.get(t.channelId);
+    if (!channel || !isChannelType(channel.type)) continue;
+    const transport = CHANNEL_TRANSPORT[channel.type as ChannelType];
+    if (transport !== "email" && transport !== "web_push") continue;
+    for (const u of await resolveTargetUsers(t, ctx)) {
+      if (transport === "email") {
+        if (u.email && u.email.trim()) out.add(u.id);
+      } else {
+        pushCandidates.add(u.id);
+      }
+    }
+  }
+
+  if (pushCandidates.size > 0) {
+    // ONE grouped read for the whole later-tier set rather than a findMany per
+    // target: the sweep asks this per due tier, and a fleet-wide chain can name
+    // every account.
+    const withDevices = await prisma.pushSubscription.groupBy({
+      by: ["userId"],
+      where: { userId: { in: Array.from(pushCandidates) } },
+    });
+    for (const g of withDevices) out.add(g.userId);
+  }
+  return out;
+}
+
 export interface ExpandDeliveriesOptions {
   /** `region:` tags mined from the RULE's scope (recipientScopeRegion routing). */
   scopeRegionTags?: string[];
@@ -436,6 +535,17 @@ export interface ExpandDeliveriesOptions {
   /** Escalation provenance (tier/attempt) — stamped into every row's meta so
    *  the View tab's "Escalated" marker and audits can attribute the send. */
   escalation?: { tier: number; attempt: number };
+  /** Users a HIGHER tier of this escalation chain will reach — dropped from
+   *  this send's user-routed recipients so one person is paged once, at the
+   *  highest tier that names them. Typed addresses and address-book contacts
+   *  are unaffected (they carry no user id). Set only by the escalation sweep. */
+  excludeUserIds?: ReadonlySet<string>;
+  /** Out-param (the httpCheck-diagnostics pattern): how many distinct users
+   *  excludeUserIds removed. The escalation sweep needs it to tell "this tier
+   *  delivered nothing because its channel is dead" (retry next sweep) from
+   *  "this tier delivered nothing because a higher tier owns everyone on it"
+   *  (done — stop re-running it every 60s). Populated only when passed. */
+  suppressedOut?: { count: number };
 }
 
 export async function expandDeliveries(
@@ -480,23 +590,21 @@ export async function expandDeliveries(
     rowAck.push(ackFor ?? null);
   };
 
-  // Recipient users for a target = union of: specific user ids + (if opted in)
-  // users in the TRIGGERING asset's region(s) + (if opted in) users in the
-  // rule's scope region(s) + legacy tag-routing. Deduped by id.
+  // Recipient users for a target, minus anyone a HIGHER escalation tier will
+  // reach (excludeUserIds — see resolveReachableUserIds). Suppressed ids are
+  // collected in a Set rather than counted, so two targets naming the same
+  // person report ONE suppression — matching the union that would have deduped
+  // them into a single delivery.
+  const excluded = opts.excludeUserIds;
+  const suppressedIds = new Set<string>();
   const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
-    const map = new Map<string, RecipientUser>();
-    const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
-    // Broadcast modes first — recipientAllUsers subsumes every other source, so
-    // resolving it short-circuits the rest rather than unioning redundantly.
-    if (t.recipientAllUsers) return await resolveAllUsers();
-    if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
-    if (t.recipientRegions?.length) addUsers(await resolveUsersByRegions(t.recipientRegions));
-    if (t.recipientRoles?.length) addUsers(await resolveUsersByRoles(t.recipientRoles));
-    if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
-    if (t.recipientDeviceRegion && assetRegionTags?.length) addUsers(await resolveRecipientUsers(assetRegionTags));
-    if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
-    if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
-    return Array.from(map.values());
+    const users = await resolveTargetUsers(t, { scopeRegionTags, assetRegionTags });
+    if (!excluded || excluded.size === 0) return users;
+    return users.filter((u) => {
+      if (!excluded.has(u.id)) return true;
+      suppressedIds.add(u.id);
+      return false;
+    });
   };
 
   // Rule-level Cc/Bcc resolve once per notification, then apply per email target.
@@ -590,6 +698,8 @@ export async function expandDeliveries(
       add(channel.id, transport, "");
     }
   }
+
+  if (opts.suppressedOut) opts.suppressedOut.count = suppressedIds.size;
 
   if (rows.length === 0) return 0;
   await stampAckTokens(notificationId, rows, rowAck);
