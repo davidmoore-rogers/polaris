@@ -60,6 +60,18 @@
     if (!canWrite()) return false;
     return !!c.createdBy && c.createdBy === (window.currentUsername || null);
   }
+  /** Is this row owned by the directory sync rather than by an operator? */
+  function isSyncedRow(c) {
+    return !!c && !!c.origin && c.origin !== "manual";
+  }
+  /**
+   * Taking a synced row out of the sync's hands needs fullwrite, and falls out
+   * of the existing gate with no special case: synced rows carry createdBy
+   * null, and a write-level caller may only touch rows they created.
+   */
+  function canAdoptRow(c) {
+    return isSyncedRow(c) && canWriteAny();
+  }
 
   // ─── Standalone overlay (the stacked-modal pattern) ────────────────────────
 
@@ -442,7 +454,19 @@
   var AB_CELLS = {
     name: { label: "Name", width: "220px", cell: function (en) { return escapeHtml(en.name || "—"); } },
     email: { label: "Email", width: "250px", cls: "mono", cell: function (en) { return escapeHtml(en.email || ""); } },
-    description: { label: "Description", cell: function (en) { return escapeHtml(en.description || ""); } },
+    description: {
+      label: "Description",
+      cell: function (en) {
+        // Two people called "J. Martin" are told apart by their job, not their
+        // id, so a synced row with no description of its own shows what the
+        // directory knows instead of an empty cell. Derived at RENDER time —
+        // storing it would put it in the operator-owned description column,
+        // where the next sync would appear to have overwritten their text.
+        var text = en.description
+          || [en.jobTitle, en.department].filter(function (x) { return !!x; }).join(" — ");
+        return escapeHtml(text || "");
+      },
+    },
     source: { label: "Source", width: "110px", cell: function (en) { return sourceBadge(en.source); } },
   };
 
@@ -469,7 +493,11 @@
 
   // Survives a re-render (the Refresh button, a save from the editor) so the
   // operator's search term isn't silently thrown away under them.
-  var _tab = { term: "" };
+  // `origin` is the People tab's Curated / Directory filter. It only means
+  // anything once a directory is syncing AND the caller may see synced rows,
+  // so the control is rendered from the server's answer to both questions
+  // rather than guessed at.
+  var _tab = { term: "", origin: "all", showOriginFilter: false };
 
   function tabBodyHtml() {
     return '' +
@@ -481,6 +509,9 @@
         '<div class="form-group" style="margin-bottom:8px">' +
           '<input type="text" class="input" id="ab-tab-search" autocomplete="off" spellcheck="false" ' +
                  'placeholder="Search people, contacts and lists…" value="' + escapeHtml(_tab.term) + '">' +
+        '</div>' +
+        '<div id="ab-tab-origin" style="' + (_tab.showOriginFilter ? "margin-bottom:8px" : "display:none") + '">' +
+          originChipsHtml() +
         '</div>' +
         '<div id="ab-tab-results"><p class="empty-state">Loading…</p></div>' +
       '</div>' +
@@ -507,12 +538,24 @@
       {
         label: "Added by",
         width: "120px",
-        cell: function (en) { return escapeHtml((en.contact && en.contact.createdBy) || "—"); },
+        cell: function (en) {
+          if (isSyncedRow(en.contact)) return '<span class="hint">Directory sync</span>';
+          return escapeHtml((en.contact && en.contact.createdBy) || "—");
+        },
       },
       {
         width: "120px",
         cell: function (en) {
-          if (!en.contact || !canEditRow(en.contact)) return "";
+          if (!en.contact) return "";
+          // A synced row is the sync's until someone claims it: Delete would be
+          // undone on the next run, so the honest verb is Adopt.
+          if (isSyncedRow(en.contact)) {
+            return canAdoptRow(en.contact)
+              ? '<button class="btn btn-secondary btn-sm" data-ab-adopt="' + escapeHtml(en.contact.id) + '" ' +
+                'title="Take ownership of this entry so the directory sync stops updating or removing it">Adopt</button>'
+              : "";
+          }
+          if (!canEditRow(en.contact)) return "";
           return '<button class="btn btn-secondary btn-sm" data-ab-edit="' + escapeHtml(en.contact.id) + '">Edit</button> ' +
             '<button class="btn btn-danger btn-sm" data-ab-del="' + escapeHtml(en.contact.id) + '">Delete</button>';
         },
@@ -523,6 +566,24 @@
   // How many CONTACT rows one page of the People tab asks for. The server caps
   // at 200 regardless; this is the number the "showing N of M" hint is about.
   var AB_PAGE_SIZE = 50;
+
+  /**
+   * Curated / Directory / All. Deliberately three chips rather than a "hide
+   * synced" checkbox: with a directory synced, "the address book" means two
+   * different populations, and an operator looking for a colleague they added
+   * by hand should be able to say so.
+   */
+  function originChipsHtml() {
+    var opts = [
+      { key: "all", label: "All" },
+      { key: "manual", label: "Added here" },
+      { key: "directory", label: "From the directory" },
+    ];
+    return opts.map(function (o) {
+      return '<button type="button" class="chip' + (_tab.origin === o.key ? " active" : "") + '" ' +
+        'data-ab-origin="' + o.key + '">' + escapeHtml(o.label) + "</button>";
+    }).join(" ");
+  }
 
   async function loadTabPeople() {
     var box = document.getElementById("ab-tab-results");
@@ -536,12 +597,21 @@
       // every contact and filter in the browser, which made each keystroke cost
       // the whole table.
       var res = await Promise.all([
-        api.contacts.list({ q: term, limit: AB_PAGE_SIZE }),
+        api.contacts.list({ q: term, origin: _tab.origin, limit: AB_PAGE_SIZE }),
         api.contacts.search(term, true),
       ]);
       contacts = (res[0] && res[0].contacts) || [];
       total = (res[0] && typeof res[0].total === "number") ? res[0].total : contacts.length;
       entries = (res[1] && res[1].entries) || [];
+      // Offer the filter only when it can do something: the caller may see
+      // synced rows AND something is actually syncing. Otherwise it is a
+      // control whose "From the directory" option is always empty.
+      var offer = !!(res[0] && res[0].directoryVisible && res[0].directorySyncAvailable);
+      if (offer !== _tab.showOriginFilter) {
+        _tab.showOriginFilter = offer;
+        var slot = document.getElementById("ab-tab-origin");
+        if (slot) slot.style.display = offer ? "" : "none";
+      }
     } catch (err) {
       if (term !== _tab.term) return;
       box.innerHTML = '<p class="empty-state">' +
@@ -557,8 +627,13 @@
     contacts.forEach(function (c) { held[String(c.email || "").toLowerCase()] = true; });
     var rows = contacts.map(function (c) {
       return {
-        source: "contact", id: c.id, email: c.email, name: c.name,
-        description: c.description, kind: "person", contact: c,
+        // A synced row badges as the directory it came from, which is why
+        // Contact.origin stores the backend name: it drops straight into the
+        // same `source` vocabulary sourceBadge already understands.
+        source: c.origin && c.origin !== "manual" ? c.origin : "contact",
+        id: c.id, email: c.email, name: c.name,
+        description: c.description, jobTitle: c.jobTitle, department: c.department,
+        kind: c.kind === "group" ? "group" : "person", contact: c,
       };
     }).concat(entries.filter(function (en) {
       return !en.email || !held[String(en.email).toLowerCase()];
@@ -628,6 +703,30 @@
     }
 
     host.addEventListener("click", async function (ev) {
+      var chip = ev.target.closest && ev.target.closest("[data-ab-origin]");
+      if (chip) {
+        _tab.origin = chip.getAttribute("data-ab-origin") || "all";
+        var slot = document.getElementById("ab-tab-origin");
+        if (slot) slot.innerHTML = originChipsHtml();
+        loadTabPeople();
+        return;
+      }
+      var ad = ev.target.closest && ev.target.closest("[data-ab-adopt]");
+      if (ad) {
+        // Spelled out because it is not obvious from the button: adopting is
+        // what makes the entry survive the person leaving the directory, and
+        // it is also what stops their details being kept current.
+        if (!(await showConfirm(
+          "Take ownership of this entry? It will stay in the address book even if the person leaves the " +
+          "directory, and the directory sync will stop updating it.",
+        ))) return;
+        try {
+          await api.contacts.adopt(ad.getAttribute("data-ab-adopt"));
+          showToast("Entry is now yours to manage", "success");
+        } catch (err) { showToast((err && err.message) || "Could not take ownership", "error"); }
+        loadTabPeople();
+        return;
+      }
       var ed = ev.target.closest && ev.target.closest("[data-ab-edit]");
       if (ed) {
         // One row by id. Re-reading the whole list to find it was merely

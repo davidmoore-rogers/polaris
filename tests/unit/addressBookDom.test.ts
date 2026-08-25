@@ -35,6 +35,11 @@ let deleted: string[];
 let created: Record<string, unknown>[];
 let updated: Record<string, unknown>[];
 let toasts: string[];
+let adopted: string[] = [];
+/** Every `origin` the tab asked the server for, in order. */
+let listOrigins: string[] = [];
+let directoryVisible = false;
+let directorySyncAvailable = false;
 let previewed: Record<string, unknown>[];
 let confirmAnswer = true;
 let level = "fullwrite";
@@ -110,10 +115,20 @@ beforeAll(() => {
               String(c.email ?? "").toLowerCase().includes(term) ||
               String(c.name ?? "").toLowerCase().includes(term))
           : contacts;
+        const scoped = params?.origin === "manual"
+          ? matched.filter((c) => (c.origin ?? "manual") === "manual")
+          : params?.origin === "directory"
+            ? matched.filter((c) => (c.origin ?? "manual") !== "manual")
+            : matched;
+        listOrigins.push(params?.origin ?? "all");
         const limit = params?.limit ?? 50;
-        return { contacts: matched.slice(0, limit), total: matched.length, limit, offset: 0 };
+        return {
+          contacts: scoped.slice(0, limit), total: scoped.length, limit, offset: 0,
+          directoryVisible, directorySyncAvailable,
+        };
       },
       get: async (id: string) => ({ contact: contacts.find((c) => c.id === id) ?? null }),
+      adopt: async (id: string) => { adopted.push(id); return { contact: contacts.find((c) => c.id === id) }; },
       // Filters on the query the way searchAddressBook does (email or name
       // contains), so a test can tell the users/directory half of the tab's
       // results from the contacts half.
@@ -173,6 +188,10 @@ beforeEach(() => {
   deleted = [];
   created = [];
   updated = [];
+  adopted = [];
+  listOrigins = [];
+  directoryVisible = false;
+  directorySyncAvailable = false;
   toasts = [];
   previewed = [];
   confirmAnswer = true;
@@ -680,5 +699,108 @@ describe("picker selection", () => {
     click(doc.querySelector(".modal-close"));
     await flush();
     expect(await p).toBeNull();
+  });
+});
+
+describe("directory-synced rows", () => {
+  /** A row the sync owns: createdBy is null and origin names the backend. */
+  const SYNCED = {
+    id: "c9", email: "synced@example.com", name: "Synced Person", description: null,
+    jobTitle: "Foreman", department: "Quarry Ops", phone: "555-1000",
+    origin: "entra", kind: "person",
+    assetCondition: null, assetConditionEffective: null, assetFilterUnconvertible: [],
+    assetIds: [], createdBy: null,
+  };
+
+  function peopleRows() {
+    return Array.from(doc.querySelectorAll("#ab-tab-results tbody tr"));
+  }
+  const render = () =>
+    (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+
+  it("offers Adopt instead of Edit/Delete — a delete would be undone next run", async () => {
+    contacts.push(SYNCED as never);
+    await render();
+    await flush();
+    expect(doc.querySelectorAll('[data-ab-adopt="c9"]')).toHaveLength(1);
+    expect(doc.querySelectorAll('[data-ab-del="c9"]')).toHaveLength(0);
+    expect(doc.querySelectorAll('[data-ab-edit="c9"]')).toHaveLength(0);
+    // A row the operator added keeps both verbs.
+    expect(doc.querySelectorAll('[data-ab-del="c1"]')).toHaveLength(1);
+  });
+
+  it("withholds Adopt below fullwrite — taking a row from the sync is an admin act", async () => {
+    level = "write";
+    contacts.push(SYNCED as never);
+    await render();
+    await flush();
+    expect(doc.querySelectorAll('[data-ab-adopt="c9"]')).toHaveLength(0);
+  });
+
+  it("adopts on confirm, and says nothing happened when declined", async () => {
+    contacts.push(SYNCED as never);
+    await render();
+    await flush();
+
+    confirmAnswer = false;
+    click(doc.querySelector('[data-ab-adopt="c9"]'));
+    await flush();
+    expect(adopted).toEqual([]);
+
+    confirmAnswer = true;
+    click(doc.querySelector('[data-ab-adopt="c9"]'));
+    await flush();
+    expect(adopted).toEqual(["c9"]);
+  });
+
+  it("badges the row as its directory and shows what the directory knows", async () => {
+    // origin stores the backend name so it drops into the existing badge
+    // vocabulary; job title and department are how two people with the same
+    // name are told apart in a picker.
+    contacts.push(SYNCED as never);
+    await render();
+    await flush();
+    const text = (doc.getElementById("contacts-list") as unknown as { textContent: string }).textContent;
+    expect(text).toContain("Entra");
+    expect(text).toContain("Foreman — Quarry Ops");
+    expect(text).toContain("Directory sync");
+  });
+});
+
+describe("the origin filter", () => {
+  const render = () =>
+    (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+
+  it("stays hidden when nothing is syncing, or when the caller can't see it", async () => {
+    // Otherwise it is a control whose "From the directory" option is always
+    // empty, which reads as a broken filter.
+    directoryVisible = true;
+    directorySyncAvailable = false;
+    await render();
+    await flush();
+    expect((doc.getElementById("ab-tab-origin") as unknown as HTMLElement).style.display).toBe("none");
+  });
+
+  it("appears once a directory is syncing and the caller may see it", async () => {
+    directoryVisible = true;
+    directorySyncAvailable = true;
+    await render();
+    await flush();
+    expect((doc.getElementById("ab-tab-origin") as unknown as HTMLElement).style.display).not.toBe("none");
+  });
+
+  it("asks the SERVER for the chosen slice rather than filtering what it has", async () => {
+    directoryVisible = true;
+    directorySyncAvailable = true;
+    await render();
+    await flush();
+
+    click(doc.querySelector('[data-ab-origin="directory"]'));
+    await flush();
+    expect(listOrigins.at(-1)).toBe("directory");
+
+    click(doc.querySelector('[data-ab-origin="manual"]'));
+    await flush();
+    expect(listOrigins.at(-1)).toBe("manual");
   });
 });

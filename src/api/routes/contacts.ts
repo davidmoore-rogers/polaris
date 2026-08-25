@@ -41,6 +41,7 @@ import { requestActor } from "../middleware/auth.js";
 import { AppError } from "../../utils/errors.js";
 import { contactSearchLimiter } from "../middleware/rateLimits.js";
 import { directorySearchAvailable } from "../../services/directorySearchService.js";
+import { directorySyncAvailable } from "../../services/directorySyncService.js";
 import { DEVICE_FILTER_FIELD_OPS, scopeConditionMeta } from "../../services/notificationTypes.js";
 import { listScopeOptions } from "../../services/notificationRuleService.js";
 import { listAssetTypes } from "../../services/assetTypeService.js";
@@ -127,9 +128,12 @@ contactsRouter.get("/", requirePermission("contacts", "read"), async (req, res, 
       total: page.total,
       limit: query.limit,
       offset: query.offset,
-      // So the UI can hide the origin filter entirely rather than offer a
-      // control that silently returns nothing.
+      // Two different questions, and the UI needs both: may this caller SEE
+      // synced rows, and is anything actually syncing? Offering an origin
+      // filter when the answer to either is no is a control that silently
+      // returns nothing.
       directoryVisible,
+      directorySyncAvailable: directoryVisible ? await directorySyncAvailable() : false,
     });
   } catch (err) { next(err); }
 });
