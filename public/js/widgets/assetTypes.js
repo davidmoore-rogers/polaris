@@ -85,6 +85,19 @@
       }).join("") + '</div>';
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchCounts() {
+    return PolarisWidgets.getSummary({ sections: ["assetTypes"] })
+      .then(function (d) { return (d && d.assetTypeCounts) || []; })
+      .catch(function () { return []; });
+  }
+
+  function render(el, config, rows) {
+    el.innerHTML = "";
+    if ((config && config.chartStyle) === "bar") renderBar(el, rows || [], config.hiddenTypes);
+    else renderPie(el, rows || [], config.hiddenTypes);
+  }
+
   PolarisWidgets.register({
     type: "assetTypes",
     category: "Assets",
@@ -93,17 +106,22 @@
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { chartStyle: "pie", hiddenTypes: [] },
+    // /dashboard/summary gates the assetTypes section on assets:read, so the
+    // widget gates on the same key — without it a role with no asset access
+    // could add this and read "No assets to show", which is a false statement
+    // about the fleet rather than an empty one.
+    requiredPermission: { key: "assets", level: "read" },
 
     fetchData: function (_config) {
-      return PolarisWidgets.getSummary({ sections: ["assetTypes"] })
-        .then(function (d) { return (d && d.assetTypeCounts) || []; })
-        .catch(function () { return []; });
+      return fetchCounts();
     },
 
-    renderInstance: function (el, config, data) {
-      el.innerHTML = "";
-      if ((config && config.chartStyle) === "bar") renderBar(el, data || [], config.hiddenTypes);
-      else renderPie(el, data || [], config.hiddenTypes);
+    renderInstance: function (el, config, data, ctx) {
+      render(el, config, data);
+      var timer = setInterval(function () {
+        fetchCounts().then(function (rows) { render(el, config, rows); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

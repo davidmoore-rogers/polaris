@@ -205,7 +205,7 @@
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
         fetchAlerts(config).then(function (d) { render(el, d, config); }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 

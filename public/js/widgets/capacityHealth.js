@@ -48,6 +48,11 @@
       '</div>' + reasonsHtml;
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchCapacity() {
+    return api.serverSettings.getPgTuning().catch(function () { return null; });
+  }
+
   PolarisWidgets.register({
     type: "capacityHealth",
     category: "IP Space",
@@ -59,11 +64,15 @@
     requiredPermission: { key: "serverSettingsSystem", level: "read" },
 
     fetchData: function () {
-      return api.serverSettings.getPgTuning().catch(function () { return null; });
+      return fetchCapacity();
     },
 
-    renderInstance: function (el, _config, data) {
+    renderInstance: function (el, _config, data, ctx) {
       renderInstance(el, data);
+      var timer = setInterval(function () {
+        fetchCapacity().then(function (d) { renderInstance(el, d); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

@@ -77,7 +77,7 @@
       renderTiles(el, data, config);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["status"]).then(function (d) { renderTiles(el, d, config); }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
 

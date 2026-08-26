@@ -106,7 +106,7 @@
       render(el, config, data);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["storageForecast"]).then(function (d) { render(el, config, (d && d.storageForecast) || []); }).catch(function () {});
-      }, 60000);
+      }, PolarisWidgets.REFRESH.slow);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
 

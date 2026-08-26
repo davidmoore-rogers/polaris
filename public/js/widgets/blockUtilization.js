@@ -35,6 +35,13 @@
     }).join("");
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchBlocks() {
+    return PolarisWidgets.getSummary({ sections: ["blocks"] })
+      .then(function (d) { return (d && d.blockUtilization) || []; })
+      .catch(function () { return []; });
+  }
+
   PolarisWidgets.register({
     type: "blockUtilization",
     category: "IP Space",
@@ -43,15 +50,20 @@
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 4, height: 1 },
     defaultConfig: { rowLimit: 10, sortBy: "percent" },
+    // Mirrors the ipBlocks:read gate on /dashboard/summary's blocks section.
+    // The function key is `ipBlocks`, not `blocks` (FUNCTION_KEYS).
+    requiredPermission: { key: "ipBlocks", level: "read" },
 
     fetchData: function (_config) {
-      return PolarisWidgets.getSummary({ sections: ["blocks"] })
-        .then(function (d) { return (d && d.blockUtilization) || []; })
-        .catch(function () { return []; });
+      return fetchBlocks();
     },
 
-    renderInstance: function (el, config, data) {
+    renderInstance: function (el, config, data, ctx) {
       renderRows(el, data || [], config);
+      var timer = setInterval(function () {
+        fetchBlocks().then(function (rows) { renderRows(el, rows || [], config); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

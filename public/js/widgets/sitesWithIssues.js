@@ -99,7 +99,7 @@
       wire(el, function () { return current; }, config);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["sitesWithIssues"]).then(function (d) { current = (d && d.sitesWithIssues) || []; render(el, current, config); }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); _state.delete(el); });
     },
 

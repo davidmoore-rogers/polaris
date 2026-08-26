@@ -28,6 +28,16 @@
     el.innerHTML = header + body;
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchStale() {
+    return Promise.all([
+      api.reservations.listAlerts("active").catch(function () { return []; }),
+      api.reservations.alertsCount().catch(function () { return { count: 0 }; }),
+    ]).then(function (out) {
+      return { rows: out[0] || [], total: (out[1] && out[1].count) || 0 };
+    });
+  }
+
   PolarisWidgets.register({
     type: "staleReservations",
     category: "IP Space",
@@ -39,16 +49,15 @@
     requiredPermission: { key: "staleReservations", level: "read" },
 
     fetchData: function () {
-      return Promise.all([
-        api.reservations.listAlerts("active").catch(function () { return []; }),
-        api.reservations.alertsCount().catch(function () { return { count: 0 }; }),
-      ]).then(function (out) {
-        return { rows: out[0] || [], total: (out[1] && out[1].count) || 0 };
-      });
+      return fetchStale();
     },
 
-    renderInstance: function (el, config, data) {
+    renderInstance: function (el, config, data, ctx) {
       renderRows(el, data.rows || [], data.total || 0, config && config.rowLimit);
+      var timer = setInterval(function () {
+        fetchStale().then(function (d) { renderRows(el, (d && d.rows) || [], (d && d.total) || 0, config && config.rowLimit); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

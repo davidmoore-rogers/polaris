@@ -186,7 +186,7 @@
       el.addEventListener("click", onClick);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downInterfaces", "downIpsecTunnels"]).then(function (d) { render(el, mergeRows(d, config), config); }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 

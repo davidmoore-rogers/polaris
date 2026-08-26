@@ -53,7 +53,7 @@
       renderRows(el, runs);
       var timer = setInterval(function () {
         api.integrations.discoveries().then(function (next) { renderRows(el, next || []); }).catch(function () {});
-      }, 10000);
+      }, PolarisWidgets.REFRESH.fast);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
 

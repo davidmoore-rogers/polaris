@@ -43,7 +43,7 @@
       render(el, data, config);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["stalePolls"]).then(function (d) { render(el, (d && d.stalePolls) || [], config); }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
 

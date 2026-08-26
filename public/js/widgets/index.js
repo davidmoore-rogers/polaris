@@ -57,6 +57,15 @@
     "server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other",
   ];
 
+  // Widget refresh cadence, by how fast the underlying thing actually moves:
+  //   fast   — in-flight progress (a running discovery)
+  //   normal — outage state (down assets/interfaces, active alerts)
+  //   slow   — ranked metrics, forecasts, maps, history
+  // NOTE: NOC_TTL_MS is 15000, so `fast` refetches faster than the shared memo
+  // TTL and gets cached data two ticks out of three. That is tolerable for a
+  // progress readout; do not copy the pattern to a widget that needs fresh data.
+  window.PolarisWidgets.REFRESH = { fast: 10000, normal: 30000, slow: 60000 };
+
   // Shared NOC-summary accessor. Each widget fetches ONLY its own feed(s)
   // (?feeds=topCpu) so it renders as soon as its data exists instead of
   // gating on the slowest feed in a monolithic payload. Results are memoized

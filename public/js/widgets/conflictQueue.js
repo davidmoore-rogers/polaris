@@ -29,6 +29,16 @@
     el.innerHTML = header + body;
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchConflicts() {
+    return Promise.all([
+      api.conflicts.count().catch(function () { return { count: 0 }; }),
+      api.conflicts.list({ status: "pending", limit: 5 }).catch(function () { return []; }),
+    ]).then(function (out) {
+      return { count: (out[0] && out[0].count) || 0, rows: out[1] || [] };
+    });
+  }
+
   PolarisWidgets.register({
     type: "conflictQueue",
     category: "Discovery",
@@ -40,16 +50,15 @@
     requiredPermission: { key: "discoveryConflicts", level: "read" },
 
     fetchData: function () {
-      return Promise.all([
-        api.conflicts.count().catch(function () { return { count: 0 }; }),
-        api.conflicts.list({ status: "pending", limit: 5 }).catch(function () { return []; }),
-      ]).then(function (out) {
-        return { count: (out[0] && out[0].count) || 0, rows: out[1] || [] };
-      });
+      return fetchConflicts();
     },
 
-    renderInstance: function (el, _config, data) {
+    renderInstance: function (el, _config, data, ctx) {
       renderRows(el, data.count || 0, data.rows || []);
+      var timer = setInterval(function () {
+        fetchConflicts().then(function (d) { renderRows(el, (d && d.count) || 0, (d && d.rows) || []); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

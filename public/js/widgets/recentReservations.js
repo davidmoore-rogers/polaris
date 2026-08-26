@@ -35,6 +35,23 @@
     }).join("");
   }
 
+  // Shared by fetchData and the refresh timer so the two can't drift.
+  function fetchRecent(config) {
+    var wanted = (config && Array.isArray(config.sourceTypes)) ? config.sourceTypes : ["manual"];
+    // Fetch only this widget's section; the shared getSummary memo dedupes
+    // same-config widgets. recentLimit is sent only past the server's
+    // 10-row default so default-config widgets share one cache slot.
+    var serverLimit = PolarisWidgets.serverRowLimit(config && config.rowLimit);
+    var needMore = (config && config.rowLimit === "none") || serverLimit > 10;
+    return PolarisWidgets.getSummary({
+      sections: ["recent"],
+      sourceTypes: wanted,
+      recentLimit: needMore ? serverLimit : null,
+    })
+      .then(function (data) { return (data && data.recentReservations) || []; })
+      .catch(function () { return []; });
+  }
+
   PolarisWidgets.register({
     type: "recentReservations",
     category: "IP Space",
@@ -43,25 +60,19 @@
     defaultSize: { width: 6, height: 1 },
     minSize: { width: 3, height: 1 },
     defaultConfig: { rowLimit: 10, sourceTypes: ["manual"] },
+    // Mirrors the reservations:read gate on /dashboard/summary's recent section.
+    requiredPermission: { key: "reservations", level: "read" },
 
     fetchData: function (config) {
-      var wanted = (config && Array.isArray(config.sourceTypes)) ? config.sourceTypes : ["manual"];
-      // Fetch only this widget's section; the shared getSummary memo dedupes
-      // same-config widgets. recentLimit is sent only past the server's
-      // 10-row default so default-config widgets share one cache slot.
-      var serverLimit = PolarisWidgets.serverRowLimit(config && config.rowLimit);
-      var needMore = (config && config.rowLimit === "none") || serverLimit > 10;
-      return PolarisWidgets.getSummary({
-        sections: ["recent"],
-        sourceTypes: wanted,
-        recentLimit: needMore ? serverLimit : null,
-      })
-        .then(function (data) { return (data && data.recentReservations) || []; })
-        .catch(function () { return []; });
+      return fetchRecent(config);
     },
 
-    renderInstance: function (el, config, data) {
+    renderInstance: function (el, config, data, ctx) {
       renderRows(el, data || [], config);
+      var timer = setInterval(function () {
+        fetchRecent(config).then(function (rows) { renderRows(el, rows || [], config); }).catch(function () {});
+      }, PolarisWidgets.REFRESH.slow);
+      ctx.onUnmount(function () { clearInterval(timer); });
     },
 
     renderPreview: function (el) {

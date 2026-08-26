@@ -13,6 +13,17 @@
      undefined — references fell back to a hardcoded grey (#1c1f24) or, where
      no fallback was given (dashboard hover states), silently did nothing. */
   --color-bg-elevated: #26264a;
+  /* Hover feedback on transparent chrome (grips, icon buttons, menu rows,
+     picker groups). A white overlay is invisible on a light surface, so this
+     is white-ish here and black-ish in the daylight family — every such hover
+     paints the token, never a literal rgba(255,255,255,...). */
+  --color-hover-tint: rgba(255,255,255,0.06);
+  /* Sibling of --color-hover-tint for STATIC faint fills — count badges, chips
+     and cards that sit on a surface rather than reacting to a pointer. Same
+     reason it can't be a literal (white over a light surface is invisible), and
+     deliberately not --color-bg-elevated: these sit ON an elevated surface
+     already, so an elevated fill would vanish against its own parent. */
+  --color-fill-subtle: rgba(255,255,255,0.06);
   --color-border: #252540;
   --color-border-light: #1e1e36;
   --color-text-primary: #e6e6e6;
@@ -70,6 +81,8 @@
   --color-deprecated: #757575;
   --color-sev-serious: #ff8a00;
   --color-sev-notice: #94a3b8;
+  --color-hover-tint: rgba(0,0,0,0.05);
+  --color-fill-subtle: rgba(0,0,0,0.05);
   --shadow-sm: 0 1px 4px rgba(0,0,0,.08);
   --shadow-md: 0 8px 32px rgba(0,0,0,.12);
 }
@@ -3076,8 +3089,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border: 1px solid var(--color-border);
   border-radius: 6px;
   /* Explicit faint overlay (not --color-bg-elevated) so this asset-modal
-     dependency card keeps its pre-token subtle look over the navy slide-over. */
-  background: rgba(255,255,255,0.02);
+     dependency card keeps its pre-token subtle look over the navy slide-over.
+     Via the token because the literal white was invisible on the daylight themes. */
+  background: var(--color-fill-subtle);
 }
 .dep-tree-header {
   font-size: 0.78rem;
@@ -4377,8 +4391,8 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 }
 .dashboard-tab:hover { color: var(--color-text-primary); }
 .dashboard-tab.active {
-  color: #4fc3f7;
-  border-bottom-color: #4fc3f7;
+  color: var(--color-accent);
+  border-bottom-color: var(--color-accent);
 }
 /* Edit-mode drag handle on each tab — the tab itself isn't draggable (the
    active tab is mostly the rename input), so the grip is the grab target. */
@@ -4386,7 +4400,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   cursor: grab; user-select: none; color: var(--color-text-tertiary);
   font-size: 0.9rem; line-height: 1; padding: 2px 3px; border-radius: 4px; flex-shrink: 0;
 }
-.dashboard-tab-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-tab-grip:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
 .dashboard-tab-grip:active { cursor: grabbing; }
 .dashboard-tab-remove {
   background: transparent;
@@ -4398,7 +4412,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   border-radius: 3px;
   cursor: pointer;
 }
-.dashboard-tab-remove:hover { color: #ef5350; background: rgba(255,255,255,0.08); }
+.dashboard-tab-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 /* Inline rename input on the active tab — looks like the tab text until focused. */
 .dashboard-tab-name-input {
   background: transparent;
@@ -4413,7 +4427,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .dashboard-tab-name-input:hover { border-color: var(--color-border, rgba(255,255,255,0.18)); }
 .dashboard-tab-name-input:focus {
   outline: none;
-  border-color: #4fc3f7;
+  border-color: var(--color-accent);
   background: var(--color-bg-primary); /* --color-bg doesn't exist; the #0f1115 fallback clashed with the navy theme */
 }
 
@@ -4473,8 +4487,8 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 }
 .dashboard-column-width-ctl button:last-child { border-right: 0; }
 .dashboard-column-width-ctl button.active {
-  background: rgba(79,195,247,0.18);
-  color: #4fc3f7;
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  color: var(--color-accent);
 }
 .dashboard-column-remove {
   background: transparent;
@@ -4486,7 +4500,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   cursor: pointer;
   border-radius: 4px;
 }
-.dashboard-column-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
+.dashboard-column-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 
 /* Trailing "new column" drop target — only in edit mode. */
 .dashboard-newcol-target {
@@ -4581,7 +4595,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   cursor: grab; user-select: none; color: var(--color-text-tertiary);
   font-size: 1rem; line-height: 1; padding: 2px 4px; border-radius: 4px; flex-shrink: 0;
 }
-.dashboard-widget-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-widget-grip:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
 .dashboard-widget-grip:active { cursor: grabbing; }
 .dashboard-widget-action {
   background: transparent;
@@ -4595,7 +4609,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 }
 .dashboard-widget-action:hover {
   color: var(--color-text-primary);
-  background: rgba(255,255,255,0.06);
+  background: var(--color-hover-tint);
 }
 
 .dashboard-widget-body {
@@ -4616,8 +4630,8 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   font-size: 0.95rem;
   line-height: 1;
 }
-.dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
-.dashboard-widget-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
+.dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
+.dashboard-widget-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 
 /* Widget-specific body wrappers reuse the rolled-up styles from the old
    dashboard surface — kept under .dashboard-widget-body so layout still
@@ -4665,12 +4679,12 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   cursor: pointer;
   text-align: left;
 }
-.widget-export-menu button:hover:not(:disabled) { background: rgba(255,255,255,0.06); }
+.widget-export-menu button:hover:not(:disabled) { background: var(--color-hover-tint); }
 .widget-export-menu button:disabled { color: var(--color-text-tertiary); cursor: default; }
 .widget-export-count {
   font-size: 0.72rem;
   color: var(--color-text-secondary);
-  background: rgba(255,255,255,0.07);
+  background: var(--color-fill-subtle);
   border-radius: 8px;
   padding: 1px 7px;
 }
@@ -4853,16 +4867,16 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   cursor: pointer;
   text-align: left;
 }
-.widget-picker-group:hover { background: rgba(255,255,255,0.04); color: var(--color-text-primary); }
+.widget-picker-group:hover { background: var(--color-hover-tint); color: var(--color-text-primary); }
 .widget-picker-group.active {
-  color: #4fc3f7;
-  box-shadow: inset 3px 0 0 #4fc3f7;
-  background: rgba(79,195,247,0.08);
+  color: var(--color-accent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 .widget-picker-group-count {
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
-  background: rgba(255,255,255,0.06);
+  background: var(--color-fill-subtle);
   border-radius: 8px;
   padding: 0 7px;
 }
@@ -4887,7 +4901,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   border-radius: 6px;
   cursor: grab;
 }
-.widget-library-card:hover { border-color: rgba(79,195,247,0.40); }
+.widget-library-card:hover { border-color: color-mix(in srgb, var(--color-accent) 40%, transparent); }
 .widget-library-card[draggable="true"]:active { cursor: grabbing; }
 .widget-fav-star {
   background: transparent;
@@ -4929,7 +4943,19 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 }
 
 /* Small status-pill colors used in the Capacity Health + Discovery Activity widgets.
-   Matches the severity palette used elsewhere (capacity reasons, monitor alerts). */
+   Matches the severity palette used elsewhere (capacity reasons, monitor alerts).
+
+   -ok / -watch / -amber / -red STAY LITERAL ON PURPOSE — reviewed 2026-08-26 and
+   declined. They are deliberately softer tints than --color-success / --color-accent
+   / --color-warning / --color-danger, and binding them to those tokens collapses the
+   ladder: in noon, watch (#b5451c), amber (#c96a00) and red (#9b1c1c) become three
+   reds a hair apart, so a four-step tier stops reading as four steps. Binding -watch
+   to --color-accent would also couple a capacity tier to the brand accent, which the
+   two-vocabularies rule (see POLARIS-UI-GUIDE section 14) keeps apart from severity.
+   Note each pill's `background` is a matching literal rgba() too, so a color-only
+   swap would leave the text fighting its own tint. If these ever need to follow the
+   theme, give the tier ladder its OWN tokens (--color-tier-*) carrying both halves;
+   do not reach for the semantic four. */
 .widget-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.3px; }
 .widget-pill-ok    { background: rgba(76,175,80,0.18);  color: #81c784; }
 .widget-pill-watch { background: rgba(79,195,247,0.18); color: #4fc3f7; }
@@ -5054,7 +5080,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .sitemap-popup-title { font-weight: 700; font-size: 0.92rem; margin-bottom: 4px; }
 .sitemap-popup-row { font-size: 0.8rem; color: var(--color-text-secondary); display: flex; gap: 8px; }
 .sitemap-popup-row span { color: var(--color-text-tertiary); }
-.sitemap-popup-link { display: inline-block; margin-top: 6px; font-size: 0.8rem; color: #4fc3f7; text-decoration: none; }
+.sitemap-popup-link { display: inline-block; margin-top: 6px; font-size: 0.8rem; color: var(--color-accent); text-decoration: none; }
 .leaflet-tooltip.sitemap-tip { background: var(--color-bg-elevated, #1c1f24); color: var(--color-text-primary); border: 1px solid var(--color-border, rgba(255,255,255,0.12)); font-size: 0.75rem; font-weight: 600; }
 /* Hover labels (transient, sit right over the dot) keep Leaflet's built-in
    speech-bubble tail, colored to match the bubble. */
@@ -5095,11 +5121,12 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   color: #ffffff; border-radius: 3px; padding: 3px 8px; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
   cursor: pointer; font-family: inherit; box-shadow: 0 2px 8px rgba(0,0,0,0.5);
 }
-.sitemap-wx button:hover { border-color: #4fc3f7; }
-/* Active keeps the same dark chip as every other button; the cyan text + border
+.sitemap-wx button:hover { border-color: var(--color-accent); }
+/* Active keeps the same dark chip as every other button; the accent text + border
    mark it on (readable now that the chip is near-opaque, unlike the old
-   cyan-on-cyan-tint). */
-.sitemap-wx button.active { border-color: #4fc3f7; color: #4fc3f7; }
+   cyan-on-cyan-tint). Accent, not a literal — this used to hardcode the retired
+   cyan and stayed cyan in all three themes. */
+.sitemap-wx button.active { border-color: var(--color-accent); color: var(--color-accent); }
 .sitemap-radar-clock {
   position: absolute; right: 8px; top: 40px; pointer-events: none; display: none;
   background: rgba(13,16,22,0.82); border: 1px solid rgba(255,255,255,0.22);

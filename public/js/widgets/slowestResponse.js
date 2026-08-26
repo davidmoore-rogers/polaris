@@ -36,7 +36,7 @@
       render(el, config, data);
       var timer = setInterval(function () {
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["slowestResponse"]).then(function (d) { render(el, config, (d && d.slowestResponse) || []); }).catch(function () {});
-      }, 60000);
+      }, PolarisWidgets.REFRESH.slow);
       ctx.onUnmount(function () { clearInterval(timer); });
     },
 

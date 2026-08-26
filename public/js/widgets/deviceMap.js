@@ -275,7 +275,7 @@
 
       var siteTimer = setInterval(function () {
         api.map.sites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
-      }, 60000);
+      }, PolarisWidgets.REFRESH.slow);
 
       ctx.onUnmount(function () {
         clearInterval(siteTimer);

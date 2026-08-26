@@ -146,7 +146,7 @@
         PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) {
           render(el, { nodes: (d && d.downNodes) || [], total: d && d.downNodesTotal != null ? d.downNodesTotal : null }, config);
         }).catch(function () {});
-      }, 30000);
+      }, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 
