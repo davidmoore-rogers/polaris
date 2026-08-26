@@ -28,8 +28,18 @@ function _getCurrentTheme() {
 function _setTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("polaris-theme", theme);
-  // No live label to repaint: the toggle lives in the user menu, which is
-  // built from _getCurrentTheme() each time it opens.
+  // The sidebar toggle is a long-lived button naming the theme it will switch
+  // TO, so it has to be repainted here — nothing else rebuilds it. (The user
+  // menu's rows are rebuilt per open, which is why this had no work to do
+  // while the toggle lived there.)
+  var btn = document.getElementById("btn-theme-toggle");
+  if (btn) {
+    var isDark = theme === "dark";
+    var svg = btn.querySelector("svg");
+    if (svg) svg.outerHTML = isDark ? _sunIcon() : _moonIcon();
+    var label = btn.querySelector("span");
+    if (label) label.textContent = isDark ? "Light Mode" : "Dark Mode";
+  }
 }
 
 function _sunIcon() {
@@ -399,14 +409,27 @@ function renderNav() {
       ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
         <a href="/server-settings.html" class="sidebar-bottom-link${current === '/server-settings.html' ? ' active' : ''}">${ICONS.settings}<span>Server Settings</span></a>
       </div>` : ''}
-      <!-- Theme, push enrollment and logout used to sit here. They now live in
-           the user menu behind the page-header badge (renderUserBadge), which
-           renders on every page just as the sidebar does — push in particular
-           must stay reachable for an alerts:read role that cannot open
-           /automations.html, where the only enrollment control once lived. -->
+      <!-- The theme toggle sits here, below Server Settings and above the
+           version line. Push enrollment and logout stay in the user menu
+           behind the page-header badge (renderUserBadge) — push in
+           particular must stay reachable for an alerts:read role that cannot
+           open /automations.html, where the only enrollment control once
+           lived. The padding/border pair depends on whether the Server
+           Settings block above rendered: without it this block owns the
+           separator from the nav. -->
+      <div style="padding:${(isAdmin() || canManageAssets()) ? '0.25rem' : '0.5rem'} 0.5rem 0.5rem;${(isAdmin() || canManageAssets()) ? '' : 'border-top:1px solid var(--color-border-light);'}">
+        <button type="button" id="btn-theme-toggle" class="theme-toggle">${_getCurrentTheme() === 'dark' ? _sunIcon() : _moonIcon()}<span>${_getCurrentTheme() === 'dark' ? 'Light Mode' : 'Dark Mode'}</span></button>
+      </div>
       <div id="sidebar-version" style="padding:0 0.75rem 0.75rem;text-align:center;font-size:0.7rem;color:var(--color-text-tertiary);letter-spacing:0.02em"></div>
     </div>
   `;
+
+  var themeBtn = document.getElementById("btn-theme-toggle");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", function () {
+      _setTheme(_getCurrentTheme() === "dark" ? "light" : "dark");
+    });
+  }
 
   wirePushToggle();
   wireTotpState();
@@ -1201,22 +1224,17 @@ function renderUserBadge() {
 }
 
 /**
- * The account menu behind the page-header user badge: theme, push enrollment,
- * two-factor enrollment, logout. Items are built per open so the theme label
- * and the push / 2FA rows reflect current state without anything to keep
- * repainted.
+ * The account menu behind the page-header user badge: push enrollment,
+ * two-factor enrollment, logout. Items are built per open so the push / 2FA
+ * rows reflect current state without anything to keep repainted. The theme
+ * toggle lives at the bottom of the sidebar, not here — it is a display
+ * preference rather than an account action, and an always-visible control
+ * beats one behind a menu for something operators flip often.
  */
 function openUserMenu(anchor) {
   if (typeof showRowMenu !== "function") return;
 
-  var isDark = _getCurrentTheme() === "dark";
-  var items = [
-    {
-      label: isDark ? "Light Mode" : "Dark Mode",
-      icon: isDark ? _sunIcon() : _moonIcon(),
-      onSelect: function () { _setTheme(isDark ? "light" : "dark"); },
-    },
-  ];
+  var items = [];
 
   var push = _pushMenuItem();
   if (push) items.push(push);
@@ -1224,7 +1242,9 @@ function openUserMenu(anchor) {
   var totp = _totpMenuItem();
   if (totp) items.push(totp);
 
-  items.push({ separator: true });
+  // Only separate Logout from something — with no push or 2FA row the menu is
+  // Logout alone, and a leading rule would be a divider above nothing.
+  if (items.length) items.push({ separator: true });
   items.push({
     label: "Logout",
     icon: ICONS.logout,

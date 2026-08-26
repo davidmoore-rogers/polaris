@@ -2,10 +2,10 @@
  * tests/unit/userAccountMenu.test.ts — the page-header account menu
  * (`openUserMenu` in public/js/app.js).
  *
- * Theme, push enrollment and logout used to be three always-visible controls
- * at the bottom of the sidebar. They now live behind the user badge, which
- * means a regression here doesn't misalign a button — it removes the only way
- * to log out or switch themes from every page at once.
+ * Push enrollment, two-factor enrollment and logout live behind the user
+ * badge, which means a regression here doesn't misalign a button — it removes
+ * the only way to log out from every page at once. The theme toggle is NOT
+ * here: it sits at the bottom of the sidebar (see sidebarThemeToggleDom).
  *
  * openUserMenu is pulled out of app.js rather than evaluating the whole file
  * (119 KB with polling loops that would fire here); everything it reaches for
@@ -41,20 +41,15 @@ interface Item {
   onSelect?: () => void;
 }
 
-function open(opts: { theme?: string; push?: Item | null; totp?: Item | null } = {}) {
+function open(opts: { push?: Item | null; totp?: Item | null } = {}) {
   const captured: { items: Item[]; opts: Record<string, unknown>; anchor: unknown } =
     { items: [], opts: {}, anchor: null };
-  const themeWrites: string[] = [];
   const fetches: string[] = [];
 
   const g = globalThis as Record<string, unknown>;
   g.showRowMenu = (anchor: unknown, items: Item[], o: Record<string, unknown>) => {
     captured.anchor = anchor; captured.items = items; captured.opts = o;
   };
-  g._getCurrentTheme = () => opts.theme ?? "dark";
-  g._setTheme = (t: string) => { themeWrites.push(t); };
-  g._sunIcon = () => "<svg id='sun'/>";
-  g._moonIcon = () => "<svg id='moon'/>";
   g._pushMenuItem = () => (opts.push === undefined ? null : opts.push);
   g._totpMenuItem = () => (opts.totp === undefined ? null : opts.totp);
   g._csrfHeaders = () => ({ "x-csrf-token": "t" });
@@ -64,49 +59,40 @@ function open(opts: { theme?: string; push?: Item | null; totp?: Item | null } =
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   const openUserMenu = new Function(extractFn("openUserMenu") + "\nreturn openUserMenu;")() as (a: unknown) => void;
   openUserMenu({ id: "badge" });
-  return { ...captured, themeWrites, fetches, labels: captured.items.map((i) => (i.separator ? "—" : i.label)) };
+  return { ...captured, fetches, labels: captured.items.map((i) => (i.separator ? "—" : i.label)) };
 }
 
 describe("openUserMenu", () => {
-  it("offers theme and logout even when push isn't available", () => {
-    // Push is conditional (browser support / alerts:read / a configured
-    // channel). The other two are not — losing them would strand the user.
-    expect(open().labels).toEqual(["Light Mode", "—", "Logout"]);
+  it("offers logout even when nothing conditional is available", () => {
+    // Push (browser support / alerts:read / a configured channel) and 2FA
+    // (local accounts only) are both conditional. Logout is not — losing it
+    // would strand the user. With neither, there is nothing for a separator
+    // to separate, so the menu is Logout alone.
+    expect(open().labels).toEqual(["Logout"]);
   });
 
-  it("names the theme it will switch TO, not the one in effect", () => {
-    expect(open({ theme: "dark" }).labels[0]).toBe("Light Mode");
-    expect(open({ theme: "light" }).labels[0]).toBe("Dark Mode");
-  });
-
-  it("switches the theme to the opposite of the current one", () => {
-    const dark = open({ theme: "dark" });
-    dark.items[0].onSelect!();
-    expect(dark.themeWrites).toEqual(["light"]);
-
-    const light = open({ theme: "light" });
-    light.items[0].onSelect!();
-    expect(light.themeWrites).toEqual(["dark"]);
-  });
-
-  it("slots the push row between theme and the logout separator", () => {
+  it("carries no theme row — the toggle lives in the sidebar", () => {
     const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} } });
-    expect(r.labels).toEqual(["Light Mode", "Enable push", "—", "Logout"]);
+    expect(r.labels).not.toContain("Light Mode");
+    expect(r.labels).not.toContain("Dark Mode");
+  });
+
+  it("slots the push row above the logout separator", () => {
+    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} } });
+    expect(r.labels).toEqual(["Enable push", "—", "Logout"]);
   });
 
   it("slots the two-factor row after push, still above the separator", () => {
-    // The 2FA row is conditional for the same class of reason push is (local
-    // accounts only), so its absence must not disturb the unconditional rows.
     const r = open({
       push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} },
       totp: { label: "Set up two-factor auth", icon: "<svg/>", onSelect: () => {} },
     });
-    expect(r.labels).toEqual(["Light Mode", "Enable push", "Set up two-factor auth", "—", "Logout"]);
+    expect(r.labels).toEqual(["Enable push", "Set up two-factor auth", "—", "Logout"]);
   });
 
   it("omits the two-factor row for an SSO account without disturbing the rest", () => {
-    const r = open({ totp: null });
-    expect(r.labels).toEqual(["Light Mode", "—", "Logout"]);
+    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} }, totp: null });
+    expect(r.labels).toEqual(["Enable push", "—", "Logout"]);
   });
 
   it("marks logout destructive and gives every row an icon", () => {
