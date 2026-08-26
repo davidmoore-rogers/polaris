@@ -2691,27 +2691,36 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
     '<button class="btn btn-secondary btn-sm pg-prev" ' + (currentPage <= 1 ? 'disabled' : '') + '>&laquo; Prev</button>' +
     pageButtons +
     '<button class="btn btn-secondary btn-sm pg-next" ' + (currentPage >= totalPages ? 'disabled' : '') + '>Next &raquo;</button>' +
-    '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px">' + total + ' items</span>';
+    // nowrap: at narrow widths this label would otherwise break between the
+    // number and the word, which reads as two separate facts.
+    '<span style="font-size:0.82rem;color:var(--color-text-tertiary);margin-left:8px;white-space:nowrap">' + total + ' items</span>';
 
   // Standard list-controls row: a 3-column grid keeps the page navigation
   // centered across the full width regardless of the right cluster's size.
   // Left cell empty, center = pagination, right cell = action buttons + the
   // page-size ("Show N") selector (rendered when onSizeChange is supplied).
   // Replaces the older absolute-positioned action-button cluster. Documented
-  // in TEMPLATES.md → "Paginated list controls row".
+  // in design/POLARIS-UI-GUIDE.md Part II → "Paginated list controls row".
   var pageSizes = (opts && opts.pageSizes) || [15, 25, 50, 100];
   var hasTop = !!topEl; // render the size selector only once (top row when present)
 
   containers.forEach(function (container) {
     container.style.display = "grid";
-    container.style.gridTemplateColumns = "1fr auto 1fr";
+    // Breathing room against the table: the top row sits above the wrapper and
+    // the bottom row below it, and flush against the border both read as table
+    // chrome rather than as controls FOR the table.
+    container.style.margin = (container === topEl) ? "0 0 10px" : "10px 0 0";
+    // minmax(0,1fr) rather than 1fr: a 1fr track refuses to shrink below its
+    // content, so on a narrow table the side columns push into the centered
+    // nav instead of letting it wrap.
+    container.style.gridTemplateColumns = "minmax(0,1fr) auto minmax(0,1fr)";
     container.style.alignItems = "center";
     container.style.gap = "12px";
     container.style.position = "";
     container.innerHTML =
       '<span></span>' +
       '<div class="pg-center" style="display:flex;align-items:center;gap:12px;justify-content:center;flex-wrap:wrap">' + navHtml + '</div>' +
-      '<div class="pg-right" style="display:flex;align-items:center;gap:6px;justify-self:end"></div>';
+      '<div class="pg-right" style="display:flex;align-items:center;gap:6px;justify-self:end;flex-wrap:wrap;justify-content:flex-end"></div>';
 
     container.querySelector('.pg-prev').addEventListener("click", function () {
       if (currentPage > 1) onPageChange(currentPage - 1);

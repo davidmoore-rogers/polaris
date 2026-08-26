@@ -899,16 +899,28 @@ code {
   border-bottom: 1px solid var(--color-border);
 }
 .page-header h2 {
+  /* The actions row is what wraps, so the title is what must not: with the
+     default flex-shrink it absorbs every pixel that row takes and breaks a
+     two-word page name onto two lines. */
+  flex-shrink: 0;
+  white-space: nowrap;
   font-size: 1.35rem;
   font-weight: 700;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  color: #fff;
+  color: var(--color-text-primary);
 }
 .page-header-actions {
   display: flex;
   gap: 8px;
   align-items: center;
+  /* Wraps rather than overhanging its parent: four header buttons plus the
+     user badge overflow a narrow viewport, and the badge is LAST, so it is
+     what gets sliced. Right-aligned so a wrapped row still reads as one
+     group. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 /* ─── Global Search ───────────────────────────────────────────────────────── */
@@ -1077,6 +1089,11 @@ code {
 .user-badge-name {
   font-size: 0.82rem;
   color: var(--color-text-secondary);
+  /* Truncates before anything else in the badge gives way: the username is the
+     one part that can lose characters and still identify the account, unlike
+     the avatar or the role pill. */
+  min-width: 0;
+  flex-shrink: 1;
   max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2105,11 +2122,33 @@ body.sf-resizing * { user-select: none !important; }
   box-shadow: 0 4px 16px rgba(0,0,0,0.35), 0 0 0 1px var(--color-accent);
 }
 /* Idle state for an always-visible action bar (e.g. Notifications View tab):
-   no accent border/ring until the operator selects a row. Keeps the depth
-   shadow so the frozen bar still reads as floating. */
+   nothing is selected, so the bar recedes into the page rather than floating
+   above it — same fill as the rows below it, hairline border, NO shadow. It
+   lights up (surface + accent ring + depth shadow) only once there is a
+   selection to act on, which is also what makes the lit state legible as
+   "these buttons will do something now". */
 .bulk-bar.bulk-bar-idle {
+  /* Matches the unselected rows below it, i.e. .table-wrapper's fill — idle,
+     the bar reads as the table's own top edge rather than a floating control.
+     Note this is NOT the body fill (--color-bg-secondary), which is a step
+     darker and would read as a gap. */
+  background: var(--color-bg-primary);
   border-color: var(--color-border);
-  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  box-shadow: none;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+
+/* Selected rows track the bar: an accent wash plus a left marker, so the eye
+   can pair "3 selected" with WHICH three. Beats a checkbox-only cue on a wide
+   table where the checkbox column has scrolled out of view. */
+tbody tr.selected > td {
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-surface));
+}
+tbody tr.selected:hover > td {
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-surface));
+}
+tbody tr.selected > td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-accent);
 }
 /* Reusable on/off toggle switch (e.g. the Notifications → Manage "Enabled"
    column). A styled checkbox; the input itself stays accessible. */
