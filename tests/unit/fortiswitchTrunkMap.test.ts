@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   matchTrunkPeer,
   parseTrunkPortMap,
+  trunkPeerNameTail,
 } from "../../src/utils/fortiswitchTrunkMap.js";
 
 // Verbatim from a FortiSwitch-124E-FPOE running v7.6.6.
@@ -91,5 +92,38 @@ describe("matchTrunkPeer", () => {
       ["ALTF5920008350", "asset-a"],
     ]);
     expect(matchTrunkPeer("F5920008350", dual)).toBe("asset-a");
+  });
+});
+
+describe("trunkPeerNameTail", () => {
+  // The two shapes the ifTable actually publishes: switch peer with -0,
+  // FortiGate peer bare.
+  it("extracts the tail from real trunk interface names", () => {
+    expect(trunkPeerNameTail("8EF5920000001-0")).toBe("8EF5920000001");
+    expect(trunkPeerNameTail("GT61FTK21000002")).toBe("GT61FTK21000002");
+    expect(trunkPeerNameTail("  8EPTQ21000003-0 ")).toBe("8EPTQ21000003");
+  });
+
+  // Ordinary port names must never trigger the peer lookup: the shape test is
+  // what keeps the preservation pass off the hot path for every normal scrape.
+  it("rejects ordinary interface names", () => {
+    expect(trunkPeerNameTail("port23")).toBeNull();
+    expect(trunkPeerNameTail("lan1")).toBeNull();
+    expect(trunkPeerNameTail("internal")).toBeNull();
+    expect(trunkPeerNameTail("Ethernet 2")).toBeNull();       // whitespace
+    expect(trunkPeerNameTail("aggregate.uplink1")).toBeNull(); // punctuation
+    expect(trunkPeerNameTail("fortilink")).toBeNull();         // too short
+    expect(trunkPeerNameTail("")).toBeNull();
+    expect(trunkPeerNameTail(null)).toBeNull();
+    expect(trunkPeerNameTail(undefined)).toBeNull();
+  });
+
+  it("strips any member index, not just -0", () => {
+    expect(trunkPeerNameTail("8EF5920000001-12")).toBe("8EF5920000001");
+  });
+
+  // A short tail would suffix-match too easily; the floor refuses it.
+  it("rejects a tail below the minimum length even with a member suffix", () => {
+    expect(trunkPeerNameTail("ABC123-0")).toBeNull();
   });
 });

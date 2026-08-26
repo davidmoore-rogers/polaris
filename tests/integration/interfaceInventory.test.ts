@@ -26,8 +26,10 @@ const HOSTNAME = "iface-inventory-test";
 let assetId = "";
 
 async function wipe(): Promise<void> {
-  // asset_interfaces cascades with the Asset, so deleting the asset is enough.
-  await prisma.asset.deleteMany({ where: { hostname: HOSTNAME } });
+  // asset_interfaces cascades with the Asset, so deleting the assets is enough.
+  // startsWith covers the per-test peer/other assets too — a leaked peer would
+  // carry its serial into the next test's trunk-preservation matching.
+  await prisma.asset.deleteMany({ where: { hostname: { startsWith: HOSTNAME } } });
 }
 
 function sample(ifName: string, over: Partial<InterfaceSample> = {}): InterfaceSample {
@@ -186,5 +188,129 @@ d("interface inventory (current-state)", () => {
     await persistInterfaces(assetId, [sample("port1")]);
     await prisma.asset.delete({ where: { id: assetId } });
     expect(await prisma.assetInterface.count({ where: { assetId } })).toBe(0);
+  });
+
+  // ── FortiLink trunk preservation ──────────────────────────────────────────
+  // FortiSwitchOS removes a FortiLink trunk aggregate from the ifTable while
+  // the link is down, so a downed inter-switch trunk vanished from the
+  // inventory (and the System tab, and the pin picker) at exactly the moment
+  // the down alert about it fired. A dropped row whose name resolves to a
+  // still-present peer switch that reciprocates survives the delete-replace,
+  // marked down.
+
+  const SERIAL_A = "S1TESTAAAA000001";
+  const SERIAL_B = "S1TESTBBBB000002";
+  // The trunk name is the peer serial + "-0", left-truncated to 15 chars.
+  const TRUNK_ON_A = "ESTBBBB000002-0"; // A's interface toward B
+  const TRUNK_ON_B = "ESTAAAA000001-0"; // B's interface toward A
+
+  async function createPeer(over: Record<string, unknown> = {}): Promise<string> {
+    const peer = await prisma.asset.create({
+      data: {
+        hostname: `${HOSTNAME}-peer`,
+        assetType: "switch",
+        status: "active",
+        serialNumber: SERIAL_B,
+        ...over,
+      },
+    });
+    return peer.id;
+  }
+
+  async function stampSelfSerial(): Promise<void> {
+    await prisma.asset.update({ where: { id: assetId }, data: { serialNumber: SERIAL_A } });
+  }
+
+  it("preserves a trunk interface whose peer is active and reciprocates, marked down", async () => {
+    await stampSelfSerial();
+    const peerId = await createPeer();
+    await persistInterfaces(peerId, [sample(TRUNK_ON_B)]);
+
+    await persistInterfaces(assetId, [sample("port1"), sample(TRUNK_ON_A, { operStatus: "up" })]);
+    // Trunk goes down → it leaves the ifTable → next scrape omits it.
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    const rows = await stored();
+    expect(rows.map((r) => r.ifName)).toEqual([TRUNK_ON_A, "port1"]);
+    const trunk = rows.find((r) => r.ifName === TRUNK_ON_A)!;
+    expect(trunk.operStatus).toBe("down");
+  });
+
+  it("keeps firstSeen across the outage and refreshes the row when the trunk returns", async () => {
+    await stampSelfSerial();
+    const peerId = await createPeer();
+    await persistInterfaces(peerId, [sample(TRUNK_ON_B)]);
+
+    const t0 = new Date(Date.now() - 60 * 60 * 1000);
+    await persistInterfaces(assetId, [sample(TRUNK_ON_A)], t0);
+    const before = (await stored())[0];
+
+    await persistInterfaces(assetId, [sample("port1")], new Date(Date.now() - 30 * 60 * 1000));
+
+    const t2 = new Date();
+    await persistInterfaces(assetId, [sample("port1"), sample(TRUNK_ON_A, { operStatus: "up" })], t2);
+    const after = (await stored()).find((r) => r.ifName === TRUNK_ON_A)!;
+
+    expect(after.firstSeen.getTime()).toBe(before.firstSeen.getTime());
+    expect(after.operStatus).toBe("up");
+    expect(after.lastSeen.getTime()).toBe(t2.getTime());
+  });
+
+  it("preservation holds when BOTH ends drop the trunk (reciprocal preserved rows vouch for each other)", async () => {
+    await stampSelfSerial();
+    const peerId = await createPeer();
+    await persistInterfaces(assetId, [sample(TRUNK_ON_A)]);
+    await persistInterfaces(peerId, [sample(TRUNK_ON_B)]);
+
+    // Link down: both sides' next full scrape omits the trunk. Whichever side
+    // scrapes first still sees the other's stored row; after that each side's
+    // preserved row satisfies the other's reciprocity check.
+    await persistInterfaces(assetId, [sample("port1")]);
+    await persistInterfaces(peerId, [sample("port9")]);
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    expect((await stored()).map((r) => r.ifName)).toContain(TRUNK_ON_A);
+    const peerRows = await prisma.assetInterface.findMany({ where: { assetId: peerId } });
+    expect(peerRows.map((r) => r.ifName)).toContain(TRUNK_ON_B);
+  });
+
+  it("removes the trunk when the peer is decommissioned", async () => {
+    await stampSelfSerial();
+    const peerId = await createPeer({ status: "decommissioned" });
+    await persistInterfaces(peerId, [sample(TRUNK_ON_B)]);
+
+    await persistInterfaces(assetId, [sample(TRUNK_ON_A)]);
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    expect((await stored()).map((r) => r.ifName)).toEqual(["port1"]);
+  });
+
+  it("removes the trunk when the peer has no reciprocal interface", async () => {
+    await stampSelfSerial();
+    const peerId = await createPeer();
+    await persistInterfaces(peerId, [sample("port5")]); // no trunk toward A
+
+    await persistInterfaces(assetId, [sample(TRUNK_ON_A)]);
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    expect((await stored()).map((r) => r.ifName)).toEqual(["port1"]);
+  });
+
+  it("removes the trunk when its name matches no asset serial", async () => {
+    await stampSelfSerial();
+    await persistInterfaces(assetId, [sample("NOSUCHPEER0001-0")]);
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    expect((await stored()).map((r) => r.ifName)).toEqual(["port1"]);
+  });
+
+  it("removes the trunk when this asset has no serial for the peer to reciprocate against", async () => {
+    const peerId = await createPeer();
+    await persistInterfaces(peerId, [sample(TRUNK_ON_B)]);
+
+    await persistInterfaces(assetId, [sample(TRUNK_ON_A)]);
+    await persistInterfaces(assetId, [sample("port1")]);
+
+    expect((await stored()).map((r) => r.ifName)).toEqual(["port1"]);
   });
 });

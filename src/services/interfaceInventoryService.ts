@@ -39,6 +39,7 @@ import {
   EMPTY_INTERFACE_IDENTITY,
   type InterfaceIdentity,
 } from "../utils/interfaceIdentity.js";
+import { matchTrunkPeer, trunkPeerNameTail } from "../utils/fortiswitchTrunkMap.js";
 import type { InterfaceSample } from "./monitoringService.js";
 
 /**
@@ -122,12 +123,108 @@ export function dedupeAndCapInterfaces<T extends { ifName: string }>(
 }
 
 /**
+ * Statuses under which a trunk peer still counts as "present" for the
+ * preservation pass below. A decommissioned / disabled / shelved peer means
+ * the trunk is legitimately gone and its interface row should go with it;
+ * a peer merely in a maintenance window is still cabled to this switch.
+ */
+const TRUNK_PEER_PRESENT_STATUSES = ["active", "maintenance"];
+
+/**
+ * Which of an asset's about-to-be-dropped interface rows are FortiLink trunk
+ * interfaces whose peer still exists — and should therefore be PRESERVED.
+ *
+ * FortiSwitchOS names its auto-created FortiLink trunk aggregates after the
+ * PEER's serial ("8EF5920000001-0", see utils/fortiswitchTrunkMap.ts) — and
+ * removes the aggregate from the ifTable entirely while the link is down. To
+ * the delete-replace scrape that is indistinguishable from a port that never
+ * existed, so a downed inter-switch trunk vanished from the inventory, the
+ * System tab and the pin picker at exactly the moment an operator was looking
+ * for it (the down alert it fired names an interface that "doesn't exist").
+ *
+ * A dropped row is preserved only when BOTH ends still vouch for the trunk:
+ *   1. its name resolves (serial suffix-match, ambiguity refuses) to exactly
+ *      one OTHER asset that is still active / in maintenance, and
+ *   2. that peer's own interface inventory carries a reciprocal trunk row
+ *      naming THIS asset's serial.
+ * The reciprocity check is stable across the outage because preserved rows
+ * stay in the table: whichever side scrapes first still sees the other side's
+ * row, and from then on each side's preserved row satisfies the other's
+ * check. Decommissioning either switch (or unpairing them) breaks a
+ * condition and the row ages out on the next full scrape.
+ *
+ * Best-effort: a failed read falls back to the plain delete-replace rather
+ * than failing the scrape.
+ */
+async function resolvePreservedTrunkNames(
+  assetId: string,
+  droppedNames: string[],
+): Promise<string[]> {
+  const candidates = droppedNames
+    .map((name) => ({ name, tail: trunkPeerNameTail(name) }))
+    .filter((c): c is { name: string; tail: string } => c.tail != null);
+  if (candidates.length === 0) return [];
+
+  try {
+    // Same fleet-wide serial scan persistTrunkMembers runs — only reached
+    // when a full scrape actually drops a serial-shaped interface name.
+    const assets = await prisma.asset.findMany({
+      where: { serialNumber: { not: null } },
+      select: { id: true, serialNumber: true, status: true },
+    });
+    // Without our own serial the peer can't have a reciprocal row naming us.
+    const selfSerial = assets.find((a) => a.id === assetId)?.serialNumber ?? null;
+    if (!selfSerial) return [];
+
+    const serialToAssetId = new Map<string, string>();
+    for (const a of assets) {
+      if (a.id === assetId || !a.serialNumber) continue;
+      if (!TRUNK_PEER_PRESENT_STATUSES.includes(a.status)) continue;
+      serialToAssetId.set(a.serialNumber, a.id);
+    }
+
+    const peerByName = new Map<string, string>();
+    for (const c of candidates) {
+      const peerId = matchTrunkPeer(c.tail, serialToAssetId);
+      if (peerId) peerByName.set(c.name, peerId);
+    }
+    if (peerByName.size === 0) return [];
+
+    const peerIfaces = await prisma.assetInterface.findMany({
+      where: { assetId: { in: [...new Set(peerByName.values())] } },
+      select: { assetId: true, ifName: true },
+    });
+    const selfAsPeerMap = new Map([[selfSerial, assetId]]);
+    const reciprocated = new Set<string>();
+    for (const row of peerIfaces) {
+      const tail = trunkPeerNameTail(row.ifName);
+      if (tail && matchTrunkPeer(tail, selfAsPeerMap) === assetId) {
+        reciprocated.add(row.assetId);
+      }
+    }
+
+    return candidates
+      .filter((c) => {
+        const peerId = peerByName.get(c.name);
+        return peerId != null && reciprocated.has(peerId);
+      })
+      .map((c) => c.name);
+  } catch (err) {
+    logger.warn({ err, assetId }, "trunk-interface preservation check failed — falling back to plain replace");
+    return [];
+  }
+}
+
+/**
  * Full-replace an asset's current-state interface inventory.
  *
  * Contract (the LLDP / physical-entity contract, enforced by the CALLER):
  *   - a collector that can't supply interfaces → don't call this at all, stored
  *     rows stay.
  *   - `[]` → wipes the asset's rows.
+ *   - EXCEPTION: a FortiLink trunk interface whose peer switch still exists
+ *     (and reciprocates) survives the replace even when absent from the
+ *     scrape, marked `operStatus="down"` — see resolvePreservedTrunkNames.
  *
  * NOTE the system-info caller deliberately does NOT call this on an empty
  * array. Unlike LLDP, an empty interface list is ambiguous: a FortiOS token
@@ -139,7 +236,8 @@ export function dedupeAndCapInterfaces<T extends { ifName: string }>(
  *
  * `firstSeen` is preserved for an interface still present in the scrape, so
  * "this port has existed since March" survives a re-scrape; a name that
- * disappears and later returns correctly resets it.
+ * disappears and later returns correctly resets it — except a preserved trunk
+ * row, which never left the table and keeps its history across the outage.
  *
  * Delete + insert run in ONE transaction so a concurrent reader sees the old
  * set or the new set, never an empty intermediate — this table backs the System
@@ -180,8 +278,21 @@ export async function persistInterfaceRows(
   });
   const priorFirstSeen = new Map(existing.map((e) => [e.ifName, e.firstSeen]));
 
-  await prisma.$transaction([
-    prisma.assetInterface.deleteMany({ where: { assetId } }),
+  // A FortiLink trunk aggregate leaves the ifTable while its link is down, so
+  // "absent from the scrape" does not always mean "gone". Preserve trunk rows
+  // both ends still vouch for, marked down (see resolvePreservedTrunkNames).
+  const incomingNames = new Set(rows.map((r) => r.ifName));
+  const droppedNames = existing.map((e) => e.ifName).filter((n) => !incomingNames.has(n));
+  const preserved = droppedNames.length > 0
+    ? await resolvePreservedTrunkNames(assetId, droppedNames)
+    : [];
+
+  const results = await prisma.$transaction([
+    prisma.assetInterface.deleteMany({
+      where: preserved.length > 0
+        ? { assetId, ifName: { notIn: preserved } }
+        : { assetId },
+    }),
     ...(rows.length > 0
       ? [prisma.assetInterface.createMany({
           data: rows.map((r) => ({
@@ -192,7 +303,30 @@ export async function persistInterfaceRows(
           })),
         })]
       : []),
+    // The device stating nothing about the trunk IS the down signal — the
+    // aggregate only leaves the ifTable when the link is down. Edge-triggered:
+    // a trunk already marked down issues no write on later scrapes. lastSeen
+    // deliberately stays at the last real sighting.
+    ...(preserved.length > 0
+      ? [prisma.assetInterface.updateMany({
+          where: {
+            assetId,
+            ifName: { in: preserved },
+            OR: [{ operStatus: null }, { operStatus: { not: "down" } }],
+          },
+          data: { operStatus: "down" },
+        })]
+      : []),
   ]);
+  if (preserved.length > 0) {
+    const flipped = (results[results.length - 1] as { count: number }).count;
+    if (flipped > 0) {
+      logger.info(
+        { assetId, preserved },
+        "FortiLink trunk interface absent from scrape — preserved as down (peer switch still active with a reciprocal trunk)",
+      );
+    }
+  }
   // The identity map is derived from exactly these rows.
   invalidateInterfaceIdentity(assetId);
 }

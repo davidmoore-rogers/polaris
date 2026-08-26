@@ -52,6 +52,35 @@ export interface TrunkPortEntry {
 const TRUNK_SUFFIX = /-\d+$/;
 
 /**
+ * Shortest tail worth suffix-matching against serials. Real tails are 13–15
+ * characters (a 16-char serial minus what the 15-char cap ate); the floor
+ * exists so ordinary short port names ("port23", "lan1") never trigger the
+ * peer lookup at all, and so a degenerate tail can't suffix-match half the
+ * fleet's serials.
+ */
+const MIN_PEER_TAIL_LEN = 10;
+
+/**
+ * The peer-serial tail of an interface NAME shaped like a FortiLink trunk
+ * ("8EF5920000001-0", "GT61FTK21000002"), or null for anything else.
+ *
+ * The trunk aggregates the switch auto-creates toward its FortiLink peers
+ * appear in the ifTable under these names, so the interface inventory can
+ * carry rows whose name IS a peer identity. This is the shape test the
+ * inventory's trunk-preservation pass runs before doing any DB work: strip
+ * the `-<n>` member suffix, then require a serial-plausible tail (alnum,
+ * long enough that a match against an asset serial means something).
+ */
+export function trunkPeerNameTail(ifName: string | null | undefined): string | null {
+  const name = (ifName ?? "").trim();
+  if (!name) return null;
+  const tail = name.replace(TRUNK_SUFFIX, "");
+  if (tail.length < MIN_PEER_TAIL_LEN) return null;
+  if (!/^[A-Za-z0-9]+$/.test(tail)) return null;
+  return tail;
+}
+
+/**
  * Parse the raw OctetString into entries.
  *
  * Tolerant by construction: entries are `::`-separated with inconsistent
