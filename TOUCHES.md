@@ -432,8 +432,8 @@ build auto-prune + boot-time auto-build are layered on top.
   `java -jar jsign.jar --storetype PKCS12` invocation (password via env
   `POLARIS_SIGNING_PASSWORD`, never argv) with an EXPLICIT `--tsaurl` +
   `--tsmode RFC3161` (PKCS12 gets no automatic countersignature, so this
-  is what keeps signatures valid past cert expiry), the keytool-backed
-  keystore/alias check behind the Test button, the `signingAvailability()`
+  is what keeps signatures valid past cert expiry), the keytool-backed (bare
+  name, then the JVM's own `java.home` — the headless JDK ships keytool beside the JVM, so a PATH miss is NOT an absent tool; a real absence only degrades the Test message, signing never uses keytool) keystore/alias check behind the Test button, the `signingAvailability()`
   probe (java on PATH + jar candidates + keystore READABILITY), and the
   durable `agent.signing.lastFailure` Setting behind the sidebar alert.
   `agentBuildService.signWindowsBinaries()` calls it between the platform

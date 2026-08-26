@@ -34,6 +34,7 @@ import {
   isSigningConfigured,
   buildJsignArgs,
   parseKeytoolAliases,
+  parseJavaHome,
   aliasAdvisory,
   isKeytoolMissing,
   scrubSecrets,
@@ -202,6 +203,34 @@ describe("parseKeytoolAliases", () => {
   it("returns an empty list for output with no entries", () => {
     expect(parseKeytoolAliases("Your keystore contains 0 entries")).toEqual([]);
     expect(parseKeytoolAliases("")).toEqual([]);
+  });
+});
+
+describe("parseJavaHome", () => {
+  // The fallback this feeds exists because java-17-openjdk-headless ships
+  // keytool NEXT TO THE JVM rather than necessarily on PATH — so a PATH miss
+  // must not be read as "keytool is absent".
+  it("extracts java.home from -XshowSettings output", () => {
+    const out = [
+      "Property settings:",
+      "    file.encoding = UTF-8",
+      "    java.home = /usr/lib/jvm/java-17-openjdk-17.0.12.0.7-2.el9.x86_64",
+      "    java.io.tmpdir = /tmp",
+      "",
+      'openjdk version "17.0.12" 2026-07-16',
+    ].join("\n");
+    expect(parseJavaHome(out)).toBe("/usr/lib/jvm/java-17-openjdk-17.0.12.0.7-2.el9.x86_64");
+  });
+
+  it("handles a Windows path with spaces", () => {
+    expect(parseJavaHome("    java.home = C:\\Program Files\\Microsoft\\jdk-17.0.12\\")).toBe(
+      "C:\\Program Files\\Microsoft\\jdk-17.0.12\\",
+    );
+  });
+
+  it("returns null when the property is absent or the output is empty", () => {
+    expect(parseJavaHome("openjdk version \"17.0.12\"")).toBeNull();
+    expect(parseJavaHome("")).toBeNull();
   });
 });
 

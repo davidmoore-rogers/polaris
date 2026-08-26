@@ -1249,6 +1249,8 @@ Integrations → **Polaris Agents** → **Code signing (internal CA)**:
 
 1. Tick **Sign Windows agent binaries on build** and fill in the **keystore path**, **keystore password**, and **timestamp URL**. Leave **key alias** blank unless the keystore holds more than one entry, and leave **jsign jar path** blank for auto-detection. Saving requires `serverSettingsSystem = fullwrite` (admin).
 2. Click **Test** — it checks Java and the jar, then opens the keystore with the stored password via `keytool` and lists the aliases it found. That proves the path/password pair and catches a mistyped alias, which otherwise only surfaces as a jsign error mid-build. It makes **no network call**, so it does not prove the timestamp authority is reachable.
+
+   `keytool` ships inside `java-17-openjdk-headless`, but beside the JVM rather than necessarily symlinked onto `PATH`. Polaris tries the bare name first and then the JVM's own reported `java.home` (and `JAVA_HOME` if you set one), so it normally finds it either way. If it genuinely can't, Test reports *"password NOT verified"* and everything else still passes — signing itself never uses keytool, only `java -jar jsign.jar`, so this is a diagnostic downgrade rather than a functional one.
 3. Run a build. The progress strip gains `sign-windows-amd64` / `sign-windows-arm64` rows after the six platform rows; the completed Event carries `signed: true`.
 
 Verify a signed binary with `osslsigncode verify` (Linux) or `Get-AuthenticodeSignature` (Windows) — run the latter on a machine that trusts your internal root, or it will correctly report an untrusted chain. Explorer → Properties → Details also shows the embedded VERSIONINFO metadata (product name, version) that the agent binaries carry regardless of signing.

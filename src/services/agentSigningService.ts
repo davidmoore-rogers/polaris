@@ -449,23 +449,53 @@ export function parseKeytoolAliases(stdout: string): string[] {
  * the same JDK the availability probe already requires and needs no file to
  * sign.
  *
- * keytool is absent from some minimal JREs, so a MISSING BINARY degrades to
- * "unverified" rather than reporting a failure — telling the operator their
- * password is wrong because a tool is missing would send them to the wrong
- * field entirely.
+ * Resolution is two-step: the bare name (which is the whole story wherever the
+ * JDK registered its alternatives), then the JVM-reported `java.home`. That
+ * second step matters because `java-17-openjdk-headless` DOES ship keytool —
+ * beside the JVM — so a PATH miss is not the same as the tool being absent,
+ * and without the fallback the Test button would sit permanently degraded on a
+ * perfectly well-provisioned host.
+ *
+ * A genuinely MISSING binary degrades to "unverified" rather than reporting a
+ * failure — telling the operator their password is wrong because a tool is
+ * missing would send them to the wrong field entirely.
  */
 export async function verifyKeystore(
   cfg: Pick<AgentSigningConfig, "keystorePath" | "keystorePassword">,
 ): Promise<{ verified: boolean; aliases: string[]; error?: string }> {
+  const args = [
+    "-list", "-storetype", "PKCS12",
+    "-keystore", cfg.keystorePath,
+    "-storepass:env", SIGNING_PASSWORD_ENV,
+  ];
+  const opts = {
+    timeout: 15_000,
+    env: { ...process.env, [SIGNING_PASSWORD_ENV]: cfg.keystorePassword },
+  };
+
+  // Bare name first: on a host where the JDK registered its alternatives this
+  // is the whole story, and it costs one exec.
   try {
-    const { stdout } = await execFileAsync(
-      "keytool",
-      ["-list", "-storetype", "PKCS12", "-keystore", cfg.keystorePath, "-storepass:env", SIGNING_PASSWORD_ENV],
-      {
-        timeout: 15_000,
-        env: { ...process.env, [SIGNING_PASSWORD_ENV]: cfg.keystorePassword },
-      },
-    );
+    const { stdout } = await execFileAsync("keytool", args, opts);
+    return { verified: true, aliases: parseKeytoolAliases(stdout) };
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") {
+      const detail = scrubSecrets((err?.stderr || err?.stdout || err?.message || "").trim(), [cfg.keystorePassword]);
+      return { verified: false, aliases: [], error: detail || "keystore could not be opened" };
+    }
+    /* not on PATH — fall through to the JVM-reported location */
+  }
+
+  // `java-17-openjdk-headless` DOES ship keytool, but next to the JVM rather
+  // than necessarily symlinked into /usr/bin, so a PATH miss is not the same
+  // as "absent". Ask the JVM where it lives instead of guessing at
+  // /usr/lib/jvm globs, which differ across distros and Windows JDKs.
+  const resolved = await resolveKeytoolPath();
+  if (!resolved) {
+    return { verified: false, aliases: [], error: "keytool not available — password not verified" };
+  }
+  try {
+    const { stdout } = await execFileAsync(resolved, args, opts);
     return { verified: true, aliases: parseKeytoolAliases(stdout) };
   } catch (err: any) {
     if (err?.code === "ENOENT") {
@@ -474,6 +504,48 @@ export async function verifyKeystore(
     const detail = scrubSecrets((err?.stderr || err?.stdout || err?.message || "").trim(), [cfg.keystorePassword]);
     return { verified: false, aliases: [], error: detail || "keystore could not be opened" };
   }
+}
+
+/**
+ * Pull `java.home` out of `java -XshowSettings:properties -version` output
+ * (which the JVM prints to STDERR). Pure.
+ */
+export function parseJavaHome(output: string): string | null {
+  const m = /^\s*java\.home\s*=\s*(.+?)\s*$/m.exec(output);
+  return m?.[1] ? m[1] : null;
+}
+
+/**
+ * Absolute path to keytool when it isn't on PATH: `JAVA_HOME` if the operator
+ * set one, else the running JVM's own `java.home`. Returns null when neither
+ * yields an executable file — the caller then reports the honest "password not
+ * verified" rather than blaming the password.
+ */
+export async function resolveKeytoolPath(): Promise<string | null> {
+  const exe = process.platform === "win32" ? "keytool.exe" : "keytool";
+  const candidates: string[] = [];
+
+  if (process.env.JAVA_HOME) candidates.push(resolvePath(process.env.JAVA_HOME, "bin", exe));
+
+  try {
+    // Properties go to stderr; -version keeps it from waiting on a main class.
+    const { stderr, stdout } = await execFileAsync("java", ["-XshowSettings:properties", "-version"], {
+      timeout: 10_000,
+    });
+    const home = parseJavaHome(stderr || stdout || "");
+    if (home) candidates.push(resolvePath(home, "bin", exe));
+  } catch {
+    /* no java, or an old JVM without -XshowSettings — nothing more to try */
+  }
+
+  for (const c of candidates) {
+    try {
+      if ((await stat(c)).isFile()) return c;
+    } catch {
+      /* keep probing */
+    }
+  }
+  return null;
 }
 
 /** Is this verifyKeystore() error the degraded "no keytool" case? Pure. */
