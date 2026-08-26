@@ -4994,6 +4994,35 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .sitemap-body.sitemap-dark .leaflet-tile-pane,
 .polaris-basemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
 
+/* The zoom control floats ON that darkened basemap, so it takes the same dark
+   surface the dark popups and tooltips below use — Leaflet's default white bar
+   read as a hole punched in the map. Values are hardcoded, not theme tokens:
+   the map theme is its own per-user preference (a light app theme can hold a
+   dark map), so these must follow the BASEMAP, not the app palette. Scoped to
+   the zoom buttons and the Site Map home button, both of which draw glyphs in
+   `color`; the leaflet-draw toolbar's buttons are dark sprite images on white
+   and would go invisible on a dark background. */
+.sitemap-body.sitemap-dark .leaflet-control-zoom a,
+.polaris-basemap-dark .leaflet-control-zoom a,
+.sitemap-body.sitemap-dark .leaflet-bar a.sitemap-home,
+.polaris-basemap-dark .leaflet-bar a.sitemap-home {
+  background-color: #1c1f24; color: #e6e8eb; border-bottom-color: rgba(255,255,255,0.12);
+}
+.sitemap-body.sitemap-dark .leaflet-control-zoom a:hover,
+.sitemap-body.sitemap-dark .leaflet-control-zoom a:focus,
+.polaris-basemap-dark .leaflet-control-zoom a:hover,
+.polaris-basemap-dark .leaflet-control-zoom a:focus,
+.sitemap-body.sitemap-dark .leaflet-bar a.sitemap-home:hover,
+.sitemap-body.sitemap-dark .leaflet-bar a.sitemap-home:focus,
+.polaris-basemap-dark .leaflet-bar a.sitemap-home:hover,
+.polaris-basemap-dark .leaflet-bar a.sitemap-home:focus {
+  background-color: #262a31; color: #fff;
+}
+.sitemap-body.sitemap-dark .leaflet-control-zoom a.leaflet-disabled,
+.polaris-basemap-dark .leaflet-control-zoom a.leaflet-disabled {
+  background-color: #171a1e; color: #5f666f;
+}
+
 /* ── Site Map widget (SolarWinds-style status dots + weather) ───────────── */
 
 /* Pulsing ring under a down site's dot. */

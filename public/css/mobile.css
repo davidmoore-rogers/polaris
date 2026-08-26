@@ -990,6 +990,19 @@ button, .list-item, .chip { touch-action: manipulation; }
    so markers and overlays above it stay unfiltered. */
 .polaris-basemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
 
+/* Zoom control on the darkened basemap — mirrors styles.css. Hardcoded rather
+   than theme tokens: it follows the basemap, not the app palette. */
+.polaris-basemap-dark .leaflet-control-zoom a {
+  background-color: #1c1f24; color: #e6e8eb; border-bottom-color: rgba(255,255,255,0.12);
+}
+.polaris-basemap-dark .leaflet-control-zoom a:hover,
+.polaris-basemap-dark .leaflet-control-zoom a:focus {
+  background-color: #262a31; color: #fff;
+}
+.polaris-basemap-dark .leaflet-control-zoom a.leaflet-disabled {
+  background-color: #171a1e; color: #5f666f;
+}
+
 .map-screen .map-fab-pos {
   position: absolute;
   right: 16px;
