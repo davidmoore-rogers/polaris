@@ -23,6 +23,10 @@
  *     inherited tag on the next reconcile (provenance-bounded — the unit suite
  *     in tests/unit/mapRegionDrift.test.ts covers the full matrix; this one
  *     exercises the real RegionTagAssignment table).
+ *   - The map-save review (`reviewRegionTagsForMapSave`) strips a region tag
+ *     from a pinned OUT-of-polygon gate even without a provenance row — the
+ *     geometry-authoritative gate pass behind the Device Map's Save Regions —
+ *     while subnets and non-gates keep the provenance-bounded protections.
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
@@ -36,6 +40,7 @@ import {
   applyRename,
   applyDelete,
   reconcileMapRegions,
+  reviewRegionTagsForMapSave,
   type MapRegion,
 } from "../../src/services/mapRegionService.js";
 
@@ -238,5 +243,36 @@ d("mapRegionService — subnet region tags", () => {
     });
     await applyOneRegion(region);
     expect(await tagsOf(outSubnetId)).toContain(handTag);
+  });
+
+  it("map-save review strips a stale region tag from an out-of-polygon gate, provenance row or not", async () => {
+    // The pre-provenance stale-tag case: the Atlanta gate carries the region
+    // tag with NO RegionTagAssignment row, and its pin sits outside the
+    // polygon. The provenance-bounded reconcile must leave it; the map-save
+    // review's gate pass must strip it — and only it.
+    const outGate = await prisma.asset.findFirst({
+      where: { serialNumber: "FGTTEST0000000002" },
+      select: { id: true, tags: true },
+    });
+    await prisma.asset.update({
+      where: { id: outGate!.id },
+      data: { tags: [...(outGate!.tags ?? []), `region:${REGION_NAME}`, "operator-note"] },
+    });
+
+    const summary = await reviewRegionTagsForMapSave();
+    expect(summary.firewallTagsStripped).toBe(1);
+
+    const after = await prisma.asset.findUnique({ where: { id: outGate!.id }, select: { tags: true } });
+    expect(after?.tags).not.toContain(`region:${REGION_NAME}`);
+    expect(after?.tags).toContain("operator-note");
+
+    // The in-polygon gate gained (and keeps) the tag through the reconcile half.
+    const inGate = await prisma.asset.findFirst({
+      where: { serialNumber: IN_SERIAL },
+      select: { tags: true },
+    });
+    expect(inGate?.tags).toContain(`region:${REGION_NAME}`);
+    // Subnets stay provenance-bounded: the hand-tag protection above still holds.
+    expect(await tagsOf(inSubnetId)).toContain(`region:${REGION_NAME}`);
   });
 });

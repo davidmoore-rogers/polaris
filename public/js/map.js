@@ -2956,8 +2956,14 @@
       if (p && p._polarisDirty) dirty.push(p);
     }
     if (dirty.length === 0) {
+      // No polygon edits, but the save click still reviews: it's the
+      // operator's assertion that the drawn geography is the truth, and the
+      // review is what strips stale region tags off gates that MOVED (their
+      // pin changed rather than any polygon).
       teardownRegionEditMode();
-      setStatus("");
+      setStatus("Reviewing region tags…");
+      var reviewOnly = await reviewRegionTags();
+      setStatus(reviewOnly);
       return;
     }
     setStatus("Saving " + dirty.length + " region change" + (dirty.length === 1 ? "" : "s") + "…");
@@ -2990,7 +2996,33 @@
       return;
     }
     teardownRegionEditMode();
-    setStatus(dirty.length + " region" + (dirty.length === 1 ? "" : "s") + " saved.");
+    setStatus(dirty.length + " region" + (dirty.length === 1 ? "" : "s") + " saved. Reviewing region tags…");
+    var review = await reviewRegionTags();
+    setStatus(dirty.length + " region" + (dirty.length === 1 ? "" : "s") + " saved." + (review ? " " + review : ""));
+  }
+
+  // POST /map/regions/reconcile — every Save Regions click reviews region tags
+  // fleet-wide: the provenance-bounded reconcile (re-add members, strip tracked
+  // drift) plus the gate pass that removes region tags from pinned FortiGates
+  // no longer inside the named polygon. Non-fatal by design: the polygon PUTs
+  // above already landed, so a review failure downgrades to a toast instead of
+  // keeping the operator in edit mode. Returns the status-line summary ("" when
+  // nothing changed or the call failed).
+  async function reviewRegionTags() {
+    try {
+      var s = await api.mapRegions.reconcile();
+      if (!s) return "";
+      var bits = [];
+      if (s.assetsTouched > 0)  bits.push("assets +" + s.added + "/−" + s.removed);
+      if (s.subnetsTouched > 0) bits.push("networks +" + s.subnetsAdded + "/−" + s.subnetsRemoved);
+      if (s.firewallTagsStripped > 0) {
+        bits.push(s.firewallTagsStripped + " stale gate tag" + (s.firewallTagsStripped === 1 ? "" : "s") + " removed");
+      }
+      return bits.length > 0 ? "Region tags reviewed: " + bits.join(", ") + "." : "";
+    } catch (err) {
+      showToast("Region tag review failed — " + (err && err.message ? err.message : err), "error");
+      return "";
+    }
   }
 
   // Revert every dirty polygon to the shape it had when edit mode opened

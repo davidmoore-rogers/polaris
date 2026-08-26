@@ -23,6 +23,14 @@
  *   - A subnet re-served by an out-of-region gate loses the tag.
  *   - The add pass is idempotent and records provenance exactly once.
  *   - applyDelete clears provenance so a later region can't inherit it.
+ *   - stripOutOfRegionFirewallTags (the map-save gate pass): a pinned gate
+ *     outside the polygon loses the tag WITHOUT a provenance row (the
+ *     pre-provenance stale-tag case), its provenance row is dropped when one
+ *     exists, and the documented protections hold — in-polygon gates,
+ *     non-firewalls, unpinned gates, and tags naming no current region are
+ *     never touched.
+ *   - reviewRegionTagsForMapSave composes the two passes without double
+ *     counting and is a clean no-op on a fleet whose tags match the map.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -45,6 +53,8 @@ const store = {
   assets: [] as AssetRow[],
   subnets: [] as SubnetRow[],
   prov: [] as ProvRow[],
+  /** The mapRegions Setting blob — lets reviewRegionTagsForMapSave load regions. */
+  regions: [] as unknown[],
 };
 
 /**
@@ -90,7 +100,14 @@ vi.mock("../../src/db.js", () => ({
   prisma: {
     asset: table(() => store.assets),
     subnet: table(() => store.subnets),
-    setting: { findUnique: vi.fn(async () => null), upsert: vi.fn(async () => ({})) },
+    setting: {
+      findUnique: vi.fn(async () =>
+        store.regions.length > 0
+          ? { value: store.regions.map((r) => ({ ...(r as object) })), updatedAt: new Date("2026-08-26T00:00:00Z") }
+          : null,
+      ),
+      upsert: vi.fn(async () => ({})),
+    },
     tag: { upsert: vi.fn(async () => ({})), deleteMany: vi.fn(async () => ({ count: 0 })) },
     regionTagAssignment: {
       findMany: vi.fn(async (args: any = {}) =>
@@ -117,9 +134,13 @@ vi.mock("../../src/db.js", () => ({
 
 import type { MapRegion } from "../../src/services/mapRegionService.js";
 
-const { diffRegionMembership, applyOneRegion, applyDelete } = await import(
-  "../../src/services/mapRegionService.js"
-);
+const {
+  diffRegionMembership,
+  applyOneRegion,
+  applyDelete,
+  stripOutOfRegionFirewallTags,
+  reviewRegionTagsForMapSave,
+} = await import("../../src/services/mapRegionService.js");
 
 // A square around (40.71, -74.01). "Inside" sits at the centre; "outside" is a
 // whole degree away, well clear of the edge.
@@ -183,6 +204,7 @@ function seed(): void {
   ];
   store.subnets = [{ id: "sub", cidr: "10.88.1.0/24", fortigateDevice: DEVICE_NAME, tags: ["operator-set"] }];
   store.prov = [];
+  store.regions = [];
 }
 
 const tagsOf = (id: string) => store.assets.find((a) => a.id === id)!.tags;
@@ -341,5 +363,119 @@ describe("applyDelete", () => {
     expect(store.prov).toEqual([]);
     expect(tagsOf("gate")).not.toContain(TAG);
     expect(subnetTags()).toEqual(["operator-set"]);
+  });
+});
+
+describe("stripOutOfRegionFirewallTags — the map-save gate pass", () => {
+  beforeEach(seed);
+
+  it("strips the tag from a pinned gate outside the polygon even with NO provenance row", async () => {
+    // The pre-provenance world: the tag exists, RegionTagAssignment doesn't.
+    moveGateOut();
+    const gate = store.assets.find((a) => a.id === "gate")!;
+    gate.tags = [TAG, "operator-note"];
+
+    const summary = await stripOutOfRegionFirewallTags([REGION]);
+    expect(summary.firewallTagsStripped).toBe(1);
+    expect(summary.firewallsTouched).toBe(1);
+    // Only the region tag goes; the operator's other tags are untouched.
+    expect(tagsOf("gate")).toEqual(["operator-note"]);
+  });
+
+  it("drops the provenance row for a stripped pair", async () => {
+    await applyOneRegion(REGION);
+    moveGateOut();
+
+    // Called directly (not through the reconcile), so the provenance row is
+    // still standing when the gate pass strips the tag.
+    const summary = await stripOutOfRegionFirewallTags([REGION]);
+    expect(summary.firewallTagsStripped).toBe(1);
+    expect(tagsOf("gate")).not.toContain(TAG);
+    expect(provIds()).not.toContain("asset:gate");
+  });
+
+  it("keeps the tag on a gate inside the polygon", async () => {
+    const gate = store.assets.find((a) => a.id === "gate")!;
+    gate.tags = [TAG];
+    const summary = await stripOutOfRegionFirewallTags([REGION]);
+    expect(summary.firewallTagsStripped).toBe(0);
+    expect(tagsOf("gate")).toEqual([TAG]);
+  });
+
+  it("never touches non-firewalls, unpinned gates, or tags naming no current region", async () => {
+    moveGateOut();
+    const gate = store.assets.find((a) => a.id === "gate")!;
+    // "region:Retired" matches no current region — not ours to judge.
+    gate.tags = ["region:Retired", TAG];
+    // The documented hand-tag case: a non-geolocated device an operator tagged.
+    store.assets.push({
+      id: "manual",
+      hostname: "printer-ashf",
+      serialNumber: null,
+      assetType: "printer",
+      latitude: null,
+      longitude: null,
+      ipAddress: null,
+      fortinetTopology: null,
+      tags: [TAG],
+    });
+    // A gate with no pin can't be judged geometrically.
+    store.assets.push({
+      id: "unpinned-gate",
+      hostname: "fgt-nowhere",
+      serialNumber: "FGT0002",
+      assetType: "firewall",
+      latitude: null,
+      longitude: null,
+      ipAddress: null,
+      fortinetTopology: { role: "fortigate" },
+      tags: [TAG],
+    });
+
+    const summary = await stripOutOfRegionFirewallTags([REGION]);
+    expect(summary.firewallTagsStripped).toBe(1);
+    expect(tagsOf("gate")).toEqual(["region:Retired"]);
+    expect(tagsOf("manual")).toEqual([TAG]);
+    expect(tagsOf("unpinned-gate")).toEqual([TAG]);
+  });
+});
+
+describe("reviewRegionTagsForMapSave", () => {
+  beforeEach(seed);
+
+  it("strips a pre-provenance stale gate tag the reconcile half cannot touch", async () => {
+    store.regions = [REGION];
+    moveGateOut();
+    const gate = store.assets.find((a) => a.id === "gate")!;
+    gate.tags = [TAG]; // no provenance row — the reconcile must leave it alone
+
+    const summary = await reviewRegionTagsForMapSave();
+    expect(summary.removed).toBe(0); // provenance-bounded half found nothing
+    expect(summary.firewallTagsStripped).toBe(1);
+    expect(tagsOf("gate")).toEqual([]);
+  });
+
+  it("does not double-count a provenance-tracked drift the reconcile already stripped", async () => {
+    store.regions = [REGION];
+    await reviewRegionTagsForMapSave(); // tags + records the in-region fleet
+    moveGateOut();
+
+    const summary = await reviewRegionTagsForMapSave();
+    expect(summary.removed).toBe(3); // gate + switch + server, via provenance
+    expect(summary.firewallTagsStripped).toBe(0); // nothing left for the gate pass
+    expect(tagsOf("gate")).not.toContain(TAG);
+  });
+
+  it("is a clean no-op on a fleet whose tags match the map", async () => {
+    store.regions = [REGION];
+    const first = await reviewRegionTagsForMapSave();
+    expect(first.added).toBe(3);
+    expect(first.subnetsAdded).toBe(1);
+
+    const second = await reviewRegionTagsForMapSave();
+    expect(second.added).toBe(0);
+    expect(second.removed).toBe(0);
+    expect(second.subnetsRemoved).toBe(0);
+    expect(second.firewallTagsStripped).toBe(0);
   });
 });

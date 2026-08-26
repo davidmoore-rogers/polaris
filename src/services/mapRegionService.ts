@@ -36,6 +36,19 @@
  * Manually *removing* a region tag from an in-polygon asset will be re-added on
  * the next reconcile — that direction stays authoritative by design so polygon
  * membership always implies the tag.
+ *
+ * **Pinned FIREWALLS are the one carve-out from provenance-bounding, and only
+ * on the map-save review.** For a coordinate-carrying gate, region membership
+ * is purely geometric and the add direction is already authoritative (see the
+ * paragraph above) — so when the operator clicks "Save Regions" on the Device
+ * Map, `reviewRegionTagsForMapSave` additionally strips any `region:<name>`
+ * tag from a pinned gate that sits OUTSIDE that region's polygon, provenance
+ * row or not. That is what cleans gate tags that predate the provenance table
+ * (migration 20260819020000) after a gate moves. The save click is the
+ * operator's assertion that the drawn geography is the truth, which is why the
+ * periodic job and the discovery-end hook deliberately do NOT get this pass —
+ * they stay provenance-bounded. Non-gates (the hand-tagged printer case) and
+ * gates without coordinates are never touched by it.
  */
 
 import { randomUUID } from "node:crypto";
@@ -925,4 +938,94 @@ export async function reconcileMapRegions(): Promise<ReconcileSummary> {
     }
   }
   return { added, removed, assetsTouched: touched, subnetsAdded, subnetsRemoved, subnetsTouched };
+}
+
+/** What the firewall-geometry pass of the map-save review did. */
+export interface FirewallTagReview extends Record<string, unknown> {
+  /** `region:` tags stripped from pinned gates sitting outside the named polygon. */
+  firewallTagsStripped: number;
+  /** Gates that lost at least one tag. */
+  firewallsTouched: number;
+}
+
+/**
+ * Strip `region:<name>` tags from coordinate-carrying FIREWALLS whose pin is
+ * outside that region's polygon — regardless of provenance.
+ *
+ * This is deliberately stronger than the reconcile's provenance-bounded strip,
+ * and deliberately narrower: it runs only from the map-save review (see the
+ * module header), and it only ever judges a FIREWALL WITH COORDINATES against a
+ * region that still EXISTS. Everything else keeps the documented protections —
+ * a hand-tagged printer, a gate with no pin, and a `region:` tag naming no
+ * current region are all left exactly as they are. For a pinned gate the
+ * polygon already implies the tag in the add direction (a hand-removed tag is
+ * re-added every pass), so a tag the polygon does NOT imply is stale by the
+ * same authority, whether or not this service recorded applying it.
+ */
+export async function stripOutOfRegionFirewallTags(regions: MapRegion[]): Promise<FirewallTagReview> {
+  const byTag = new Map<string, MapRegion>();
+  for (const r of regions) byTag.set(regionTag(r.name), r);
+  if (byTag.size === 0) return { firewallTagsStripped: 0, firewallsTouched: 0 };
+
+  const gates = await prisma.asset.findMany({
+    where: {
+      assetType: "firewall",
+      latitude: { not: null },
+      longitude: { not: null },
+    },
+    select: { id: true, tags: true, latitude: true, longitude: true },
+  });
+
+  const updates: { id: string; tags: string[] }[] = [];
+  const dropsByRegion = new Map<string, string[]>();
+  let stripped = 0;
+  for (const gate of gates) {
+    const lat = gate.latitude as unknown as number | null;
+    const lng = gate.longitude as unknown as number | null;
+    if (lat == null || lng == null) continue;
+    const tags = Array.isArray(gate.tags) ? gate.tags : [];
+    const keep: string[] = [];
+    for (const t of tags) {
+      const region = t.startsWith(TAG_PREFIX) ? byTag.get(t) : undefined;
+      if (region && !pointInPolygon([lat, lng], region.polygon)) {
+        stripped++;
+        const ids = dropsByRegion.get(region.id) ?? [];
+        ids.push(gate.id);
+        dropsByRegion.set(region.id, ids);
+        continue;
+      }
+      keep.push(t);
+    }
+    if (keep.length !== tags.length) updates.push({ id: gate.id, tags: keep });
+  }
+
+  for (const c of chunk50(updates)) {
+    await prisma.$transaction(
+      c.map((u) => prisma.asset.update({ where: { id: u.id }, data: { tags: u.tags } })),
+    );
+  }
+  // A provenance row for a stripped pair is now a lie ("we tagged this and it
+  // is still a member") — drop it so the next reconcile doesn't count the gate
+  // as drifted a second time.
+  for (const [regionId, ids] of dropsByRegion) {
+    await dropProvenance(regionId, "asset", ids);
+  }
+
+  return { firewallTagsStripped: stripped, firewallsTouched: updates.length };
+}
+
+/** Combined summary of the map-save review — reconcile plus the gate pass. */
+export interface MapSaveReviewSummary extends ReconcileSummary, FirewallTagReview {}
+
+/**
+ * The Device Map "Save Regions" review: the standard provenance-bounded
+ * reconcile over every region (add current members, strip recorded drift),
+ * then the geometry-authoritative gate pass above. Reconcile runs FIRST so the
+ * gate pass only ever sees tags provenance-bounding chose to leave behind —
+ * the two never double-count a removal.
+ */
+export async function reviewRegionTagsForMapSave(): Promise<MapSaveReviewSummary> {
+  const reconciled = await reconcileMapRegions();
+  const gates = await stripOutOfRegionFirewallTags(await listRegions());
+  return { ...reconciled, ...gates };
 }

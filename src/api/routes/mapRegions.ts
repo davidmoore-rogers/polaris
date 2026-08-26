@@ -198,6 +198,36 @@ router.post("/", requirePermission("mapRegions", "write"), async (req, res, next
   }
 });
 
+// POST /map/regions/reconcile
+// The Device Map's "Save Regions" review. Every save click — even one with no
+// polygon edits — runs the full provenance-bounded reconcile over every region
+// PLUS the geometry-authoritative gate pass: a pinned FortiGate loses any
+// `region:<name>` tag whose polygon no longer contains it, provenance row or
+// not (the only path that cleans gate tags predating the provenance table —
+// see reviewRegionTagsForMapSave). Same write gate as the polygon saves it
+// rides along with.
+router.post("/reconcile", requirePermission("mapRegions", "write"), async (req, res, next) => {
+  try {
+    const summary = await service.reviewRegionTagsForMapSave();
+    if (summary.assetsTouched > 0 || summary.subnetsTouched > 0 || summary.firewallTagsStripped > 0) {
+      logEvent({
+        action: "region.tags_reconciled",
+        resourceType: "map-region",
+        actor: req.session?.username,
+        message:
+          `Map save review — ${reconcileMessage(summary)}` +
+          (summary.firewallTagsStripped > 0
+            ? `; ${summary.firewallTagsStripped} out-of-region gate tag${summary.firewallTagsStripped === 1 ? "" : "s"} stripped`
+            : ""),
+        details: summary,
+      });
+    }
+    res.json(summary);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PUT /map/regions/:id
 router.put("/:id", requirePermission("mapRegions", "write"), async (req, res, next) => {
   try {
