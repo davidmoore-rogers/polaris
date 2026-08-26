@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
+import { APP_SHELL_STUBS } from "./_appShellStubs.js";
 
 vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
@@ -43,7 +44,7 @@ function boot(): Record<string, any> {
     var api = { integrations: {}, credentials: {}, monitorSettings: {} };
     var permAtLeast = function(){ return true; };
   `;
-  (win as any).eval(stubs + "\n" + SRC + "\n;window.__scope = this;");
+  (win as any).eval(APP_SHELL_STUBS + "\n" + stubs + "\n" + SRC + "\n;window.__scope = this;");
   return win as unknown as Record<string, any>;
 }
 

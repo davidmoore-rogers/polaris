@@ -3831,14 +3831,14 @@ function assetMonitoringFormHTML(asset, managedAgent) {
     { key: "storage",      label: "Storage",       html: bodyStorage()      },
   ];
 
-  // _intRenderTabbedBody + _intWireModalTabs are global helpers from
+  // tabbedBodyHTML + wireModalTabs are the shared globals from
   // integrations.js (loaded before assets.js on assets.html). The tab key
   // namespaces the strip so it doesn't collide with the Integration modal's
   // stream-tab strips when both pages share a session.
   var transportBlockHtml =
     '<div id="f-transport-wrap" style="margin-top:0.5rem;padding-top:0.75rem;border-top:1px solid var(--color-border)">' +
       '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0.5rem 0 0.5rem 0">Polling Methods</p>' +
-      _intRenderTabbedBody("asset-mon-streams", streamTabs) +
+      tabbedBodyHTML("asset-mon-streams", streamTabs) +
       '<p class="hint" style="margin-top:0.5rem">Per-asset overrides win over class / integration / source-default tiers. When a method needs a credential, "Source default" lets the asset inherit the integration\'s configured credential at runtime.</p>' +
     '</div>';
 
@@ -4144,11 +4144,11 @@ async function _wireMonitorEditTab(asset) {
   var transportWrap = document.getElementById("f-transport-wrap");
 
   // Wire the per-stream subtab strip inside the Polling Methods block so
-  // clicking a stream tab actually swaps the body. _intWireModalTabs is a
+  // clicking a stream tab actually swaps the body. wireModalTabs is a
   // global helper from integrations.js (loaded before assets.js on every
   // page that needs the asset modal).
-  if (transportWrap && typeof _intWireModalTabs === "function") {
-    _intWireModalTabs("asset-mon-streams");
+  if (transportWrap && typeof wireModalTabs === "function") {
+    wireModalTabs("asset-mon-streams");
   }
 
   // Per-stream selects and their corresponding polling selects. Storage has
@@ -4405,32 +4405,6 @@ async function _openAssetOverridesSlideover(scope) {
   });
 }
 
-function _renderTabbedBody(prefix, tabs) {
-  // tabs: [{key, label, html}]
-  var tabBar = '<div class="page-tabs" id="' + prefix + '-tabs" style="margin-bottom:1rem">' +
-    tabs.map(function (t, i) {
-      return '<button type="button" class="page-tab' + (i === 0 ? " active" : "") + '" data-tab="' + t.key + '">' + escapeHtml(t.label) + '</button>';
-    }).join("") +
-    '</div>';
-  var panels = tabs.map(function (t, i) {
-    return '<div class="page-tab-panel' + (i === 0 ? " active" : "") + '" id="' + prefix + '-tab-' + t.key + '">' + t.html + '</div>';
-  }).join("");
-  return tabBar + panels;
-}
-
-function _wireModalTabs(prefix) {
-  document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var key = btn.getAttribute("data-tab");
-      document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (b) { b.classList.remove("active"); });
-      document.querySelectorAll('[id^="' + prefix + '-tab-"]').forEach(function (p) { p.classList.remove("active"); });
-      btn.classList.add("active");
-      var panel = document.getElementById(prefix + "-tab-" + key);
-      if (panel) panel.classList.add("active");
-    });
-  });
-}
-
 /**
  * Wire the Add Asset form's IP cross-reference panel (assets-ipcontext.js).
  *
@@ -4465,14 +4439,14 @@ function _wireIpContextPanel() {
 
 async function openCreateModal() {
   await _ensureTagCache();
-  var body = _renderTabbedBody("asset-edit", [
+  var body = tabbedBodyHTML("asset-edit", [
     { key: "general",    label: "General",    html: assetFormHTML({}) },
     { key: "monitoring", label: "Monitoring", html: assetMonitoringFormHTML({}) },
   ]);
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save">Create Asset</button>';
   openModal("Add Asset", body, footer);
-  _wireModalTabs("asset-edit");
+  wireModalTabs("asset-edit");
   wireDescriptionCapWarning("f-description", "f-description-cap-warn");
   wireTagPicker();
   _wireMonitorEditTab({});
@@ -4519,12 +4493,12 @@ async function openEditModal(id, opts) {
     if (asset.id) {
       editTabs.push({ key: "maintenance", label: "Maintenance", html: assetMaintenanceFormHTML(asset) });
     }
-    var body = _renderTabbedBody("asset-edit", editTabs);
+    var body = tabbedBodyHTML("asset-edit", editTabs);
     var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
       '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
     var title = "Edit Asset" + (asset.hostname ? " — " + asset.hostname : "");
     openModal(title, body, footer, { wide: true });
-    _wireModalTabs("asset-edit");
+    wireModalTabs("asset-edit");
     // Open on a caller-requested tab (e.g. the System-tab "Unmonitored" pill
     // deep-links here to Monitoring). Falls back to the default first tab.
     if (opts.tab) {
@@ -5180,7 +5154,7 @@ async function openViewModal(id) {
     // Sources tab — moved to the end so the operational tabs (Processes /
     // Quarantine / Events) come first; discovery-source provenance lives last.
     tabs.push({ key: "sources", label: "Sources", html: _assetSourcesTabHTML(sources, a.id, sightings, ipHistory) });
-    var tabsHTML = _renderTabbedBody("asset-view", tabs);
+    var tabsHTML = tabbedBodyHTML("asset-view", tabs);
     bodyEl.innerHTML = '<div class="asset-panel-content">' + tabsHTML + '</div>';
 
     titleEl.innerHTML = 'Asset Details' + (a.hostname
@@ -5227,9 +5201,9 @@ async function openViewModal(id) {
     if (actionsEl) actionsEl.innerHTML = actionBtns;
     footerEl.innerHTML = dismissBtns;
 
-    _wireModalTabs("asset-view");
+    wireModalTabs("asset-view");
     // Footer button swap (Screenshot ↔ Export) rides on every tab click;
-    // _wireModalTabs has no change hook, so a delegated listener on the tab
+    // wireModalTabs has no change hook, so a delegated listener on the tab
     // bar does it. The immediate call covers the initial (General) state.
     var assetTabBar = document.getElementById("asset-view-tabs");
     if (assetTabBar) {
@@ -19354,8 +19328,8 @@ function _monsetRender() {
   // tab activates its panel. Same shared helper the integration Monitoring
   // tab uses. Safe to call before the listeners below — they don't depend
   // on tab state.
-  if (typeof _intWireModalTabs === "function") {
-    _intWireModalTabs("monset-manual-streams");
+  if (typeof wireModalTabs === "function") {
+    wireModalTabs("monset-manual-streams");
   }
   // Reactive per-stream credential rows: each stream's polling-method
   // dropdown reveals the matching snmp/ssh/winrm credential row. Helper
@@ -19606,8 +19580,8 @@ function _monsetManualSectionHTML(v) {
   // polling dropdown (Manual is the bottom of the resolver). showMib:false
   // drops the per-stream MIB picker here — Manual tier doesn't expose it
   // for this iteration; MIBs are picked at the asset tier instead.
-  // _classStreamSubtabHTML, _streamsForClass, _intRenderTabbedBody, and
-  // _intWireModalTabs are global function declarations in integrations.js
+  // _classStreamSubtabHTML and _streamsForClass are global function
+  // declarations in integrations.js; tabbedBodyHTML / wireModalTabs are in app.js
   // (loaded before this file on assets.html), so they're directly callable.
   var creds = (typeof _credentialCache !== "undefined" && _credentialCache && Array.isArray(_credentialCache.list))
     ? _credentialCache.list
@@ -19626,7 +19600,7 @@ function _monsetManualSectionHTML(v) {
   return '<div class="monset-section">' +
     '<h3 style="margin-bottom:0.25rem">Manual Monitoring</h3>' +
     '<p class="hint" style="margin:0 0 1rem 0;color:var(--color-text-tertiary)">Settings applied to assets without an integration source — manually-created assets, or assets whose origin integration was deleted.</p>' +
-    _intRenderTabbedBody("monset-manual-streams", streamTabs) +
+    tabbedBodyHTML("monset-manual-streams", streamTabs) +
     '<p class="hint" style="margin:0.5rem 0 0.5rem 0;color:var(--color-text-tertiary)">Manual tier accepts any method — operator picks per stream and supplies a credential at the asset level (or relies on ICMP).</p>' +
     '<p class="hint" style="margin:0 0 0.75rem 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>' +
     '<div style="margin-top:1rem;text-align:right">' +
@@ -19839,13 +19813,13 @@ function _monsetOpenOverrideEditor(existing) {
     (isEdit ? '<p class="hint" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0.25rem 0 0.75rem 0">Class is fixed for an existing override; delete and re-create to change it.</p>' : '') +
     '<div id="monset-ov-direct-poll-warning"></div>' +
     '<p class="hint" style="margin:0.5rem 0 0.75rem 0;color:var(--color-text-tertiary)">Leave a field blank to inherit from the source\'s tier.</p>' +
-    _intRenderTabbedBody("monset-ov-streams", streamTabs) +
+    tabbedBodyHTML("monset-ov-streams", streamTabs) +
     '<p class="hint" style="margin:0.5rem 0 0 0;font-size:0.78rem">Sample retention is a global setting. Edit it in <a href="/server-settings.html?tab=retention">Server Settings → Retention</a>.</p>';
   var footer = '<button class="btn btn-secondary" id="btn-monset-ov-cancel">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-monset-ov-save">' + (isEdit ? "Save Changes" : "Create Override") + '</button>';
   openModal(isEdit ? "Edit Class Override" : "Add Class Override", body, footer);
   _populateUploadedMibsInDropdowns();
-  if (typeof _intWireModalTabs === "function") _intWireModalTabs("monset-ov-streams");
+  if (typeof wireModalTabs === "function") wireModalTabs("monset-ov-streams");
   document.getElementById("btn-monset-ov-cancel").addEventListener("click", _monsetRender);
   document.getElementById("btn-monset-ov-save").addEventListener("click", function () {
     _monsetSaveOverride(existing);

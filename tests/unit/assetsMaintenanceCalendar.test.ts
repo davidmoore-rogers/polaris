@@ -43,8 +43,8 @@ beforeAll(() => {
   g.showConfirm = async () => false;
   g.openModal = () => {};
   g.closeModal = () => {};
-  g._renderTabbedBody = () => "";
-  g._wireModalTabs = () => {};
+  g.tabbedBodyHTML = () => "";
+  g.wireModalTabs = () => {};
   g.collectTagCriteria = () => null;
   g.api = {};
   const src = readFileSync(resolve(__dirname, "../../public/js/assets-maintenance.js"), "utf8");

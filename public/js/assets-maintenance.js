@@ -26,12 +26,12 @@
  * schedules against the Polaris server's clock, stated in the UI hint.
  *
  * Depends on globals from app.js (openModal/closeModal/showToast/showConfirm/
- * escapeHtml/canManageMaintenance) and assets.js (_renderTabbedBody/
- * _wireModalTabs), both loaded before this file on assets.html.
+ * escapeHtml/canManageMaintenance) and app.js (tabbedBodyHTML/
+ * wireModalTabs), both loaded before this file on assets.html.
  */
 
 /* global api, openModal, closeModal, showToast, showConfirm, escapeHtml,
-          _renderTabbedBody, _wireModalTabs, loadAssets */
+          tabbedBodyHTML, wireModalTabs, loadAssets */
 
 // ─── Filter vocabulary ───────────────────────────────────────────────────────
 
@@ -227,7 +227,7 @@ async function openMaintenanceModal(opts) {
   var pinned = (opts && Array.isArray(opts.assetIds)) ? opts.assetIds.slice() : [];
   _maintEditingId = null;
   _maintEditingAssetIds = pinned;
-  var body = _renderTabbedBody("maint", [
+  var body = tabbedBodyHTML("maint", [
     { key: "create",   label: "Create Schedule", html: _maintEditorHTML() },
     { key: "list",     label: "Schedules",       html: '<div id="maint-list-body" class="empty-state">Loading…</div>' },
     { key: "calendar", label: "Calendar",        html: _maintCalendarHTML() },
@@ -238,7 +238,7 @@ async function openMaintenanceModal(opts) {
     '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
     { large: true }
   );
-  _wireModalTabs("maint");
+  wireModalTabs("maint");
   _maintWireEditor();
   _maintWireCalendar();
   _maintReloadList();

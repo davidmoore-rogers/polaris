@@ -777,60 +777,12 @@ setInterval(function () {
   });
 }, 2000);
 
-// ─── Tab helpers (FMG / FortiGate modal — General + Monitoring) ────────────
-//
-// Mirror of the assets.js tab pattern. Keeps `f-...` form IDs intact across
-// tabs so the existing getFormConfig / getFgtFormConfig don't need to change.
-
-function _intRenderTabbedBody(prefix, tabs) {
-  var tabBar = '<div class="page-tabs" id="' + prefix + '-tabs" style="margin-bottom:1rem">' +
-    tabs.map(function (t, i) {
-      return '<button type="button" class="page-tab' + (i === 0 ? " active" : "") + '" data-tab="' + t.key + '">' + escapeHtml(t.label) + '</button>';
-    }).join("") +
-    '</div>';
-  var panels = tabs.map(function (t, i) {
-    return '<div class="page-tab-panel' + (i === 0 ? " active" : "") + '" id="' + prefix + '-tab-' + t.key + '">' + t.html + '</div>';
-  }).join("");
-  return tabBar + panels;
-}
-
-function _intWireModalTabs(prefix) {
-  document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      var key = btn.getAttribute("data-tab");
-      document.querySelectorAll("#" + prefix + "-tabs .page-tab").forEach(function (b) { b.classList.remove("active"); });
-      document.querySelectorAll('[id^="' + prefix + '-tab-"]').forEach(function (p) { p.classList.remove("active"); });
-      btn.classList.add("active");
-      var panel = document.getElementById(prefix + "-tab-" + key);
-      if (panel) panel.classList.add("active");
-    });
-  });
-}
-
-// Shared emphasis callout for the integration modal tabs. Every highlighted
-// note (security blast-radius warnings, tip/alternative boxes, permission
-// requirements) renders through this one helper so the modal reads as a single
-// design language instead of a grab-bag of ad-hoc boxes. `variant` selects the
-// accent from real theme tokens (so it adapts to light/dark); the faint tint is
-// derived from that same token via color-mix. `title` is the bold lead row
-// (icon prepended automatically); `bodyHtml` is raw HTML rendered as hint text.
-var CALLOUT_VARIANTS = {
-  warning: { color: "var(--color-warning)", icon: "&#9888;" },        // warning sign — security / silent-failure caveats
-  tip:     { color: "var(--color-accent)", icon: "&#128161;" },       // light bulb — alternatives / suggestions
-  note:    { color: "var(--color-text-secondary)", icon: "" },        // neutral informational
-};
-function calloutHTML(variant, title, bodyHtml) {
-  var v = CALLOUT_VARIANTS[variant] || CALLOUT_VARIANTS.note;
-  return '<div style="border-left:3px solid ' + v.color + ';' +
-      'background:color-mix(in srgb, ' + v.color + ' 9%, transparent);' +
-      'border-radius:0 var(--radius-sm) var(--radius-sm) 0;padding:0.6rem 0.8rem;margin-top:0.75rem">' +
-      (title
-        ? '<p style="margin:0 0 0.4rem 0;font-weight:600;color:' + v.color + '">' +
-            (v.icon ? v.icon + " " : "") + title + '</p>'
-        : '') +
-      '<p class="hint" style="margin:0">' + bodyHtml + '</p>' +
-    '</div>';
-}
+// The tab helpers (tabbedBodyHTML / wireModalTabs), the form-section parts
+// (sectionHeading / formDivider / infoBox / checkboxRow) and calloutHTML are
+// shared globals in app.js. This file used to carry a private copy of the tab
+// pair, byte-identical to assets.js's — the two drifting apart is exactly what
+// the shared pair exists to prevent. Field ids stay `f-...` across tabs so one
+// read pass collects the whole form.
 
 // DHCP Push tab body. Renders the master toggle plus mode-aware guidance:
 // when useProxy is on the call lands on the FortiGate via FMG's REST proxy
@@ -1479,7 +1431,7 @@ function integrationMonitorOverrideHTML(credentials, selectedSnmpId, selectedSsh
   }
   return row("snmp", "SNMP", "f-mon-credential",     selectedSnmpId) +
          row("ssh",  "SSH",  "f-mon-credential-ssh", selectedSshId)  +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+    formDivider();
 }
 
 // Build a per-class timer block. The id prefix lets the FortiGate /
@@ -2063,7 +2015,7 @@ function _classSubtabBodyHTML(opts) {
   return banner +
     headerHtml +
     '<div id="' + streamsWrapId + '" data-direct-toggle="' + escapeHtml(directToggleId || "") + '" style="' + wrapperHidden + '">' +
-      _intRenderTabbedBody(streamTabsPrefix, streamTabs) +
+      tabbedBodyHTML(streamTabsPrefix, streamTabs) +
     '</div>';
 }
 
@@ -2155,7 +2107,7 @@ function _classDirectPollHTML(idPrefix, kindLabel, credentials, currentEnabled, 
         emptyHint +
       '</div>';
   }
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Direct polling</p>' +
+  return sectionHeading("Direct polling") +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Managed ' + escapeHtml(_kindPlural(kindLabel)) + ' in FortiLink mode usually keep their own management plane locked down. Polaris can\'t reach them through the controller FortiGate REST API, so direct polling only works when the matching protocol has been explicitly enabled on the ' + escapeHtml(kindLabel) + ' itself.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.6rem">' +
@@ -2388,7 +2340,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
     (hasIntegrationId ? '<em>Change a selection above to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and discovery has run at least once.</em>') +
   '</div>';
 
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitor interfaces</p>' +
+  return sectionHeading("Auto-monitor interfaces") +
     '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.2rem 0">Pin interfaces on every ' + escapeHtml(kindLabel) + ' discovered by this integration. Selected interfaces are added to each device\'s "Poll 1m" list and scraped on the response-time cadence (~60s). Operator-pinned interfaces on individual assets are preserved.</p>' +
       '<p class="hint" style="margin:0 0 0.6rem 0;font-size:0.78rem">Strictly additive — removing a selection here does <strong>not</strong> unpin interfaces already pinned on existing assets.</p>' +
@@ -2403,7 +2355,7 @@ function _autoMonitorInterfacesHTML(idPrefix, kindLabel, currentSelection, _defa
         lldpPanel) +
       previewPanel +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+    formDivider();
 }
 
 // Reads the auto-monitor card into a server-shaped AutoMonitorSelection or
@@ -2556,7 +2508,7 @@ function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasInteg
     (hasIntegrationId ? '<em>Enable a block to preview matches.</em>' : '<em>Preview becomes available after the integration is saved and agents report.</em>') +
   '</div>';
 
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Auto-monitor storage</p>' +
+  return sectionHeading("Auto-monitor storage") +
     '<div style="background:rgba(79,195,247,0.06);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.2rem 0">Pin storage mounts on every ' + escapeHtml(kindLabel) + ' discovered by this integration. Selected mounts are re-walked on the fast cadence. Operator-pinned mounts on individual assets are preserved.</p>' +
       '<p class="hint" style="margin:0 0 0.6rem 0;font-size:0.78rem">Strictly additive — removing a selection here does <strong>not</strong> unpin mounts already pinned on existing assets.</p>' +
@@ -2568,7 +2520,7 @@ function _autoMonitorStorageHTML(idPrefix, kindLabel, currentSelection, hasInteg
       allPanel +
       previewPanel +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+    formDivider();
 }
 
 // Reads the storage card into an AutoMonitorStorageSelection or null. Returns
@@ -2624,7 +2576,7 @@ function _agentDeployHTML(idPrefix, kindLabel, currentCfg, credentials) {
       '</div>';
   }
   var bodyHidden = enabled ? "" : "display:none";
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Agent auto-deploy</p>' +
+  return sectionHeading("Agent auto-deploy") +
     '<div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.3);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (enabled ? "checked" : "") + ' style="width:auto">' +
@@ -3707,7 +3659,7 @@ function monitorSettingsFormHTML(s, opts) {
         "A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority." +
       '</p>' +
       verifyPresenceHtml +
-      _intRenderTabbedBody("intg-mon-class", classTabs) +
+      tabbedBodyHTML("intg-mon-class", classTabs) +
     '</section>';
 }
 
@@ -3720,7 +3672,7 @@ function monitorSettingsFormHTML(s, opts) {
 // `getFormConfig()` and `_fmgToggleDirectMode()` keep reading them unchanged.
 // UI semantic: checked = direct (useProxy=false); unchecked = proxy.
 function _fmgDirectModeBlockHTML(d) {
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Direct polling</p>' +
+  return sectionHeading("Direct polling") +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<input type="checkbox" id="f-useDirect" ' + (d.useProxy === false ? "checked" : "") + ' style="width:auto" onchange="_fmgToggleDirectMode(this.checked)">' +
@@ -3847,14 +3799,14 @@ function _wireAutoMonitoringButtons(rootEl) {
 function _wireMonitoringTabSubtabs(integrationType) {
   var spec = _CLASS_SUBTAB_SPECS[integrationType];
   if (!spec) return;
-  _intWireModalTabs("intg-mon-class");
+  wireModalTabs("intg-mon-class");
   // Wire the Enable/Disable Auto-Monitoring buttons for every class subtab.
   _wireAutoMonitoringButtons(document);
   spec.classes.forEach(function (c) {
     var prefix = (c.key === spec.primary)
       ? "intg-mon-streams-primary"
       : "intg-mon-streams-" + c.key;
-    _intWireModalTabs(prefix);
+    wireModalTabs(prefix);
 
     // Wire the Direct Polling toggle (if any) for this class so flipping it
     // reveals or hides the per-stream subtab wrapper without losing the
@@ -4396,8 +4348,8 @@ function fortiManagerGeneralHTML(defaults) {
   var d = defaults || {};
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Production FortiManager"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">This integration is for <strong style="color:var(--color-text-primary)">on-premise FortiManager</strong> only (not FortiManager Cloud). Requires version <strong style="color:var(--color-text-primary)">7.4.7+</strong> or <strong style="color:var(--color-text-primary)">7.6.2+</strong>. Older versions do not support bearer token authentication.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. fmg.example.com"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
@@ -4411,7 +4363,7 @@ function fortiManagerGeneralHTML(defaults) {
       '<label for="f-verifySsl" style="margin:0">Verify SSL certificate</label>' +
     '</div>' +
     '<p class="hint" style="color:var(--color-warning,#d98c00)">Leave enabled. Disabling certificate verification lets a network attacker on the path intercept this connection and capture the API credentials. Disable only for a device with a self-signed certificate you cannot replace.</p>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
+    formDivider() +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enabled" ' + (d.enabled !== false ? "checked" : "") + ' style="width:auto">' +
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
@@ -4438,7 +4390,7 @@ function fortiManagerFiltersHTML(defaults) {
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
   var devMode = (d.deviceInclude && d.deviceInclude.length > 0) ? "include" : "exclude";
   var devNames = devMode === "include" ? (d.deviceInclude || []) : (d.deviceExclude || []);
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Device Filter</p>' +
+  return sectionHeading("FortiGate Device Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
@@ -4450,8 +4402,8 @@ function fortiManagerFiltersHTML(defaults) {
       '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g. FG-HQ-01&#10;FG-DC-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to query all managed FortiGates. Matched against device name or hostname. Wildcards supported: <code>FG-*</code>, <code>*-lab</code>, <code>*dc*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Filter</p>' +
+    formDivider() +
+    sectionHeading("DHCP Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
@@ -4463,8 +4415,8 @@ function fortiManagerFiltersHTML(defaults) {
       '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Filter</p>' +
+    formDivider() +
+    sectionHeading("Interface Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-ifaceMode" style="width:auto">' +
@@ -4476,8 +4428,8 @@ function fortiManagerFiltersHTML(defaults) {
       '<textarea id="f-ifaceInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(ifaceList.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to include all interfaces. Applies to interface IP reservations only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
+    formDivider() +
+    sectionHeading("Device Inventory") +
     '<div class="form-group"><label>Interface Filter</label>' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-inventoryMode" style="width:auto">' +
@@ -4543,8 +4495,8 @@ function fortiGateGeneralHTML(defaults) {
   var d = defaults || {};
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Branch Office FortiGate"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">This integration connects <strong style="color:var(--color-text-primary)">directly to a standalone FortiGate</strong> (not managed by FortiManager). Requires an API administrator token created under <strong style="color:var(--color-text-primary)">System &gt; Administrators &gt; REST API Admin</strong>.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. fortigate.example.com"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
@@ -4566,8 +4518,8 @@ function fortiGateGeneralHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query for DHCP updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">FortiGate Settings</p>' +
+    formDivider() +
+    sectionHeading("FortiGate Settings") +
     '<div class="form-group"><label>Management Interface</label><input type="text" id="f-mgmtInterface" value="' + escapeHtml(d.mgmtInterface || "") + '" placeholder="e.g. port1, mgmt, loopback0"><p class="hint">Interface name used for FortiGate management traffic</p></div>' +
     verboseLoggingFormHTML(d);
 }
@@ -4583,7 +4535,7 @@ function fortiGateFiltersHTML(defaults) {
   var ifaceList = ifaceMode === "include" ? (d.interfaceInclude || []) : (d.interfaceExclude || []);
   var invMode = (d.inventoryIncludeInterfaces && d.inventoryIncludeInterfaces.length > 0) ? "include" : "exclude";
   var invIfaces = invMode === "include" ? (d.inventoryIncludeInterfaces || []) : (d.inventoryExcludeInterfaces || []);
-  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Filter</p>' +
+  return sectionHeading("DHCP Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-dhcpMode" style="width:auto">' +
@@ -4595,8 +4547,8 @@ function fortiGateFiltersHTML(defaults) {
       '<textarea id="f-dhcpInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(dhcpIfaces.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to include all interfaces. Applies to DHCP server scope discovery only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Interface Filter</p>' +
+    formDivider() +
+    sectionHeading("Interface Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-ifaceMode" style="width:auto">' +
@@ -4608,8 +4560,8 @@ function fortiGateFiltersHTML(defaults) {
       '<textarea id="f-ifaceInterfaces" rows="2" placeholder="One per line — e.g. port1&#10;internal*&#10;*wan">' + escapeHtml(ifaceList.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to include all interfaces. Applies to interface IP reservations only. Wildcards supported: <code>port*</code>, <code>*wan</code>, <code>*mgmt*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Inventory</p>' +
+    formDivider() +
+    sectionHeading("Device Inventory") +
     '<div class="form-group"><label>Interface Filter</label>' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-inventoryMode" style="width:auto">' +
@@ -4662,8 +4614,8 @@ function windowsServerFormHTML(defaults) {
   var enabledChecked = d.enabled !== false ? "checked" : "";
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. DC1 DHCP Server"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Windows Server DHCP</strong> via WinRM (PowerShell remoting). Requires WinRM enabled on the target server (port <strong style="color:var(--color-text-primary)">5985</strong> HTTP or <strong style="color:var(--color-text-primary)">5986</strong> HTTPS).</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. dhcp-server.example.com"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 5985) + '" min="1" max="65535" style="width:90px"></div>' +
@@ -4680,8 +4632,8 @@ function windowsServerFormHTML(defaults) {
       '<label for="f-enabled" style="margin:0">Enabled</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 4) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query for DHCP updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">DHCP Scope Filtering</p>' +
+    formDivider() +
+    sectionHeading("DHCP Scope Filtering") +
     '<div class="form-group"><label>Include Scopes</label><textarea id="f-dhcpInclude" rows="2" placeholder="One per line — scope name or ID&#10;e.g. 10.0.1.0">' + escapeHtml((d.dhcpInclude || []).join("\n")) + '</textarea><p class="hint">Only sync these DHCP scopes (leave empty to sync all)</p></div>' +
     '<div class="form-group"><label>Exclude Scopes</label><textarea id="f-dhcpExclude" rows="2" placeholder="One per line — scope name or ID&#10;e.g. lab-scope">' + escapeHtml((d.dhcpExclude || []).join("\n")) + '</textarea><p class="hint">Skip these DHCP scopes when syncing</p></div>' +
     verboseLoggingFormHTML(d);
@@ -4712,8 +4664,8 @@ function entraIdFormHTML(defaults) {
   var autoChecked = d.autoDiscover !== false ? "checked" : "";
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Corporate Entra ID"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Microsoft Entra ID</strong> (Azure AD) via an app registration with client-credentials flow. Requires <strong style="color:var(--color-text-primary)">Device.Read.All</strong> (application); add <strong style="color:var(--color-text-primary)">DeviceManagementManagedDevices.Read.All</strong> if Intune sync is enabled, and <strong style="color:var(--color-text-primary)">User.Read.All</strong> + <strong style="color:var(--color-text-primary)">Group.Read.All</strong> + <strong style="color:var(--color-text-primary)">OrgContact.Read.All</strong> (or <strong style="color:var(--color-text-primary)">Directory.Read.All</strong>) if you enable address-book directory search on the Monitoring tab. Grant admin consent in the Azure portal.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div class="form-group"><label>Tenant ID *</label><input type="text" id="f-tenantId" value="' + escapeHtml(d.tenantId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Directory (tenant) ID from Azure portal &gt; Entra ID &gt; Overview</p></div>' +
     '<div class="form-group"><label>Client ID *</label><input type="text" id="f-clientId" value="' + escapeHtml(d.clientId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Application (client) ID from App Registrations &gt; Overview</p></div>' +
     '<div class="form-group"><label>Client Secret *</label><input type="password" id="f-clientSecret" value="' + (d.clientSecretPlaceholder ? "" : escapeHtml(d.clientSecret || "")) + '" placeholder="' + (d.clientSecretPlaceholder || "Secret value") + '"><p class="hint">Generate under App Registrations &gt; Certificates &amp; secrets &gt; New client secret (save the Value, not the ID)</p></div>' +
@@ -4735,8 +4687,8 @@ function entraIdFormHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to automatically query Graph for device updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Device Filter</p>' +
+    formDivider() +
+    sectionHeading("Device Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
@@ -4779,8 +4731,8 @@ function activeDirectoryFormHTML(defaults) {
   var defaultPort = useLdaps ? 636 : 389;
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Corp AD — DC01"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to an <strong style="color:var(--color-text-primary)">on-premise Active Directory</strong> domain controller via LDAP simple bind. Produces assets only. Hybrid-joined devices are cross-linked to the Entra ID integration via on-prem SID, so the same device never appears twice.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. dc01.corp.local"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || defaultPort) + '" min="1" max="65535" style="width:90px"></div>' +
@@ -4816,8 +4768,8 @@ function activeDirectoryFormHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query AD for device updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">OU Filter</p>' +
+    formDivider() +
+    sectionHeading("OU Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
@@ -4890,8 +4842,8 @@ function azureArcFormHTML(defaults) {
 
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Azure Arc — Production"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to <strong style="color:var(--color-text-primary)">Azure Arc</strong> through an Entra app registration using the client-credentials flow against <strong style="color:var(--color-text-primary)">Azure Resource Manager</strong>. Discovers Arc-enabled servers (<code>Microsoft.HybridCompute/machines</code>) as assets — no subnets or reservations. Machines merge with assets already discovered by Entra ID, Active Directory and vCenter. <strong style="color:var(--color-text-primary)">No Microsoft Graph permissions are needed</strong> — this is an ARM-only integration, which is the step most often carried over by mistake from an Entra ID setup.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Azure Setup</p>' +
+    formDivider() +
+    sectionHeading("Azure Setup") +
     '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Complete these in the Azure portal before testing the connection:</p>' +
     '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem;line-height:1.6">' +
       '<li>Register an application under <strong>Entra ID &rarr; App registrations</strong>, and copy its <strong>Directory (tenant) ID</strong> and <strong>Application (client) ID</strong>.</li>' +
@@ -4904,8 +4856,8 @@ function azureArcFormHTML(defaults) {
       "Azure returns only the resources this app is allowed to read, so a missing role assignment yields <em>fewer machines</em> — never an access-denied error. If Test Connection reports fewer subscriptions than you expect, check the Reader assignment first; nothing else will tell you.") +
     calloutHTML("tip", "Read-only by design",
       "Polaris never writes to Azure. <strong>Reader</strong> is sufficient for everything this integration does — don't grant anything broader.") +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div class="form-group"><label>Tenant ID *</label><input type="text" id="f-tenantId" value="' + escapeHtml(d.tenantId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Directory (tenant) ID from Azure portal &gt; Entra ID &gt; Overview</p></div>' +
     '<div class="form-group"><label>Client ID *</label><input type="text" id="f-clientId" value="' + escapeHtml(d.clientId || "") + '" placeholder="e.g. 00000000-0000-0000-0000-000000000000"><p class="hint">Application (client) ID from App Registrations &gt; Overview</p></div>' +
     '<div class="form-group"><label>Client Secret *</label><input type="password" id="f-clientSecret" value="' + (d.clientSecretPlaceholder ? "" : escapeHtml(d.clientSecret || "")) + '" placeholder="' + (d.clientSecretPlaceholder || "Secret value") + '"><p class="hint">This is a separate secret from any Entra ID integration — reuse one app registration only if you have granted it both Graph and ARM access.</p></div>' +
@@ -4934,8 +4886,8 @@ function azureArcFormHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query Azure Resource Manager for Arc machine updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Additional Arc Resources</p>' +
+    formDivider() +
+    sectionHeading("Additional Arc Resources") +
     '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-text-tertiary)">Each option below adds <strong>one</strong> extra Azure query per discovery run for the whole tenant &mdash; not one per machine. Neither creates new devices in Polaris; both attach detail to the Arc machines already discovered.</p>' +
     '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
       '<input type="checkbox" id="f-enableVmInstances" ' + (vmInst ? "checked" : "") + ' style="width:auto">' +
@@ -4954,8 +4906,8 @@ function azureArcFormHTML(defaults) {
     '<p class="hint" style="color:var(--color-warning,#d98c00)">Unlike the two options above, this one <strong>adds devices</strong>: each connected cluster becomes its own asset of type <em>Kubernetes Cluster</em>, with its own subtab on the Monitoring tab. A cluster is monitored as a single endpoint &mdash; no agent, no interfaces, no storage.</p>' +
     calloutHTML("note", "Requires Resource Graph",
       "Both options are read through Azure Resource Graph, which is what keeps them to one query each. If <em>Query via Azure Resource Graph</em> above is off &mdash; or Resource Graph is unavailable in your tenant &mdash; the discovery run skips this enrichment and says so in its log rather than falling back to a far more expensive per-machine read.") +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Resource Group Filter</p>' +
+    formDivider() +
+    sectionHeading("Resource Group Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-rgMode" style="width:auto">' +
@@ -4967,8 +4919,8 @@ function azureArcFormHTML(defaults) {
       '<textarea id="f-rgNames" rows="2" placeholder="One per line — e.g.&#10;rg-prod-*&#10;*-lab">' + escapeHtml(rgNames.join("\n")) + '</textarea>' +
       '<p class="hint">Leave empty to sync machines in every resource group. Wildcards supported: <code>rg-prod-*</code>, <code>*-lab</code>, <code>*sql*</code></p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Machine Filter</p>' +
+    formDivider() +
+    sectionHeading("Machine Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
@@ -4980,8 +4932,8 @@ function azureArcFormHTML(defaults) {
       '<textarea id="f-deviceNames" rows="2" placeholder="One per line — e.g.&#10;SRV-*&#10;*-lab">' + escapeHtml(devNames.join("\n")) + '</textarea>' +
       '<p class="hint">Matched against the machine\'s Azure display name. Leave empty to sync every machine.</p>' +
     '</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Tag Filter</p>' +
+    formDivider() +
+    sectionHeading("Tag Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-tagMode" style="width:auto">' +
@@ -5033,8 +4985,8 @@ function vcenterFormHTML(defaults) {
   var devNames = devMode === "include" ? (d.vmInclude || []) : (d.vmExclude || []);
   return '<div class="form-group"><label>Name *</label><input type="text" id="f-name" value="' + escapeHtml(d.name || "") + '" placeholder="e.g. Production vCenter"></div>' +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5">Connects to a <strong style="color:var(--color-text-primary)">VMware vCenter</strong> server (7.0U2+) and discovers virtual machines, ESXi hosts, and datastores. VMs merge with assets discovered by other integrations (matched by vNIC MAC / hostname); vCenter data wins over every source except the Polaris Agent. VMs gain a clickable link to their running host and a vMotion-safe host dependency.</div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">Connection Settings</p>' +
+    formDivider() +
+    sectionHeading("Connection Settings") +
     '<div style="display:grid;grid-template-columns:1fr auto;gap:8px">' +
       '<div class="form-group"><label>Host / IP *</label><input type="text" id="f-host" value="' + escapeHtml(d.host || "") + '" placeholder="e.g. vcenter.corp.local"></div>' +
       '<div class="form-group"><label>Port</label><input type="number" id="f-port" value="' + (d.port || 443) + '" min="1" max="65535" style="width:90px"></div>' +
@@ -5055,8 +5007,8 @@ function vcenterFormHTML(defaults) {
       '<label for="f-autoDiscover" style="margin:0">Enable auto-discovery</label>' +
     '</div>' +
     '<div class="form-group"><label>Auto-Discovery Interval</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-pollInterval" value="' + (d.pollInterval || 12) + '" min="1" max="24" style="width:80px"><span style="color:var(--color-text-tertiary);font-size:0.85rem">hours</span></div><p class="hint">How often to re-query vCenter for inventory updates (1–24 hours)</p></div>' +
-    '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">' +
-    '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin-bottom:0.75rem">VM Filter</p>' +
+    formDivider() +
+    sectionHeading("VM Filter") +
     '<div class="form-group">' +
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
         '<select id="f-deviceMode" style="width:auto">' +
@@ -5168,17 +5120,244 @@ function _readSshCredentialId() {
   return el.value || "";
 }
 
-function _titleForType(type, action) {
-  var product =
-    type === "windowsserver" ? "Windows Server" :
-    type === "fortigate" ? "FortiGate" :
-    type === "entraid" ? "Entra ID" :
-    type === "activedirectory" ? "Active Directory" :
-    type === "vcenter" ? "vCenter" :
-    type === "azurearc" ? "Azure Arc" :
-    "FortiManager";
-  return action + " " + product + " Integration";
+// ─── The one shape, for all seven integration types ────────────────────────
+//
+// Product name, required-field list and tab set live HERE rather than being
+// re-derived inside the Add and Edit flows. The two flows used to build two
+// separate tab arrays, so a tab added to one silently missed the other (the
+// old code carried a comment warning about exactly that), and the per-type
+// required-field checks were copy-pasted chains that had already drifted
+// apart. The modal shell itself is openIntegrationModal in app.js.
+
+var _INTEGRATION_PRODUCTS = {
+  fortimanager:    "FortiManager",
+  fortigate:       "FortiGate",
+  activedirectory: "Active Directory",
+  entraid:         "Entra ID",
+  windowsserver:   "Windows Server",
+  vcenter:         "vCenter",
+  azurearc:        "Azure Arc",
+};
+
+/** The product an operator picked to get here. Unknown types fall back to the
+ *  historical default so a new type can never render a blank title. */
+function _productForType(type) {
+  return _INTEGRATION_PRODUCTS[type] || "FortiManager";
 }
+
+function _titleForType(type, action) {
+  return action + " " + _productForType(type) + " Integration";
+}
+
+// What a Test Connection request actually needs, as [fieldId, label] so the
+// toast can NAME what is missing instead of firing a doomed request and
+// reporting the server's error as if it were news.
+//
+// `secret: true` entries are dropped on the EDIT flow: a stored secret renders
+// as a blank "leave blank to keep current" field there, and requiring it would
+// block a legitimate test of an unchanged credential.
+var _INTEGRATION_REQUIRED_FIELDS = {
+  // Subscriptions are deliberately NOT required for Entra / Arc — empty means
+  // "every subscription this app can see", which is a legitimate config and a
+  // useful first test.
+  entraid: [
+    ["f-tenantId", "tenant ID"], ["f-clientId", "client ID"],
+    ["f-clientSecret", "client secret", true],
+  ],
+  azurearc: [
+    ["f-tenantId", "tenant ID"], ["f-clientId", "client ID"],
+    ["f-clientSecret", "client secret", true],
+  ],
+  activedirectory: [
+    ["f-host", "host"], ["f-bindDn", "bind DN"],
+    ["f-bindPassword", "bind password", true], ["f-baseDn", "base DN"],
+  ],
+  windowsserver: [["f-host", "host"], ["f-username", "username"]],
+  vcenter: [
+    ["f-host", "host"], ["f-username", "username"],
+    ["f-password", "password", true],
+  ],
+  fortimanager: [["f-host", "host"], ["f-apiToken", "API token", true]],
+  fortigate:    [["f-host", "host"], ["f-apiToken", "API token", true]],
+};
+
+function _integrationRequires(type, mode) {
+  var all = _INTEGRATION_REQUIRED_FIELDS[type] || _INTEGRATION_REQUIRED_FIELDS.fortimanager;
+  return all.filter(function (f) { return mode !== "edit" || !f[2]; })
+    .map(function (f) { return [f[0], f[1]]; });
+}
+
+// The five non-Fortinet types that carry a Monitoring tab. A type in neither
+// this list nor the Fortinet pair gets the flat, untabbed form.
+var _NON_FORTINET_TABBED = ["activedirectory", "entraid", "windowsserver", "vcenter", "azurearc"];
+
+/**
+ * The tab set for one integration type, in order, for BOTH flows.
+ *
+ * ctx: {
+ *   type, mode: "create"|"edit",
+ *   id, name, pollInterval,       // null / "" / undefined on create
+ *   config,                       // {} on create
+ *   defaults,                     // the general/filters seed blob
+ *   generalHtml,                  // non-Fortinet types supply their own
+ *   monSettings, creds,
+ * }
+ *
+ * Create is the same shape as Edit with an empty stored config, which is why
+ * one builder serves both — every per-tab value below reads out of `config`
+ * and degrades to the off/default state when it is empty.
+ */
+function _integrationTabs(ctx) {
+  var type = ctx.type;
+  var config = ctx.config || {};
+  var defaults = ctx.defaults || {};
+  var isFmg = type === "fortimanager";
+  var isFgt = type === "fortigate";
+  var isAd = type === "activedirectory";
+  var isEntra = type === "entraid";
+  var isVc = type === "vcenter";
+  var isArc = type === "azurearc";
+
+  if (isFmg || isFgt) {
+    // `useProxy` is meaningful only for FMG; standalone FortiGate always goes
+    // direct REST, so pass true there to keep the FMG copy's "direct" warning
+    // from rendering somewhere it doesn't apply.
+    var pushUseProxy = isFmg ? (config.useProxy !== false) : true;
+    var fgCfg = config.fortigateMonitor || {};
+    var tabs = [
+      {
+        key: "general", label: "General",
+        html: isFmg ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults),
+      },
+      {
+        key: "filters", label: "Filters",
+        html: isFmg ? fortiManagerFiltersHTML(defaults) : fortiGateFiltersHTML(defaults),
+      },
+      {
+        key: "monitoring", label: "Monitoring",
+        html: monitorSettingsFormHTML(ctx.monSettings || {}, {
+          snmpCredentials:      ctx.creds || [],
+          monitorCredentialId:  config.monitorCredentialId || null,
+          sshCredentialId:      config.sshCredentialId     || null,
+          fortigateMonitor:     config.fortigateMonitor    || null,
+          fortiswitchMonitor:   config.fortiswitchMonitor  || null,
+          fortiapMonitor:       config.fortiapMonitor      || null,
+          excludeFortilinkLldp: config.excludeFortilinkLldp === true,
+          integrationId:        ctx.id || null,
+          integrationType:      type,
+          integrationName:      ctx.name || "",
+          pollInterval:         ctx.pollInterval,
+          // The relocated useDirect toggle + direct-mode credentials block
+          // lives inside the FortiGate class subtab. Only `useProxy === false`
+          // is read out of it, so the create flow's seed blob is equivalent to
+          // the empty object it used to pass.
+          fmgDefaults:          defaults,
+        }),
+      },
+      {
+        key: "push", label: "DHCP Push",
+        html: reservationPushFormHTML(
+          config.pushReservations === true, pushUseProxy,
+          config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true,
+          config.adoptDiscoveredMac === true,
+        ),
+      },
+      {
+        key: "quarantine-push", label: "Quarantine Push",
+        html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
+      },
+      {
+        key: "description-sync", label: "Description Sync",
+        html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
+      },
+      { key: "sdwan", label: "SD‑WAN", html: sdwanFormHTML(config.pullSdwan === true) },
+      {
+        // Carries the pull-from-SNMP and push-geocoded-coords toggles that used
+        // to sit inside Monitoring → FortiGate. DOM ids preserved so the save
+        // path (`_readFortigateMonitorBlock`) keeps finding them.
+        key: "geographicLocation", label: "Geographic Location",
+        html: geographicLocationFormHTML(
+          fgCfg.pullSnmpLocation === true,
+          fgCfg.useSnmpLocationCoords === true,
+          fgCfg.pushGeocodedCoords === true,
+          fgCfg.latitudeMetavar || "Latitude",
+          fgCfg.longitudeMetavar || "Longitude",
+          fgCfg.addressMetavar || "",
+          type,
+        ),
+      },
+    ];
+    return tabs;
+  }
+
+  if (_NON_FORTINET_TABBED.indexOf(type) === -1) return null;   // flat form only
+
+  // AD / Entra / Windows Server / vCenter / Azure Arc: the type's own flat form
+  // becomes the General tab, with Monitoring alongside it and the feature tabs
+  // after. Monitoring here is the same tab minus the Discovery Defaults section
+  // (those concerns are Fortinet-only).
+  var nonFortinet = [
+    { key: "general", label: "General", html: ctx.generalHtml },
+    {
+      key: "monitoring", label: "Monitoring",
+      html: monitorSettingsFormHTML(ctx.monSettings || {}, {
+        integrationId:      ctx.id || null,
+        integrationType:    type,
+        integrationName:    ctx.name || "",
+        pollInterval:       ctx.pollInterval,
+        snmpCredentials:    ctx.creds || [],
+        // Per-class blocks so the subtabs render their saved stream values.
+        // Freshly seeded by the migration job; a pre-migration install sees an
+        // empty object → overlay no-ops → the flat baseline shows through.
+        workstationMonitor: config.workstationMonitor || null,
+        serverMonitor:      config.serverMonitor      || null,
+        vmMonitor:          config.vmMonitor          || null,
+        hostMonitor:        config.hostMonitor        || null,
+        verifyPresence:     config.verifyPresence,
+      }),
+    },
+  ];
+  // The address-book directory tab (live search + scheduled sync).
+  if (isAd || isEntra) {
+    nonFortinet.push({ key: "directory", label: "Directory", html: directoryFormHTML(type, config) });
+  }
+  // The SSH-onboarding script publishing opt-in — one per provider.
+  if (isEntra) {
+    nonFortinet.push({
+      key: "scriptpub", label: "Script Publishing",
+      html: scriptPublishingFormHTML(config.publishToIntune === true),
+    });
+  }
+  if (isArc) {
+    nonFortinet.push({
+      key: "scriptpub", label: "Script Publishing",
+      html: arcScriptPublishingFormHTML(config.allowRunCommand === true),
+    });
+  }
+  return nonFortinet;
+}
+
+/** The per-type wiring both flows run after the modal is in the DOM. */
+function _wireIntegrationModal(type, id) {
+  var isFmgOrFgt = (type === "fortimanager" || type === "fortigate");
+  if (isFmgOrFgt) {
+    _wireMonitoringTabSubtabs(type);
+    wireAutoMonitorCards(id || null);
+    _wireProbeTimeoutWarning();
+    _wireCredentialPickerVisibility();
+    _populateUploadedMibsInDropdowns();
+    return;
+  }
+  if (_NON_FORTINET_TABBED.indexOf(type) === -1) return;   // flat form, nothing to wire
+  _wireDirectorySyncToggle();
+  _wireMonitoringTabSubtabs(type);
+  if (type === "activedirectory" || type === "entraid" || type === "azurearc") {
+    wireWorkstationServerCards(id || null);
+  }
+  if (type === "vcenter") wireVcenterCards(id || null);
+  _wireProbeTimeoutWarning();
+}
+
 
 async function openCreateModal(type) {
   type = type || "fortimanager";
@@ -5189,291 +5368,204 @@ async function openCreateModal(type) {
   var isWin = type === "windowsserver";
   var isVc = type === "vcenter";
   var isArc = type === "azurearc";
-  var title = _titleForType(type, "Add");
-  // FMG / FortiGate / AD / Entra / WindowsServer integrations all expose a
-  // Monitoring tab. FMG and FortiGate also get the Discovery Defaults
-  // section (per-class addAsMonitored / autoMonitorInterfaces / per-stream
-  // transport overrides). All five seed their initial Monitoring tab from
-  // the manual tier — closest equivalent to "fleet defaults" until the
-  // operator saves the new integration's own tier.
-  var body;
+  var isFmgOrFgt = isFmg || isFgt;
+
+  // Every type with a Monitoring tab seeds it from the MANUAL tier — the
+  // closest equivalent to "fleet defaults" until the operator saves the new
+  // integration's own tier, which happens right after create below.
+  var monSettings = {};
+  var creds = [];
+  if (isFmgOrFgt || isAd || isEntra || isWin || isVc || isArc) {
+    try { monSettings = (await api.monitorSettings.getManual()) || {}; }
+    catch (e) { /* fall back to the form's own defaults */ }
+  }
+  // Credential pickers: the SNMP/SSH pickers on the Fortinet Monitoring tab,
+  // and the agent auto-deploy SSH/WinRM pickers on the AD/Entra/vCenter/Arc
+  // class cards.
+  if (isFmgOrFgt || isVc || isArc || isAd || isEntra) {
+    try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; }
+    catch (e) { /* pickers just render their defaults */ }
+  }
+
+  // Seed TLS-verify ON for NEW integrations so the checkbox renders checked,
+  // matching the verify-by-default backend schema (2026-06-03 review, M1). The
+  // edit flow passes the stored config, so existing rows are unaffected.
+  var createDefaults = isFmg ? { verifySsl: true, fortigateVerifySsl: true }
+    : isFgt ? { verifySsl: true }
+    : (isAd || isVc) ? { verifyTls: true } : {};
+
+  // The Fortinet pair build their General tab from their own split
+  // general/filters helpers, so this is only consulted by the other five —
+  // and by the flat, untabbed fallback below.
+  var generalHtml = isFmgOrFgt ? "" : _formHTMLForType(type, createDefaults);
+
+  var tabs = _integrationTabs({
+    type: type, mode: "create",
+    id: null, name: "", pollInterval: undefined,
+    config: {},                       // nothing stored yet — every tab renders its off/default state
+    defaults: createDefaults,
+    generalHtml: generalHtml,
+    monSettings: monSettings,
+    creds: creds,
+  });
+
+  // Tracks whether the pre-save Test Connection succeeded against the current
+  // form data — inherited onto the new integration after Create so the Discover
+  // button isn't gated on a redundant re-test. openIntegrationModal owns the
+  // flag and hands it to onSave.
+  openIntegrationModal({
+    product: _productForType(type),
+    action: "Add",
+    prefix: "intg-edit",
+    tabs: tabs,
+    html: tabs ? null : generalHtml,
+    requires: _integrationRequires(type, "create"),
+    onWire: function () { _wireIntegrationModal(type, null); },
+    onTest: function () { return _testNewIntegration(type); },
+    onSave: function (ctx) { return _createIntegration(type, ctx.tested); },
+  });
+}
+
+/** Test Connection for the Add flow. Throws to let the modal shell toast it. */
+async function _testNewIntegration(type) {
+  var result = await api.integrations.testNew({
+    type: type,
+    name: val("f-name") || "Test",
+    config: _formConfigForType(type),
+  });
+  showToast(result.message, result.ok ? "success" : "error");
+  return result;
+}
+
+/** The Create button's work. `tested` says whether Test Connection passed on
+ *  the current form, which lets a successful create inherit that result. */
+async function _createIntegration(type, tested) {
+  var isFmg = type === "fortimanager";
+  var isFgt = type === "fortigate";
+  var isAd  = type === "activedirectory";
+  var isEntra = type === "entraid";
+  var isWin = type === "windowsserver";
+  var isVc = type === "vcenter";
+  var isArc = type === "azurearc";
+  var autoDiscoverEl = document.getElementById("f-autoDiscover");
+  var createConfig = _formConfigForType(type);
   if (isFmg || isFgt) {
-    var monSettings = {};
-    var creds = [];
-    // No integration ID yet on the Add flow — seed the form from the manual
-    // tier (closest equivalent to "fleet defaults"). After create, the new
-    // integration's tier gets written via setIntegration() below.
-    try {
-      var manual = await api.monitorSettings.getManual();
-      monSettings = manual || {};
-    } catch (e) { /* fall back to defaults */ }
-    try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
-    // Seed TLS-verify ON for NEW integrations so the checkbox renders checked,
-    // matching the verify-by-default backend schema (2026-06-03 review, M1).
-    // Edit flow passes the stored config, so existing rows are unaffected.
-    var generalHtml = isFmg
-      ? fortiManagerGeneralHTML({ verifySsl: true, fortigateVerifySsl: true })
-      : fortiGateGeneralHTML({ verifySsl: true });
-    var filtersHtml = isFmg ? fortiManagerFiltersHTML({}) : fortiGateFiltersHTML({});
-    var addTabs = [
-      { key: "general", label: "General", html: generalHtml },
-      { key: "filters", label: "Filters", html: filtersHtml },
-    ];
-    addTabs.push({ key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, { snmpCredentials: creds, monitorCredentialId: null, integrationId: null, integrationType: type, integrationName: "", fmgDefaults: {}, excludeFortilinkLldp: false }) });
-    // FMG and standalone FortiGate share the Reservation Push and Quarantine
-    // Push tabs. Both default to off. The "useProxy=true" flag in the form
-    // helpers labels the active mode for FMG; standalone FortiGate ignores it
-    // and always uses direct REST with the integration's own credentials —
-    // pass true so the FMG copy doesn't render an irrelevant "direct" warning.
-    addTabs.push({ key: "push", label: "DHCP Push", html: reservationPushFormHTML(false, true, false, false, false) });
-    addTabs.push({ key: "quarantine-push", label: "Quarantine Push", html: quarantinePushFormHTML(false, true) });
-    // Description Sync tab (FMG + standalone FortiGate). Default off.
-    addTabs.push({ key: "description-sync", label: "Description Sync", html: descriptionSyncFormHTML(false, true) });
-    // SD-WAN tab (FMG + standalone FortiGate). Default off.
-    addTabs.push({ key: "sdwan", label: "SD‑WAN", html: sdwanFormHTML(false) });
-    // Geographic Location tab (FMG + standalone FortiGate). Carries the
-    // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
-    // inside Monitoring → FortiGate. DOM ids preserved so the existing save
-    // path (`_readFortigateMonitorBlock`) keeps finding them.
-    addTabs.push({ key: "geographicLocation", label: "Geographic Location", html: geographicLocationFormHTML(false, false, false, "Latitude", "Longitude", "", type) });
-    body = _intRenderTabbedBody("intg-edit", addTabs);
-  } else if (isAd || isEntra || isWin || isVc || isArc) {
-    var addMonSettings = {};
-    try {
-      var addManual = await api.monitorSettings.getManual();
-      addMonSettings = addManual || {};
-    } catch (e) { /* fall back to defaults */ }
-    // vCenter VM agent auto-deploy needs the credential list for its
-    // SSH/WinRM pickers (same card the AD/Entra classes use).
-    var addNonFortinetCreds = [];
-    if (isVc || isArc || isAd || isEntra) {
-      try { var vcCredResp = await api.credentials.list(); addNonFortinetCreds = Array.isArray(vcCredResp) ? vcCredResp : []; } catch (e) { /* pickers just render empty */ }
-    }
-    var addNonFortinetTabs = [
-      { key: "general",    label: "General",    html: _formHTMLForType(type, (isAd || isVc) ? { verifyTls: true } : {}) },
-      { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(addMonSettings, {
-        integrationId:   null,
-        integrationType: type,
-        integrationName: "",
-        snmpCredentials: addNonFortinetCreds,
-      }) },
-    ];
-    // AD / Entra: the address-book directory tab (live search + scheduled
-    // sync). Registered in BOTH tab arrays — see the note below.
-    if (isAd || isEntra) {
-      addNonFortinetTabs.push({
-        key: "directory", label: "Directory", html: directoryFormHTML(type, {}),
-      });
-    }
-    // Entra only: the SSH-onboarding script publishing opt-in. Registered in
-    // BOTH tab arrays (this one and the edit array) — the two are separate
-    // lists and a tab added to one silently misses the other flow.
-    if (isEntra) {
-      addNonFortinetTabs.push({
-        key: "scriptpub", label: "Script Publishing", html: scriptPublishingFormHTML(false),
-      });
-    }
+    var credId = _readMonitorCredentialId();
+    if (credId) createConfig.monitorCredentialId = credId;
+    var sshCredId = _readSshCredentialId();
+    if (sshCredId) createConfig.sshCredentialId = sshCredId;
+    // Per-stream polling methods are part of the integration tier
+    // settings now (Cadence & Retention section); they're written to
+    // Integration.config.monitorSettings.polling by the
+    // /monitor-settings/integration/:id PUT after the integration is
+    // created — no inline fields needed on create.
+    var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-",   { klass: "fortigate",   isPrimary: true });
+    var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-",     { klass: "fortiswitch", isPrimary: false });
+    var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-",         { klass: "fortiap",     isPrimary: false, includeStorage: false });
+    if (fgBlockNew) createConfig.fortigateMonitor   = fgBlockNew;
+    if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
+    if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
+  }
+  if (isAd || isEntra || isWin || isArc) {
+    // AD / Entra / Windows Server per-class blocks. Workstations is the
+    // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
+    // (namespaced `f-mon-classecho-servers-*`). _CLASS_SUBTAB_SPECS
+    // uses plural class keys; backend Zod schema names them singularly.
+    var wsBlockNew = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
+    var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
+    if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
+    if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
     if (isArc) {
-      addNonFortinetTabs.push({
-        key: "scriptpub", label: "Script Publishing", html: arcScriptPublishingFormHTML(false),
-      });
+      // Reduced cluster block (addAsMonitored + streams only). Read with
+      // the same reader vCenter's ESXi hosts use — Zod strips the extra
+      // null fields the reduced schema doesn't carry.
+      var k8sBlockNew = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
+      if (k8sBlockNew) createConfig.k8sMonitor = k8sBlockNew;
     }
-    body = _intRenderTabbedBody("intg-edit", addNonFortinetTabs);
-  } else {
-    body = _formHTMLForType(type, {});
+    var verifyPresenceNew = _readVerifyPresenceToggle();
+    if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
+    var dirSearchNew = _readDirectorySearchToggle();
+    if (dirSearchNew !== undefined) createConfig.enableDirectorySearch = dirSearchNew;
+    // The Directory tab is one control set: the sync toggle and its
+    // exclusions are read together, so a saved filter can never belong to
+    // a toggle that was not saved with it.
+    var dirSyncNew = _readDirectorySyncConfig();
+    if (dirSyncNew !== undefined) {
+      createConfig.enableDirectorySync = dirSyncNew.enabled;
+      createConfig.directorySync = dirSyncNew.filter;
+    }
   }
-  var footer = '<button class="btn btn-secondary" id="btn-test-new">Test Connection</button>' +
-    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-    '<button class="btn btn-primary" id="btn-save">Create</button>';
-  openModal(title, body, footer, { wide: true });
+  if (isVc) {
+    // vCenter per-class blocks: VMs primary (full workstation-style
+    // reader — the host block's extra null fields are stripped by Zod).
+    var vmBlockNew   = _readWorkstationServerMonitorBlock("f-mon-vm-",   { klass: "vms",   isPrimary: true });
+    var hostBlockNew = _readWorkstationServerMonitorBlock("f-mon-host-", { klass: "hosts", isPrimary: false });
+    if (vmBlockNew)   createConfig.vmMonitor   = vmBlockNew;
+    if (hostBlockNew) createConfig.hostMonitor = hostBlockNew;
+    var vcVerifyPresenceNew = _readVerifyPresenceToggle();
+    if (vcVerifyPresenceNew !== undefined) createConfig.verifyPresence = vcVerifyPresenceNew;
+  }
   if (isFmg || isFgt) {
-    _intWireModalTabs("intg-edit");
-    _wireMonitoringTabSubtabs(type);
-    wireAutoMonitorCards(null);
-    _wireProbeTimeoutWarning();
-    _wireCredentialPickerVisibility();
-    _populateUploadedMibsInDropdowns();
-  } else if (isAd || isEntra || isWin || isVc || isArc) {
-    _intWireModalTabs("intg-edit");
-    _wireDirectorySyncToggle();
-    _wireMonitoringTabSubtabs(type);
-    if (isAd || isEntra || isArc) wireWorkstationServerCards(null);
-    if (isVc) wireVcenterCards(null);
-    _wireProbeTimeoutWarning();
+    var pushToggleNew = _readPushReservationsToggle();
+    if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
+    var arpSweepToggleNew = _readArpPresenceSweepToggle();
+    if (arpSweepToggleNew !== undefined) createConfig.arpPresenceSweep = arpSweepToggleNew;
+    var autoReserveInfraNew = _readAutoReserveInfraToggle();
+    if (autoReserveInfraNew !== undefined) createConfig.autoReserveFortinetInfra = autoReserveInfraNew;
+    var adoptMacNew = _readAdoptDiscoveredMacToggle();
+    if (adoptMacNew !== undefined) createConfig.adoptDiscoveredMac = adoptMacNew;
+    var quarantinePushToggleNew = _readPushQuarantineToggle();
+    if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
+    var syncDescriptionsNew = _readSyncDescriptionsToggle();
+    if (syncDescriptionsNew !== undefined) createConfig.syncDescriptions = syncDescriptionsNew;
+    var sdwanToggleNew = _readPullSdwanToggle();
+    if (sdwanToggleNew !== undefined) createConfig.pullSdwan = sdwanToggleNew;
+    var excludeFortilinkLldpNew = _readExcludeFortilinkLldpToggle();
+    if (excludeFortilinkLldpNew !== undefined) createConfig.excludeFortilinkLldp = excludeFortilinkLldpNew;
   }
-
-  // Tracks whether the pre-save Test Connection succeeded against the
-  // current form data. Used after Create to inherit the result onto the new
-  // integration so the Discover button isn't gated on a redundant re-test.
-  var _modalTestOk = false;
-
-  document.getElementById("btn-test-new").addEventListener("click", async function () {
-    var btn = this;
-    if (isEntra || isArc) {
-      // Subscriptions deliberately NOT required — empty means "every
-      // subscription this app can see", which is a legitimate config and a
-      // useful first test.
-      if (!val("f-tenantId") || !val("f-clientId") || !val("f-clientSecret")) { showToast("Fill in tenant ID, client ID, and client secret first", "error"); return; }
-    } else if (isAd) {
-      if (!val("f-host") || !val("f-bindDn") || !val("f-bindPassword") || !val("f-baseDn")) { showToast("Fill in host, bind DN, bind password, and base DN first", "error"); return; }
-    } else if (isWin) {
-      if (!val("f-host") || !val("f-username")) { showToast("Fill in host and username first", "error"); return; }
-    } else if (isVc) {
-      if (!val("f-host") || !val("f-username") || !val("f-password")) { showToast("Fill in host, username, and password first", "error"); return; }
-    } else {
-      if (!val("f-host") || !val("f-apiToken")) { showToast("Fill in host and API token first", "error"); return; }
-    }
-    btn.disabled = true;
-    btn.textContent = "Testing...";
-    try {
-      var result = await api.integrations.testNew({
-        type: type,
-        name: val("f-name") || "Test",
-        config: _formConfigForType(type),
-      });
-      _modalTestOk = !!result.ok;
-      showToast(result.message, result.ok ? "success" : "error");
-    } catch (err) {
-      _modalTestOk = false;
-      if (err.name === "AbortError") { showToast("Test aborted", "error"); }
-      else { showToast(err.message, "error"); }
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Test Connection";
-    }
-  });
-
-  document.getElementById("btn-save").addEventListener("click", async function () {
-    var btn = this;
-    btn.disabled = true;
-    btn.textContent = "Creating...";
-    try {
-      var autoDiscoverEl = document.getElementById("f-autoDiscover");
-      var createConfig = _formConfigForType(type);
-      if (isFmg || isFgt) {
-        var credId = _readMonitorCredentialId();
-        if (credId) createConfig.monitorCredentialId = credId;
-        var sshCredId = _readSshCredentialId();
-        if (sshCredId) createConfig.sshCredentialId = sshCredId;
-        // Per-stream polling methods are part of the integration tier
-        // settings now (Cadence & Retention section); they're written to
-        // Integration.config.monitorSettings.polling by the
-        // /monitor-settings/integration/:id PUT after the integration is
-        // created — no inline fields needed on create.
-        var fgBlockNew = _readFortigateMonitorBlock("f-mon-fortigate-",   { klass: "fortigate",   isPrimary: true });
-        var swBlockNew = _readClassMonitorBlock("f-mon-fortiswitch-",     { klass: "fortiswitch", isPrimary: false });
-        var apBlockNew = _readClassMonitorBlock("f-mon-fortiap-",         { klass: "fortiap",     isPrimary: false, includeStorage: false });
-        if (fgBlockNew) createConfig.fortigateMonitor   = fgBlockNew;
-        if (swBlockNew) createConfig.fortiswitchMonitor = swBlockNew;
-        if (apBlockNew) createConfig.fortiapMonitor     = apBlockNew;
-      }
-      if (isAd || isEntra || isWin || isArc) {
-        // AD / Entra / Windows Server per-class blocks. Workstations is the
-        // primary class subtab (legacy `f-mon-*` IDs); Servers is secondary
-        // (namespaced `f-mon-classecho-servers-*`). _CLASS_SUBTAB_SPECS
-        // uses plural class keys; backend Zod schema names them singularly.
-        var wsBlockNew = _readWorkstationServerMonitorBlock("f-mon-workstation-", { klass: "workstations", isPrimary: true });
-        var srvBlockNew = _readWorkstationServerMonitorBlock("f-mon-server-",     { klass: "servers",      isPrimary: false });
-        if (wsBlockNew)  createConfig.workstationMonitor = wsBlockNew;
-        if (srvBlockNew) createConfig.serverMonitor      = srvBlockNew;
-        if (isArc) {
-          // Reduced cluster block (addAsMonitored + streams only). Read with
-          // the same reader vCenter's ESXi hosts use — Zod strips the extra
-          // null fields the reduced schema doesn't carry.
-          var k8sBlockNew = _readWorkstationServerMonitorBlock("f-mon-clusters-", { klass: "clusters", isPrimary: false });
-          if (k8sBlockNew) createConfig.k8sMonitor = k8sBlockNew;
-        }
-        var verifyPresenceNew = _readVerifyPresenceToggle();
-        if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
-        var dirSearchNew = _readDirectorySearchToggle();
-        if (dirSearchNew !== undefined) createConfig.enableDirectorySearch = dirSearchNew;
-        // The Directory tab is one control set: the sync toggle and its
-        // exclusions are read together, so a saved filter can never belong to
-        // a toggle that was not saved with it.
-        var dirSyncNew = _readDirectorySyncConfig();
-        if (dirSyncNew !== undefined) {
-          createConfig.enableDirectorySync = dirSyncNew.enabled;
-          createConfig.directorySync = dirSyncNew.filter;
-        }
-      }
-      if (isVc) {
-        // vCenter per-class blocks: VMs primary (full workstation-style
-        // reader — the host block's extra null fields are stripped by Zod).
-        var vmBlockNew   = _readWorkstationServerMonitorBlock("f-mon-vm-",   { klass: "vms",   isPrimary: true });
-        var hostBlockNew = _readWorkstationServerMonitorBlock("f-mon-host-", { klass: "hosts", isPrimary: false });
-        if (vmBlockNew)   createConfig.vmMonitor   = vmBlockNew;
-        if (hostBlockNew) createConfig.hostMonitor = hostBlockNew;
-        var vcVerifyPresenceNew = _readVerifyPresenceToggle();
-        if (vcVerifyPresenceNew !== undefined) createConfig.verifyPresence = vcVerifyPresenceNew;
-      }
-      if (isFmg || isFgt) {
-        var pushToggleNew = _readPushReservationsToggle();
-        if (pushToggleNew !== undefined) createConfig.pushReservations = pushToggleNew;
-        var arpSweepToggleNew = _readArpPresenceSweepToggle();
-        if (arpSweepToggleNew !== undefined) createConfig.arpPresenceSweep = arpSweepToggleNew;
-        var autoReserveInfraNew = _readAutoReserveInfraToggle();
-        if (autoReserveInfraNew !== undefined) createConfig.autoReserveFortinetInfra = autoReserveInfraNew;
-        var adoptMacNew = _readAdoptDiscoveredMacToggle();
-        if (adoptMacNew !== undefined) createConfig.adoptDiscoveredMac = adoptMacNew;
-        var quarantinePushToggleNew = _readPushQuarantineToggle();
-        if (quarantinePushToggleNew !== undefined) createConfig.pushQuarantine = quarantinePushToggleNew;
-        var syncDescriptionsNew = _readSyncDescriptionsToggle();
-        if (syncDescriptionsNew !== undefined) createConfig.syncDescriptions = syncDescriptionsNew;
-        var sdwanToggleNew = _readPullSdwanToggle();
-        if (sdwanToggleNew !== undefined) createConfig.pullSdwan = sdwanToggleNew;
-        var excludeFortilinkLldpNew = _readExcludeFortilinkLldpToggle();
-        if (excludeFortilinkLldpNew !== undefined) createConfig.excludeFortilinkLldp = excludeFortilinkLldpNew;
-      }
-      if (isEntra) {
-        var publishToIntuneNew = _readPublishToIntuneToggle();
-        if (publishToIntuneNew !== undefined) createConfig.publishToIntune = publishToIntuneNew;
-      }
-      if (isArc) {
-        var allowRunCommandNew = _readAllowRunCommandToggle();
-        if (allowRunCommandNew !== undefined) createConfig.allowRunCommand = allowRunCommandNew;
-      }
-      var input = {
-        type: type,
-        name: val("f-name"),
-        config: createConfig,
-        enabled: document.getElementById("f-enabled").checked,
-        autoDiscover: autoDiscoverEl ? autoDiscoverEl.checked : true,
-        pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
-      };
-      var result = await api.integrations.create(input);
-      // Save the new integration's tier-3 monitor settings if the Monitoring
-      // tab was rendered. Failures here aren't fatal — the integration is
-      // already created; operator can edit and resave.
-      if ((isFmg || isFgt || isAd || isEntra || isWin || isVc || isArc) && result && result.id) {
-        try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
-        catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
-      }
-      closeModal();
-      showToast("Integration created");
-      loadIntegrations();
-      // If the user successfully tested the connection in the modal, inherit
-      // that result onto the new integration so the Discover button is
-      // immediately enabled instead of gated on a redundant re-test.
-      if (_modalTestOk && result && result.id) {
-        api.integrations.test(result.id, input.name)
-          .then(function () { loadIntegrations(); })
-          .catch(function () { /* user can retry from the card */ });
-      }
-      if (result && result.conflicts && result.conflicts.length) {
-        showConflictModal(result.id, result.conflicts);
-      } else {
-        // Conflict modal owns the screen when it renders, so skip the
-        // no-blocks warning in that case — operators see it on the next
-        // create or after the conflict modal closes.
-        await _warnIfNoBlocksForIntegrationType(type, input.name);
-      }
-    } catch (err) {
-      showToast(err.message, "error");
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Create";
-    }
-  });
+  if (isEntra) {
+    var publishToIntuneNew = _readPublishToIntuneToggle();
+    if (publishToIntuneNew !== undefined) createConfig.publishToIntune = publishToIntuneNew;
+  }
+  if (isArc) {
+    var allowRunCommandNew = _readAllowRunCommandToggle();
+    if (allowRunCommandNew !== undefined) createConfig.allowRunCommand = allowRunCommandNew;
+  }
+  var input = {
+    type: type,
+    name: val("f-name"),
+    config: createConfig,
+    enabled: document.getElementById("f-enabled").checked,
+    autoDiscover: autoDiscoverEl ? autoDiscoverEl.checked : true,
+    pollInterval: parseInt(document.getElementById("f-pollInterval").value, 10) || 4,
+  };
+  var result = await api.integrations.create(input);
+  // Save the new integration's tier-3 monitor settings if the Monitoring
+  // tab was rendered. Failures here aren't fatal — the integration is
+  // already created; operator can edit and resave.
+  if ((isFmg || isFgt || isAd || isEntra || isWin || isVc || isArc) && result && result.id) {
+    try { await api.monitorSettings.setIntegration(result.id, getMonitorSettingsFromForm()); }
+    catch (e) { showToast("Integration created, but monitor settings couldn\'t be saved: " + (e.message || "unknown error"), "error"); }
+  }
+  closeModal();
+  showToast("Integration created");
+  loadIntegrations();
+  // If the user successfully tested the connection in the modal, inherit
+  // that result onto the new integration so the Discover button is
+  // immediately enabled instead of gated on a redundant re-test.
+  if (tested && result && result.id) {
+    api.integrations.test(result.id, input.name)
+      .then(function () { loadIntegrations(); })
+      .catch(function () { /* user can retry from the card */ });
+  }
+  if (result && result.conflicts && result.conflicts.length) {
+    showConflictModal(result.id, result.conflicts);
+  } else {
+    // Conflict modal owns the screen when it renders, so skip the
+    // no-blocks warning in that case — operators see it on the next
+    // create or after the conflict modal closes.
+    await _warnIfNoBlocksForIntegrationType(type, input.name);
+  }
 }
 
 // Edit-modal orchestrator (split 2026-08): per-type form spec, tab assembly,
@@ -5482,186 +5574,53 @@ async function openEditModal(id) {
   try {
     var intg = await api.integrations.get(id);
     var config = intg.config || {};
-    var isWin = intg.type === "windowsserver";
-    var isFgt = intg.type === "fortigate";
-    var isEntra = intg.type === "entraid";
-    var isAd = intg.type === "activedirectory";
-    var isVc = intg.type === "vcenter";
-    var isArc = intg.type === "azurearc";
+    var type = intg.type;
     var spec = _intgEditFormSpec(intg, config);
-    var body = spec.body;
     var formGetter = spec.formGetter;
-    var defaults = spec.defaults;
 
     // FMG + FortiGate get the full Monitoring tab (Cadence + Discovery
-    // Defaults + Class Overrides). AD / Entra / WindowsServer get the same
-    // Monitoring tab minus the Discovery Defaults section (those concerns
-    // don't apply to non-Fortinet integrations). All tier-3 settings are
-    // now per-integration — this tab edits THIS integration's settings
-    // only. Manual tier + cross-source class overrides live on the Assets
-    // page Monitoring Settings modal.
-    var isFmgOrFgt = (intg.type === "fortimanager" || intg.type === "fortigate");
-    var monCapable = isFmgOrFgt || isAd || isEntra || isWin || isVc || isArc;
-    if (!isFmgOrFgt && monCapable) {
-      // AD / Entra / WindowsServer / vCenter: wrap the existing flat form as
-      // the General tab and add a Monitoring tab alongside it.
-      var monSettings = {};
-      try {
-        var resp = await api.monitorSettings.getIntegration(intg.id);
-        if (resp && resp.settings) monSettings = resp.settings;
-      } catch (e) { /* fall back to defaults */ }
-      // vCenter's VM agent auto-deploy card needs the credential list.
-      var nonFortinetCreds = [];
-      if (isVc || isArc || isAd || isEntra) {
-        try { var vcEditCredResp = await api.credentials.list(); nonFortinetCreds = Array.isArray(vcEditCredResp) ? vcEditCredResp : []; } catch (e) { /* pickers render empty */ }
-      }
-      var generalTabBody = body;
-      var nonFortinetTabs = [
-        { key: "general",    label: "General",    html: generalTabBody },
-        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
-          integrationId:   id,
-          integrationType: intg.type,
-          integrationName: intg.name,
-          pollInterval:    intg.pollInterval,
-          snmpCredentials: nonFortinetCreds,
-          // Phase 2 — forward AD/Entra/WinSrv per-class blocks so per-class
-          // subtabs can render their own saved stream values. Blocks are
-          // freshly seeded by the migration job; pre-migration installs see
-          // an empty object → overlay no-ops → flat baseline shows through.
-          workstationMonitor: config.workstationMonitor || null,
-          serverMonitor:      config.serverMonitor      || null,
-          vmMonitor:          config.vmMonitor          || null,
-          hostMonitor:        config.hostMonitor        || null,
-          verifyPresence:     config.verifyPresence,
-        }) },
-      ];
-      if (isAd || isEntra) {
-        nonFortinetTabs.push({
-          key: "directory", label: "Directory", html: directoryFormHTML(intg.type, config),
-        });
-      }
-      if (isEntra) {
-        nonFortinetTabs.push({
-          key: "scriptpub", label: "Script Publishing",
-          html: scriptPublishingFormHTML(config.publishToIntune === true),
-        });
-      }
-      if (isArc) {
-        nonFortinetTabs.push({
-          key: "scriptpub", label: "Script Publishing",
-          html: arcScriptPublishingFormHTML(config.allowRunCommand === true),
-        });
-      }
-      body = _intRenderTabbedBody("intg-edit", nonFortinetTabs);
-    }
-    if (isFmgOrFgt) {
-      var monSettings = {};
-      var creds = [];
-      try {
-        var resp = await api.monitorSettings.getIntegration(intg.id);
-        var tier = resp && resp.settings;
-        // Tier may be null on a fresh integration whose tier-3 hasn't been
-        // saved yet — the form falls back to its hardcoded defaults.
-        if (tier) monSettings = tier;
-      } catch (e) { /* fall back to defaults */ }
-      try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; } catch (e) { /* picker just shows defaults */ }
-      var generalHtml = (intg.type === "fortimanager") ? fortiManagerGeneralHTML(defaults) : fortiGateGeneralHTML(defaults);
-      var filtersHtml = (intg.type === "fortimanager") ? fortiManagerFiltersHTML(defaults) : fortiGateFiltersHTML(defaults);
-      var editTabs = [
-        { key: "general",    label: "General",    html: generalHtml },
-        { key: "filters",    label: "Filters",    html: filtersHtml },
-      ];
-      editTabs.push(
-        { key: "monitoring", label: "Monitoring", html: monitorSettingsFormHTML(monSettings, {
-          snmpCredentials: creds,
-          monitorCredentialId: config.monitorCredentialId || null,
-          sshCredentialId:    config.sshCredentialId    || null,
-          fortigateMonitor:   config.fortigateMonitor   || null,
-          fortiswitchMonitor: config.fortiswitchMonitor || null,
-          fortiapMonitor:     config.fortiapMonitor     || null,
-          excludeFortilinkLldp: config.excludeFortilinkLldp === true,
-          integrationId:      id,
-          integrationType:    intg.type,
-          integrationName:    intg.name,
-          pollInterval:       intg.pollInterval,
-          // The relocated useDirect toggle + direct-mode credentials block
-          // lives inside the FortiGate class subtab in the Monitoring tab.
-          // Pass the FMG `defaults` blob so it renders with the current
-          // values. Standalone FortiGate doesn't carry these fields and
-          // the block is skipped on that path.
-          fmgDefaults:        defaults,
-        }) },
-      );
-      // Reservation Push + Quarantine Push tabs render for both FMG and
-      // standalone FortiGate. The `useProxy` flag is meaningful only for FMG;
-      // standalone always goes direct REST so we pass true so the proxy/
-      // direct copy in the form helpers doesn't render an irrelevant warning.
-      {
-        var pushUseProxy = intg.type === "fortimanager" ? (config.useProxy !== false) : true;
-        editTabs.push({
-          key: "push",
-          label: "DHCP Push",
-          html: reservationPushFormHTML(config.pushReservations === true, pushUseProxy, config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true, config.adoptDiscoveredMac === true),
-        });
-        editTabs.push({
-          key: "quarantine-push",
-          label: "Quarantine Push",
-          html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
-        });
-        editTabs.push({
-          key: "description-sync",
-          label: "Description Sync",
-          html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
-        });
-        editTabs.push({
-          key: "sdwan",
-          label: "SD‑WAN",
-          html: sdwanFormHTML(config.pullSdwan === true),
-        });
-        // Geographic Location tab (FMG + standalone FortiGate). Carries the
-        // pull-from-SNMP and push-geocoded-coords toggles previously surfaced
-        // inside Monitoring → FortiGate. DOM ids preserved so the existing
-        // save path (`_readFortigateMonitorBlock`) keeps finding them.
-        var fwFgCfgEdit = config.fortigateMonitor || {};
-        editTabs.push({
-          key: "geographicLocation",
-          label: "Geographic Location",
-          html: geographicLocationFormHTML(
-            fwFgCfgEdit.pullSnmpLocation === true,
-            fwFgCfgEdit.useSnmpLocationCoords === true,
-            fwFgCfgEdit.pushGeocodedCoords === true,
-            fwFgCfgEdit.latitudeMetavar || "Latitude",
-            fwFgCfgEdit.longitudeMetavar || "Longitude",
-            fwFgCfgEdit.addressMetavar || "",
-            intg.type,
-          ),
-        });
-      }
-      body = _intRenderTabbedBody("intg-edit", editTabs);
-    }
+    // Defaults + Class Overrides). AD / Entra / WindowsServer / vCenter /
+    // Azure Arc get the same tab minus the Discovery Defaults section (those
+    // concerns are Fortinet-only). All tier-3 settings are per-integration —
+    // this tab edits THIS integration's settings only; the manual tier and the
+    // cross-source class overrides live on the Assets page's Monitoring
+    // Settings modal.
+    var monSettings = {};
+    try {
+      var resp = await api.monitorSettings.getIntegration(id);
+      // The tier can be null on an integration whose tier-3 has never been
+      // saved — the form then falls back to its own defaults.
+      if (resp && resp.settings) monSettings = resp.settings;
+    } catch (e) { /* fall back to the form's own defaults */ }
 
-    var footer = '<button class="btn btn-secondary" id="btn-test-existing">Test Connection</button>' +
-      '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" id="btn-save">Save Changes</button>';
-    openModal("Edit Integration", body, footer, { wide: true });
-    if (isFmgOrFgt) {
-      _intWireModalTabs("intg-edit");
-      _wireMonitoringTabSubtabs(intg.type);
-      wireAutoMonitorCards(id);
-      _wireProbeTimeoutWarning();
-      _wireCredentialPickerVisibility();
-      _populateUploadedMibsInDropdowns();
-    } else if (isAd || isEntra || isWin || isVc || isArc) {
-      _intWireModalTabs("intg-edit");
-      _wireDirectorySyncToggle();
-      _wireMonitoringTabSubtabs(intg.type);
-      if (isAd || isEntra || isArc) wireWorkstationServerCards(id);
-      if (isVc) wireVcenterCards(id);
-      _wireProbeTimeoutWarning();
-    }
+    var creds = [];
+    try { var credResp = await api.credentials.list(); creds = Array.isArray(credResp) ? credResp : []; }
+    catch (e) { /* pickers just render their defaults */ }
 
-    _wireIntgEditTest(id, intg);
-    _wireIntgEditSave(id, intg, formGetter);
+    var tabs = _integrationTabs({
+      type: type, mode: "edit",
+      id: id, name: intg.name, pollInterval: intg.pollInterval,
+      config: config,
+      defaults: spec.defaults,
+      generalHtml: spec.body,
+      monSettings: monSettings,
+      creds: creds,
+    });
+
+    openIntegrationModal({
+      product: _productForType(type),
+      action: "Edit",
+      prefix: "intg-edit",
+      tabs: tabs,
+      html: tabs ? null : spec.body,
+      // Secrets are excluded on edit: a stored one renders blank ("leave blank
+      // to keep current"), so requiring it would refuse to test a credential
+      // the operator has no reason to retype.
+      requires: _integrationRequires(type, "edit"),
+      onWire: function () { _wireIntegrationModal(type, id); },
+      onTest: function () { return _testExistingIntegration(id, intg); },
+      onSave: function () { return _saveIntegration(id, intg, formGetter); },
+    });
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -5873,71 +5832,66 @@ function _intgEditFormSpec(intg, config) {
         return fc;
       };
     }
-    // `defaults` rides along because the FMG / FortiGate branch of the caller
-    // re-renders the General + Filters tabs from it and forwards the blob into
-    // the Monitoring tab as `fmgDefaults`. It was function-local when this spec
-    // was split out of openEditModal, which left those call sites referencing a
+    // `defaults` rides along because _integrationTabs re-renders the FMG /
+    // FortiGate General + Filters tabs from it and forwards the blob into the
+    // Monitoring tab as `fmgDefaults`. It was function-local when this spec was
+    // split out of openEditModal, which left those call sites referencing a
     // free variable — a ReferenceError on every FMG / FortiGate edit.
     return { body: body, formGetter: formGetter, defaults: defaults };
 }
 
-// Test Connection button — posts the current (unsaved) form config; on an
-// FMG in bypass mode also verifies the direct-FortiGate path.
-function _wireIntgEditTest(id, intg) {
-    var isWin = intg.type === "windowsserver";
-    var isFgt = intg.type === "fortigate";
-    var isEntra = intg.type === "entraid";
-    var isAd = intg.type === "activedirectory";
-    var isVc = intg.type === "vcenter";
-    var isArc = intg.type === "azurearc";
-    document.getElementById("btn-test-existing").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      btn.textContent = "Testing...";
-      try {
-        var formConfig = _formConfigForType(intg.type);
-        // Strip blank secrets so the server fills them in from the stored config.
-        if (isWin || isVc) { if (!formConfig.password) delete formConfig.password; }
-        else if (isEntra || isArc) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
-        else if (isAd) { if (!formConfig.bindPassword) delete formConfig.bindPassword; }
-        else {
-          if (!formConfig.apiToken) delete formConfig.apiToken;
-          if (!formConfig.fortigateApiToken) delete formConfig.fortigateApiToken;
-        }
-        var result = await api.integrations.testNew({
-          id: id,
-          type: intg.type,
-          name: val("f-name") || intg.name,
-          config: formConfig,
-        });
-        showToast(result.message, result.ok ? "success" : "error");
-        if (result.ok) loadIntegrations();
-        // Direct-transport sanity check: run asynchronously so the FMG
-        // toast appears immediately rather than waiting on the FortiGate
-        // probe (which can take 10s if the random gate is unreachable).
-        if (result.ok && intg.type === "fortimanager" && formConfig && formConfig.useProxy === false) {
-          var probeBody = {
-            id: id,
-            type: intg.type,
-            name: val("f-name") || intg.name,
-            config: formConfig,
-          };
-          _runFortigateSampleProbe(function () { return api.integrations.testFortigateSampleNew(probeBody); });
-        }
-      } catch (err) {
-        if (err.name === "AbortError") { showToast("Test aborted", "error"); }
-        else { showToast(err.message, "error"); }
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Test Connection";
-      }
-    });
+/**
+ * Test Connection for the Edit flow — posts the current (unsaved) form config;
+ * on an FMG in bypass mode it also verifies the direct-FortiGate path.
+ *
+ * A plain async function: openIntegrationModal owns the button's
+ * disabled/relabel state and turns a throw into a toast.
+ */
+async function _testExistingIntegration(id, intg) {
+  var isWin = intg.type === "windowsserver";
+  var isEntra = intg.type === "entraid";
+  var isAd = intg.type === "activedirectory";
+  var isVc = intg.type === "vcenter";
+  var isArc = intg.type === "azurearc";
+  var formConfig = _formConfigForType(intg.type);
+  // Strip blank secrets so the server fills them in from the stored config.
+  if (isWin || isVc) { if (!formConfig.password) delete formConfig.password; }
+  else if (isEntra || isArc) { if (!formConfig.clientSecret) delete formConfig.clientSecret; }
+  else if (isAd) { if (!formConfig.bindPassword) delete formConfig.bindPassword; }
+  else {
+    if (!formConfig.apiToken) delete formConfig.apiToken;
+    if (!formConfig.fortigateApiToken) delete formConfig.fortigateApiToken;
+  }
+  var result = await api.integrations.testNew({
+    id: id,
+    type: intg.type,
+    name: val("f-name") || intg.name,
+    config: formConfig,
+  });
+  showToast(result.message, result.ok ? "success" : "error");
+  if (result.ok) loadIntegrations();
+  // Direct-transport sanity check: run asynchronously so the FMG toast appears
+  // immediately rather than waiting on the FortiGate probe (which can take 10s
+  // if the random gate is unreachable).
+  if (result.ok && intg.type === "fortimanager" && formConfig && formConfig.useProxy === false) {
+    var probeBody = {
+      id: id,
+      type: intg.type,
+      name: val("f-name") || intg.name,
+      config: formConfig,
+    };
+    _runFortigateSampleProbe(function () { return api.integrations.testFortigateSampleNew(probeBody); });
+  }
+  return result;
 }
 
-// Save phase: buildEditConfig (form read, no persist) + commitSave (the PUT +
-// monitor-settings PUT) + the Save button handler with the Auto-Monitor
+// Save phase for the Edit flow: buildEditConfig (form read, no persist) +
+// commitSave (the PUT + monitor-settings PUT) + the Auto-Monitor
 // capacity-warning confirm that must run BEFORE anything persists.
-function _wireIntgEditSave(id, intg, formGetter) {
+//
+// A plain async function — openIntegrationModal owns the button's
+// disabled/relabel state and turns a throw into a toast.
+async function _saveIntegration(id, intg, formGetter) {
     var isWin = intg.type === "windowsserver";
     var isFgt = intg.type === "fortigate";
     var isEntra = intg.type === "entraid";
@@ -6065,161 +6019,145 @@ function _wireIntgEditSave(id, intg, formGetter) {
       return { result: result, editConfig: built.editConfig };
     }
 
-    document.getElementById("btn-save").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      btn.textContent = "Saving...";
+    // Auto-Monitor confirm gate (FortiGate/Switch/AP only) — preflight
+    // the operator's proposed addAsMonitored toggle states and ask for
+    // confirmation when disabling would sweep monitoring off existing
+    // assets. Read from the hidden checkboxes (the visible buttons
+    // toggle these via _wireAutoMonitoringButtons). Aborts the save
+    // without re-enabling the button if the operator declines, so the
+    // finally block at the end resets state cleanly.
+    if (isFmgOrFgt) {
+      var proposed = {};
+      var fgEl = document.getElementById("f-mon-fortigate-addAsMonitored");
+      var swEl = document.getElementById("f-mon-fortiswitch-addAsMonitored");
+      var apEl = document.getElementById("f-mon-fortiap-addAsMonitored");
+      if (fgEl) proposed.firewall     = fgEl.checked === true;
+      if (swEl) proposed["switch"]    = swEl.checked === true;
+      if (apEl) proposed.access_point = apEl.checked === true;
       try {
-        // Auto-Monitor confirm gate (FortiGate/Switch/AP only) — preflight
-        // the operator's proposed addAsMonitored toggle states and ask for
-        // confirmation when disabling would sweep monitoring off existing
-        // assets. Read from the hidden checkboxes (the visible buttons
-        // toggle these via _wireAutoMonitoringButtons). Aborts the save
-        // without re-enabling the button if the operator declines, so the
-        // finally block at the end resets state cleanly.
-        if (isFmgOrFgt) {
-          var proposed = {};
-          var fgEl = document.getElementById("f-mon-fortigate-addAsMonitored");
-          var swEl = document.getElementById("f-mon-fortiswitch-addAsMonitored");
-          var apEl = document.getElementById("f-mon-fortiap-addAsMonitored");
-          if (fgEl) proposed.firewall     = fgEl.checked === true;
-          if (swEl) proposed["switch"]    = swEl.checked === true;
-          if (apEl) proposed.access_point = apEl.checked === true;
-          try {
-            var pre = await api.integrations.autoMonitorAssetsPreflight(id, proposed);
-            var disablingClasses = [];
-            ["firewall", "switch", "access_point"].forEach(function (k) {
-              var c = pre && pre.classes && pre.classes[k];
-              if (c && c.wouldDisable > 0) {
-                disablingClasses.push({ k: k, wouldDisable: c.wouldDisable, overridden: c.overridden });
-              }
-            });
-            if (disablingClasses.length > 0) {
-              var humanClass = { firewall: "FortiGate", "switch": "FortiSwitch", access_point: "FortiAP" };
-              var lines = disablingClasses.map(function (d) {
-                var protectedNote = d.overridden > 0 ? " (" + d.overridden + " protected by per-asset override)" : "";
-                return "  • " + humanClass[d.k] + ": " + d.wouldDisable + " asset(s) will stop being monitored" + protectedNote;
-              });
-              var ok = await showConfirm(
-                "Disabling Auto-Monitoring will sweep monitoring OFF for previously-discovered assets:\n\n" +
-                lines.join("\n") + "\n\n" +
-                "Per-asset overrides are preserved. Continue?"
-              );
-              if (!ok) {
-                btn.disabled = false;
-                btn.textContent = "Save Changes";
-                return;
-              }
-            }
-          } catch (preflightErr) {
-            // Preflight failure shouldn't block the save — log it and proceed.
-            // The backend save itself will still apply correctly.
-            if (window.console) console.warn("Auto-Monitor preflight failed:", preflightErr);
+        var pre = await api.integrations.autoMonitorAssetsPreflight(id, proposed);
+        var disablingClasses = [];
+        ["firewall", "switch", "access_point"].forEach(function (k) {
+          var c = pre && pre.classes && pre.classes[k];
+          if (c && c.wouldDisable > 0) {
+            disablingClasses.push({ k: k, wouldDisable: c.wouldDisable, overridden: c.overridden });
           }
-        }
-
-        // Build the editConfig from the form, but DON'T save yet — the
-        // Auto-Monitor capacity-warning confirm has to gate the PUT so that
-        // cancelling it leaves the integration unsaved and the edit modal open.
-        var built = buildEditConfig();
-        var classes = isFmgOrFgt ? [
-          ["fortigate",   built.editConfig.fortigateMonitor],
-          ["fortiswitch", built.editConfig.fortiswitchMonitor],
-          ["fortiap",     built.editConfig.fortiapMonitor],
-        ] : [];
-
-        // Fire apply only for per-class blocks whose autoMonitorInterfaces
-        // selection actually changed during this modal session. Saving for
-        // an unrelated reason (API token rotation, name change, monitoring
-        // tier edit) used to re-fire apply for every block that had ANY
-        // selection — expensive on big fleets and surprising to operators.
-        // Baseline = saved selection stashed at modal-open by
-        // _autoMonitorInterfacesHTML; proposed = whatever editConfig holds
-        // (what we're about to PUT). Equality goes through _amonCanonicalize so
-        // array reordering / null-vs-empty-object don't read as a change.
-        var classToBaselinePrefix = {
-          fortigate:   "f-mon-fortigate-amon-",
-          fortiswitch: "f-mon-fortiswitch-amon-",
-          fortiap:     "f-mon-fortiap-amon-",
-        };
-        var activeApplies = classes.filter(function (entry) {
-          if (!(entry[1] && entry[1].autoMonitorInterfaces)) return false;
-          var prefix = classToBaselinePrefix[entry[0]];
-          var baseline = prefix ? window["__autoMon_savedSelection_" + prefix] : null;
-          return _amonCanonicalize(baseline) !== _amonCanonicalize(entry[1].autoMonitorInterfaces);
         });
-
-        // Capacity guard: warn BEFORE saving when the changed selections would
-        // pin a large number of interfaces. We sniff the cached count from each
-        // preview block; missing/stale values just skip the warning. Scoped to
-        // the blocks that ARE changing — a class whose selection didn't change
-        // this session shouldn't contribute to the estimate. Cancelling here
-        // returns to the edit modal with NOTHING saved (the finally block
-        // re-enables the Save button).
-        if (activeApplies.length > 0) {
-          var changedPrefixes = activeApplies
-            .map(function (e) { return classToBaselinePrefix[e[0]]; })
-            .filter(Boolean);
-          var totalEstimate = 0;
-          changedPrefixes.forEach(function (p) {
-            var el = document.getElementById(p + "preview");
-            var n = el && el.dataset && parseInt(el.dataset.interfaceCount || "0", 10);
-            if (Number.isFinite(n)) totalEstimate += n;
+        if (disablingClasses.length > 0) {
+          var humanClass = { firewall: "FortiGate", "switch": "FortiSwitch", access_point: "FortiAP" };
+          var lines = disablingClasses.map(function (d) {
+            var protectedNote = d.overridden > 0 ? " (" + d.overridden + " protected by per-asset override)" : "";
+            return "  • " + humanClass[d.k] + ": " + d.wouldDisable + " asset(s) will stop being monitored" + protectedNote;
           });
-          if (totalEstimate > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD) {
-            var ok = await showConfirm(
-              "Auto-Monitor will pin approximately " + totalEstimate + " interfaces across the discovered devices.\n\n" +
-              "Each pin gets scraped on the response-time cadence (default 60s). Large pin counts add load to the database and to the monitored devices.\n\n" +
-              "Continue saving and applying now?"
-            );
-            if (!ok) {
-              showToast("Cancelled — nothing saved");
-              return;
-            }
-          }
+          var ok = await showConfirm(
+            "Disabling Auto-Monitoring will sweep monitoring OFF for previously-discovered assets:\n\n" +
+            lines.join("\n") + "\n\n" +
+            "Per-asset overrides are preserved. Continue?"
+          );
+          if (!ok) return;
         }
-
-        // Confirm cleared (or wasn't needed) — persist now.
-        var saved = await commitSave(built);
-
-        if (activeApplies.length > 0) {
-          // Kick each per-class apply. The endpoint now returns 202 immediately
-          // and resolves the selection against the fleet in the BACKGROUND —
-          // on big fleets the resolve is a multi-second-to-minutes query, so
-          // awaiting it here used to wedge the modal on "Applying..." for
-          // minutes. The apply is additive + idempotent and also re-runs on the
-          // next discovery, so we just confirm it started.
-          var applyResults = await Promise.all(activeApplies.map(function (entry) {
-            return api.integrations.interfaceAggregateApply(id, entry[0]).then(
-              function () { return { ok: true,  klass: entry[0] }; },
-              function (err) { return { ok: false, klass: entry[0], err: err }; },
-            );
-          }));
-          var failures = [];
-          for (var c = 0; c < applyResults.length; c++) {
-            if (!applyResults[c].ok) failures.push(applyResults[c].klass + ": " + (applyResults[c].err.message || "failed"));
-          }
-          closeModal();
-          if (failures.length === 0) {
-            showToast("Integration updated · auto-monitor is applying in the background", "success");
-          } else {
-            showToast("Saved, but apply couldn't start — " + failures.join("; "), "error");
-          }
-        } else {
-          closeModal();
-          showToast("Integration updated");
-        }
-        loadIntegrations();
-        if (saved.result && saved.result.conflicts && saved.result.conflicts.length) {
-          showConflictModal(saved.result.id || id, saved.result.conflicts);
-        }
-      } catch (err) {
-        showToast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-        btn.textContent = "Save Changes";
+      } catch (preflightErr) {
+        // Preflight failure shouldn't block the save — log it and proceed.
+        // The backend save itself will still apply correctly.
+        if (window.console) console.warn("Auto-Monitor preflight failed:", preflightErr);
       }
+    }
+
+    // Build the editConfig from the form, but DON'T save yet — the
+    // Auto-Monitor capacity-warning confirm has to gate the PUT so that
+    // cancelling it leaves the integration unsaved and the edit modal open.
+    var built = buildEditConfig();
+    var classes = isFmgOrFgt ? [
+      ["fortigate",   built.editConfig.fortigateMonitor],
+      ["fortiswitch", built.editConfig.fortiswitchMonitor],
+      ["fortiap",     built.editConfig.fortiapMonitor],
+    ] : [];
+
+    // Fire apply only for per-class blocks whose autoMonitorInterfaces
+    // selection actually changed during this modal session. Saving for
+    // an unrelated reason (API token rotation, name change, monitoring
+    // tier edit) used to re-fire apply for every block that had ANY
+    // selection — expensive on big fleets and surprising to operators.
+    // Baseline = saved selection stashed at modal-open by
+    // _autoMonitorInterfacesHTML; proposed = whatever editConfig holds
+    // (what we're about to PUT). Equality goes through _amonCanonicalize so
+    // array reordering / null-vs-empty-object don't read as a change.
+    var classToBaselinePrefix = {
+      fortigate:   "f-mon-fortigate-amon-",
+      fortiswitch: "f-mon-fortiswitch-amon-",
+      fortiap:     "f-mon-fortiap-amon-",
+    };
+    var activeApplies = classes.filter(function (entry) {
+      if (!(entry[1] && entry[1].autoMonitorInterfaces)) return false;
+      var prefix = classToBaselinePrefix[entry[0]];
+      var baseline = prefix ? window["__autoMon_savedSelection_" + prefix] : null;
+      return _amonCanonicalize(baseline) !== _amonCanonicalize(entry[1].autoMonitorInterfaces);
     });
+
+    // Capacity guard: warn BEFORE saving when the changed selections would
+    // pin a large number of interfaces. We sniff the cached count from each
+    // preview block; missing/stale values just skip the warning. Scoped to
+    // the blocks that ARE changing — a class whose selection didn't change
+    // this session shouldn't contribute to the estimate. Cancelling here
+    // returns to the edit modal with NOTHING saved (the finally block
+    // re-enables the Save button).
+    if (activeApplies.length > 0) {
+      var changedPrefixes = activeApplies
+        .map(function (e) { return classToBaselinePrefix[e[0]]; })
+        .filter(Boolean);
+      var totalEstimate = 0;
+      changedPrefixes.forEach(function (p) {
+        var el = document.getElementById(p + "preview");
+        var n = el && el.dataset && parseInt(el.dataset.interfaceCount || "0", 10);
+        if (Number.isFinite(n)) totalEstimate += n;
+      });
+      if (totalEstimate > AUTO_MONITOR_INTERFACE_WARN_THRESHOLD) {
+        var ok = await showConfirm(
+          "Auto-Monitor will pin approximately " + totalEstimate + " interfaces across the discovered devices.\n\n" +
+          "Each pin gets scraped on the response-time cadence (default 60s). Large pin counts add load to the database and to the monitored devices.\n\n" +
+          "Continue saving and applying now?"
+        );
+        if (!ok) {
+          showToast("Cancelled — nothing saved");
+          return;
+        }
+      }
+    }
+
+    // Confirm cleared (or wasn't needed) — persist now.
+    var saved = await commitSave(built);
+
+    if (activeApplies.length > 0) {
+      // Kick each per-class apply. The endpoint now returns 202 immediately
+      // and resolves the selection against the fleet in the BACKGROUND —
+      // on big fleets the resolve is a multi-second-to-minutes query, so
+      // awaiting it here used to wedge the modal on "Applying..." for
+      // minutes. The apply is additive + idempotent and also re-runs on the
+      // next discovery, so we just confirm it started.
+      var applyResults = await Promise.all(activeApplies.map(function (entry) {
+        return api.integrations.interfaceAggregateApply(id, entry[0]).then(
+          function () { return { ok: true,  klass: entry[0] }; },
+          function (err) { return { ok: false, klass: entry[0], err: err }; },
+        );
+      }));
+      var failures = [];
+      for (var c = 0; c < applyResults.length; c++) {
+        if (!applyResults[c].ok) failures.push(applyResults[c].klass + ": " + (applyResults[c].err.message || "failed"));
+      }
+      closeModal();
+      if (failures.length === 0) {
+        showToast("Integration updated · auto-monitor is applying in the background", "success");
+      } else {
+        showToast("Saved, but apply couldn't start — " + failures.join("; "), "error");
+      }
+    } else {
+      closeModal();
+      showToast("Integration updated");
+    }
+    loadIntegrations();
+    if (saved.result && saved.result.conflicts && saved.result.conflicts.length) {
+      showConflictModal(saved.result.id || id, saved.result.conflicts);
+    }
 }
 
 async function testConnection(id, btn) {

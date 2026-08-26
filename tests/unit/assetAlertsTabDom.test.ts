@@ -31,6 +31,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { APP_SHELL_STUBS } from "./_appShellStubs.js";
 
 const g = globalThis as Record<string, any>;
 
@@ -108,7 +109,9 @@ async function mount(opts?: { perm?: string; alerts?: any[] }) {
 
 // The sliced functions call each other by name, so they have to land on
 // globalThis rather than in a Function body's scope.
-const SRC = FN_NAMES.map(fnSrc).join("\n") + "\n" + FN_NAMES.map((n) => `globalThis.${n} = ${n};`).join("\n");
+// APP_SHELL_STUBS carries the app.js helpers these functions call as free
+// variables in the browser (syncSelectedRows, the form parts).
+const SRC = APP_SHELL_STUBS + "\n" + FN_NAMES.map(fnSrc).join("\n") + "\n" + FN_NAMES.map((n) => `globalThis.${n} = ${n};`).join("\n");
 
 beforeEach(() => {
   ctx = {

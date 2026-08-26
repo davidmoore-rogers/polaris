@@ -41,8 +41,8 @@ beforeAll(() => {
   g.showToast = () => {};
   g.showConfirm = async () => false;
   g.closeModal = () => {};
-  g._wireModalTabs = () => {};
-  g._renderTabbedBody = renderTabbedBody;
+  g.wireModalTabs = () => {};
+  g.tabbedBodyHTML = renderTabbedBody;
   g.collectTagCriteria = () => null; // empty rule row → no criteria
   g.openModal = (_title: string, body: string) => {
     win.document.body.innerHTML = body;
