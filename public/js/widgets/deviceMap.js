@@ -144,8 +144,9 @@
       });
       map.addControl(new HomeControl());
 
-      // Theme-aware basemap: CARTO Dark Matter (dark) or OpenStreetMap (light),
-      // matching the Device Map page. The .sitemap-dark class darkens tiles so
+      // Theme-aware basemap: OpenStreetMap in both themes, matching the Device
+      // Map page (CARTO's Dark Matter served the dark half until CARTO began
+      // requiring an API key). The .sitemap-dark class darkens the tile pane so
       // the health dots stay legible on dark.
       var mapTheme = themePref();
       var basemap = null;
@@ -153,9 +154,8 @@
         if (basemap) { map.removeLayer(basemap); basemap = null; }
         var dark = mapTheme === "dark";
         basemap = L.tileLayer(
-          dark ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-               : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-          { maxZoom: 19, attribution: dark ? "© OpenStreetMap · CARTO" : "© OpenStreetMap contributors" }
+          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
         ).addTo(map);
         el.classList.toggle("sitemap-dark", dark);
       }

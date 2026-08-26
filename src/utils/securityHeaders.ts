@@ -29,17 +29,20 @@ export function buildHelmetOptions(): HelmetOptions {
         scriptSrcAttr: ["'unsafe-inline'"],
         styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
-        // OpenStreetMap tile servers (light theme) AND CartoDB Dark Matter
-        // (dark theme) are whitelisted here so the Device Map page can render
-        // a real geographic basemap in both themes. Tiles load as <img>, not
-        // fetch, so they don't appear in connectSrc.
+        // OpenStreetMap tile servers are whitelisted here so the Device Map
+        // page, the mobile map tab and the two map widgets can render a real
+        // geographic basemap. OSM serves BOTH themes — dark is a CSS filter
+        // over the tile pane, not a second tile source (CARTO's Dark Matter
+        // was the dark half until CARTO began requiring an API key on its
+        // basemap CDN, which is why *.basemaps.cartocdn.com is gone from this
+        // list). Tiles load as <img>, not fetch, so they don't appear in
+        // connectSrc.
         imgSrc: [
           "'self'",
           "data:",
           "blob:",
           "https://*.tile.openstreetmap.org",
           "https://tile.openstreetmap.org",
-          "https://*.basemaps.cartocdn.com",
           // RainViewer precipitation-radar tiles for the Site Map widget's
           // weather overlay (loaded as <img>, served from tilecache.rainviewer.com).
           // The widget is proxy-first (/api/v1/weather radar tiles = 'self');

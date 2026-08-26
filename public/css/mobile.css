@@ -984,6 +984,12 @@ button, .list-item, .chip { touch-action: manipulation; }
   position: absolute;
   inset: 0;
 }
+/* Dark basemap. Mirrors .polaris-basemap-dark in styles.css (which mobile.html
+   does not load): OpenStreetMap is the only unkeyed tile source, so dark is a
+   filter over its tiles rather than a second tile set. Scoped to the tile pane
+   so markers and overlays above it stay unfiltered. */
+.polaris-basemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
+
 .map-screen .map-fab-pos {
   position: absolute;
   right: 16px;

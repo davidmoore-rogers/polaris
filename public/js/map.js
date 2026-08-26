@@ -108,12 +108,15 @@
     // path so PNG URLs resolve correctly.
     L.Icon.Default.imagePath = "/css/vendor/leaflet/images/";
 
-    // Theme-aware basemap. OpenStreetMap for light theme, CartoDB Dark
-    // Matter for dark. Both are free and don't require API keys; CartoDB
-    // is documented as fair-use friendly. Tile layer is swapped in place
-    // when the operator clicks the map-theme toggle, OR when the global
-    // app theme changes AND the user hasn't set a per-user map override
-    // (getMapTheme falls back to the global theme in that case).
+    // Theme-aware basemap. OpenStreetMap tiles in BOTH themes; dark is a
+    // CSS filter over the tile pane rather than a second tile set. CARTO's
+    // Dark Matter served the dark half until CARTO started requiring an API
+    // key on its basemap CDN — unkeyed tiles now come back as an "API KEY
+    // REQUIRED" watermark. OSM is the only unkeyed source, so filtering it
+    // is what keeps dark working without a per-install third-party account.
+    // Tile layer is swapped in place when the operator clicks the map-theme
+    // toggle, OR when the global app theme changes AND the user hasn't set a
+    // per-user map override (getMapTheme falls back to the global theme).
     applyBasemapTheme();
     var themeObserver = new MutationObserver(function (muts) {
       for (var i = 0; i < muts.length; i++) {
@@ -213,14 +216,12 @@
   function applyBasemapTheme() {
     if (!map) return;
     var isDark = getMapTheme() === "dark";
-    var url = isDark
-      ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-      : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-    var attribution = isDark
-      ? "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors © <a href=\"https://carto.com/attributions\">CARTO</a>"
-      : "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors";
+    var url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    var attribution = "© <a href=\"https://www.openstreetmap.org/copyright\">OpenStreetMap</a> contributors";
     if (basemapLayer) map.removeLayer(basemapLayer);
     basemapLayer = L.tileLayer(url, { maxZoom: 19, attribution: attribution }).addTo(map);
+    // Dark is the same tiles under a filter — see the note in initMap.
+    map.getContainer().classList.toggle("polaris-basemap-dark", isDark);
     paintMapThemeToggle();
   }
 

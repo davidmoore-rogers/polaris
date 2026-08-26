@@ -146,7 +146,8 @@
       });
       map.addControl(new HomeControl());
 
-      // Theme-aware basemap: CARTO Dark Matter (dark) or CARTO Positron (light).
+      // Theme-aware basemap: OpenStreetMap in both themes (CARTO's Dark Matter
+      // and Positron served both halves until CARTO began requiring an API key).
       // The .sitemap-dark class drives the basemap darkening filter (CSS), so
       // dots/radar stay legible on dark; light theme renders the map normally.
       var mapTheme = themePref();
@@ -155,9 +156,8 @@
         if (basemap) { map.removeLayer(basemap); basemap = null; }
         var dark = mapTheme === "dark";
         basemap = L.tileLayer(
-          dark ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-               : "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-          { maxZoom: 19, attribution: "© OpenStreetMap · CARTO" }
+          "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+          { maxZoom: 19, attribution: "© OpenStreetMap contributors" }
         ).addTo(map);
         el.classList.toggle("sitemap-dark", dark);
       }

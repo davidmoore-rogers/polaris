@@ -4982,9 +4982,19 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .fg-cluster.monitor-maintenance { background: #9575cd; }
 .fg-cluster.monitor-passive     { background: #5c6bc0; }
 
+/* ── Dark basemap ─────────────────────────────────────────────── */
+/* Every Leaflet surface renders OpenStreetMap tiles — the only unkeyed tile
+   source — so a dark map is this filter, not a second tile set. (CARTO's Dark
+   Matter served the dark half until CARTO began requiring an API key on its
+   basemap CDN and unkeyed tiles came back watermarked.) The filter sits on
+   .leaflet-tile-pane specifically, so marker/overlay panes above it — the Site
+   Map widget's weather pane included — stay unfiltered and vivid.
+   .sitemap-dark is the widget-scoped flavor; .polaris-basemap-dark is the
+   portable one used by the Device Map page and the mobile map tab. */
+.sitemap-body.sitemap-dark .leaflet-tile-pane,
+.polaris-basemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
+
 /* ── Site Map widget (SolarWinds-style status dots + weather) ───────────── */
-/* Darken the basemap only in dark theme so dots/radar pop; light theme renders normally. */
-.sitemap-body.sitemap-dark .leaflet-tile-pane { filter: brightness(0.6) saturate(0.55) contrast(1.1); }
 
 /* Pulsing ring under a down site's dot. */
 @keyframes sitemap-pulse-ring { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(4); opacity: 0; } }

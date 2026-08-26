@@ -202,24 +202,22 @@
     _map.addLayer(_markerCluster);
   }
 
-  // Theme-aware basemap. Mirrors desktop map.js's tile choice — CartoDB
-  // Dark Matter for dark theme, OpenStreetMap default for light. Swaps
-  // the layer in place so an open-map theme toggle doesn't leak the
-  // previous tile layer.
+  // Theme-aware basemap. Mirrors desktop map.js's tile choice — OpenStreetMap
+  // in both themes, with dark produced by CSS-filtering the tile pane
+  // (.polaris-basemap-dark). CARTO's Dark Matter served the dark half until
+  // CARTO started requiring an API key on its basemap CDN. Swaps the layer in
+  // place so an open-map theme toggle doesn't leak the previous tile layer.
   function applyBasemapTheme() {
     if (!_map) return;
     var L = window.L;
     var isDark = (window.PolarisTheme ? PolarisTheme.get() : "dark") === "dark";
-    var url = isDark
-      ? "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-      : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-    var attribution = isDark
-      ? '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>'
-      : '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+    var url = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+    var attribution = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
     if (_basemapLayer) {
       try { _map.removeLayer(_basemapLayer); } catch (e) {}
     }
     _basemapLayer = L.tileLayer(url, { maxZoom: 19, attribution: attribution }).addTo(_map);
+    _map.getContainer().classList.toggle("polaris-basemap-dark", isDark);
   }
 
   function clusterIcon(cluster) {
