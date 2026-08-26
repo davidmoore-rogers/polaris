@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Doc-drift guard for the project-memory files (CLAUDE.md, ARCHITECTURE.md,
-// BUSINESS-RULES.md, TOUCHES.md, design/POLARIS-UI-GUIDE.md). Catches the *mechanically-checkable* drift that
+// BUSINESS-RULES.md, TOUCHES.md, UI-CANON.md). Catches the *mechanically-checkable* drift that
 // accumulated badly before the 2026-05 docs overhaul — it CANNOT judge whether
 // prose is still accurate, only structural coverage + reference hygiene.
 //
@@ -20,7 +20,7 @@
 //      exists on disk. (Templated paths like `<type>Service.ts` are ignored.)
 //   5. No lowercase `touches.md` / `primaries.md` references — and no
 //      references to the retired TEMPLATES.md at all — survive in the five
-//      docs (its UI half lives in design/POLARIS-UI-GUIDE.md Part II, its
+//      docs (its UI half lives in UI-CANON.md, its
 //      backend half in TOUCHES.md's Canonical backend patterns).
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
@@ -32,7 +32,12 @@ const r = (p) => join(ROOT, p);
 const read = (p) => readFileSync(r(p), "utf8");
 const exists = (p) => existsSync(r(p));
 
-const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "BUSINESS-RULES.md", "TOUCHES.md", "design/POLARIS-UI-GUIDE.md"];
+// design/POLARIS-UI-GUIDE.md is deliberately NOT policed here: it is a drop-in
+// snapshot of the external UI kit, so its paths describe a NEW app's layout
+// (public/css/polaris-ui.css, public/js/polaris-ui.js) rather than this repo's,
+// and editing it to satisfy a check here would just be clobbered by the next
+// kit re-sync. The Polaris-only half lives in UI-CANON.md, which IS policed.
+const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "BUSINESS-RULES.md", "TOUCHES.md", "UI-CANON.md"];
 const failures = [];
 const fail = (check, msg) => failures.push({ check, msg });
 
@@ -58,7 +63,7 @@ function tsFiles(dir) {
 
 // === Check 1: no file:line refs in the index files ===
 const LINE_REF = /\.(ts|js|tsx|jsx|mjs|prisma|sql|sh|ps1):\d+/g;
-for (const d of ["TOUCHES.md", "design/POLARIS-UI-GUIDE.md"]) {
+for (const d of ["TOUCHES.md", "UI-CANON.md"]) {
   const hits = [...docText[d].matchAll(LINE_REF)].map((m) => m[0]);
   if (hits.length) {
     fail(
@@ -73,7 +78,7 @@ for (const d of ["TOUCHES.md", "design/POLARIS-UI-GUIDE.md"]) {
 // `(line 85)`, `(lines ~834-900)`, `(around line 5381)` drift just as badly as
 // file.ts:NNN but slip past Check 1. Use `path -> symbolName()` instead.
 const PROSE_LINE_REF = /\((?:around\s+)?lines?\s+~?\d+/gi;
-for (const d of ["TOUCHES.md", "design/POLARIS-UI-GUIDE.md"]) {
+for (const d of ["TOUCHES.md", "UI-CANON.md"]) {
   const hits = [...docText[d].matchAll(PROSE_LINE_REF)].map((m) => m[0]);
   if (hits.length) {
     fail(
@@ -198,14 +203,14 @@ for (const d of DOCS) {
     );
   }
   // TEMPLATES.md was sunset 2026-08: UI patterns moved to
-  // design/POLARIS-UI-GUIDE.md Part II, backend patterns to TOUCHES.md's
+  // UI-CANON.md, backend patterns to TOUCHES.md's
   // "Canonical backend patterns" part. A reference to it is a dead pointer.
   const retired = [...docText[d].matchAll(/\bTEMPLATES\.md\b/g)].length;
   if (retired) {
     fail(
       "retired-doc",
       `${d} has ${retired} reference(s) to the retired TEMPLATES.md. ` +
-        `Point UI patterns at design/POLARIS-UI-GUIDE.md Part II and backend patterns at TOUCHES.md -> Canonical backend patterns.`,
+        `Point UI patterns at UI-CANON.md and backend patterns at TOUCHES.md -> Canonical backend patterns.`,
     );
   }
 }

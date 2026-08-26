@@ -331,7 +331,7 @@ function clampMonitoredState(data: Record<string, unknown>): void {
 // ─── Asset list: server-side filter / sort / pagination ────────────────────
 //
 // The assets table runs TableSF in *server-side mode* (mirrors the Events page,
-// see design/POLARIS-UI-GUIDE.md Part II → "Sortable + filterable data table (server-side mode)"):
+// see UI-CANON.md → "Sortable + filterable data table (server-side mode)"):
 // every filter + sort the operator sets on a column header is translated into
 // query params here, and only one page of rows is shipped to the browser. This
 // is what keeps the page fast at 12k+ assets — the prior frontend pulled the
@@ -1759,7 +1759,7 @@ function resolveRange(req: any): { since: Date; until: Date; rangeLabel: string 
  * sample is hidden but its presence lets the line enter the chart from the
  * left edge instead of starting partway through. Stats stay scoped to the
  * visible window (filtered in the service). See the "Time-series chart
- * (SVG)" section of design/POLARIS-UI-GUIDE.md Part II.
+ * (SVG)" section of UI-CANON.md.
  *
  *   - detail tier (bucketSeconds=0): 5-minute lookback — covers ~1-5 polls
  *     at 1m/2m/5m cadences without bloating the query.

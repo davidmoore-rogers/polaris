@@ -186,7 +186,7 @@ function _chartRangeBtnsHTML(barClass, entries, prefKey, fallback) {
 // Lookback-overflow clipping helpers. The history endpoints fetch ~1 bucket
 // of samples BEFORE the visible window so the chart's polyline enters from
 // the left edge with continuous data instead of starting partway through;
-// see the "Time-series chart (SVG)" section of design/POLARIS-UI-GUIDE.md Part II. The chart
+// see the "Time-series chart (SVG)" section of UI-CANON.md. The chart
 // renderer hides those pre-since samples by wrapping every data-drawing
 // element (polyline / dots / failure lines / hit targets) in a <g> bound
 // to a per-chart clipPath that matches the inner plot area exactly.
@@ -396,7 +396,7 @@ function _applyCustomRangeSelection(ui, fromIso, toIso) {
 }
 
 // Renders a stats line into the given container using the canonical
-// Response Time format (see design/POLARIS-UI-GUIDE.md Part II → "Time-series chart (SVG)"): leading "<count> samples"
+// Response Time format (see UI-CANON.md → "Time-series chart (SVG)"): leading "<count> samples"
 // span (count bolded), then one "<Label>: <value>" span per metric.
 // Flex gap on the container handles visual separation. Also writes a
 // plaintext summary to container.dataset.summary for screenshot
@@ -546,7 +546,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
-  // The row's verbs live behind the hostname (design/POLARIS-UI-GUIDE.md Part II → "Row context
+  // The row's verbs live behind the hostname (UI-CANON.md → "Row context
   // menu"). Built from the row RECORD in _assetsData, not the trigger's
   // data-* attributes, because the quarantine verbs depend on the asset's MAC,
   // status and type.
@@ -1713,7 +1713,7 @@ if (typeof userReady !== "undefined" && userReady && typeof userReady.then === "
 /**
  * The "+ Add Asset(s)" menu's rows.
  *
- * Each row is gated by the key ITS OWN routes check, per design/POLARIS-UI-GUIDE.md Part II -> "Row
+ * Each row is gated by the key ITS OWN routes check, per UI-CANON.md -> "Row
  * context menu": the hand-typed form is `assets:write` (POST /assets), while a
  * Discovery is the separate `networkScan` key (an active sweep of
  * operator-supplied ranges is a capability an admin may want to withhold from
@@ -6288,7 +6288,7 @@ function _openInstallAgentModal(a) {
         '<p class="hint">The credential needs admin rights on the target host (the installer creates a Windows Service and writes under <code>%ProgramFiles%\\Polaris\\Agent\\</code>).</p>' +
       '</div>';
 
-    // Match the canonical modal pattern (design/POLARIS-UI-GUIDE.md Part II → Modal): build the
+    // Match the canonical modal pattern (UI-CANON.md → Modal): build the
     // body + a footer string + use openModal directly, then bind the
     // primary button's onclick. showFormModal is the right helper-of-
     // last-resort for plain OK/Cancel forms, but we need to KEEP the
@@ -6426,7 +6426,7 @@ function _openInstallAgentModal(a) {
 
 function _confirmUninstallAgent(a, force) {
   // showConfirm returns a Promise<boolean>; never use window.confirm
-  // (per design/POLARIS-UI-GUIDE.md Part II → Modal canonical pattern).
+  // (per UI-CANON.md → Modal canonical pattern).
   var prompt = force
     ? "Force-remove drops the local ManagedAgent row immediately without contacting the host. The agent's bearer has already been revoked, but the binary + service will remain on the host as an orphan — you'll need to clean those up manually. Continue?"
     : "Polaris will SSH into the host using the credential stored at install time, stop the agent, and remove the binary + service. The local row will be hard-deleted on success.";
@@ -8926,7 +8926,7 @@ async function _loadSensorHistoryFor(assetId, sensorName, range, callOpts) {
         });
     }
     // Stash the active selection on the chart so silent ticks / probe-now
-    // refetch the same view (canonical convention: design/POLARIS-UI-GUIDE.md Part II → "Time-series chart (SVG)").
+    // refetch the same view (canonical convention: UI-CANON.md → "Time-series chart (SVG)").
     if (opts.from && opts.to) {
       chartEl.dataset.from = opts.from;
       chartEl.dataset.to   = opts.to;
@@ -16961,7 +16961,7 @@ function _ipHistoryTableHTML(rows) {
 // popup, scoped to one asset (resourceType=asset, resourceId baked into every
 // fetch). events.js is only loaded on events.html, so its renderTable /
 // showEventDetail / TableSF wiring aren't available here — these mirror
-// public/js/events.js. Follows design/POLARIS-UI-GUIDE.md Part II → "Sortable + filterable data
+// public/js/events.js. Follows UI-CANON.md → "Sortable + filterable data
 // table (server-side mode)" + offset pagination outside TableSF, and
 // applyTableLayout for the column resize/chooser (dynamic-table variant).
 var _assetEventsCurrentPage = [];   // current page of rows (Detail lookup by idx)
@@ -19928,7 +19928,7 @@ function _monsetOpenOverrideEditor(existing) {
   //
   // Stream-subtab layout — Response Time / CPU+Memory / Temperature /
   // Interfaces / LLDP / Storage — matches the canonical design in
-  // design/POLARIS-UI-GUIDE.md Part II ("Polling methods section"). Reuses `_classStreamSubtabHTML`
+  // UI-CANON.md ("Polling methods section"). Reuses `_classStreamSubtabHTML`
   // with `isPrimary=false` + prefix `monset-ov-` so generated input ids
   // follow the same convention Manual Monitoring uses (polling/MIB selects
   // at `monset-ov-tier-<pollField>` / `monset-ov-tier-<streamKey>Mib`;

@@ -3,8 +3,9 @@
 This is the short, practical version of the working agreements. The
 authoritative, always-loaded source is **[CLAUDE.md](CLAUDE.md)** — when this
 file and CLAUDE.md disagree, CLAUDE.md wins. Deeper material lives in
-[ARCHITECTURE.md](ARCHITECTURE.md), [TOUCHES.md](TOUCHES.md), and the design
-system in [design/POLARIS-UI-GUIDE.md](design/POLARIS-UI-GUIDE.md).
+[ARCHITECTURE.md](ARCHITECTURE.md), [TOUCHES.md](TOUCHES.md), the UI canon in
+[UI-CANON.md](UI-CANON.md), and the portable design system it builds on in
+[design/POLARIS-UI-GUIDE.md](design/POLARIS-UI-GUIDE.md).
 
 ## Getting started
 
@@ -64,7 +65,7 @@ and the integration suite against a `postgres:15` service container
   integration usually applies to the other; ship both unless it's structurally
   FMG-only.
 - Model new work after the canonical implementation — UI patterns in
-  [design/POLARIS-UI-GUIDE.md](design/POLARIS-UI-GUIDE.md) Part II, backend
+  [UI-CANON.md](UI-CANON.md), backend
   patterns in TOUCHES.md → Canonical backend patterns — rather than inventing
   a parallel pattern.
 
@@ -72,7 +73,7 @@ and the integration suite against a `postgres:15` service container
 
 - **One logical change per commit.** Don't batch unrelated work.
 - **Before every commit, re-read CLAUDE.md / ARCHITECTURE.md / TOUCHES.md /
-  design/POLARIS-UI-GUIDE.md** and update anything the change moved, broke, or
+  UI-CANON.md** and update anything the change moved, broke, or
   invalidated —
   in the same commit. The pre-commit hook + `npm run check:docs` enforce the
   *structural* half (every model/service/job/route named, no `file:line` or
