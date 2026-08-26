@@ -173,3 +173,105 @@ describe("sparklineSvg", () => {
     expect(svg).toContain("peak 90%");
   });
 });
+
+describe("failed-poll spans", () => {
+  // A flat line through an outage is the misleading picture this exists to
+  // prevent: the samples on either side are real, the straight segment between
+  // them is an interpolation across the exact minutes nothing answered.
+  const fiveMin = series([10, 20, 30, 40, 50]); // T0 .. T0+4min
+
+  it("shades the failed window red", () => {
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 60_000, to: T0 + 120_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect(svg).toContain('fill="#dc2626"');
+  });
+
+  it("breaks the line across the gap instead of interpolating through it", () => {
+    const solid = sparklineSvg(fiveMin, { label: "CPU", from: T0, to: T0 + 240_000 });
+    const broken = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect((solid.match(/<polyline/g) ?? []).length).toBe(1);
+    // Two runs — before the gap and after it.
+    expect((broken.match(/<polyline/g) ?? []).length).toBe(2);
+  });
+
+  it("fades the bridging segment out and back in rather than dropping it", () => {
+    // Nothing at all across the gap would read as a chart that stopped
+    // rendering; the fade says "the line goes through here, we just don't know
+    // where".
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect(svg).toContain("<linearGradient");
+    expect(svg).toContain("stop-opacity=\"0.05\"");
+    expect(svg).toMatch(/stroke="url\(#polaris-fade-\d+\)"/);
+  });
+
+  it("fades out to the right when the device is still down as the email sends", () => {
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 240_000, to: T0 + 600_000 }],
+      from: T0,
+      to: T0 + 600_000,
+    });
+    // One unbroken run (the failures are all after the last sample) plus a
+    // trailing fade.
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(1);
+    expect(svg).toContain("<linearGradient");
+    expect(svg).toContain("stop-opacity=\"0\"");
+  });
+
+  it("does not fill the area under a gap", () => {
+    // The translucent fill is what makes an outage look like a period of
+    // readings; each run closes at its own extent instead.
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect((svg.match(/<polygon/g) ?? []).length).toBe(2);
+  });
+
+  it("ignores a span outside the charted window", () => {
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 - 7_200_000, to: T0 - 3_600_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect(svg).not.toContain('fill="#dc2626"');
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(1);
+  });
+
+  it("draws nothing extra when no poll failed", () => {
+    const svg = sparklineSvg(fiveMin, { label: "CPU", failSpans: [], from: T0, to: T0 + 240_000 });
+    expect(svg).not.toContain('fill="#dc2626"');
+    expect(svg).not.toContain("<linearGradient");
+  });
+
+  it("still stays self-contained and NaN-free with gaps", () => {
+    const svg = sparklineSvg(fiveMin, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
+      from: T0,
+      to: T0 + 240_000,
+    });
+    expect(svg).not.toContain("NaN");
+    // The gradient is an in-document reference, not a fetch — resvg has no
+    // network and a mail client would block one.
+    expect(svg).not.toMatch(/href=|<image/);
+    expect(svg).toMatch(/url\(#polaris-fade-\d+\)/);
+  });
+});

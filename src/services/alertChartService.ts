@@ -267,7 +267,67 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
   });
   // Failed probes are excluded deliberately: they have no response time, and
   // plotting them as 0 would draw a fast device instead of an unreachable one.
+  // Where they WERE is not lost — loadFailSpans turns them into the red bands
+  // the chart breaks its line over.
   return thin(rows.map((r) => ({ t: r.timestamp.getTime(), v: r.responseTimeMs! })));
+}
+
+/** The charts that shade failed polls: the device-story trio. Not the loss
+ *  chart (it IS the failures, drawn as a ratio) and not the sensor chart
+ *  (its red shading is the device's own alarm bit — two red vocabularies on
+ *  one chart would be unreadable). */
+const FAIL_SPAN_TOKENS: ReadonlySet<ChartToken> = new Set(["chart.cpu", "chart.memory", "chart.responseTime"]);
+
+export interface FailSpanSeries {
+  /** Merged consecutive-failure spans, for the red bands + line breaks. */
+  spans: Array<{ from: number; to: number }>;
+  /** How many polls failed in the window — the text fallback's number. */
+  failedCount: number;
+}
+
+/**
+ * Failed-poll spans for the chart window. Pure; `rows` must be ascending.
+ *
+ * Consecutive failures merge into one span rather than a sliver per sample,
+ * and a run still failing at the newest sample is OPEN — it extends to
+ * `windowEndMs` (the chart's "now"), because a device that is down as the
+ * email sends is down up to the right edge, not up to its last poll.
+ */
+export function failSpansFrom(rows: Array<{ timestamp: Date; success: boolean }>, windowEndMs: number): FailSpanSeries {
+  const spans: Array<{ from: number; to: number }> = [];
+  let open: { from: number; to: number } | null = null;
+  let failedCount = 0;
+  for (const r of rows) {
+    const t = r.timestamp.getTime();
+    if (!r.success) {
+      failedCount++;
+      if (open) open.to = t;
+      else open = { from: t, to: t };
+    } else if (open) {
+      spans.push(open);
+      open = null;
+    }
+  }
+  if (open) {
+    open.to = Math.max(open.to, windowEndMs);
+    spans.push(open);
+  }
+  return { spans, failedCount };
+}
+
+/**
+ * The DB half: PRIMARY polls only, deliberately. The ICMP loss sampler fires
+ * every 10s/5s precisely because probes are failing (rule 30 — ICMP never
+ * confirms anything), so letting its rows define outage bands would paint
+ * failure the operator's configured cadence never declared.
+ */
+async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<FailSpanSeries> {
+  const rows = await prisma.assetMonitorSample.findMany({
+    where: { assetId, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
+    orderBy: { timestamp: "asc" },
+    select: { timestamp: true, success: true },
+  });
+  return failSpansFrom(rows, now.getTime());
 }
 
 /** Bucket width for the packet-loss series — 30 points across the hour. */
@@ -486,26 +546,30 @@ export async function buildAlertCharts(
   let rt: SparkPoint[] = [];
   let loss: ProbeLossSeries = { points: [], ratioPct: null };
   let sensor: SensorSeries = { points: [], alarmSpans: [], unit: "", sensorClass: null };
+  let fail: FailSpanSeries = { spans: [], failedCount: 0 };
   try {
     const needTelemetry = wanted.has("chart.cpu") || wanted.has("chart.memory");
+    const needFailSpans = [...wanted].some((t) => FAIL_SPAN_TOKENS.has(t));
     // The display unit is install-wide branding, not per-user: an alert email
     // has no session behind it. Read once, only when a sensor is charted.
     const displayUnit = wanted.has("chart.sensor")
       ? await getBranding().then((b) => b.temperatureUnit).catch(() => "c" as const)
       : ("c" as const);
-    const [tel, rtRows, sensorRows, lossRows] = await Promise.all([
+    const [tel, rtRows, sensorRows, lossRows, failRows] = await Promise.all([
       needTelemetry ? loadTelemetry(assetId, since) : Promise.resolve({ cpu: [], mem: [] }),
       wanted.has("chart.responseTime") ? loadResponseTimes(assetId, since) : Promise.resolve([]),
       wanted.has("chart.sensor")
         ? loadSensorSeries(assetId, opts!.sensorName!, since, displayUnit)
         : Promise.resolve(sensor),
       wanted.has("chart.probeLoss") ? loadProbeLoss(assetId, lossSince, lossBucketMs(lossWindowMs)) : Promise.resolve(loss),
+      needFailSpans ? loadFailSpans(assetId, since, now) : Promise.resolve(fail),
     ]);
     cpu = tel.cpu;
     mem = tel.mem;
     rt = rtRows;
     sensor = sensorRows;
     loss = lossRows;
+    fail = failRows;
   } catch (err) {
     logger.warn({ err: (err as Error)?.message, assetId }, "alert chart sample load failed — sending without charts");
   }
@@ -535,6 +599,7 @@ export async function buildAlertCharts(
     // its buckets — the number the automation actually fired on. See
     // probeLossSeriesFrom.
     const avgOverride = isLoss ? loss.ratioPct : null;
+    const withFailSpans = FAIL_SPAN_TOKENS.has(token) && fail.spans.length > 0;
     const svg = sparklineSvg(points, {
       label,
       unit,
@@ -542,6 +607,7 @@ export async function buildAlertCharts(
       ...(meta.percent ? { yMin: 0, yMax: 100 } : {}),
       threshold: opts?.thresholds?.[token] ?? null,
       ...(isSensor && sensor.alarmSpans.length ? { alarmSpans: sensor.alarmSpans } : {}),
+      ...(withFailSpans ? { failSpans: fail.spans } : {}),
       from: (isLoss ? lossSince : since).getTime(),
       to: now.getTime(),
       avgOverride,
@@ -556,7 +622,11 @@ export async function buildAlertCharts(
         // An alarm-triggered alert charts the VALUE; the bit itself is what the
         // automation fired on, so the text has to carry it too — image blocking
         // is on by default in plenty of clients.
-        (isSensor && sensor.alarmSpans.length ? " — the device raised its own alarm during this window" : ""),
+        (isSensor && sensor.alarmSpans.length ? " — the device raised its own alarm during this window" : "") +
+        // Same reason: the red bands are the only thing saying the flat stretch
+        // is missing data rather than a steady reading, so a text reader needs
+        // the count.
+        (withFailSpans ? ` — ${fail.failedCount} poll${fail.failedCount === 1 ? "" : "s"} failed during this window` : ""),
       attachment: png
         ? { cid, filename: `${token.replace(".", "-")}.png`, contentType: "image/png", content: png }
         : null,

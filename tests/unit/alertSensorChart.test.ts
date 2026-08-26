@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from "vitest";
 import { sparklineSvg } from "../../src/utils/sparklineSvg.js";
 import {
   chartTokenForMetric,
+  failSpansFrom,
   substituteChartTokens,
   type RenderedChart,
   type ChartToken,
@@ -120,6 +121,38 @@ describe("the sensor chart labels itself from the sensor", () => {
     const svg = sparklineSvg(pts([61, 62]), { label: "CPU ON-DIE Temperature", unit: " °C" });
     expect(svg).toContain("CPU ON-DIE Temperature");
     expect(svg).toContain("°C");
+  });
+});
+
+describe("failSpansFrom", () => {
+  const probe = (min: number, success: boolean) => ({ timestamp: new Date(T0 + min * 60_000), success });
+  const END = T0 + 10 * 60_000;
+
+  it("merges consecutive failures into one span, not a sliver per probe", () => {
+    const { spans, failedCount } = failSpansFrom(
+      [probe(0, true), probe(1, false), probe(2, false), probe(3, false), probe(4, true)],
+      END,
+    );
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 180_000 }]);
+    expect(failedCount).toBe(3);
+  });
+
+  it("keeps separate outages separate", () => {
+    const { spans } = failSpansFrom([probe(0, false), probe(1, true), probe(2, false), probe(3, true)], END);
+    expect(spans).toHaveLength(2);
+  });
+
+  it("leaves a still-failing run OPEN to the window's end", () => {
+    // A device that is down as the email sends is down up to the right edge of
+    // the chart, not up to whenever its last poll happened to land — otherwise
+    // the shading stops short and the line looks like it merely ended.
+    const { spans } = failSpansFrom([probe(0, true), probe(8, false), probe(9, false)], END);
+    expect(spans).toEqual([{ from: T0 + 8 * 60_000, to: END }]);
+  });
+
+  it("is empty when everything answered", () => {
+    expect(failSpansFrom([probe(0, true), probe(1, true)], END)).toEqual({ spans: [], failedCount: 0 });
+    expect(failSpansFrom([], END)).toEqual({ spans: [], failedCount: 0 });
   });
 });
 

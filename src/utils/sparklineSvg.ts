@@ -63,6 +63,15 @@ export interface SparklineOptions {
    * never changes).
    */
   alarmSpans?: Array<{ from: number; to: number }>;
+  /**
+   * Spans (epoch ms) where the device's polls FAILED. Shaded red like
+   * alarmSpans, and — the part that matters — the line is BROKEN across each
+   * span: the segment bridging a failure fades out and back in instead of
+   * interpolating a healthy-looking straight line through the exact period
+   * nothing answered. A span still open at the last point fades the line out
+   * to the right rather than just stopping it.
+   */
+  failSpans?: Array<{ from: number; to: number }>;
 }
 
 const W = 520;
@@ -197,28 +206,95 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     })
     .join("");
 
-  // Alarm bands sit BEHIND everything (drawn first) so the line stays readable
+  // Red bands sit BEHIND everything (drawn first) so the line stays readable
   // over them. Clamped to the plot, and a zero-width span still gets ~2px so a
-  // single alarming sample is visible rather than invisible.
-  const alarmBands = (opts.alarmSpans ?? [])
-    .map((s) => {
-      const x1 = Math.max(PAD_L, Math.min(x(s.from), PAD_L + plotW));
-      const x2 = Math.max(PAD_L, Math.min(x(s.to), PAD_L + plotW));
-      const w = Math.max(2, x2 - x1);
-      return `<rect x="${x1.toFixed(1)}" y="${PAD_T}" width="${w.toFixed(1)}" height="${plotH}" fill="#dc2626" fill-opacity="0.13"/>`;
-    })
-    .join("");
+  // single alarming/failed sample is visible rather than invisible.
+  const bandRects = (spans: Array<{ from: number; to: number }>, opacity: string): string =>
+    spans
+      .map((s) => {
+        const x1 = Math.max(PAD_L, Math.min(x(s.from), PAD_L + plotW));
+        const x2 = Math.max(PAD_L, Math.min(x(s.to), PAD_L + plotW));
+        const w = Math.max(2, x2 - x1);
+        return `<rect x="${x1.toFixed(1)}" y="${PAD_T}" width="${w.toFixed(1)}" height="${plotH}" fill="#dc2626" fill-opacity="${opacity}"/>`;
+      })
+      .join("");
+  const failSpans = (opts.failSpans ?? []).filter((s) => s.to > from && s.from < to).sort((a, b) => a.from - b.from);
+  const alarmBands = bandRects(opts.alarmSpans ?? [], "0.13");
+  const failBands = bandRects(failSpans, "0.10");
 
-  const pts = points.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`);
-  const line = `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${pts.join(" ")}"/>`;
-  const area =
-    `<polygon fill="${color}" fill-opacity="0.10" points="${PAD_L},${PAD_T + plotH} ${pts.join(" ")} ${(PAD_L + plotW).toFixed(1)},${PAD_T + plotH}"/>`;
+  // Failure spans break the line into runs: interpolating straight across an
+  // outage draws a healthy-looking reading through the exact period nothing
+  // answered. Each gap is bridged by a gradient stroke that fades out and back
+  // in instead.
+  const gapBetween = (a: SparkPoint, b: SparkPoint) => failSpans.some((s) => s.to > a.t && s.from < b.t);
+  const runs: SparkPoint[][] = [];
+  for (const p of points) {
+    const cur = runs[runs.length - 1];
+    if (cur && !gapBetween(cur[cur.length - 1]!, p)) cur.push(p);
+    else runs.push([p]);
+  }
 
-  // A single sample has no line to draw — mark it so the chart isn't empty.
-  const dot =
-    points.length === 1
-      ? `<circle cx="${x(points[0]!.t).toFixed(1)}" cy="${y(points[0]!.v).toFixed(1)}" r="3" fill="${color}"/>`
-      : "";
+  const baseY = `${PAD_T + plotH}`;
+  const defs: string[] = [];
+  // Gradients are local defs, not external references — resvg resolves them
+  // in-document. Stops are in user space so the fade tracks the gap's own x.
+  const fadeLine = (x1: number, y1: number, x2: number, y2: number, kind: "bridge" | "out" | "in"): string => {
+    if (x2 - x1 < 1) return "";
+    const id = `polaris-fade-${defs.length}`;
+    const stops =
+      kind === "bridge"
+        ? `<stop offset="0" stop-color="${color}" stop-opacity="0.9"/><stop offset="0.5" stop-color="${color}" stop-opacity="0.05"/><stop offset="1" stop-color="${color}" stop-opacity="0.9"/>`
+        : kind === "out"
+          ? `<stop offset="0" stop-color="${color}" stop-opacity="0.9"/><stop offset="1" stop-color="${color}" stop-opacity="0"/>`
+          : `<stop offset="0" stop-color="${color}" stop-opacity="0"/><stop offset="1" stop-color="${color}" stop-opacity="0.9"/>`;
+    defs.push(
+      `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}">${stops}</linearGradient>`,
+    );
+    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="url(#${id})" stroke-width="2" stroke-linecap="round"/>`;
+  };
+
+  const lineParts: string[] = [];
+  const areaParts: string[] = [];
+  const dotParts: string[] = [];
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i]!;
+    const rp = run.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`);
+    if (run.length === 1) {
+      // A single sample has no line to draw — mark it so it isn't invisible.
+      dotParts.push(`<circle cx="${x(run[0]!.t).toFixed(1)}" cy="${y(run[0]!.v).toFixed(1)}" r="3" fill="${color}"/>`);
+    } else {
+      lineParts.push(
+        `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${rp.join(" ")}"/>`,
+      );
+      // The fill closes vertically at the run's own extent, so an outage gap
+      // isn't filled and a series that ends mid-window doesn't ramp to the
+      // corner.
+      areaParts.push(
+        `<polygon fill="${color}" fill-opacity="0.10" points="${x(run[0]!.t).toFixed(1)},${baseY} ${rp.join(" ")} ${x(run[run.length - 1]!.t).toFixed(1)},${baseY}"/>`,
+      );
+    }
+    if (i > 0) {
+      const prev = runs[i - 1]!;
+      const a = prev[prev.length - 1]!;
+      const b = run[0]!;
+      lineParts.push(fadeLine(x(a.t), y(a.v), x(b.t), y(b.v), "bridge"));
+    }
+  }
+  // A failure open past the last point (still down as the email sends) fades
+  // the line out to the right; one open before the first point fades it in.
+  if (runs.length > 0) {
+    const first = runs[0]![0]!;
+    const lastRun = runs[runs.length - 1]!;
+    const last = lastRun[lastRun.length - 1]!;
+    const leadFroms = failSpans.filter((s) => s.from < first.t).map((s) => Math.max(s.from, from));
+    if (leadFroms.length) lineParts.push(fadeLine(x(Math.min(...leadFroms)), y(first.v), x(first.t), y(first.v), "in"));
+    const trailTos = failSpans.filter((s) => s.to > last.t).map((s) => Math.min(s.to, to));
+    if (trailTos.length) lineParts.push(fadeLine(x(last.t), y(last.v), x(Math.max(...trailTos)), y(last.v), "out"));
+  }
+  const defsBlock = defs.length ? `<defs>${defs.join("")}</defs>` : "";
+  const line = lineParts.join("");
+  const area = areaParts.join("");
+  const dot = dotParts.join("");
 
   const thresholdLine =
     opts.threshold != null && opts.threshold >= yMin && opts.threshold <= yMax
@@ -235,5 +311,5 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-${esc(timeAxisLabel(tSpan))}</text>` +
     `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
 
-  return head + alarmBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
+  return head + defsBlock + alarmBands + failBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
 }
