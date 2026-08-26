@@ -34,6 +34,8 @@ import {
   isSigningConfigured,
   buildJsignArgs,
   parseKeytoolAliases,
+  parseKeytoolCertInfo,
+  looksLikePkcs12,
   parseJavaHome,
   aliasAdvisory,
   isKeytoolMissing,
@@ -203,6 +205,100 @@ describe("parseKeytoolAliases", () => {
   it("returns an empty list for output with no entries", () => {
     expect(parseKeytoolAliases("Your keystore contains 0 entries")).toEqual([]);
     expect(parseKeytoolAliases("")).toEqual([]);
+  });
+});
+
+describe("looksLikePkcs12", () => {
+  const der = Buffer.concat([Buffer.from([0x30, 0x82, 0x0a, 0x00]), Buffer.alloc(80, 1)]);
+
+  it("accepts a DER-shaped buffer", () => {
+    expect(looksLikePkcs12(der).ok).toBe(true);
+  });
+
+  // The likeliest operator mistake, and worth its own message: both
+  // `openssl pkcs12` and the Windows export wizard can emit base64.
+  it("names the PEM case specifically rather than saying 'not a keystore'", () => {
+    const pem = Buffer.from("-----BEGIN CERTIFICATE-----\n" + "A".repeat(80));
+    const res = looksLikePkcs12(pem);
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/PEM/);
+    expect(res.error).toMatch(/private key/i);
+  });
+
+  it("rejects a too-small file and a non-DER first byte", () => {
+    expect(looksLikePkcs12(Buffer.alloc(10)).ok).toBe(false);
+    expect(looksLikePkcs12(Buffer.concat([Buffer.from([0x89]), Buffer.alloc(80)])).ok).toBe(false);
+  });
+});
+
+describe("parseKeytoolCertInfo", () => {
+  const NOW = Date.parse("2026-08-26T00:00:00Z");
+  const VERBOSE = [
+    "Keystore type: PKCS12",
+    "Keystore provider: SUN",
+    "",
+    "Your keystore contains 1 entry",
+    "",
+    "Alias name: codesign",
+    "Creation date: Aug 26, 2026",
+    "Entry type: PrivateKeyEntry",
+    "Certificate chain length: 2",
+    "Certificate[1]:",
+    "Owner: CN=Example Publisher, O=Example Org",
+    "Issuer: CN=Example Issuing CA, DC=example, DC=com",
+    "Serial number: 1a2b3c",
+    "Valid from: Wed Aug 26 00:00:00 UTC 2026 until: Fri Aug 26 00:00:00 UTC 2028",
+    "Certificate fingerprints:",
+    "\t SHA1: AA:BB:CC",
+    "\t SHA256: 11:22:33:44:55",
+  ].join("\n");
+
+  it("pulls subject, issuer, fingerprint, aliases and the private-key flag", () => {
+    const info = parseKeytoolCertInfo(VERBOSE, NOW);
+    expect(info.subject).toBe("CN=Example Publisher, O=Example Org");
+    expect(info.issuer).toBe("CN=Example Issuing CA, DC=example, DC=com");
+    expect(info.fingerprintSha256).toBe("11:22:33:44:55");
+    expect(info.aliases).toEqual(["codesign"]);
+    expect(info.hasPrivateKey).toBe(true);
+  });
+
+  it("computes daysRemaining from the injected clock", () => {
+    const info = parseKeytoolCertInfo(VERBOSE, NOW);
+    expect(info.validUntilRaw).toBe("Fri Aug 26 00:00:00 UTC 2028");
+    // 2026-08-26 → 2028-08-26 spans a leap year (2028), so 731 days.
+    expect(info.daysRemaining).toBe(731);
+  });
+
+  it("reports a negative daysRemaining once expired", () => {
+    const info = parseKeytoolCertInfo(VERBOSE, Date.parse("2029-08-26T00:00:00Z"));
+    expect(info.daysRemaining).toBeLessThan(0);
+  });
+
+  // keytool formats dates per locale, so the countdown is best-effort — but the
+  // displayed expiry must never be lost to an unparseable one.
+  it("keeps the raw expiry when the date can't be parsed", () => {
+    const odd = VERBOSE.replace(
+      "Valid from: Wed Aug 26 00:00:00 UTC 2026 until: Fri Aug 26 00:00:00 UTC 2028",
+      "Valid from: 26.08.2026 г. until: 26.08.2028 г.",
+    );
+    const info = parseKeytoolCertInfo(odd, NOW);
+    expect(info.validUntilRaw).toBe("26.08.2028 г.");
+    expect(info.daysRemaining).toBeUndefined();
+    expect(info.validUntil).toBeUndefined();
+  });
+
+  // A keystore with only a cert can't sign — installKeystore refuses it, so
+  // this flag has to be right.
+  it("flags a keystore with no private key", () => {
+    const certOnly = VERBOSE.replace("Entry type: PrivateKeyEntry", "Entry type: trustedCertEntry");
+    expect(parseKeytoolCertInfo(certOnly, NOW).hasPrivateKey).toBe(false);
+  });
+
+  it("survives empty output", () => {
+    const info = parseKeytoolCertInfo("", NOW);
+    expect(info.hasPrivateKey).toBe(false);
+    expect(info.aliases).toEqual([]);
+    expect(info.subject).toBeUndefined();
   });
 });
 

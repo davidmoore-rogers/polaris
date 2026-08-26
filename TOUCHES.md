@@ -435,7 +435,7 @@ build auto-prune + boot-time auto-build are layered on top.
   is what keeps signatures valid past cert expiry), the keytool-backed (bare
   name, then the JVM's own `java.home` — the headless JDK ships keytool beside the JVM, so a PATH miss is NOT an absent tool; a real absence only degrades the Test message, signing never uses keytool) keystore/alias check behind the Test button, the `signingAvailability()`
   probe (java on PATH + jar candidates + keystore READABILITY), and the
-  durable `agent.signing.lastFailure` Setting behind the sidebar alert.
+  durable `agent.signing.lastFailure` Setting behind the sidebar alert, and the operator keystore upload (`installKeystore` validate-then-rename into `SIGNING_DIR`, which is under `data/` and NOT `UPLOADS_DIR` — that one is served at `/uploads/<file>`, so a keystore there would be downloadable; `removeManagedKeystore` only ever touches the managed path).
   `agentBuildService.signWindowsBinaries()` calls it between the platform
   loop and the manifest write; phase `"signing"`, steps `sign / windows-<arch>`. **FAIL-OPEN:** a failure emits `agent.build.sign_failed` (warning) + stamps the failure Setting but the build completes and ships unsigned — never blocks agent rollout.
   A fully-signed build (or disabling signing) clears the stamp. Routes:

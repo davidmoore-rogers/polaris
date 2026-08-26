@@ -2460,10 +2460,28 @@ router.put("/agents/server-url", requirePermission("serverSettingsSystem", "full
 
 router.get("/agents/signing", async (_req, res, next) => {
   try {
-    const { getSigningConfigMasked, signingAvailability } =
-      await import("../../services/agentSigningService.js");
+    const {
+      getSigningConfigMasked, getSigningConfigRaw, signingAvailability,
+      keystoreCertInfo, MANAGED_KEYSTORE_PATH,
+    } = await import("../../services/agentSigningService.js");
     const config = await getSigningConfigMasked();
-    res.json({ config, availability: await signingAvailability() });
+    const availability = await signingAvailability();
+    // Cert details are best-effort enrichment — an unreadable keystore or a
+    // missing keytool already has its own error on `availability`, so this
+    // returning null is never the only signal something is wrong. Skipped
+    // entirely when the keystore isn't readable, to avoid a pointless exec.
+    const certInfo = availability.keystoreOk
+      ? await keystoreCertInfo(await getSigningConfigRaw())
+      : null;
+    res.json({
+      config,
+      availability,
+      certInfo,
+      // Drives whether the UI offers Delete: an operator-typed path points at a
+      // file Polaris didn't place, and removing it would be a surprise.
+      keystoreManaged: config.keystorePath === MANAGED_KEYSTORE_PATH,
+      managedKeystorePath: MANAGED_KEYSTORE_PATH,
+    });
   } catch (err) { next(err); }
 });
 
@@ -2553,6 +2571,104 @@ router.post("/agents/signing/test", requirePermission("serverSettingsSystem", "f
     res.json(result);
   } catch (err) { next(err); }
 });
+
+// ─── Agent signing keystore upload ─────────────────────────────────────────
+// Lets an operator install the PKCS#12 through the UI instead of needing shell
+// access on the Polaris host — which matters most on RENEWAL, an operation that
+// otherwise recurs on the certificate's schedule forever.
+//
+// The permission is the same `serverSettingsSystem=fullwrite` that already
+// gates the signing config, and that IS the right bar: a caller who can point
+// keystorePath at any file the service user can read is already choosing what
+// signs the fleet's agents. This only adds the ability to put the file there.
+//
+// 256 KB cap: a PKCS#12 with its chain is a few KB, so anything near this is
+// not a keystore. Memory storage — the buffer is validated before it is ever
+// promoted to the managed path (see installKeystore), so nothing unvalidated
+// touches the location signing reads from.
+const keystoreUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 256 * 1024 } });
+
+router.post(
+  "/agents/signing/keystore",
+  maintenanceLimiter,
+  requirePermission("serverSettingsSystem", "fullwrite"),
+  keystoreUpload.single("file"),
+  async (req, res, next) => {
+    try {
+      const { installKeystore, getSigningConfigMasked, signingAvailability } =
+        await import("../../services/agentSigningService.js");
+      const { logEvent } = await import("./events.js");
+      const actor = req.session?.username || "unknown";
+
+      if (!req.file) throw new AppError(400, "No file uploaded");
+      const password = typeof req.body?.password === "string" ? req.body.password : "";
+
+      const result = await installKeystore(req.file.buffer, password);
+
+      // Warning level, not info: this installs the key that signs every agent
+      // binary the fleet trusts. The fingerprint is recorded because it's the
+      // value an operator needs for a Defender indicator, and because it's how
+      // a later "which key signed that build?" question gets answered. The
+      // PASSWORD is never logged.
+      await logEvent({
+        action:       "agent.signing.keystore_uploaded",
+        level:        "warning",
+        actor,
+        resourceType: "polaris-agent",
+        message:
+          `Agent code-signing keystore installed (${result.verified ? "verified" : "UNVERIFIED"})` +
+          (result.info?.subject ? ` — ${result.info.subject}` : ""),
+        details: {
+          verified:          result.verified,
+          bytes:             req.file.size,
+          subject:           result.info?.subject ?? null,
+          issuer:            result.info?.issuer ?? null,
+          validUntil:        result.info?.validUntilRaw ?? null,
+          fingerprintSha256: result.info?.fingerprintSha256 ?? null,
+          aliases:           result.info?.aliases ?? [],
+        },
+      });
+
+      res.json({
+        ...result,
+        config:       await getSigningConfigMasked(),
+        availability: await signingAvailability(),
+      });
+    } catch (err) { next(err); }
+  },
+);
+
+router.delete(
+  "/agents/signing/keystore",
+  maintenanceLimiter,
+  requirePermission("serverSettingsSystem", "fullwrite"),
+  async (req, res, next) => {
+    try {
+      const { removeManagedKeystore, getSigningConfigMasked, signingAvailability } =
+        await import("../../services/agentSigningService.js");
+      const { logEvent } = await import("./events.js");
+      const actor = req.session?.username || "unknown";
+
+      const { removed } = await removeManagedKeystore();
+      await logEvent({
+        action:       "agent.signing.keystore_removed",
+        level:        "warning",
+        actor,
+        resourceType: "polaris-agent",
+        message:      removed
+          ? "Agent code-signing keystore deleted — builds will ship unsigned until one is installed"
+          : "Agent code-signing keystore delete requested, but none was stored",
+        details:      { removed },
+      });
+
+      res.json({
+        removed,
+        config:       await getSigningConfigMasked(),
+        availability: await signingAvailability(),
+      });
+    } catch (err) { next(err); }
+  },
+);
 
 // ─── Agent cert-pin rotation (Phase 2 dual-pin) ────────────────────────────
 // Operators stage a new pin BEFORE rotating the server cert so the entire

@@ -55,11 +55,12 @@
 
 import { execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { stat, access } from "node:fs/promises";
+import { stat, access, mkdir, writeFile, rename, unlink, chmod } from "node:fs/promises";
 import { constants as FS } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { prisma } from "../db.js";
-import { STATE_DIR } from "../utils/paths.js";
+import { AppError } from "../utils/errors.js";
+import { STATE_DIR, SIGNING_DIR } from "../utils/paths.js";
 import { SECRET_MASK, isMaskedSecret } from "../utils/secretMask.js";
 import { asObject } from "../utils/object.js";
 
@@ -551,6 +552,241 @@ export async function resolveKeytoolPath(): Promise<string | null> {
 /** Is this verifyKeystore() error the degraded "no keytool" case? Pure. */
 export function isKeytoolMissing(error?: string): boolean {
   return Boolean(error && error.startsWith("keytool not available"));
+}
+
+// ─── Operator-uploaded keystore ───────────────────────────────────────
+
+/**
+ * Where an uploaded keystore is stored. One fixed filename, so re-uploading on
+ * renewal replaces in place rather than accumulating keys on disk — every
+ * surviving copy of a fleet-trusted signing key is another place it can leak
+ * from. Under SIGNING_DIR, which no static handler serves (see paths.ts).
+ */
+export const MANAGED_KEYSTORE_PATH = resolvePath(SIGNING_DIR, "codesign.pfx");
+
+/** Mode for the stored keystore: readable only by the service user. */
+const KEYSTORE_MODE = 0o400;
+
+/**
+ * Cheap structural gate before anything touches disk. A PKCS#12 is DER, so it
+ * opens with an ASN.1 SEQUENCE tag (0x30); a PEM export — the likeliest operator
+ * mistake, since `openssl pkcs12` and the Windows wizard can both emit
+ * base64 — starts with "-----". Naming that case explicitly saves an operator
+ * from re-reading the docs. Pure.
+ */
+export function looksLikePkcs12(buf: Buffer): { ok: boolean; error?: string } {
+  if (buf.length < 64) return { ok: false, error: "File is too small to be a PKCS#12 keystore" };
+  if (buf.subarray(0, 5).toString("latin1") === "-----") {
+    return { ok: false, error: "That looks like a PEM file — export the certificate as PKCS#12 (.pfx/.p12) with its private key" };
+  }
+  if (buf[0] !== 0x30) {
+    return { ok: false, error: "Not a PKCS#12 keystore (expected DER encoding)" };
+  }
+  return { ok: true };
+}
+
+export interface KeystoreCertInfo {
+  /** Certificate subject DN as keytool reports it ("Owner:"). */
+  subject?: string;
+  issuer?: string;
+  /** Raw "until" text from keytool — locale-formatted, shown verbatim. */
+  validUntilRaw?: string;
+  /** ISO form, only when the raw text parsed. */
+  validUntil?: string;
+  /** Whole days until expiry; negative once expired. Only when parseable. */
+  daysRemaining?: number;
+  /** SHA-256 fingerprint — the value to paste into a Defender indicator. */
+  fingerprintSha256?: string;
+  /** False when the keystore holds no PrivateKeyEntry (i.e. cannot sign). */
+  hasPrivateKey: boolean;
+  aliases: string[];
+}
+
+/**
+ * Parse `keytool -list -v` output. Pure so the shapes are unit-testable without
+ * a keystore.
+ *
+ * `nowMs` is injected rather than read from the clock so `daysRemaining` is
+ * deterministic in tests. Dates are LOCALE-FORMATTED by keytool, so the raw
+ * text is always kept and the parsed form is best-effort — a locale this can't
+ * read loses the countdown, never the displayed expiry.
+ */
+export function parseKeytoolCertInfo(stdout: string, nowMs: number): KeystoreCertInfo {
+  const info: KeystoreCertInfo = {
+    hasPrivateKey: /^\s*Entry type:\s*PrivateKeyEntry\s*$/m.test(stdout),
+    aliases: [],
+  };
+
+  for (const m of stdout.matchAll(/^\s*Alias name:\s*(.+?)\s*$/gm)) {
+    if (m[1]) info.aliases.push(m[1]);
+  }
+
+  const owner = /^\s*Owner:\s*(.+?)\s*$/m.exec(stdout);
+  if (owner?.[1]) info.subject = owner[1];
+  const issuer = /^\s*Issuer:\s*(.+?)\s*$/m.exec(stdout);
+  if (issuer?.[1]) info.issuer = issuer[1];
+
+  const valid = /^\s*Valid from:\s*(.+?)\s+until:\s*(.+?)\s*$/m.exec(stdout);
+  if (valid?.[2]) {
+    info.validUntilRaw = valid[2];
+    const parsed = Date.parse(valid[2]);
+    if (!Number.isNaN(parsed)) {
+      info.validUntil = new Date(parsed).toISOString();
+      info.daysRemaining = Math.floor((parsed - nowMs) / 86_400_000);
+    }
+  }
+
+  // keytool prints fingerprints on their own indented lines under
+  // "Certificate fingerprints:".
+  const fp = /^\s*SHA-?256:\s*([0-9A-Fa-f:]+)\s*$/m.exec(stdout);
+  if (fp?.[1]) info.fingerprintSha256 = fp[1].toUpperCase();
+
+  return info;
+}
+
+/**
+ * Read the installed keystore's certificate details for display. Returns null
+ * when there's no keystore, no keytool, or the password doesn't open it — every
+ * one of which is already reported by signingAvailability()/testSigningSetup(),
+ * so this stays a best-effort enrichment rather than a second error channel.
+ */
+export async function keystoreCertInfo(
+  cfg: Pick<AgentSigningConfig, "keystorePath" | "keystorePassword">,
+  nowMs: number = Date.now(),
+): Promise<KeystoreCertInfo | null> {
+  if (!cfg.keystorePath || !cfg.keystorePassword) return null;
+  const args = [
+    "-list", "-v", "-storetype", "PKCS12",
+    "-keystore", cfg.keystorePath,
+    "-storepass:env", SIGNING_PASSWORD_ENV,
+  ];
+  const opts = {
+    timeout: 15_000,
+    env: { ...process.env, [SIGNING_PASSWORD_ENV]: cfg.keystorePassword },
+    maxBuffer: 4 * 1024 * 1024,
+  };
+  try {
+    const { stdout } = await execFileAsync("keytool", args, opts);
+    return parseKeytoolCertInfo(stdout, nowMs);
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") return null;
+  }
+  const resolved = await resolveKeytoolPath();
+  if (!resolved) return null;
+  try {
+    const { stdout } = await execFileAsync(resolved, args, opts);
+    return parseKeytoolCertInfo(stdout, nowMs);
+  } catch {
+    return null;
+  }
+}
+
+export interface InstallKeystoreResult {
+  path: string;
+  /** False when keytool was unavailable — stored, but unverified. */
+  verified: boolean;
+  info: KeystoreCertInfo | null;
+  /** Operator-facing note when something is off but not fatal. */
+  warning?: string;
+}
+
+/**
+ * Validate an uploaded PKCS#12 and, only if it opens, install it as the managed
+ * keystore and point the config at it.
+ *
+ * Validate-then-commit is the whole point: the alternative is writing bytes to
+ * disk, pointing signing at them, and finding out at the next build that the
+ * password was wrong — by which time the previous working keystore is already
+ * overwritten. So the upload lands on a temp path in the SAME directory (making
+ * the promote a same-filesystem rename), is opened with the supplied password,
+ * and is only promoted once it answers.
+ *
+ * A keystore with no PrivateKeyEntry is REFUSED rather than warned about: it
+ * cannot sign, so accepting it would swap a working config for one guaranteed
+ * to fail at the next build.
+ *
+ * When keytool is genuinely unavailable the upload is accepted UNVERIFIED —
+ * jsign doesn't need keytool, so refusing would block a host that can sign
+ * perfectly well; the caller surfaces the warning.
+ */
+export async function installKeystore(
+  buffer: Buffer,
+  password: string,
+): Promise<InstallKeystoreResult> {
+  const shape = looksLikePkcs12(buffer);
+  if (!shape.ok) throw new AppError(400, shape.error ?? "Not a PKCS#12 keystore");
+  if (!password) throw new AppError(400, "The keystore password is required to validate the upload");
+
+  await mkdir(SIGNING_DIR, { recursive: true });
+  const tmpPath = `${MANAGED_KEYSTORE_PATH}.upload`;
+  await writeFile(tmpPath, buffer, { mode: KEYSTORE_MODE });
+
+  try {
+    const probe = await verifyKeystore({ keystorePath: tmpPath, keystorePassword: password });
+    let verified = probe.verified;
+    let warning: string | undefined;
+    let info: KeystoreCertInfo | null = null;
+
+    if (!probe.verified) {
+      if (!isKeytoolMissing(probe.error)) {
+        // Wrong password, corrupt file — say so and keep the previous keystore.
+        throw new AppError(400, `Keystore could not be opened: ${probe.error ?? "unknown error"}`);
+      }
+      verified = false;
+      warning =
+        "Stored, but NOT verified — keytool was unavailable, so the password could not be checked. " +
+        "Signing itself does not use keytool; a wrong password will surface at the next build.";
+    } else {
+      info = await keystoreCertInfo({ keystorePath: tmpPath, keystorePassword: password });
+      if (info && !info.hasPrivateKey) {
+        throw new AppError(
+          400,
+          "That keystore holds no private key, so it cannot sign. Re-export the certificate WITH its private key.",
+        );
+      }
+    }
+
+    // Same-directory rename → atomic promote; a crash mid-upload can't leave a
+    // half-written keystore in place of a working one.
+    await rename(tmpPath, MANAGED_KEYSTORE_PATH);
+    await chmod(MANAGED_KEYSTORE_PATH, KEYSTORE_MODE).catch(() => {
+      /* best effort — Windows has no POSIX mode */
+    });
+
+    await updateSigningConfig({ keystorePath: MANAGED_KEYSTORE_PATH, keystorePassword: password });
+    return { path: MANAGED_KEYSTORE_PATH, verified, info, warning };
+  } finally {
+    await unlink(tmpPath).catch(() => {
+      /* already promoted, or never written */
+    });
+  }
+}
+
+/**
+ * Delete the managed keystore and clear the config's pointer to it.
+ *
+ * Only ever touches MANAGED_KEYSTORE_PATH — an operator-typed path pointing at
+ * a keystore they placed themselves is left alone, since Polaris didn't put it
+ * there and deleting it would be a surprise. The password is cleared too: a
+ * stored password with no keystore is a secret kept for nothing.
+ */
+export async function removeManagedKeystore(): Promise<{ removed: boolean }> {
+  let removed = false;
+  try {
+    await unlink(MANAGED_KEYSTORE_PATH);
+    removed = true;
+  } catch {
+    /* nothing stored */
+  }
+  const cfg = await getSigningConfigRaw();
+  if (cfg.keystorePath === MANAGED_KEYSTORE_PATH) {
+    await prisma.setting.upsert({
+      where: { key: AGENT_SIGNING_SETTING_KEY },
+      update: { value: { ...cfg, keystorePath: "", keystorePassword: "" } as object },
+      create: { key: AGENT_SIGNING_SETTING_KEY, value: DEFAULT_SIGNING_CONFIG as object },
+    });
+  }
+  return { removed };
 }
 
 /**

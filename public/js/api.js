@@ -1011,6 +1011,12 @@ const api = {
     agentSigningGet:          ()    => request("GET",  "/server-settings/agents/signing"),
     agentSigningSet:          (cfg) => request("PUT",  "/server-settings/agents/signing", cfg),
     agentSigningTest:         ()    => trackedRequest("Testing code signing", "POST", "/server-settings/agents/signing/test"),
+    // The .pfx and its password travel together: installKeystore validates
+    // before promoting, so a wrong password fails the upload instead of
+    // replacing a working keystore with one that breaks the next build.
+    agentSigningUploadKeystore: (file, password) =>
+      uploadFileFields("/server-settings/agents/signing/keystore", file, { password: password }),
+    agentSigningDeleteKeystore: () => request("DELETE", "/server-settings/agents/signing/keystore"),
     getNtp:      ()       => request("GET", "/server-settings/ntp"),
     updateNtp:   (body)   => request("PUT", "/server-settings/ntp", body),
     testNtp:     (body)   => trackedRequest("Testing NTP sync", "POST", "/server-settings/ntp/test", body),
@@ -1291,6 +1297,30 @@ const api = {
 // loudly, because both were written to degrade quietly when the client is
 // absent. Publishing the object is what makes that guard mean what it says.
 window.api = api;
+
+/**
+ * Multipart POST of one file plus arbitrary sibling form fields. Separate from
+ * uploadFile() because that one hardcodes a `category` field; this carries the
+ * keystore password alongside the .pfx so validation and install are one
+ * request (a two-step "upload, then set the password" would leave an
+ * unvalidated keystore installed in between).
+ */
+async function uploadFileFields(path, file, fields) {
+  const formData = new FormData();
+  formData.append("file", file);
+  Object.keys(fields || {}).forEach(function (k) {
+    if (fields[k] !== undefined && fields[k] !== null) formData.append(k, fields[k]);
+  });
+
+  const res = await fetch(API_BASE + path, {
+    method: "POST",
+    headers: _csrfHeaders(),
+    body: formData,
+  });
+
+  if (res.status === 401) { window.location.href = "/login.html"; return; }
+  return _readResponseBody(res, "Upload failed");
+}
 
 async function uploadFile(path, category, file) {
   const formData = new FormData();

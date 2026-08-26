@@ -691,6 +691,46 @@
           '</p>';
       }
 
+      // Installed-certificate summary. Worth its own block because the expiry
+      // is one of the failure modes that otherwise arrives silently: the cert
+      // lapses, builds keep succeeding, and the binaries just stop being
+      // signed. The fingerprint is here because it's the value an operator
+      // pastes into a Defender indicator.
+      var certBlock = "";
+      var ci = r.certInfo;
+      if (ci) {
+        var expiryTxt = escapeHtml(ci.validUntilRaw || "unknown");
+        var expiryColor = "var(--color-text-secondary)";
+        if (typeof ci.daysRemaining === "number") {
+          if (ci.daysRemaining < 0) {
+            expiryTxt += " — EXPIRED";
+            expiryColor = "var(--color-danger)";
+          } else {
+            expiryTxt += " (" + ci.daysRemaining + " day" + (ci.daysRemaining === 1 ? "" : "s") + ")";
+            if (ci.daysRemaining < 30) expiryColor = "var(--color-warning)";
+          }
+        }
+        function ciRow(label, value, color) {
+          if (!value) return "";
+          return '<div style="display:flex;gap:0.5rem;margin-top:0.15rem">' +
+            '<span style="width:150px;flex-shrink:0;color:var(--color-text-tertiary)">' + label + '</span>' +
+            '<span style="flex:1;word-break:break-all' + (color ? ";color:" + color : "") + '">' + value + '</span>' +
+          '</div>';
+        }
+        certBlock =
+          '<div style="margin-top:0.5rem;padding:0.5rem;border:1px solid var(--color-border);border-radius:4px;font-size:0.78rem">' +
+            '<div style="color:var(--color-text-secondary);margin-bottom:0.25rem">Installed certificate</div>' +
+            ciRow("Subject", escapeHtml(ci.subject || "")) +
+            ciRow("Issuer", escapeHtml(ci.issuer || "")) +
+            ciRow("Expires", expiryTxt, expiryColor) +
+            ciRow("SHA-256", escapeHtml(ci.fingerprintSha256 || "")) +
+            ciRow("Aliases", escapeHtml((ci.aliases || []).join(", "))) +
+            (ci.hasPrivateKey === false
+              ? '<div style="color:var(--color-danger);margin-top:0.25rem">⚠ No private key in this keystore — it cannot sign.</div>'
+              : "") +
+          '</div>';
+      }
+
       function inputRow(id, label, value, placeholder, type) {
         return '<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.35rem">' +
           '<label for="' + id + '" style="width:150px;flex-shrink:0;font-size:0.78rem;color:var(--color-text-secondary)">' + label + '</label>' +
@@ -713,6 +753,7 @@
           'UNTRUSTED one.' +
         '</p>' +
         statusLine +
+        certBlock +
         '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none;font-size:0.85rem;margin-top:0.3rem">' +
           '<input type="checkbox" id="agent-signing-enabled" style="width:15px;height:15px;flex-shrink:0"' + (cfg.enabled ? " checked" : "") + '>' +
           '<span>Sign Windows agent binaries on build</span>' +
@@ -722,6 +763,32 @@
         inputRow("agent-signing-alias",    "Key alias",            cfg.alias,        "optional — only for a multi-entry keystore") +
         inputRow("agent-signing-tsa",      "Timestamp URL",        cfg.tsaUrl,       "http://timestamp.digicert.com") +
         inputRow("agent-signing-jar",      "jsign jar path",       cfg.jsignJarPath, avail.jarPath || "auto-detect (tools/jsign.jar)") +
+        // Upload path: the alternative to placing the .pfx over SSH, and the
+        // one that matters on renewal. The file and its password go up
+        // together and are validated BEFORE replacing whatever is installed,
+        // so a wrong password can't leave signing broken.
+        '<div style="margin-top:0.6rem;padding-top:0.5rem;border-top:1px dashed var(--color-border)">' +
+          '<div style="color:var(--color-text-secondary);font-size:0.8rem;margin-bottom:0.25rem">' +
+            'Upload keystore' +
+          '</div>' +
+          '<p style="font-size:0.75rem;color:var(--color-text-tertiary);margin:0 0 0.35rem 0">' +
+            'A PKCS#12 (<code>.pfx</code>/<code>.p12</code>) exported <strong>with its private key</strong>. ' +
+            'Stored at <code>' + escapeHtml(r.managedKeystorePath || "") + '</code> (not web-accessible) and ' +
+            'the path above is set for you. Validated before it replaces anything.' +
+          '</p>' +
+          '<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.35rem">' +
+            '<label for="agent-signing-file" style="width:150px;flex-shrink:0;font-size:0.78rem;color:var(--color-text-secondary)">Keystore file</label>' +
+            '<input type="file" id="agent-signing-file" accept=".pfx,.p12,application/x-pkcs12" ' +
+              'style="flex:1;font-size:0.78rem">' +
+          '</div>' +
+          inputRow("agent-signing-uploadpw", "Password for file", "", "password protecting the .pfx", "password") +
+          '<div style="display:flex;gap:0.5rem;margin-top:0.5rem;align-items:center">' +
+            '<button class="btn btn-secondary" id="btn-agent-signing-upload" style="padding:4px 14px;font-size:0.8rem">Upload</button>' +
+            (r.keystoreManaged
+              ? '<button class="btn btn-secondary" id="btn-agent-signing-delkeystore" style="padding:4px 14px;font-size:0.8rem">Delete keystore</button>'
+              : "") +
+          '</div>' +
+        '</div>' +
         '<div style="display:flex;gap:0.5rem;margin-top:0.6rem">' +
           '<button class="btn btn-secondary" id="btn-agent-signing-save" style="padding:4px 14px;font-size:0.8rem">Save</button>' +
           '<button class="btn btn-secondary" id="btn-agent-signing-test" style="padding:4px 14px;font-size:0.8rem" ' +
@@ -747,6 +814,59 @@
           }).catch(function (err) {
             showToast("Save failed: " + err.message, "error");
             saveBtn.disabled = false;
+          });
+        });
+      }
+
+      var uploadBtn = document.getElementById("btn-agent-signing-upload");
+      if (uploadBtn) {
+        uploadBtn.addEventListener("click", function () {
+          var fileInput = document.getElementById("agent-signing-file");
+          var pwInput   = document.getElementById("agent-signing-uploadpw");
+          var file = fileInput && fileInput.files && fileInput.files[0];
+          if (!file) { showToast("Choose a .pfx or .p12 file first", "error"); return; }
+          // Required client-side too, but the server validates regardless —
+          // it's what proves the password actually opens the keystore.
+          if (!pwInput || !pwInput.value) { showToast("Enter the password protecting the file", "error"); return; }
+
+          uploadBtn.disabled = true;
+          api.serverSettings.agentSigningUploadKeystore(file, pwInput.value).then(function (res) {
+            // An unverified install is a real outcome, not a failure: keytool
+            // was missing, so the password is untested. Say which happened.
+            if (res && res.verified === false) {
+              showToast(res.warning || "Keystore stored, but the password could not be verified", "warning");
+            } else {
+              showToast("Keystore installed and verified", "success");
+            }
+            pwInput.value = "";
+            if (fileInput) fileInput.value = "";
+            renderAgentCodeSigning();
+          }).catch(function (err) {
+            showToast("Upload failed: " + err.message, "error");
+            uploadBtn.disabled = false;
+          });
+        });
+      }
+
+      var delKsBtn = document.getElementById("btn-agent-signing-delkeystore");
+      if (delKsBtn) {
+        delKsBtn.addEventListener("click", function () {
+          // Confirm: this is the key that signs every agent binary, and builds
+          // silently ship unsigned once it's gone (fail-open).
+          showConfirm(
+            "Delete the signing keystore?\n\n" +
+            "The stored certificate and its password are removed. Agent builds will keep succeeding but will " +
+            "ship UNSIGNED Windows binaries until a keystore is installed again."
+          ).then(function (ok) {
+            if (!ok) return;
+            delKsBtn.disabled = true;
+            api.serverSettings.agentSigningDeleteKeystore().then(function () {
+              showToast("Keystore deleted — builds will ship unsigned", "warning");
+              renderAgentCodeSigning();
+            }).catch(function (err) {
+              showToast("Delete failed: " + err.message, "error");
+              delKsBtn.disabled = false;
+            });
           });
         });
       }
@@ -1082,7 +1202,7 @@
 
   function openInstalledAgentsPanel() {
     var overlay = _ensureInstalledAgentsPanelDOM();
-    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    revealOverlay(overlay);
     refreshInstalledAgentsPanel();
   }
 

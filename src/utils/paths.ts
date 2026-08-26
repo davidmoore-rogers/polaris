@@ -40,6 +40,19 @@ export const SETUP_COMPLETE_MARKER = resolve(STATE_DIR, ".setup-complete");
 export const BACKUP_DIR = resolve(STATE_DIR, "data", "backups");
 export const UPLOADS_DIR = resolve(STATE_DIR, "public", "uploads");
 
+/**
+ * Operator-uploaded agent code-signing keystore (a PKCS#12 holding an
+ * internal-CA signing cert + its private key).
+ *
+ * Deliberately under `data/` and NOT `UPLOADS_DIR`: that one resolves to
+ * STATE_DIR/public/uploads and is served at /uploads/<file>, so a keystore
+ * placed there would be downloadable by anyone who could guess the name. This
+ * directory is never mounted by any static handler. Lives under STATE_DIR so it
+ * survives in-app updates and container recreation like backups and agent
+ * binaries do.
+ */
+export const SIGNING_DIR = resolve(STATE_DIR, "data", "signing");
+
 // Polaris Agent binaries. The release tarball ships per-version directories
 // under data/agents/<version>/ (one binary per OS×arch) plus manifest.json
 // that names the current default version. The in-app updater preserves

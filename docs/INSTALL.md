@@ -1233,7 +1233,11 @@ echo "2abf2ade9ea322acc2d60c24794eadc465ff9380938fca4c932d09e0b25f1c28  /opt/pol
 
 On Windows Server: `winget install Microsoft.OpenJDK.17` (or the MSI from https://aka.ms/download-jdk) and drop `jsign-7.4.jar` at `C:\polaris\tools\jsign.jar`. No Polaris restart needed — the availability probe re-checks on every page load.
 
-**Then place the keystore.** Copy the `.pfx` onto the Polaris host and lock it down to the service account — it is a fleet-trusted signing key:
+**Then install the keystore.** Either upload it through the UI, or place it on the host by hand.
+
+**Upload (no shell access needed).** On the Code signing card, pick the `.pfx` under **Upload keystore**, enter the password protecting it, and press **Upload**. Polaris validates the file *before* replacing anything — wrong password, a PEM export, or a keystore with no private key are all refused with the reason, leaving whatever was installed untouched. On success it stores the file at `<state dir>/data/signing/codesign.pfx` (mode `0400`, owned by the service user, in a directory no static handler serves), sets the keystore path for you, and shows the certificate's subject, issuer, SHA-256 fingerprint and **expiry with a day countdown** — which is also where you get the fingerprint to paste into a Defender indicator. This is the path to use on renewal: upload the new `.pfx` over the old one. **Delete keystore** removes it (and clears the stored password); builds then keep succeeding but ship unsigned.
+
+**By hand.** Copy the `.pfx` onto the Polaris host and lock it down to the service account — it is a fleet-trusted signing key:
 
 ```sh
 sudo install -o polaris -g polaris -m 0400 codesign.pfx /opt/polaris/tools/codesign.pfx
