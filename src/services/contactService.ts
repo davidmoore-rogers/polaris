@@ -37,6 +37,7 @@
  */
 
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import {
@@ -66,11 +67,29 @@ import { MIN_DIRECTORY_QUERY, searchDirectory } from "./directorySearchService.j
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+/** Who owns a contact row. See business rule 35. */
+export type ContactOrigin = "manual" | "entra" | "ad";
+
+/** A synced row is one the directory sync created and still claims. */
+export function isDirectoryOrigin(origin: string): boolean {
+  return origin !== "manual";
+}
+
 export interface ContactRow {
   id: string;
   email: string;
   name: string | null;
   description: string | null;
+  /**
+   * "manual" for anything an operator created, otherwise the directory that
+   * did. Drives the visibility gate, the adoption path, and what the picker
+   * badges -- the backend names line up with AddressBookEntry.source on purpose.
+   */
+  origin: string;
+  kind: string;
+  jobTitle: string | null;
+  department: string | null;
+  phone: string | null;
   /** The live filter shape. */
   assetCondition: ScopeConditionGroup | null;
   /** Legacy flat filter — null on any row written since the cutover. */
@@ -96,6 +115,14 @@ export interface ContactInput {
   email: string;
   name?: string | null;
   description?: string | null;
+  /**
+   * Operator-settable on a manual row. On a SYNCED row these are projected
+   * from the directory and an operator write would be overwritten on the next
+   * run -- which is why editing a synced row adopts it (see adoptDirectoryContact).
+   */
+  jobTitle?: string | null;
+  department?: string | null;
+  phone?: string | null;
   assetCondition?: unknown;
   /**
    * Accepted so an API caller (and the pre-cutover UI) can still post a flat
@@ -136,6 +163,17 @@ export interface AddressBookEntry {
   kind: "person" | "group";
   /** True when the caller may edit/delete this entry (contacts only). */
   owned?: boolean;
+  /**
+   * Two people called "J. Martin" are told apart by their job, not their id,
+   * so the picker needs these to be pickable at all. Present on stored
+   * contacts and on live directory hits; absent on Polaris user accounts,
+   * which have no such fields.
+   */
+  jobTitle?: string | null;
+  department?: string | null;
+  phone?: string | null;
+  /** Provenance of a stored contact -- "manual" unless the sync owns it. */
+  origin?: string;
 }
 
 const MAX_ASSET_PINS = 500;
@@ -236,6 +274,11 @@ function rowToContact(row: {
   email: string;
   name: string | null;
   description: string | null;
+  origin: string;
+  kind: string;
+  jobTitle: string | null;
+  department: string | null;
+  phone: string | null;
   assetCondition: unknown;
   assetCriteria: unknown;
   assetIds: string[];
@@ -300,8 +343,8 @@ function resolveWrittenFilter(input: ContactFilterInput): {
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
 
-// Fire-time resolution reads every contact on each alert; without this the
-// delivery expansion would re-read the table per notification. 30s mirrors the
+// Fire-time resolution reads the contact table on each alert; without this the
+// delivery expansion would re-read it per notification. 30s mirrors the
 // recipient user index next door.
 const CONTACT_CACHE_TTL_MS = 30_000;
 const _contactCache = createTtlCache<ContactRow[]>({ ttlMs: CONTACT_CACHE_TTL_MS, maxEntries: 1 });
@@ -311,18 +354,136 @@ export function bumpContactCache(): void {
   _contactCache.invalidate();
 }
 
-function loadContacts(): Promise<ContactRow[]> {
+/**
+ * The only contacts `resolveContactsForAsset` can possibly return: those
+ * carrying a device filter (a condition tree or a legacy criteria blob) or at
+ * least one explicit pin.
+ *
+ * The narrowing is a correctness-preserving bound, not a micro-optimization. A
+ * contact with no filter and no pins owns no devices, so it can never match a
+ * triggering asset -- loading it costs a row, a JSON parse and a
+ * criteriaToCondition fold to reach a foregone conclusion. That was invisible
+ * while the address book was hand-curated and tens of rows deep. It stops being
+ * invisible the moment a bulk source can put thousands of address-only rows in
+ * the table, at which point the alert fire path would scale with the size of the
+ * company rather than with the number of people who actually own equipment.
+ *
+ * `assetIds: { isEmpty: false }` covers the pin case; the two JSON columns are
+ * DB-NULL (not JSON-null) on an unfiltered row, because the writers pass
+ * `undefined` rather than a null literal.
+ */
+function loadFilterCarryingContacts(): Promise<ContactRow[]> {
   return _contactCache.getOrCompute("", async () => {
-    const rows = await prisma.contact.findMany({ orderBy: { email: "asc" } });
+    const rows = await prisma.contact.findMany({
+      where: {
+        OR: [
+          { assetCondition: { not: Prisma.DbNull } },
+          { assetCriteria: { not: Prisma.DbNull } },
+          { assetIds: { isEmpty: false } },
+        ],
+      },
+      orderBy: { email: "asc" },
+    });
     return rows.map(rowToContact);
   });
 }
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
-export async function listContacts(): Promise<ContactRow[]> {
-  const rows = await prisma.contact.findMany({ orderBy: [{ name: "asc" }, { email: "asc" }] });
-  return rows.map(rowToContact);
+/** One page of the address book, plus the unpaged total the pager needs. */
+export interface ContactPage {
+  contacts: ContactRow[];
+  /** Rows matching the query across ALL pages -- not `contacts.length`. */
+  total: number;
+}
+
+export interface ListContactsOptions {
+  /** Substring match on email or name, case-insensitive. Blank = everything. */
+  q?: string | null;
+  limit?: number;
+  offset?: number;
+  /** "manual" = curated only, "directory" = synced only, "all" = both. */
+  origin?: "manual" | "directory" | "all";
+  /**
+   * FALSE hides every directory-synced row, whatever `origin` asks for.
+   *
+   * This is the visibility gate, and it is deliberately a separate parameter
+   * from `origin` so a caller cannot widen its own access by passing a filter:
+   * the route derives this from the caller's permissions and the operator picks
+   * `origin`. A gated caller asking for `origin: "directory"` gets an empty
+   * page rather than a 403 -- the filter-don't-403 posture the other
+   * mixed-visibility endpoints use.
+   */
+  includeDirectorySynced?: boolean;
+}
+
+export const CONTACT_PAGE_DEFAULT = 50;
+export const CONTACT_PAGE_MAX = 200;
+
+/**
+ * The shared substring predicate. `mode: "insensitive"` compiles to ILIKE, which
+ * the trigram indexes on `lower(email)` / `lower(name)` serve -- without them
+ * this is a sequential scan, and paginating would bound the payload without
+ * bounding the work.
+ */
+/**
+ * The origin half of the predicate: what the caller ASKED for, intersected
+ * with what they are ALLOWED to see. The gate always wins, and the result is
+ * an empty page rather than a 403 -- the filter-don't-403 posture.
+ *
+ * The intersection is the subtle part. A caller who may not see synced rows and
+ * asks for ONLY synced rows must get NOTHING: falling back to the manual rows
+ * would answer a question they did not ask, and a table full of unexpected rows
+ * reads as "the filter is broken", not as "you may not see those".
+ */
+function contactOriginWhere(opts: ListContactsOptions) {
+  const maySeeSynced = opts.includeDirectorySynced === true;
+  const wants = opts.origin ?? "all";
+
+  if (wants === "manual") return { origin: "manual" };
+  if (wants === "directory") {
+    // `in: []` matches nothing, which is the honest answer to "the synced rows,
+    // please" from someone who may not have them.
+    return maySeeSynced ? { origin: { not: "manual" } } : { origin: { in: [] as string[] } };
+  }
+  return maySeeSynced ? {} : { origin: "manual" };
+}
+
+function contactSearchWhere(q: string) {
+  if (!q) return {};
+  return {
+    OR: [
+      { email: { contains: q, mode: "insensitive" as const } },
+      { name: { contains: q, mode: "insensitive" as const } },
+    ],
+  };
+}
+
+/**
+ * One page of the address book, filtered SERVER-side.
+ *
+ * Both halves used to be the caller's problem: this returned every row and the
+ * browser filtered in JavaScript. That is fine for a curated list and untenable
+ * for a table a bulk source can grow without bound -- the payload carries two
+ * JSON blobs per row and `rowToContact` re-validates both, so the cost of
+ * "show me the address book" grew with the whole table, on every keystroke.
+ */
+export async function listContacts(opts: ListContactsOptions = {}): Promise<ContactPage> {
+  const q = String(opts.q ?? "").trim();
+  const limit = Math.min(Math.max(Math.trunc(opts.limit ?? CONTACT_PAGE_DEFAULT), 1), CONTACT_PAGE_MAX);
+  const offset = Math.max(Math.trunc(opts.offset ?? 0), 0);
+  const where = { ...contactSearchWhere(q), ...contactOriginWhere(opts) };
+
+  const [rows, total] = await Promise.all([
+    prisma.contact.findMany({
+      where,
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+      take: limit,
+      skip: offset,
+    }),
+    prisma.contact.count({ where }),
+  ]);
+  return { contacts: rows.map(rowToContact), total };
 }
 
 export async function getContact(id: string): Promise<ContactRow | null> {
@@ -330,12 +491,111 @@ export async function getContact(id: string): Promise<ContactRow | null> {
   return row ? rowToContact(row) : null;
 }
 
+
+/**
+ * Take a directory-synced row out of the sync's hands and make it the
+ * operator's: `origin` back to "manual", `createdBy` stamped, provenance rows
+ * deleted.
+ *
+ * Dropping the provenance is the whole mechanism, not bookkeeping. The sync
+ * deletes a row when its LAST DirectoryContactSource goes; a row with none was
+ * never the sync's to delete. So adoption is exactly what makes the row survive
+ * the person leaving the directory -- and what stops the next run re-creating a
+ * second entry for an address it no longer recognizes as its own.
+ *
+ * The Event NAMES the address, unlike the sync's own counts-only Events. That
+ * asymmetry is deliberate: this is a single deliberate act by a person, audited
+ * the same way `contact.created` and `contact.updated` already are, whereas bulk
+ * machine activity must not put the employee roster into `Event.details`.
+ */
+export async function adoptDirectoryContact(
+  id: string,
+  opts: { input?: ContactInput; actor?: string | null; reason?: string } = {},
+): Promise<ContactRow> {
+  const before = await prisma.contact.findUnique({
+    where: { id },
+    select: { id: true, email: true, name: true, origin: true },
+  });
+  if (!before) throw new AppError(404, "Contact not found");
+  if (!isDirectoryOrigin(before.origin)) {
+    throw new AppError(409, `"${before.email}" is already an address-book entry you own`);
+  }
+
+  const input = opts.input;
+  const filter = input ? resolveWrittenFilter(input) : null;
+  const assetIds = input ? normalizeAssetIds(input.assetIds) : undefined;
+
+  // One transaction: a row promoted to "manual" while its provenance survived
+  // would be re-adopted on every run, and provenance deleted while the row
+  // stayed "entra" would be a synced row no sync can ever clean up.
+  const [, row] = await prisma.$transaction([
+    prisma.directoryContactSource.deleteMany({ where: { contactId: id } }),
+    prisma.contact.update({
+      where: { id },
+      data: {
+        origin: "manual",
+        createdBy: opts.actor ?? null,
+        // Only when the caller supplied values. A bare adopt (the Adopt button)
+        // keeps everything the directory last reported -- the point is to take
+        // ownership of the entry, not to blank it.
+        ...(input
+          ? {
+              email: normalizeContactEmail(input.email),
+              name: trimOrNull(input.name),
+              description: trimOrNull(input.description),
+              jobTitle: trimOrNull(input.jobTitle),
+              department: trimOrNull(input.department),
+              phone: trimOrNull(input.phone),
+              assetCondition: (filter!.condition ?? null) as never,
+              assetCriteria: (filter!.criteria ?? null) as never,
+              assetIds,
+            }
+          : {}),
+      },
+    }),
+  ]);
+
+  bumpContactCache();
+  await logEvent({
+    action: "contact.adopted",
+    resourceType: "contact",
+    resourceId: row.id,
+    resourceName: row.email,
+    actor: opts.actor ?? undefined,
+    message:
+      `Took ownership of ${row.name ? `"${row.name}" <${row.email}>` : row.email}, previously synced from ` +
+      `${before.origin === "ad" ? "Active Directory" : "Entra ID"}` +
+      `${opts.reason ? ` (${opts.reason})` : ""}. It will no longer be updated or removed by the directory sync.`,
+    details: { previousOrigin: before.origin },
+  });
+  return rowToContact(row);
+}
+
 export async function createContact(input: ContactInput, createdBy: string | null): Promise<ContactRow> {
   const email = normalizeContactEmail(input.email);
   const { condition: assetCondition, criteria: assetCriteria } = resolveWrittenFilter(input);
   const assetIds = normalizeAssetIds(input.assetIds);
 
-  const existing = await prisma.contact.findUnique({ where: { email }, select: { id: true, name: true } });
+  const existing = await prisma.contact.findUnique({
+    where: { email },
+    select: { id: true, name: true, origin: true },
+  });
+  if (existing && isDirectoryOrigin(existing.origin)) {
+    // The address is held by a row the directory sync created. `email` is
+    // UNIQUE, so a synced row physically blocks hand-creating the same person
+    // -- and refusing here would leave an operator no way to take ownership of
+    // an address they are looking straight at.
+    //
+    // Adopting is also what PRESERVES the sync's own guarantee. A departed
+    // person's row is deleted on the next run (business rule 35); a row an
+    // operator has claimed must survive that, and the way the reconcile knows
+    // to leave it alone is that adoption drops its provenance.
+    return adoptDirectoryContact(existing.id, {
+      input,
+      actor: createdBy,
+      reason: "created over a directory-synced address",
+    });
+  }
   if (existing) {
     throw new AppError(409, `"${email}" is already in the address book${existing.name ? ` as "${existing.name}"` : ""}`);
   }
@@ -345,6 +605,9 @@ export async function createContact(input: ContactInput, createdBy: string | nul
       email,
       name: trimOrNull(input.name),
       description: trimOrNull(input.description),
+      jobTitle: trimOrNull(input.jobTitle),
+      department: trimOrNull(input.department),
+      phone: trimOrNull(input.phone),
       assetCondition: (assetCondition ?? undefined) as never,
       assetCriteria: (assetCriteria ?? undefined) as never,
       assetIds,
@@ -391,12 +654,30 @@ export async function updateContact(id: string, input: ContactInput, actor?: str
     throw new AppError(409, `"${email}" is already in the address book`);
   }
 
+  // Editing a synced row takes ownership of it. Writing the operator's values
+  // into a row the sync still claims would look like it worked and then be
+  // silently overwritten on the next discovery run.
+  //
+  // Reaching here on a synced row already requires `fullwrite`, with no code:
+  // synced rows carry `createdBy = null`, and assertOwnership refuses a null
+  // createdBy for a write-level caller. That is intentional, not an accident
+  // to be tidied up -- taking a directory row out of the sync's hands is an
+  // administrative act.
+  const current = await prisma.contact.findUnique({ where: { id }, select: { origin: true } });
+  if (!current) throw new AppError(404, "Contact not found");
+  if (isDirectoryOrigin(current.origin)) {
+    return adoptDirectoryContact(id, { input, actor: actor ?? null, reason: "edited a directory-synced entry" });
+  }
+
   const row = await prisma.contact.update({
     where: { id },
     data: {
       email,
       name: trimOrNull(input.name),
       description: trimOrNull(input.description),
+      jobTitle: trimOrNull(input.jobTitle),
+      department: trimOrNull(input.department),
+      phone: trimOrNull(input.phone),
       // Both nulls must be written explicitly — `undefined` would leave a stale
       // blob in place when the operator clears the filter, and leaving the
       // legacy column behind a new condition would resurrect the old filter on
@@ -421,7 +702,21 @@ export async function updateContact(id: string, input: ContactInput, actor?: str
 export async function deleteContact(id: string, actor?: string): Promise<void> {
   // Read first so the audit event can name what was removed — a bare id in the
   // log is useless once the row is gone.
-  const existing = await prisma.contact.findUnique({ where: { id }, select: { email: true, name: true } });
+  const existing = await prisma.contact.findUnique({
+    where: { id },
+    select: { email: true, name: true, origin: true },
+  });
+  if (existing && isDirectoryOrigin(existing.origin)) {
+    // Deleting would succeed and then be undone by the next discovery run,
+    // which is a worse outcome than refusing: the operator would believe the
+    // address was gone. Name both real ways out instead.
+    throw new AppError(
+      409,
+      `"${existing.email}" is synced from your ${existing.origin === "ad" ? "Active Directory" : "Entra ID"} ` +
+      "integration and would return on the next discovery run. Exclude it in that integration's " +
+      "directory-sync filter, or save it to the address book first to take ownership of it.",
+    );
+  }
   await prisma.contact.delete({ where: { id } });
   bumpContactCache();
   await logEvent({
@@ -536,7 +831,7 @@ async function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<S
  * Mirrors reconcileTagsForAsset, which does the same thing for managed tags.
  */
 export async function resolveContactsForAsset(assetId: string): Promise<ContactRow[]> {
-  const contacts = await loadContacts();
+  const contacts = await loadFilterCarryingContacts();
   if (contacts.length === 0) return [];
 
   // Pinned-only contacts need no asset load at all.
@@ -592,14 +887,61 @@ export async function resolveContactEmailsForAsset(assetId: string): Promise<str
  * user id is the more durable token because it survives the person changing
  * address, whereas a stored contact address does not.
  */
+export interface AddressBookSearchOptions {
+  limit?: number;
+  callerUsername?: string | null;
+  /**
+   * Fan the query out LIVE to the opted-in AD / Entra directories. Nothing is
+   * persisted on this path.
+   *
+   * Named `includeLiveDirectory` because there are now two different directory
+   * questions and one word for both was a bug waiting to happen: this one asks
+   * "query the directory right now", the next asks "show me rows the sync
+   * already stored".
+   */
+  includeLiveDirectory?: boolean;
+  /**
+   * Include directory-SYNCED contact rows. The visibility gate; the route
+   * derives it from the caller's permissions, never from their query string.
+   */
+  includeDirectorySynced?: boolean;
+}
+
 export async function searchAddressBook(
   query: string,
-  opts: { limit?: number; callerUsername?: string | null; includeDirectory?: boolean } = {},
+  opts: AddressBookSearchOptions = {},
 ): Promise<AddressBookEntry[]> {
   const limit = opts.limit ?? 50;
   const q = String(query ?? "").trim().toLowerCase();
 
-  const [users, contacts] = await Promise.all([listRecipientUsers(), listContacts()]);
+  // The contacts half is resolved in SQL, and deliberately does NOT go through
+  // listContacts / rowToContact: a typeahead entry needs five scalar columns,
+  // whereas rowToContact re-validates both JSON filter blobs per row through
+  // Zod. Reading the whole table and validating filters nobody asked about, on
+  // every keystroke, is the exact cost this endpoint cannot carry once the
+  // table can hold a whole company.
+  //
+  // `limit * 2 + 1` rather than `limit`: users and contacts are merged and then
+  // deduped by address, so fetching exactly `limit` contacts could leave the
+  // page short after a dedupe drops the ones that are also Polaris accounts.
+  // The `+ 1` is what makes "there are more" detectable by the caller.
+  const [users, contactRows] = await Promise.all([
+    listRecipientUsers(),
+    prisma.contact.findMany({
+      where: {
+        ...contactSearchWhere(q),
+        // Same gate as the list route, same reason: a caller who may not browse
+        // the synced roster must not be able to walk it a query at a time.
+        ...(opts.includeDirectorySynced === true ? {} : { origin: "manual" }),
+      },
+      select: {
+        id: true, email: true, name: true, description: true, createdBy: true,
+        origin: true, kind: true, jobTitle: true, department: true, phone: true,
+      },
+      orderBy: [{ name: "asc" }, { email: "asc" }],
+      take: limit * 2 + 1,
+    }),
+  ]);
 
   const entries: AddressBookEntry[] = [];
   for (const u of users) {
@@ -613,22 +955,29 @@ export async function searchAddressBook(
       kind: "person",
     });
   }
-  for (const c of contacts) {
+  for (const c of contactRows) {
     entries.push({
-      source: "contact",
+      // A synced row badges as the directory it came from rather than as a
+      // plain contact, which is why `origin` stores the backend name: the
+      // picker's existing entra / ad badges light up with no client change.
+      source: (isDirectoryOrigin(c.origin) ? c.origin : "contact") as AddressBookEntry["source"],
       id: c.id,
       email: c.email,
       name: c.name,
       description: c.description,
-      kind: "person",
+      kind: (c.kind === "group" ? "group" : "person"),
       owned: !!opts.callerUsername && c.createdBy === opts.callerUsername,
+      jobTitle: c.jobTitle,
+      department: c.department,
+      phone: c.phone,
+      origin: c.origin,
     });
   }
 
   // Directory (GAL) hits rank BELOW the local sources: a Polaris account or a
   // curated contact is the entry an operator meant, and the directory is the
   // long tail. Live only — nothing here is persisted (see directorySearchService).
-  if (opts.includeDirectory && q.length >= MIN_DIRECTORY_QUERY) {
+  if (opts.includeLiveDirectory && q.length >= MIN_DIRECTORY_QUERY) {
     try {
       for (const d of await searchDirectory(q, limit)) {
         entries.push({
@@ -654,6 +1003,11 @@ export async function searchAddressBook(
     return true;
   });
 
+  // Still applied in JS, but over a bounded set and for one reason only: the
+  // USER half is an unfiltered cached index, so it is the half that still needs
+  // matching. Contacts arrived pre-filtered by SQL and directory hits were
+  // matched upstream; re-testing them here is harmless and keeps one definition
+  // of what "matches" means across the three sources.
   const filtered = q
     ? deduped.filter(
         (e) => e.email.toLowerCase().includes(q) || (e.name ?? "").toLowerCase().includes(q),

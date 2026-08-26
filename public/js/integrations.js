@@ -1155,6 +1155,166 @@ function _readDirectorySearchToggle() {
   return !!el.checked;
 }
 
+
+// ─── Directory tab (AD / Entra only) ────────────────────────────────────────
+//
+// Both address-book directory controls live here, together, because they are
+// one subject with one crucial difference between them: SEARCH reads the
+// directory live and stores nothing; SYNC stores the roster. Putting them side
+// by side is what makes that contrast legible — it used to be implied by
+// distance, with the search toggle sitting under the Monitoring tab's
+// "per-class polling, cadences and credentials" header, which it is not.
+
+function directoryFormHTML(integrationType, cfg) {
+  var c = cfg || {};
+  var sync = c.directorySync || {};
+  var isEntra = integrationType === "entraid";
+
+  var perms = isEntra
+    ? "Requires the Graph application permissions <strong>User.Read.All</strong>, <strong>Group.Read.All</strong> and <strong>OrgContact.Read.All</strong> (or <strong>Directory.Read.All</strong>), admin-consented on the app registration — device discovery alone does not grant them."
+    : "Requires the bind account to have read access to user, group and contact objects under the base DN — device discovery only reads computer objects.";
+
+  // Said plainly, because it is the decision an operator is actually making.
+  var piiWarning = calloutHTML(
+    "warning",
+    "Switching this on stores your directory in Polaris",
+    "Every matching person's name, email address, job title, department and phone number is written to the " +
+    "Polaris database and is included in <strong>every backup</strong>, including off-host copies. Entries are " +
+    "visible only to roles holding <strong>Automation Management</strong> access. Someone who leaves the directory " +
+    "is removed here on the next discovery run. Granting the directory permissions above, and accepting this " +
+    "retention, should be reviewed by whoever owns your directory.",
+  );
+
+  var mailboxNote = isEntra
+    ? calloutHTML(
+        "note",
+        "Microsoft Graph cannot identify shared mailboxes",
+        "Graph reports no mailbox type for a user without a separate per-person request, which would mean one " +
+        "extra call for every entry on every run. Shared, room and equipment mailboxes are therefore <strong>not</strong> " +
+        "excluded automatically here — use the name or domain exclusions below for them. (The Active Directory " +
+        "integration can exclude them properly, from the Exchange schema.)",
+      )
+    : "";
+
+  function checkbox(id, label, on, hint) {
+    return '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 0.75rem 0">' +
+        '<input type="checkbox" id="' + id + '" ' + (on ? "checked" : "") + ' style="width:auto;margin-top:3px">' +
+        '<div><label for="' + id + '" style="margin:0">' + label + '</label>' +
+        (hint ? '<p class="hint" style="margin:0.15rem 0 0 0">' + hint + '</p>' : "") + '</div>' +
+      '</div>';
+  }
+
+  function listField(id, label, value, hint) {
+    return '<div class="form-group">' +
+        '<label for="' + id + '">' + label + '</label>' +
+        '<textarea id="' + id + '" rows="2" placeholder="One per line">' +
+          escapeHtml((value || []).join("\n")) +
+        '</textarea>' +
+        '<p class="hint" style="margin:0.15rem 0 0 0">' + hint + '</p>' +
+      '</div>';
+  }
+
+  var ouFields = isEntra ? "" : (
+    listField("f-ds-ouInclude", "Only these OUs", sync.ouInclude,
+      "Distinguished-name patterns, <code>*</code> matches anything — e.g. <code>*OU=Staff,DC=corp,DC=example</code>. " +
+      "When set, everything outside them is excluded and the exclusion list below is ignored.") +
+    listField("f-ds-ouExclude", "Exclude these OUs", sync.ouExclude,
+      "Same pattern syntax. Used only when no include list is set.")
+  );
+
+  return '<section>' +
+      '<p class="hint" style="margin:0 0 0.85rem 0;color:var(--color-text-tertiary)">' +
+        "How this directory feeds the Polaris address book. " + perms +
+      '</p>' +
+
+      '<h4 style="margin:1rem 0 0.5rem">Look up people as you type</h4>' +
+      checkbox("f-enableDirectorySearch", "Search this directory from the address book",
+        c.enableDirectorySearch === true,
+        "Lets the automation recipient picker look up people, distribution lists and org contacts as an operator " +
+        "types. Results are <strong>live and never stored</strong> — only an address someone actually picks is saved.") +
+
+      '<h4 style="margin:1.25rem 0 0.5rem">Keep the address book in step with the directory</h4>' +
+      checkbox("f-enableDirectorySync", "Sync this directory into the address book",
+        c.enableDirectorySync === true,
+        "Runs at the end of every discovery for this integration. Adds a contact for each person who matches, " +
+        "keeps their details current, and removes them when they leave the directory. Contacts you added by " +
+        "hand are never touched.") +
+      piiWarning +
+
+      '<div id="intg-ds-detail" style="' + (c.enableDirectorySync === true ? "" : "display:none") + ';margin-top:1rem">' +
+        mailboxNote +
+        checkbox("f-ds-excludeDisabled", "Skip disabled accounts", sync.excludeDisabled !== false, "") +
+        checkbox("f-ds-excludeSharedMailboxes", "Skip shared, room and equipment mailboxes",
+          sync.excludeSharedMailboxes !== false,
+          isEntra ? "Has no effect on Entra ID — see the note above." : "Read from the Exchange schema where it is present.") +
+        checkbox("f-ds-includeGroups", "Include distribution lists", sync.includeGroups !== false,
+          "Mail-enabled groups, so an alert can go to a team rather than a person.") +
+        checkbox("f-ds-includeOrgContacts", "Include external org contacts", sync.includeOrgContacts === true,
+          "Off by default — these are people outside your organization.") +
+        ouFields +
+        listField("f-ds-domainInclude", "Only these email domains", sync.domainInclude,
+          "One domain per line, e.g. <code>example.com</code>. When set, the exclusion list below is ignored.") +
+        listField("f-ds-domainExclude", "Exclude these email domains", sync.domainExclude,
+          "Used only when no include list is set.") +
+        listField("f-ds-nameExclude", "Exclude by name or address", sync.nameExclude,
+          "Patterns matched against the display name AND the address, <code>*</code> matches anything — " +
+          "e.g. <code>svc-*</code> or <code>noreply@*</code>. This is where shared and no-reply mailboxes go.") +
+        listField("f-ds-groupExclude", "Exclude members of these groups", sync.groupExclude,
+          isEntra ? "Group object IDs." : "Group distinguished names.") +
+        '<div class="form-group">' +
+          '<label for="f-ds-maxEntries">Maximum entries per run</label>' +
+          '<input type="number" id="f-ds-maxEntries" min="1" max="50000" value="' + (Number(sync.maxEntries) || 20000) + '">' +
+          '<p class="hint" style="margin:0.15rem 0 0 0">A safety stop, not a target. If a run hits it, the run says so.</p>' +
+        '</div>' +
+      '</div>' +
+    '</section>';
+}
+
+// Reveal the exclusion panel with the toggle. Wired alongside the modal tabs,
+// so it applies to both the add and edit flows.
+function _wireDirectorySyncToggle() {
+  var cb = document.getElementById("f-enableDirectorySync");
+  var panel = document.getElementById("intg-ds-detail");
+  if (!cb || !panel) return;
+  cb.addEventListener("change", function () {
+    panel.style.display = cb.checked ? "" : "none";
+  });
+}
+
+// Read the Directory tab back. Returns undefined when the tab didn't render,
+// so the caller leaves the config alone for other integration types.
+function _readDirectorySyncConfig() {
+  var cb = document.getElementById("f-enableDirectorySync");
+  if (!cb) return undefined;
+  function lines(id) {
+    var el = document.getElementById(id);
+    if (!el) return [];
+    return String(el.value || "").split(/\r?\n/).map(function (x) { return x.trim(); })
+      .filter(function (x) { return x !== ""; });
+  }
+  function checked(id, dflt) {
+    var el = document.getElementById(id);
+    return el ? !!el.checked : dflt;
+  }
+  var cap = parseInt(String((document.getElementById("f-ds-maxEntries") || {}).value || ""), 10);
+  return {
+    enabled: !!cb.checked,
+    filter: {
+      excludeDisabled: checked("f-ds-excludeDisabled", true),
+      excludeSharedMailboxes: checked("f-ds-excludeSharedMailboxes", true),
+      includeGroups: checked("f-ds-includeGroups", true),
+      includeOrgContacts: checked("f-ds-includeOrgContacts", false),
+      ouInclude: lines("f-ds-ouInclude"),
+      ouExclude: lines("f-ds-ouExclude"),
+      domainInclude: lines("f-ds-domainInclude"),
+      domainExclude: lines("f-ds-domainExclude"),
+      nameExclude: lines("f-ds-nameExclude"),
+      groupExclude: lines("f-ds-groupExclude"),
+      maxEntries: isFinite(cap) && cap > 0 ? cap : 20000,
+    },
+  };
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
@@ -3536,24 +3696,10 @@ function monitorSettingsFormHTML(s, opts) {
       '</div>';
   }
 
-  // Address-book GAL search (AD / Entra only — vCenter and Arc have no
-  // directory of people). Default OFF: it needs directory-read permissions the
-  // device-discovery integration has never required, so enabling it without the
-  // grant makes every recipient keystroke 403.
-  var directorySearchHtml = "";
-  if (integrationType === "activedirectory" || integrationType === "entraid") {
-    var dsChecked = opts.enableDirectorySearch === true ? "checked" : "";
-    var dsPerms = integrationType === "entraid"
-      ? "Requires the Graph application permissions <strong>User.Read.All</strong>, <strong>Group.Read.All</strong> and <strong>OrgContact.Read.All</strong> (or <strong>Directory.Read.All</strong>), admin-consented on the app registration — device discovery alone does not grant them."
-      : "Requires the bind account to have read access to user, group and contact objects under the base DN — device discovery only reads computer objects.";
-    directorySearchHtml = '<div class="form-group" style="display:flex;align-items:flex-start;gap:8px;margin:0 0 1rem 0">' +
-        '<input type="checkbox" id="f-enableDirectorySearch" ' + dsChecked + ' style="width:auto;margin-top:3px">' +
-        '<div>' +
-          '<label for="f-enableDirectorySearch" style="margin:0">Search this directory from the address book</label>' +
-          '<p class="hint" style="margin:0.15rem 0 0 0">Lets the automation recipient picker look up people, distribution lists and org contacts in this directory as an operator types. Results are <strong>live and never stored</strong> — only an address someone actually picks is saved. ' + dsPerms + '</p>' +
-        '</div>' +
-      '</div>';
-  }
+  // The address-book directory controls used to live here. They moved to a
+  // tab of their own (directoryFormHTML): this tab's own header describes
+  // per-class polling, cadences and credentials, and neither reading the GAL
+  // nor storing it is any of those things.
 
   return '<section>' +
       '<p class="hint" style="margin:0 0 0.85rem 0;color:var(--color-text-tertiary)">' +
@@ -3561,7 +3707,6 @@ function monitorSettingsFormHTML(s, opts) {
         "A class override (Assets page → Monitoring Settings) or a per-asset override on the asset itself takes priority." +
       '</p>' +
       verifyPresenceHtml +
-      directorySearchHtml +
       _intRenderTabbedBody("intg-mon-class", classTabs) +
     '</section>';
 }
@@ -5113,6 +5258,13 @@ async function openCreateModal(type) {
         snmpCredentials: addNonFortinetCreds,
       }) },
     ];
+    // AD / Entra: the address-book directory tab (live search + scheduled
+    // sync). Registered in BOTH tab arrays — see the note below.
+    if (isAd || isEntra) {
+      addNonFortinetTabs.push({
+        key: "directory", label: "Directory", html: directoryFormHTML(type, {}),
+      });
+    }
     // Entra only: the SSH-onboarding script publishing opt-in. Registered in
     // BOTH tab arrays (this one and the edit array) — the two are separate
     // lists and a tab added to one silently misses the other flow.
@@ -5143,6 +5295,7 @@ async function openCreateModal(type) {
     _populateUploadedMibsInDropdowns();
   } else if (isAd || isEntra || isWin || isVc || isArc) {
     _intWireModalTabs("intg-edit");
+    _wireDirectorySyncToggle();
     _wireMonitoringTabSubtabs(type);
     if (isAd || isEntra || isArc) wireWorkstationServerCards(null);
     if (isVc) wireVcenterCards(null);
@@ -5234,6 +5387,14 @@ async function openCreateModal(type) {
         if (verifyPresenceNew !== undefined) createConfig.verifyPresence = verifyPresenceNew;
         var dirSearchNew = _readDirectorySearchToggle();
         if (dirSearchNew !== undefined) createConfig.enableDirectorySearch = dirSearchNew;
+        // The Directory tab is one control set: the sync toggle and its
+        // exclusions are read together, so a saved filter can never belong to
+        // a toggle that was not saved with it.
+        var dirSyncNew = _readDirectorySyncConfig();
+        if (dirSyncNew !== undefined) {
+          createConfig.enableDirectorySync = dirSyncNew.enabled;
+          createConfig.directorySync = dirSyncNew.filter;
+        }
       }
       if (isVc) {
         // vCenter per-class blocks: VMs primary (full workstation-style
@@ -5372,9 +5533,13 @@ async function openEditModal(id) {
           vmMonitor:          config.vmMonitor          || null,
           hostMonitor:        config.hostMonitor        || null,
           verifyPresence:     config.verifyPresence,
-          enableDirectorySearch: config.enableDirectorySearch,
         }) },
       ];
+      if (isAd || isEntra) {
+        nonFortinetTabs.push({
+          key: "directory", label: "Directory", html: directoryFormHTML(intg.type, config),
+        });
+      }
       if (isEntra) {
         nonFortinetTabs.push({
           key: "scriptpub", label: "Script Publishing",
@@ -5488,6 +5653,7 @@ async function openEditModal(id) {
       _populateUploadedMibsInDropdowns();
     } else if (isAd || isEntra || isWin || isVc || isArc) {
       _intWireModalTabs("intg-edit");
+      _wireDirectorySyncToggle();
       _wireMonitoringTabSubtabs(intg.type);
       if (isAd || isEntra || isArc) wireWorkstationServerCards(id);
       if (isVc) wireVcenterCards(id);
@@ -5854,6 +6020,14 @@ function _wireIntgEditSave(id, intg, formGetter) {
         if (verifyPresenceEdit !== undefined) editConfig.verifyPresence = verifyPresenceEdit;
         var dirSearchEdit = _readDirectorySearchToggle();
         if (dirSearchEdit !== undefined) editConfig.enableDirectorySearch = dirSearchEdit;
+        // The Directory tab is one control set: the sync toggle and its
+        // exclusions are read together, so a saved filter can never belong to
+        // a toggle that was not saved with it.
+        var dirSyncEdit = _readDirectorySyncConfig();
+        if (dirSyncEdit !== undefined) {
+          editConfig.enableDirectorySync = dirSyncEdit.enabled;
+          editConfig.directorySync = dirSyncEdit.filter;
+        }
       }
       if (isVc) {
         // vCenter per-class blocks: VMs primary. The host block's extra

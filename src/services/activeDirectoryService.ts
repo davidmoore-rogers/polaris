@@ -13,6 +13,7 @@
 import { type Entry, type SearchOptions } from "ldapts";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
+import type { DirectoryPerson, DirectorySyncFilter } from "./directorySyncService.js";
 import { withBoundLdapClient, decodeObjectGuid, formatLdapError, escapeLdapFilterValue } from "./ldapClient.js";
 
 export interface ActiveDirectoryConfig {
@@ -161,6 +162,148 @@ export async function searchDirectoryAd(
       });
     }
     return out.slice(0, limit);
+  });
+}
+
+
+// ─── Directory (GAL) bulk read ──────────────────────────────────────────────
+//
+// The scheduled sync's reader (business rule 35). Same bind and the same
+// grants as the live search above, but a full enumeration rather than a term
+// match -- which changes the search options completely: searchDirectoryAd
+// clamps sizeLimit to 100 and does no paging, which is right for a typeahead
+// and would silently truncate a GAL at AD's MaxPageSize of 1000.
+//
+// The options below are copied from discoverDevices, which already does a
+// paged enumeration against the same directory. Note that ldapts accumulates
+// every page into `searchEntries` before returning, so `maxEntries` -- not the
+// page size -- is what actually bounds memory here.
+
+/** Exchange's mailbox-type discriminator (msExchRecipientTypeDetails). */
+const EXCH_SHARED = 4;
+const EXCH_ROOM = 16;
+const EXCH_EQUIPMENT = 32;
+
+/**
+ * The whole GAL filter as one string. PURE and exported so it can be asserted
+ * on directly: an LDAP filter is the kind of thing that is either exactly right
+ * or silently returns the wrong population, and it is far cheaper to pin the
+ * string than to discover the mistake against a live directory.
+ *
+ * `(mail=*)` is not an optimization -- an object with no address can never be
+ * a recipient, so it has no business in the address book.
+ *
+ * OU include/exclude are deliberately NOT here. They match DNs with wildcards,
+ * which an LDAP filter cannot express, so they are applied in JS afterwards via
+ * directoryExclusionReason -- the same split discoverDevices already uses.
+ */
+export function buildGalLdapFilter(filter: DirectorySyncFilter): string {
+  const classes = ["(&(objectCategory=person)(objectClass=user))", "(objectClass=contact)"];
+  // A mail-enabled group is a distribution list. Excluded at the SOURCE when
+  // the operator doesn't want them, rather than fetched and dropped.
+  if (filter.includeGroups) classes.push("(&(objectClass=group)(mail=*))");
+
+  const parts = ["(mail=*)", `(|${classes.join("")})`];
+
+  // LDAP_MATCHING_RULE_BIT_AND against userAccountControl bit 2 (ACCOUNTDISABLE).
+  // Contacts and groups have no userAccountControl at all, and an absent
+  // attribute does not match the bit test -- so this negation keeps them.
+  if (filter.excludeDisabled) parts.push("(!(userAccountControl:1.2.840.113556.1.4.803:=2))");
+
+  // Unlike Graph, AD answers this honestly wherever the Exchange schema is
+  // present. Where it is absent the attribute is simply missing, and these
+  // negations keep the entry -- the correct default, since an install with no
+  // Exchange schema has no shared mailboxes to exclude.
+  if (filter.excludeSharedMailboxes) {
+    for (const v of [EXCH_SHARED, EXCH_ROOM, EXCH_EQUIPMENT]) {
+      parts.push(`(!(msExchRecipientTypeDetails=${v}))`);
+    }
+  }
+
+  return `(&${parts.join("")})`;
+}
+
+/** Attributes the GAL read needs, beyond what the device read asks for. */
+const GAL_ATTRIBUTES = [
+  "objectGUID", "distinguishedName", "cn", "displayName", "mail", "title", "department",
+  "telephoneNumber", "mobile", "description", "objectClass", "userAccountControl",
+  "msExchRecipientTypeDetails", "memberOf",
+];
+
+function mailboxKindOf(raw: unknown): "user" | "shared" | "room" | "equipment" | "unknown" {
+  const n = Number(firstStr(raw));
+  if (!Number.isFinite(n)) return "unknown"; // no Exchange schema: not a claim either way
+  if (n === EXCH_SHARED) return "shared";
+  if (n === EXCH_ROOM) return "room";
+  if (n === EXCH_EQUIPMENT) return "equipment";
+  return "user";
+}
+
+/**
+ * Every mail-enabled user, contact and distribution list under the base DN.
+ *
+ * The identity is objectGUID, NOT the DN the live search uses: this one is
+ * PERSISTED as provenance, and a DN changes when a person moves OU or is
+ * renamed -- which would read as "the old person left, a new one arrived" and
+ * churn the contact row on every reorganization. The GUID survives both.
+ */
+export async function listDirectoryPeople(
+  config: ActiveDirectoryConfig,
+  filter: DirectorySyncFilter,
+  signal?: AbortSignal,
+): Promise<DirectoryPerson[]> {
+  if (!config.baseDn) return [];
+  const ldapFilter = buildGalLdapFilter(filter);
+
+  return withBoundLdapClient(config, signal, async (client) => {
+    const { searchEntries } = await client.search(config.baseDn as string, {
+      scope: (config.searchScope as SearchOptions["scope"]) || "sub",
+      filter: ldapFilter,
+      attributes: GAL_ATTRIBUTES,
+      explicitBufferAttributes: ["objectGUID"],
+      paged: { pageSize: PAGE_SIZE },
+      sizeLimit: filter.maxEntries,
+      timeLimit: 120,
+    });
+
+    const out: DirectoryPerson[] = [];
+    for (const e of searchEntries) {
+      if (signal?.aborted) break;
+      const mail = firstStr((e as any).mail);
+      if (!mail) continue;
+
+      const guidRaw = (e as any).objectGUID;
+      const guid = Buffer.isBuffer(guidRaw) ? decodeObjectGuid(guidRaw) : "";
+      // Same guard parseEntry applies to computers: an all-zero GUID shows up
+      // on half-provisioned objects and would collide with every other one.
+      if (!guid || /^0+$/.test(guid)) continue;
+
+      const classes = ([] as string[]).concat((e as any).objectClass ?? []).map((c) => String(c).toLowerCase());
+      const isGroup = classes.includes("group");
+      // firstStr returns null when the attribute is absent, and Number(null)
+      // is 0 -- which would read as a present-and-enabled account. Keep the
+      // absent case NaN so it stays "no claim".
+      const uacRaw = firstStr((e as any).userAccountControl);
+      const uac = uacRaw == null ? NaN : Number(uacRaw);
+
+      out.push({
+        externalId: guid,
+        email: mail,
+        name: firstStr((e as any).displayName) ?? firstStr((e as any).cn),
+        jobTitle: firstStr((e as any).title),
+        department: firstStr((e as any).department),
+        phone: firstStr((e as any).telephoneNumber) ?? firstStr((e as any).mobile),
+        description: firstStr((e as any).description) ?? (isGroup ? "Distribution list" : null),
+        kind: isGroup ? "group" : "person",
+        distinguishedName: e.dn || firstStr((e as any).distinguishedName) || undefined,
+        // Only a claim when the attribute was actually present: a missing
+        // userAccountControl (every contact and group) is not "enabled".
+        disabled: Number.isFinite(uac) ? (uac & 2) === 2 : undefined,
+        mailboxKind: mailboxKindOf((e as any).msExchRecipientTypeDetails),
+        groupDns: ([] as string[]).concat((e as any).memberOf ?? []).map((g) => String(g)),
+      });
+    }
+    return out.slice(0, filter.maxEntries);
   });
 }
 

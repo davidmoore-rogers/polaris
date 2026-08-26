@@ -11,7 +11,7 @@
 # Only run when code or the project-memory docs changed (skip pure asset/test commits).
 changed=$(git diff --cached --name-only)
 case "$changed" in
-  *.ts|*src/*|*prisma/schema.prisma*|*CLAUDE.md*|*ARCHITECTURE.md*|*TOUCHES.md*|*TEMPLATES.md*)
+  *.ts|*src/*|*prisma/schema.prisma*|*CLAUDE.md*|*ARCHITECTURE.md*|*BUSINESS-RULES.md*|*TOUCHES.md*|*TEMPLATES.md*)
     node scripts/check-docs.mjs || {
       echo ""
       echo "pre-commit: doc-drift check failed (see above)."

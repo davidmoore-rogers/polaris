@@ -903,7 +903,11 @@ const api = {
     run:     (id)    => request("GET", `/automations/scripts/runs/${id}`),
   },
   contacts: {
-    list:    ()      => request("GET", "/contacts"),
+    // Paginated + server-side searched. `params` = { q, limit, offset }; the
+    // response carries { contacts, total, limit, offset }. Callers must read
+    // `total` rather than `contacts.length` to know how many matched.
+    list:    (params) => request("GET", "/contacts" + toQuery(params || {})),
+    get:     (id)    => request("GET", `/contacts/${id}`),
     // Unified recipient typeahead: Polaris users ∪ address-book contacts.
     // `directory` additionally queries the opted-in AD/Entra integrations
     // (live lookup, nothing persisted).
@@ -915,6 +919,9 @@ const api = {
     filterSchema: () => request("GET", "/contacts/filter-schema"),
     create:  (body)  => request("POST", "/contacts", body),
     update:  (id, b) => request("PUT", `/contacts/${id}`, b),
+    // Take ownership of a directory-synced row: it stops being updated or
+    // removed by the sync, and survives the person leaving the directory.
+    adopt:   (id)    => request("POST", `/contacts/${id}/adopt`),
     delete:  (id)    => request("DELETE", `/contacts/${id}`),
   },
   // Network Discovery — saved active scans of operator-supplied IP ranges
