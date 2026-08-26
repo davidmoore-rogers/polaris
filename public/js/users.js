@@ -1358,7 +1358,7 @@ async function openRoleSlideover(roleId) {
   if (typeof initSlideoverResize === "function") {
     initSlideoverResize(panel, "polaris.panel.width.role-permissions");
   }
-  requestAnimationFrame(function () { overlay.classList.add("open"); });
+  revealOverlay(overlay);
 
   overlay.addEventListener("click", function (e) {
     if (e.target === overlay) closeRoleSlideover();

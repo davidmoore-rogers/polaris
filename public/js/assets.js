@@ -534,6 +534,7 @@ document.addEventListener("DOMContentLoaded", async function () {
       if (chk) { _assetsSelected.add(id); _assetsRememberSelection(id); }
       else { _assetsSelected.delete(id); delete _assetsSelectedMeta[id]; }
     });
+    syncSelectedRows(document.getElementById("assets-tbody"));
     _assetsUpdateBulkBar();
   });
   document.getElementById("assets-tbody").addEventListener("change", function (e) {
@@ -545,7 +546,7 @@ document.addEventListener("DOMContentLoaded", async function () {
     _assetsUpdateSelectAll();
     _assetsUpdateBulkBar();
   });
-  // The row's verbs live behind the hostname (TEMPLATES.md → "Row context
+  // The row's verbs live behind the hostname (design/POLARIS-UI-GUIDE.md Part II → "Row context
   // menu"). Built from the row RECORD in _assetsData, not the trigger's
   // data-* attributes, because the quarantine verbs depend on the asset's MAC,
   // status and type.
@@ -1415,6 +1416,10 @@ function _assetsRememberSelection(id) {
 }
 
 function _assetsUpdateSelectAll() {
+  // Pair the bulk bar's count with WHICH rows it means. Here rather than at
+  // each call site because this already runs after a render, a deselect-all
+  // and a single-row change.
+  syncSelectedRows(document.getElementById("assets-tbody"));
   var allCbs = document.querySelectorAll("#assets-tbody input.row-cb");
   var checked = Array.from(allCbs).filter(function (cb) { return cb.checked; }).length;
   var sa = document.getElementById("assets-select-all");
@@ -1574,9 +1579,7 @@ async function openLeasePanel(asset) {
   footerEl.innerHTML =
     openInNetworks +
     ' <button class="btn btn-sm btn-secondary" id="btn-lease-close">Close</button>';
-  requestAnimationFrame(function () {
-    document.getElementById("lease-panel-overlay").classList.add("open");
-  });
+  revealOverlay(document.getElementById("lease-panel-overlay"));
   document.getElementById("btn-lease-close").addEventListener("click", closeLeasePanel);
   document.getElementById("btn-lease-open-networks").addEventListener("click", function () {
     var hash = '#ip=' + encodeURIComponent(ctx.subnetId) + '@' + encodeURIComponent(asset.ipAddress);
@@ -2533,7 +2536,7 @@ function _showMergeReviewModal(survivor, fieldWinners, dependencyWinner) {
     overlay.querySelector('[data-merge-review="back"]').onclick = function () { done(false); };
     overlay.querySelector('[data-merge-review="ok"]').onclick = function () { done(true); };
     overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
-    requestAnimationFrame(function () { overlay.classList.add("open"); });
+    revealOverlay(overlay);
   });
 }
 
@@ -17291,7 +17294,7 @@ function openServiceDetailPanel(asset, svc) {
   titleEl.textContent = "Service — " + svc.unit;
   metaEl.textContent = asset.hostname || asset.ipAddress || asset.id;
   _setProcPanelFooter(footerEl);
-  requestAnimationFrame(function () { document.getElementById("proc-panel-overlay").classList.add("open"); });
+  revealOverlay(document.getElementById("proc-panel-overlay"));
 
   function metaRow(label, value) {
     return '<div style="display:flex;justify-content:space-between;gap:12px;padding:0.3rem 0;border-bottom:1px solid var(--color-border)">' +
@@ -18215,6 +18218,7 @@ function _wireAssetAlertSelection(assetId) {
   }
   function sync() {
     var n = selectedIds().length;
+    syncSelectedRows(bar.parentNode);
     if (label) label.textContent = n ? n + " selected" : "None selected";
     bar.classList.toggle("bulk-bar-idle", n === 0);
     if (ackBtn) ackBtn.disabled = n === 0;

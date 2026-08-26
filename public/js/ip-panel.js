@@ -77,9 +77,7 @@ function openIpPanel(subnetId, opts) {
   document.getElementById("ip-panel-meta").innerHTML = "";
   document.getElementById("ip-panel-body").innerHTML = '<p class="empty-state">Loading...</p>';
   document.getElementById("ip-panel-footer").innerHTML = "";
-  requestAnimationFrame(function () {
-    document.getElementById("ip-panel-overlay").classList.add("open");
-  });
+  revealOverlay(document.getElementById("ip-panel-overlay"));
   // focusReservationId path (dashboard / global-search deep links): fetch the
   // reservation to resolve its IP + parent subnet CIDR, then re-enter
   // openIpPanel with the resolved focusIp. Falls back to a plain panel open
@@ -518,6 +516,8 @@ function _renderIpList(data) {
         if (chk) _panelSelected.add(cb.getAttribute("data-rid"));
         else _panelSelected.delete(cb.getAttribute("data-rid"));
       });
+      // Script-assigned .checked fires no change event, so sync explicitly.
+      syncSelectedRows(body);
       _panelUpdateBulkBar();
     });
   }
@@ -651,6 +651,8 @@ function _renderIpList(data) {
 function _panelUpdateSelectAll() {
   var body = document.getElementById("ip-panel-body");
   if (!body) return;
+  // See syncSelectedRows in app.js — pairs the bar's count with the rows.
+  syncSelectedRows(body);
   var allCbs = body.querySelectorAll(".panel-row-cb");
   var checked = Array.from(allCbs).filter(function (cb) { return cb.checked; }).length;
   var sa = document.getElementById("panel-select-all");

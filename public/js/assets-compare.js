@@ -398,9 +398,7 @@ async function openComparePanel(opts) {
       '<div id="cmp-charts"></div>' +
     '</div>';
 
-  requestAnimationFrame(function () {
-    document.getElementById("compare-panel-overlay").classList.add("open");
-  });
+  revealOverlay(document.getElementById("compare-panel-overlay"));
 
   body.querySelectorAll(".cmp-range-btn").forEach(function (b) {
     b.addEventListener("click", function () {

@@ -46,9 +46,7 @@ function openBlockPanel(blockId) {
   document.getElementById("block-panel-meta").innerHTML = "";
   document.getElementById("block-panel-body").innerHTML = '<p class="empty-state">Loading...</p>';
   document.getElementById("block-panel-footer").innerHTML = "";
-  requestAnimationFrame(function () {
-    document.getElementById("block-panel-overlay").classList.add("open");
-  });
+  revealOverlay(document.getElementById("block-panel-overlay"));
   _fetchBlockSubnets();
 }
 

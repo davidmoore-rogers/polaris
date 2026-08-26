@@ -1975,24 +1975,33 @@ var _modalKeyTeardown = null;  // active focus-trap teardown for the shared moda
 // their own backdrop-close handler, so a capture-phase document listener blocks
 // that close when locked instead of editing every panel. Lock buttons are
 // injected generically by a MutationObserver, so new panels get one for free.
-var _panelLock = { modal: false, slideover: false };
+//
+// State lives on `window`, NOT in file scope: app.js can be evaluated more than
+// once on a page, and a fresh file-scope object would silently reset the lock
+// while the buttons already injected into the DOM kept claiming the old state.
+// Re-using the existing object makes a re-evaluation a no-op instead.
+window.__polarisPanelLock = window.__polarisPanelLock ||
+  { state: { modal: false, slideover: false }, user: "anon", wired: false };
+var _panelLockStore = window.__polarisPanelLock;
 
-function _panelLockKey() { return "polaris.panellock." + (currentUsername || "anon"); }
+function _panelLockKey() { return "polaris.panellock." + _panelLockStore.user; }
 
 function _loadPanelLock() {
+  var st = _panelLockStore.state;
   try {
     var v = JSON.parse(localStorage.getItem(_panelLockKey()) || "null");
-    _panelLock = { modal: !!(v && v.modal), slideover: !!(v && v.slideover) };
-  } catch (_) { _panelLock = { modal: false, slideover: false }; }
+    st.modal = !!(v && v.modal);
+    st.slideover = !!(v && v.slideover);
+  } catch (_) { st.modal = false; st.slideover = false; }
   _syncAllLockButtons();
 }
 
 function _savePanelLock() {
-  try { localStorage.setItem(_panelLockKey(), JSON.stringify(_panelLock)); } catch (_) {}
+  try { localStorage.setItem(_panelLockKey(), JSON.stringify(_panelLockStore.state)); } catch (_) {}
 }
 
 function _togglePanelLock(type) {
-  _panelLock[type] = !_panelLock[type];
+  _panelLockStore.state[type] = !_panelLockStore.state[type];
   _savePanelLock();
   _syncAllLockButtons(type);
 }
@@ -2001,7 +2010,7 @@ function _togglePanelLock(type) {
 // backdrop-click rule — e.g. the asset slide-over's Edit button, which
 // normally closes the panel before opening the edit modal and must not when
 // the operator has pinned the panel open.
-function isPanelLocked(type) { return !!_panelLock[type]; }
+function isPanelLocked(type) { return !!_panelLockStore.state[type]; }
 window.isPanelLocked = isPanelLocked;
 
 function _lockBtnSvg(locked) {
@@ -2015,7 +2024,7 @@ function _lockBtnSvg(locked) {
 function _syncLockButton(btn) {
   if (!btn) return;
   var type = btn.getAttribute("data-lock-type");
-  var locked = !!_panelLock[type];
+  var locked = !!_panelLockStore.state[type];
   var noun = type === "modal" ? "dialogs" : "panels";
   btn.innerHTML = _lockBtnSvg(locked);
   btn.classList.toggle("locked", locked);
@@ -2065,19 +2074,26 @@ function _injectPanelLockButtons() {
 }
 
 // Wire the observer (injects lock buttons into newly-created panels) + the
-// capture-phase backdrop guard for slide-overs. Idempotent — guarded so it
-// only runs once even if called from multiple page init paths.
-var _panelLockWired = false;
-function _initPanelLock() {
-  if (_panelLockWired) return;
-  _panelLockWired = true;
+// capture-phase backdrop guard for slide-overs, then load the saved preference.
+//
+// Safe to call repeatedly AND safe to call late: the listeners are wired once,
+// everything else re-syncs. Call it from the SAME ready path that waits for the
+// rest of the runtime — running before the scripts resolve leaves the observer
+// unwired and keys the preference to `anon` instead of the username.
+//
+//   initPanelLock({ user: currentUsername })
+function initPanelLock(opts) {
+  if (opts && opts.user) _panelLockStore.user = opts.user;
+  _loadPanelLock();
+  if (_panelLockStore.wired) { _injectPanelLockButtons(); return; }
+  _panelLockStore.wired = true;
 
   // Block slide-over backdrop-close when locked. Capture phase runs before the
   // panel's own (bubbling) overlay handler, so stopping propagation here keeps
   // it open. e.target is the overlay itself only on a genuine backdrop click.
   document.addEventListener("click", function (e) {
     var t = e.target;
-    if (t && t.classList && t.classList.contains("slideover-overlay") && _panelLock.slideover) {
+    if (t && t.classList && t.classList.contains("slideover-overlay") && _panelLockStore.state.slideover) {
       e.stopPropagation();
       // Same glow/bloom the modal X gives on an off-click while locked — flash
       // this slide-over's close button (the btn-icon that isn't the lock).
@@ -2105,6 +2121,272 @@ function _initPanelLock() {
   }
   _injectPanelLockButtons();
 }
+if (typeof window !== "undefined") window.initPanelLock = initPanelLock;
+
+/**
+ * Keep `tr.selected` in step with the row checkboxes under `scope` (a tbody,
+ * a table, or anything containing them).
+ *
+ * The class is what pairs the bulk bar's count with WHICH rows it means — a
+ * checkbox alone is a poor cue on a wide table where the checkbox column has
+ * scrolled out of view. Call it after any wholesale tbody re-render and after
+ * a select-all: assigning `.checked` in script does NOT fire a change event,
+ * so the delegated listener below never sees those.
+ */
+function syncSelectedRows(scope) {
+  var root = scope || document;
+  root.querySelectorAll(".cb-col input[type=checkbox]").forEach(function (cb) {
+    var tr = cb.closest("tr");
+    if (tr) tr.classList.toggle("selected", cb.checked);
+  });
+}
+if (typeof window !== "undefined") window.syncSelectedRows = syncSelectedRows;
+
+// One delegated listener covers every list page's single-row clicks, so a page
+// only has to call syncSelectedRows for the two cases this can't see.
+document.addEventListener("change", function (e) {
+  var cb = e.target;
+  if (!cb || cb.type !== "checkbox") return;
+  var cell = cb.closest && cb.closest("td.cb-col");
+  if (!cell) return;
+  var tr = cell.closest("tr");
+  if (tr) tr.classList.toggle("selected", cb.checked);
+});
+
+/**
+ * Reveal an overlay that animates in: add `.open` on the next animation frame
+ * so the transition has a start state, with a timeout floor because
+ * requestAnimationFrame does NOT fire in a hidden tab — a panel opened in a
+ * background tab would otherwise be built and never shown, staying invisible
+ * until the tab is next looked at. Idempotent: whichever fires first wins.
+ *
+ * `after` runs once, immediately after the class lands (focus, sizing).
+ */
+function revealOverlay(el, after) {
+  if (!el) return;
+  var opened = false;
+  var reveal = function () {
+    if (opened) return;
+    opened = true;
+    el.classList.add("open");
+    if (typeof after === "function") after();
+  };
+  requestAnimationFrame(reveal);
+  setTimeout(reveal, 50);
+}
+if (typeof window !== "undefined") window.revealOverlay = revealOverlay;
+
+// ─── Modal tabs + form parts ────────────────────────────────────────────────
+//
+// A tall config form stays ONE modal with tabs — never a wizard, never a new
+// page. These two are the canonical pair; assets.js and integrations.js each
+// grew a byte-identical private copy, and both now delegate here.
+//
+// tabs: [{ key, label, html }] — panel ids are `<prefix>-tab-<key>`.
+//
+// Keep field ids UNIQUE ACROSS TABS so one read pass collects the whole form:
+// a per-tab read silently drops whatever the operator never opened.
+
+function tabbedBodyHTML(prefix, tabs) {
+  return '<div class="page-tabs" id="' + prefix + '-tabs" style="margin-bottom:1rem">' +
+      tabs.map(function (t, i) {
+        return '<button type="button" class="page-tab' + (i === 0 ? " active" : "") +
+          '" data-tab="' + escapeHtml(t.key) + '">' + escapeHtml(t.label) + "</button>";
+      }).join("") +
+    "</div>" +
+    tabs.map(function (t, i) {
+      return '<div class="page-tab-panel' + (i === 0 ? " active" : "") +
+        '" id="' + prefix + "-tab-" + escapeHtml(t.key) + '">' + t.html + "</div>";
+    }).join("");
+}
+
+function wireModalTabs(prefix) {
+  var tabs = document.querySelectorAll("#" + prefix + "-tabs .page-tab");
+  Array.prototype.forEach.call(tabs, function (btn) {
+    btn.addEventListener("click", function () {
+      Array.prototype.forEach.call(tabs, function (b) { b.classList.remove("active"); });
+      Array.prototype.forEach.call(
+        document.querySelectorAll('[id^="' + prefix + '-tab-"]'),
+        function (p) { p.classList.remove("active"); },
+      );
+      btn.classList.add("active");
+      var panel = document.getElementById(prefix + "-tab-" + btn.getAttribute("data-tab"));
+      if (panel) panel.classList.add("active");
+    });
+  });
+}
+
+// Form section parts. Config modals build their sections from these rather
+// than hand-rolling the same markup, so they read as one design language.
+//   sectionHeading("Connection Settings")  → uppercase tertiary label
+//   formDivider()                          → 1px rule between groups
+//   infoBox("<html>")                      → accent-tinted informational block
+//   checkboxRow(id, label, checked)        → 'auto'-width box + label on a line
+//   calloutHTML(variant, title, bodyHtml)  → left-accent emphasis callout
+
+function sectionHeading(text) {
+  return '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;' +
+    'color:var(--color-text-tertiary);margin-bottom:0.75rem">' + escapeHtml(text) + "</p>";
+}
+
+function formDivider() {
+  return '<hr style="border:none;border-top:1px solid var(--color-border);margin:1rem 0">';
+}
+
+// Compatibility / scope constraints stated UP FRONT — versions, on-prem vs
+// cloud, what the integration will and won't reach. Bold the specific values.
+function infoBox(html) {
+  return '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);' +
+    'border-radius:var(--radius-md);padding:0.6rem 0.75rem;margin-bottom:1rem;font-size:0.82rem;' +
+    'color:var(--color-text-secondary);line-height:1.5">' + html + "</div>";
+}
+
+function checkboxRow(id, label, checked) {
+  return '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
+      '<input type="checkbox" id="' + escapeHtml(id) + '"' + (checked ? " checked" : "") +
+        ' style="width:auto">' +
+      '<label for="' + escapeHtml(id) + '" style="margin:0">' + escapeHtml(label) + "</label>" +
+    "</div>";
+}
+
+// Every highlighted note (security blast-radius warnings, tip/alternative
+// boxes, permission requirements) renders through this one helper. `variant`
+// selects the accent from real theme tokens (so it adapts across themes); the
+// faint tint is derived from that same token via color-mix. `title` is the bold
+// lead row (icon prepended automatically); `bodyHtml` is raw HTML as hint text.
+var CALLOUT_VARIANTS = {
+  warning: { color: "var(--color-warning)", icon: "&#9888;" },        // warning sign — security / silent-failure caveats
+  tip:     { color: "var(--color-accent)", icon: "&#128161;" },       // light bulb — alternatives / suggestions
+  note:    { color: "var(--color-text-secondary)", icon: "" },        // neutral informational
+};
+function calloutHTML(variant, title, bodyHtml) {
+  var v = CALLOUT_VARIANTS[variant] || CALLOUT_VARIANTS.note;
+  return '<div style="border-left:3px solid ' + v.color + ';' +
+      'background:color-mix(in srgb, ' + v.color + ' 9%, transparent);' +
+      'border-radius:0 var(--radius-sm) var(--radius-sm) 0;padding:0.6rem 0.8rem;margin-top:0.75rem">' +
+      (title
+        ? '<p style="margin:0 0 0.4rem 0;font-weight:600;color:' + v.color + '">' +
+            (v.icon ? v.icon + " " : "") + title + '</p>'
+        : '') +
+      '<p class="hint" style="margin:0">' + bodyHtml + '</p>' +
+    '</div>';
+}
+
+// ─── Integration modal (the standard shape) ─────────────────────────────────
+//
+// Every "connect us to another system" dialog is the SAME dialog. Polaris grew
+// seven of them by hand (FortiManager, FortiGate, Active Directory, Entra ID,
+// Windows Server, vCenter, Azure Arc) and they drifted: two tab
+// implementations, footers in different orders, and per-type required-field
+// chains copy-pasted with different rules. This is the one shape:
+//
+//   title    "<Action> <Product> Integration" — never a bare "Add Integration"
+//            or "Edit Integration", because the operator picked a product to
+//            get here and the title should confirm it.
+//   body     General tab first (identity + connection), Monitoring second where
+//            it exists, then feature tabs. One tab per concern; a concern with
+//            three fields is a section inside General, not a tab of its own.
+//   footer   Test Connection · Cancel · Create/Save Changes. Test is a
+//            secondary on the LEFT: it is the rehearsal, not the commitment.
+//   test     gated on the fields the request actually needs, and the toast
+//            NAMES what is missing — never fire a request you know will fail
+//            and report the server's error as if it were news.
+//
+// Saving is deliberately NEVER blocked on a passing test: an operator
+// configuring ahead of a firewall change has a legitimate reason to save
+// something that cannot connect yet. `onSave` receives `{ tested }` if it wants
+// to act on it. Both buttons disable and relabel while in flight — these calls
+// reach a remote system and can take seconds.
+//
+// Unlike the UI kit's version this does NOT scrape the form for you: Polaris's
+// per-type config readers (_formConfigForType and the per-class block readers)
+// handle nested blocks, arrays and keep-current secrets, so `onTest`/`onSave`
+// read the form themselves and this owns only the shell.
+//
+//   openIntegrationModal({
+//     product: "FortiManager", action: "Add",
+//     prefix: "intg-edit",
+//     tabs: [{key,label,html}, …],          // or `html` for a single-pane form
+//     requires: [["f-host","host"], ["f-apiToken","API token"]],
+//     onWire:  function () {…},             // per-type wiring, runs after open
+//     onTest:  function () {…},             // return {ok} or throw
+//     onSave:  function (ctx) {…},          // ctx.tested; throw to stay open
+//   })
+function openIntegrationModal(cfg) {
+  var prefix = cfg.prefix || "intg";
+  var action = cfg.action || "Add";
+  var tabs = cfg.tabs || null;
+  var body = tabs ? tabbedBodyHTML(prefix, tabs) : (cfg.html || "");
+  var saveLabel = cfg.saveLabel || (action === "Edit" ? "Save Changes" : "Create");
+  var busyLabel = cfg.busyLabel || (action === "Edit" ? "Saving…" : "Creating…");
+  var footer =
+    '<button class="btn btn-secondary" id="' + prefix + '-test">Test Connection</button>' +
+    '<button class="btn btn-secondary" id="' + prefix + '-cancel">Cancel</button>' +
+    '<button class="btn btn-primary" id="' + prefix + '-save">' + escapeHtml(saveLabel) + "</button>";
+
+  openModal(action + " " + cfg.product + " Integration", body, footer, { wide: true });
+  if (tabs) wireModalTabs(prefix);
+  if (cfg.onWire) cfg.onWire();
+
+  // Names the missing fields rather than saying "fill in the form": the whole
+  // point of testing before saving is to find out what is wrong.
+  function missingFields() {
+    var missing = [];
+    (cfg.requires || []).forEach(function (pair) {
+      var el = document.getElementById(pair[0]);
+      if (el && !String(el.value || "").trim()) missing.push(pair[1] || pair[0]);
+    });
+    return missing;
+  }
+
+  function busy(btn, label, fn) {
+    var original = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = label;
+    return Promise.resolve().then(fn).catch(function (err) {
+      if (err && err.name === "AbortError") showToast("Aborted", "error");
+      else showToast((err && err.message) || "Request failed", "error");
+    }).then(function () {
+      btn.disabled = false;
+      btn.textContent = original;
+    });
+  }
+
+  var tested = false;
+  var testBtn = document.getElementById(prefix + "-test");
+  var saveBtn = document.getElementById(prefix + "-save");
+  var cancelBtn = document.getElementById(prefix + "-cancel");
+
+  if (testBtn) testBtn.addEventListener("click", function () {
+    var missing = missingFields();
+    if (missing.length) {
+      showToast("Fill in " + missing.join(", ") + " first", "error");
+      return;
+    }
+    if (!cfg.onTest) return;
+    busy(testBtn, "Testing…", function () {
+      return Promise.resolve(cfg.onTest()).then(function (result) {
+        tested = !!(result && result.ok);
+      });
+    });
+  });
+
+  if (saveBtn) saveBtn.addEventListener("click", function () {
+    if (!cfg.onSave) return;
+    busy(saveBtn, busyLabel, function () {
+      return Promise.resolve(cfg.onSave({ tested: tested }));
+    });
+  });
+
+  // A wired listener, not an inline onclick="closeModal()" — the footer is
+  // built here, so its handlers belong here too.
+  if (cancelBtn) cancelBtn.addEventListener("click", function () {
+    if (cfg.onCancel) cfg.onCancel();
+    closeModal();
+  });
+
+  return { wasTested: function () { return tested; } };
+}
 
 function openModal(title, bodyHTML, footerHTML, options) {
   let overlay = document.getElementById("modal-overlay");
@@ -2118,7 +2400,7 @@ function openModal(title, bodyHTML, footerHTML, options) {
       if (e.target === overlay) {
         // Locked → keep the dialog open (flash the X as a hint); unlocked →
         // an off-click dismisses it. See "Panel lock" above.
-        if (_panelLock.modal) {
+        if (_panelLockStore.state.modal) {
           flashModalCloseBtn(overlay.querySelector(".modal-close"));
         } else {
           closeModal();
@@ -2162,17 +2444,26 @@ function openModal(title, bodyHTML, footerHTML, options) {
   overlay.querySelector(".modal-footer").innerHTML = footerHTML || "";
   var slideoverOpen = !!document.querySelector(".slideover-overlay.open");
   overlay.classList.toggle("above-slideover", slideoverOpen);
-  _initPanelLock();
+  initPanelLock();
   _injectPanelLockButtons();
   // Remember what had focus so closeModal can restore it; trap Tab + Escape
   // inside the dialog while it's open.
   _modalReturnFocus = document.activeElement;
   if (_modalKeyTeardown) { _modalKeyTeardown(); }
   _modalKeyTeardown = _trapFocus(modal, closeModal);
-  requestAnimationFrame(function () {
+  // rAF so the transition has a start state to animate from — but rAF does
+  // NOT fire in a hidden tab, which would leave the dialog built and invisible
+  // until the tab is next looked at. The timeout is the floor; `reveal` is
+  // idempotent so whichever fires first wins.
+  var opened = false;
+  var reveal = function () {
+    if (opened) return;
+    opened = true;
     overlay.classList.add("open");
     _focusFirstIn(modal);
-  });
+  };
+  requestAnimationFrame(reveal);
+  setTimeout(reveal, 50);
 }
 
 function closeModal() {
@@ -2425,7 +2716,16 @@ function buildOverlay(z, title, bodyHtml, footerHtml, onClose, wide) {
     }
     close();
   });
-  requestAnimationFrame(function () { overlay.classList.add("open"); _focusFirstIn(dialog); });
+  // See openModal: rAF alone never fires in a hidden tab.
+  var opened = false;
+  var reveal = function () {
+    if (opened) return;
+    opened = true;
+    overlay.classList.add("open");
+    _focusFirstIn(dialog);
+  };
+  requestAnimationFrame(reveal);
+  setTimeout(reveal, 50);
 
   return { overlay: overlay, dialog: dialog, close: close };
 }
@@ -2473,10 +2773,16 @@ function showConfirm(message) {
     }
     overlay.querySelector('[data-confirm="cancel"]').onclick = function () { done(false); };
     overlay.querySelector('[data-confirm="ok"]').onclick = function () { done(true); };
-    requestAnimationFrame(function () {
+    // See openModal: rAF alone never fires in a hidden tab.
+    var shown = false;
+    var reveal = function () {
+      if (shown) return;
+      shown = true;
       overlay.classList.add("open");
       _focusFirstIn(dialog);
-    });
+    };
+    requestAnimationFrame(reveal);
+    setTimeout(reveal, 50);
   });
 }
 
@@ -2594,10 +2900,16 @@ function showPrompt(message, opts) {
       });
     }
 
-    requestAnimationFrame(function () {
+    // See openModal: rAF alone never fires in a hidden tab.
+    var shown = false;
+    var reveal = function () {
+      if (shown) return;
+      shown = true;
       overlay.classList.add("open");
       try { input.focus(); } catch (_) { _focusFirstIn(dialog); }
-    });
+    };
+    requestAnimationFrame(reveal);
+    setTimeout(reveal, 50);
   });
 }
 if (typeof window !== "undefined") window.showPrompt = showPrompt;
@@ -3219,13 +3531,15 @@ document.addEventListener("DOMContentLoaded", async function () {
     }
   } catch (_) {}
 
-  _initPanelLock();
-  _loadPanelLock();
+  // Wires the observer + backdrop guard and loads the preference under whatever
+  // username the cache gave us (possibly none).
+  initPanelLock({ user: currentUsername });
 
   await fetchCurrentUser();
 
-  // Re-load the lock state under the authoritative username + re-sync buttons.
-  _loadPanelLock();
+  // Re-key to the authoritative username, reload and re-sync the buttons. This
+  // is why initPanelLock has to be idempotent rather than run-once.
+  initPanelLock({ user: currentUsername });
 
   // Re-render if the cache was cold OR the role name changed OR the matrix
   // shifted (an admin edited the role since the last cached snapshot).
