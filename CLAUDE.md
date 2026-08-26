@@ -85,9 +85,18 @@ AssetStatus:             active | maintenance | decommissioned | storage | disab
 // 20260709000000 + the seedAssetTypes self-heal), and the Azure Arc
 // integration added `kubernetes_cluster` the same way (migration
 // 20260807020000) for Arc-enabled connected clusters — note that
-// registration is a THREE-WAY lockstep: the migration, BUILT_IN_ASSET_TYPES,
-// AND the BUILT_IN_SEEDS entry, because seedBuiltInAssetTypes skips any seed
-// whose name isn't in the built-in list. The `hypervisor` type's
+// registration is a SIX-WAY lockstep. Backend three: the migration,
+// BUILT_IN_ASSET_TYPES, AND the BUILT_IN_SEEDS entry, because
+// seedBuiltInAssetTypes skips any seed whose name isn't in the built-in list.
+// Frontend three, all in public/js/widgets/index.js: BUILTIN_ASSET_TYPES,
+// ASSET_TYPE_LABELS and ASSET_TYPE_COLORS — the dashboard widgets read NO
+// registry (unlike assets.js, which hydrates its labels from GET /asset-types),
+// so a type absent from those static maps is invisible to the dashboard and,
+// because the server derives the hidden set as (built-ins − the enabled ones
+// the widget sent), impossible to filter on. Both `hypervisor` and
+// `kubernetes_cluster` were unfilterable from the day each was added until
+// 2026-08. tests/unit/widgetAssetTypes.test.ts pins the parity; the full
+// checklist is in TOUCHES.md → services/assetTypeService.ts. The `hypervisor` type's
 // `virtual_machine` sibling was retired by migration 20260722000000 — vCenter VMs are typed
 // plain `server` (VM identity lives in Asset.virtualization + the
 // vcenter-vm AssetSource row; the per-class config block kept its

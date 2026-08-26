@@ -50,12 +50,49 @@
     },
   };
 
-  // The eight built-in asset types, in display order. A widget's asset-type
-  // filter is "all eight on" by default; only a strict subset is sent to the
-  // server (so operator-added custom types always show through).
+  // The built-in asset types, in display order. A widget's asset-type filter is
+  // "all on" by default; only a strict subset is sent to the server (so
+  // operator-added custom types always show through). MUST stay in lockstep
+  // with BUILT_IN_ASSET_TYPES in src/utils/assetTypes.ts — the server derives
+  // the HIDDEN set as (its built-ins − the ones we send), so a name this list
+  // lacks is a type the operator can never filter on.
   window.PolarisWidgets.BUILTIN_ASSET_TYPES = [
     "server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other",
+    "hypervisor",         // vCenter (migration 20260709000000)
+    "kubernetes_cluster", // Azure Arc connected clusters (migration 20260807020000)
   ];
+
+  // The eight types that existed before the registry grew. A stored widget
+  // config predates a new built-in if it names every one of these and nothing
+  // else — see effectiveAssetTypes below.
+  var LEGACY_ASSET_TYPES = [
+    "server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other",
+  ];
+
+  // Read a stored `config.assetTypes` in TODAY's terms.
+  //
+  // The filter is stored as the ENABLED list, so a config saved before a built-in
+  // existed simply doesn't mention it — indistinguishable, by shape alone, from
+  // an operator who just switched it off. We resolve that in favor of showing
+  // the data: a list carrying ALL EIGHT legacy types is "everything was on when
+  // this was saved", so it widens to every built-in and the caller's all-on test
+  // then suppresses the param entirely. Without this, adding a built-in would
+  // silently hide it in every widget whose config was already all-on — the
+  // list would go from 8-of-8 (unfiltered) to 8-of-10 (a strict subset), and
+  // the server would start excluding the two it never heard about.
+  //
+  // Known limit: an operator who unchecks ONLY the newer types, leaving all
+  // eight legacy ones on, saves a list this reads as all-on and widens back.
+  // Anything else — any narrower pick — is passed through untouched.
+  function effectiveAssetTypes(list) {
+    if (!Array.isArray(list)) return null;
+    var all = window.PolarisWidgets.BUILTIN_ASSET_TYPES;
+    for (var i = 0; i < LEGACY_ASSET_TYPES.length; i++) {
+      if (list.indexOf(LEGACY_ASSET_TYPES[i]) === -1) return list;
+    }
+    return all.slice();
+  }
+  window.PolarisWidgets.effectiveAssetTypes = effectiveAssetTypes;
 
   // Widget refresh cadence, by how fast the underlying thing actually moves:
   //   fast   — in-flight progress (a running discovery)
@@ -88,10 +125,14 @@
   function nocQueryString(opts) {
     opts = opts || {};
     var parts = [];
-    if (Array.isArray(opts.assetTypes)
-        && opts.assetTypes.length > 0
-        && opts.assetTypes.length < window.PolarisWidgets.BUILTIN_ASSET_TYPES.length) {
-      parts.push("assetTypes=" + encodeURIComponent(opts.assetTypes.slice().sort().join(",")));
+    // Resolve a pre-existing config into today's built-in set BEFORE the
+    // strict-subset test, or a config that was all-on when it was saved reads
+    // as a narrowing and hides the built-ins added since.
+    var types = effectiveAssetTypes(opts.assetTypes);
+    if (types
+        && types.length > 0
+        && types.length < window.PolarisWidgets.BUILTIN_ASSET_TYPES.length) {
+      parts.push("assetTypes=" + encodeURIComponent(types.slice().sort().join(",")));
     }
     var regions = null;
     if (opts.regionScope === "custom") regions = Array.isArray(opts.regions) ? opts.regions : [];
@@ -713,7 +754,9 @@
         +   '<option value="custom"' + (fgScope === "custom" ? " selected" : "") + '>Selected FortiGates…</option>'
         + '</select>'
         + '<div class="widget-config-typegrid widget-config-fglist" data-nocf="fortigateList" style="display:none"></div>';
-      var enabled = Array.isArray(config.assetTypes) ? config.assetTypes : BUILTIN.slice();
+      // Same resolution the query path uses — a config saved before a built-in
+      // existed shows that type CHECKED, matching the rows the widget renders.
+      var enabled = effectiveAssetTypes(config.assetTypes) || BUILTIN.slice();
       html += '<label class="widget-config-label">Asset types</label>'
         + '<div class="widget-config-typegrid">'
         + BUILTIN.map(function (t) {
@@ -870,12 +913,12 @@
   window.PolarisWidgets.ASSET_TYPE_LABELS = {
     server: "Server", switch: "Switch", router: "Router", firewall: "Firewall",
     workstation: "Workstation", printer: "Printer", access_point: "AP", other: "Other",
-    hypervisor: "Hypervisor",
+    hypervisor: "Hypervisor", kubernetes_cluster: "K8s Cluster",
   };
   window.PolarisWidgets.ASSET_TYPE_COLORS = {
     server: "#4fc3f7", switch: "#26c6da", router: "#7e57c2", firewall: "#ef5350",
     workstation: "#66bb6a", printer: "#ffa726", access_point: "#ab47bc", other: "#90a4ae",
-    hypervisor: "#5c6bc0",
+    hypervisor: "#5c6bc0", kubernetes_cluster: "#00897b",
   };
 
   // ─── Widget header title ─────────────────────────────────────────────────

@@ -26,6 +26,7 @@ vi.mock("../../src/services/monitoringService.js", () => ({
 import * as noc from "../../src/services/nocDashboardService.js";
 import { prisma } from "../../src/db.js";
 import { resolveMonitorSettings } from "../../src/services/monitoringService.js";
+import { BUILT_IN_ASSET_TYPES } from "../../src/utils/assetTypes.js";
 
 const groupBy = prisma.asset.groupBy as unknown as ReturnType<typeof vi.fn>;
 const count = prisma.asset.count as unknown as ReturnType<typeof vi.fn>;
@@ -748,7 +749,7 @@ describe("resolveFilteredAssetIds", () => {
   });
 
   it("returns null when every built-in type is enabled and there is no region filter", async () => {
-    const all = ["server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other"];
+    const all = [...BUILT_IN_ASSET_TYPES];
     const r = await noc.resolveFilteredAssetIds({ assetTypes: all, regionNames: [] });
     expect(r).toBeNull();
     expect(findMany).not.toHaveBeenCalled();
@@ -759,7 +760,9 @@ describe("resolveFilteredAssetIds", () => {
     const r = await noc.resolveFilteredAssetIds({ assetTypes: ["server", "switch"], regionNames: ["East"] });
     expect(r).toEqual(["x", "y"]);
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
-    expect(where.assetType).toEqual({ notIn: ["router", "firewall", "workstation", "printer", "access_point", "other"] });
+    expect(where.assetType).toEqual({
+      notIn: BUILT_IN_ASSET_TYPES.filter((t) => !["server", "switch"].includes(t)),
+    });
     expect(where.tags).toEqual({ hasSome: ["region:East"] });
   });
 
@@ -813,7 +816,9 @@ describe("resolveFilteredAssetIds", () => {
     });
     const where = (findMany.mock.calls[0][0] as { where: Record<string, unknown> }).where;
     // Both dimensions present as sibling keys = implicit Prisma AND.
-    expect(where.assetType).toEqual({ notIn: ["server", "router", "firewall", "workstation", "printer", "other"] });
+    expect(where.assetType).toEqual({
+      notIn: BUILT_IN_ASSET_TYPES.filter((t) => !["switch", "access_point"].includes(t)),
+    });
     expect((where.OR as unknown[]).length).toBe(4); // 2 gates × 2 haystacks
   });
 });

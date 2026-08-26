@@ -5,18 +5,57 @@
  */
 
 (function () {
-  function renderPie(el, rows, hiddenTypes) {
+  // Display order comes from ASSET_TYPE_LABELS, but the ROWS decide what renders.
+  // This used to map over Object.keys(labels), so a type the static map didn't
+  // know — a built-in added since (hypervisor, kubernetes_cluster) or any
+  // operator-added custom type — was dropped from the chart while still counting
+  // toward the total: the pie came up a wedge short of a full circle and every
+  // other slice's percentage read low, and the bar chart scaled its widths
+  // against a `max` set by a row it never drew.
+  function orderTypes(rows) {
     var lbls = PolarisWidgets.ASSET_TYPE_LABELS;
-    var cols = PolarisWidgets.ASSET_TYPE_COLORS;
-    var hidden = new Set(hiddenTypes || []);
-    var filtered = rows.filter(function (r) { return !hidden.has(r.assetType); });
-    var total = filtered.reduce(function (s, r) { return s + r.count; }, 0);
-    if (!total) { el.innerHTML = '<p class="empty-state">No assets to show</p>'; return; }
+    var counts = {};
+    (rows || []).forEach(function (r) {
+      if (!r || !r.assetType) return;
+      counts[r.assetType] = (counts[r.assetType] || 0) + (r.count || 0);
+    });
+    var out = [];
+    Object.keys(lbls).forEach(function (k) {
+      if (counts[k] > 0) out.push({ assetType: k, count: counts[k] });
+      delete counts[k];
+    });
+    // Whatever the map didn't claim, alphabetically so the paint is stable.
+    Object.keys(counts).sort().forEach(function (k) {
+      if (counts[k] > 0) out.push({ assetType: k, count: counts[k] });
+    });
+    return out;
+  }
 
-    var ordered = Object.keys(lbls).map(function (k) {
-      var hit = filtered.find(function (r) { return r.assetType === k; });
-      return { assetType: k, count: hit ? hit.count : 0 };
-    }).filter(function (r) { return r.count > 0; });
+  // The widgets read no registry (no /asset-types fetch here), so a custom type
+  // arrives as its stored snake_case name — humanize it rather than print it raw.
+  function typeLabel(t) {
+    var lbls = PolarisWidgets.ASSET_TYPE_LABELS;
+    if (lbls[t]) return lbls[t];
+    return String(t).replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  // Unknown types get a stable hue derived from the name: several custom types
+  // sharing one fallback grey are indistinguishable as adjacent pie slices.
+  function typeColor(t) {
+    var cols = PolarisWidgets.ASSET_TYPE_COLORS;
+    if (cols[t]) return cols[t];
+    var h = 0;
+    for (var i = 0; i < String(t).length; i++) h = (h * 31 + String(t).charCodeAt(i)) % 360;
+    return "hsl(" + h + ",42%,58%)";
+  }
+
+  function renderPie(el, rows, hiddenTypes) {
+    var hidden = new Set(hiddenTypes || []);
+    var filtered = (rows || []).filter(function (r) { return !hidden.has(r.assetType); });
+    var ordered = orderTypes(filtered);
+    // Total comes from the rows being DRAWN, so the slices always close the circle.
+    var total = ordered.reduce(function (s, r) { return s + r.count; }, 0);
+    if (!total) { el.innerHTML = '<p class="empty-state">No assets to show</p>'; return; }
 
     var size = 200, r = 80, cx = size / 2, cy = size / 2;
     var startAngle = -Math.PI / 2;
@@ -29,8 +68,8 @@
       var y2 = cy + r * Math.sin(endAngle);
       var largeArc = (endAngle - startAngle) > Math.PI ? 1 : 0;
       var d = 'M ' + cx + ' ' + cy + ' L ' + x1 + ' ' + y1 + ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + x2 + ' ' + y2 + ' Z';
-      var color = cols[row.assetType] || "#9e9e9e";
-      var label = lbls[row.assetType] || row.assetType;
+      var color = typeColor(row.assetType);
+      var label = typeLabel(row.assetType);
       startAngle = endAngle;
       return { d: d, color: color, label: label, assetType: row.assetType, count: row.count, pct: Math.round(frac * 100) };
     });
@@ -61,21 +100,16 @@
   }
 
   function renderBar(el, rows, hiddenTypes) {
-    var lbls = PolarisWidgets.ASSET_TYPE_LABELS;
-    var cols = PolarisWidgets.ASSET_TYPE_COLORS;
     var hidden = new Set(hiddenTypes || []);
-    var filtered = rows.filter(function (r) { return !hidden.has(r.assetType); });
-    if (!filtered.length) { el.innerHTML = '<p class="empty-state">No assets to show</p>'; return; }
-    var max = Math.max.apply(null, filtered.map(function (r) { return r.count; }));
-    var ordered = Object.keys(lbls).map(function (k) {
-      var hit = filtered.find(function (r) { return r.assetType === k; });
-      return hit ? hit : null;
-    }).filter(Boolean);
+    var filtered = (rows || []).filter(function (r) { return !hidden.has(r.assetType); });
+    var ordered = orderTypes(filtered);
+    if (!ordered.length) { el.innerHTML = '<p class="empty-state">No assets to show</p>'; return; }
+    var max = Math.max.apply(null, ordered.map(function (r) { return r.count; }));
     el.innerHTML = '<div style="display:flex;flex-direction:column;gap:6px;padding:4px 0">' +
       ordered.map(function (r) {
         var pct = Math.round((r.count / max) * 100);
-        var color = cols[r.assetType] || "#9e9e9e";
-        var label = lbls[r.assetType] || r.assetType;
+        var color = typeColor(r.assetType);
+        var label = typeLabel(r.assetType);
         var nav = "/assets.html#type=" + encodeURIComponent(r.assetType);
         return '<a class="block-util-link" href="' + nav + '" style="display:grid;grid-template-columns:90px 1fr 40px;align-items:center;gap:8px;text-decoration:none">' +
           '<span style="font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(label) + '</span>' +

@@ -31,6 +31,7 @@
  */
 
 import { EXCLUDED_LIFECYCLE_STATUSES } from "../utils/assetInvariants.js";
+import { BUILT_IN_ASSET_TYPES } from "../utils/assetTypes.js";
 import { prisma } from "../db.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
 import { computeStorageForecast } from "./storageForecastService.js";
@@ -100,8 +101,14 @@ export async function getMonitorAlertRows(cap: number) {
   });
 }
 
-// The eight built-in asset types the per-widget asset-type filter toggles.
-const BUILTIN_ASSET_TYPES = ["server", "switch", "router", "firewall", "workstation", "printer", "access_point", "other"];
+// The built-in asset types the per-widget asset-type filter toggles. Read from
+// the registry constant rather than re-listing them: this file derives the
+// HIDDEN set as (built-ins - the enabled ones the widget sent), so a private
+// copy that misses a name silently makes that type unfilterable — which is how
+// `hypervisor` and `kubernetes_cluster` stayed off the filter after being added
+// to the registry. The widgets' own copy (public/js/widgets/index.js) is the
+// third member of this lockstep; see TOUCHES.md -> services/assetTypeService.ts.
+const BUILTIN_ASSET_TYPES: readonly string[] = BUILT_IN_ASSET_TYPES;
 
 // Sentinel the widgets send in ?fortigates= for the "(No FortiGate)" picker
 // entry — matches assets with NO gate association (no sighting rows and a
