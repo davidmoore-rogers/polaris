@@ -10,6 +10,11 @@
  * dump the whole remainder on the rightmost column, leaving cramped columns
  * and one enormous blank one.
  *
+ * Two constants drive the numbers below: FIXED_COL_W (34) is the utility-column
+ * track, and AUTOFILL_MIN_W (36) is the floor under the auto-fill column — it
+ * absorbs every deficit, and below its label's min-content the header wraps a
+ * letter per line and stretches the whole thead to ~124px.
+ *
  * table-sf.js is a plain browser script (no module exports), so it's eval'd
  * into a happy-dom Window with the app-shell globals stubbed — same approach as
  * tests/unit/tableColumnOrder.test.ts. Node has no requestAnimationFrame, so
@@ -27,8 +32,8 @@ const g = globalThis as Record<string, any>;
 
 const AVAIL = 1000;
 
-// cb (utility, pinned 20px) | fixed (static-width, declared 100px) |
-// three resizable columns, the last of which is the auto-fill one.
+// cb (utility, pinned to FIXED_COL_W = 34px) | fixed (static-width, declared
+// 100px) | three resizable columns, the last of which is the auto-fill one.
 const TABLE_HTML = `
   <div class="table-wrapper">
     <table>
@@ -106,20 +111,21 @@ beforeEach(() => { setup(); });
 
 describe("column fit — spending the leftover width", () => {
   it("spreads slack across every resizable column, proportionally", () => {
-    // 1000 available − 20 (cb) − 100 (static) = 880 for the three resizable
-    // columns, whose base widths sum to 400 → ×2.2 each.
+    // 1000 available − 34 (cb) − 100 (static) = 866 for the three resizable
+    // columns, whose base widths sum to 400 → ×2.165 each, and the auto-fill
+    // column takes the rounding remainder so the row still sums to 1000.
     layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
 
-    expect(widthOf("hostname")).toBe(220);
-    expect(widthOf("ip")).toBe(440);
-    expect(widthOf("created")).toBe(220);
+    expect(widthOf("hostname")).toBe(216);
+    expect(widthOf("ip")).toBe(433);
+    expect(widthOf("created")).toBe(217);
   });
 
   it("honors the declared width of utility + static-width columns", () => {
     layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100, badge: 999 } });
 
     expect(widthOf("badge")).toBe(100);      // declared width is the source of truth
-    expect(colWidths()[0]).toBe(20);         // cb-col pin
+    expect(colWidths()[0]).toBe(34);         // cb-col pin (FIXED_COL_W)
   });
 
   it("leaves no trailing gap — the visible columns sum to the container width", () => {
@@ -133,9 +139,9 @@ describe("column fit — spending the leftover width", () => {
     layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
     layout.setPrefs({ hidden: ["ip"], shown: ["hostname", "created"] });
 
-    // 880 now shared by hostname + created (base 200) → ×4.4.
-    expect(widthOf("hostname")).toBe(440);
-    expect(widthOf("created")).toBe(440);
+    // 866 now shared by hostname + created (base 200) → ×4.33.
+    expect(widthOf("hostname")).toBe(433);
+    expect(widthOf("created")).toBe(433);
   });
 
   it("does not shrink an over-committed table — the last column stays visible", () => {
@@ -150,16 +156,16 @@ describe("column fit — spending the leftover width", () => {
   });
 
   it("tracks a resize drag 1:1 against what's on screen", () => {
-    // Stretched render is hostname 220 / ip 440. Dragging the divider 50px left
+    // Stretched render is hostname 216 / ip 433. Dragging the divider 50px left
     // has to move it 50 SCREEN px — the stored base (100/200) sums narrower
     // than the container, so applying the delta to the base would move the
-    // divider by 50 × 2.2.
+    // divider by 50 × 2.165.
     layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
     dragHandle("hostname", -50);
 
-    expect(widthOf("hostname")).toBe(170);
-    expect(widthOf("ip")).toBe(490);
-    expect(widthOf("created")).toBe(220);
+    expect(widthOf("hostname")).toBe(166);
+    expect(widthOf("ip")).toBe(483);
+    expect(widthOf("created")).toBe(217);
     expect(colWidths().reduce((a, b) => a + b, 0)).toBe(AVAIL);
   });
 });
@@ -172,13 +178,13 @@ describe("column fit — spending the leftover width", () => {
  */
 describe("column fit — the 5px minimum width", () => {
   it("lets a drag squeeze a column to the sliver, and clamps there", () => {
-    // Stretched render is hostname 220 / ip 440. Dragging 300px left would take
-    // hostname to -80; it stops at 5 and the neighbor absorbs exactly 215.
+    // Stretched render is hostname 216 / ip 433. Dragging 300px left would take
+    // hostname to -84; it stops at 5 and the neighbor absorbs the rest.
     layout.setPrefs({ widths: { hostname: 100, ip: 200, created: 100 } });
     dragHandle("hostname", -300);
 
     expect(widthOf("hostname")).toBe(5);
-    expect(widthOf("ip")).toBe(655);
+    expect(widthOf("ip")).toBe(644);
     expect(colWidths().reduce((a, b) => a + b, 0)).toBe(AVAIL);
   });
 
@@ -187,7 +193,7 @@ describe("column fit — the 5px minimum width", () => {
     dragHandle("hostname", 1000);
 
     expect(widthOf("ip")).toBe(5);
-    expect(widthOf("hostname")).toBe(655);
+    expect(widthOf("hostname")).toBe(644);
   });
 
   it("raises a saved sub-floor width to the floor rather than honoring it", () => {
@@ -202,8 +208,28 @@ describe("column fit — the 5px minimum width", () => {
     layout.setPrefs({ widths: { hostname: 500, ip: 500, created: 1 } });
 
     // Over-committed: no leftover for the last column, so it falls back to its
-    // own saved width — itself floored.
-    expect(widthOf("created")).toBe(5);
+    // own saved width (itself floored to MIN_COL_W) — and then to
+    // AUTOFILL_MIN_W, because a 5px auto-fill column can't hold its label and
+    // the wrapping header is worse than the horizontal scroll.
+    expect(widthOf("created")).toBe(36);
+  });
+
+  it("floors the auto-fill column at AUTOFILL_MIN_W, not at the 5px sliver", () => {
+    // 34 (cb) + 100 (static) + 500 + 350 leaves 16 for `created` — under the
+    // floor, so it takes 36 and the row overflows into the wrapper's
+    // horizontal scroll rather than stretching the thead.
+    layout.setPrefs({ widths: { hostname: 500, ip: 350, created: 100 } });
+
+    expect(widthOf("created")).toBe(36);
+  });
+
+  it("lets a th's own declared width raise that floor", () => {
+    // A width on the <th> is an explicit statement of how much the column
+    // needs, so it wins over AUTOFILL_MIN_W.
+    doc.querySelector('thead th[data-col-id="created"]')!.setAttribute("style", "width:90px");
+    layout.setPrefs({ widths: { hostname: 500, ip: 350, created: 100 } });
+
+    expect(widthOf("created")).toBe(90);
   });
 });
 

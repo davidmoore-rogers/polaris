@@ -2156,9 +2156,30 @@ body.sf-resizing * { user-select: none !important; }
   color: var(--color-text-secondary);
   flex: 1;
 }
-/* Fixed, non-resizable utility columns. Pinned to a 20px floor (the resize
-   logic in table-sf.js skips them entirely — no drag handle, never absorbed). */
-th.cb-col, td.cb-col { width: 20px; min-width: 20px; text-align: center; padding: 0 2px; }
+/* Fixed, non-resizable utility columns — the resize logic in table-sf.js skips
+   them entirely (no drag handle, never absorbed).
+
+   No WIDTH here, deliberately: under table-layout:fixed the <col> element wins
+   over a stylesheet rule, and the pin loop in setupColumnLayout overwrites
+   widths[] regardless — so a width set here is inert. The 34px track is seeded
+   by FIXED_COL_W in table-sf.js, and a page opts out per table with an inline
+   style="width:…" on the <th>.
+
+   No PADDING either: any padding on this cell is stripped again by the
+   narrow-column rules setupColumnLayout generates. The cell AFTER it gives up
+   half its padding instead, so the two gaps around the box read as equal — at a
+   full 1rem the box looked left-hugging, because the gap on its right carried
+   the neighbour's padding on top of its own centering slack. */
+th.cb-col, td.cb-col { padding: 0 !important; text-align: center; }
+/* Header checkbox sits on the label line rather than the middle of the tall
+   two-row header cell. Header padding only — the filter row's alignment is
+   measured off td padding, so the half-padding rule below must not touch th. */
+thead th.cb-col { vertical-align: top; padding: 0.65rem 0 0 0 !important; }
+td.cb-col + td { padding-left: 0.5rem; }
+/* Zero the UA margin and stay INLINE: as a block in the tall, middle-aligned
+   header cell the input centred vertically and read as an extra empty header
+   row. text-align:center on the cell does the horizontal centering. */
+th.cb-col input, td.cb-col input { margin: 0; vertical-align: middle; }
 th.fav-col, td.fav-col { width: 20px; min-width: 20px; text-align: center; padding: 0 1px; }
 .fav-star {
   background: none;

@@ -933,7 +933,11 @@ function setupColumnLayout(tableEl, options) {
     document.head.appendChild(styleEl);
   }
 
-  var FIXED_COL_W = 20;
+  // Utility-column track (checkbox / favourite star). 34, not 20: a ~16px box
+  // in a 20px track has 2px either side, and the gap on its right also carries
+  // the next cell's padding — so it read as left-hugging. 34 leaves even air
+  // and still costs less than a data column.
+  var FIXED_COL_W = 34;
   // Floor under EVERY width this helper writes. A column may be squeezed to a
   // 5px sliver — enough to see it's still there, and enough to grab its own
   // resize handle and pull it back out — but never to 0px, which reads as "the
@@ -942,13 +946,22 @@ function setupColumnLayout(tableEl, options) {
   // operator packing many columns into one screen can park the ones they don't
   // need at a sliver instead of hiding them outright.
   var MIN_COL_W = 5;
+  // Below this a column renders as mostly padding and its header label wraps a
+  // letter per line, which stretches the whole thead. The auto-fill column is
+  // floored here so a table that overflows scrolls horizontally instead of
+  // ballooning its header height.
+  var AUTOFILL_MIN_W = 36;
   var widths = {};
   var hidden = {};
 
   // Pin fixed utility columns to FIXED_COL_W up front so every applyWidths()
   // call honors them — otherwise, in table-layout:fixed, a column with no
   // width entry would absorb leftover space and balloon past its 20px floor.
-  colIds.forEach(function (id) { if (noResize[id]) widths[id] = FIXED_COL_W; });
+  colIds.forEach(function (id, i) {
+    if (!noResize[id]) return;
+    var declared = parseFloat(ths[i].style.width);
+    widths[id] = declared > 0 ? declared : FIXED_COL_W;
+  });
 
   // Pin static-width columns to the width DECLARED on their <th>, not to a
   // measured render. These columns carry no drag handle, so a first render that
@@ -1005,7 +1018,10 @@ function setupColumnLayout(tableEl, options) {
       // The rendered width, not the stored base: the fit pass stretches
       // columns, and it owns the auto-fill column's width outright.
       var w = parseFloat(cols[srcIdxOf[id]].style.width) || 0;
-      if (!w || w >= NARROW_COL_W) return;
+      // `>` not `>=`: a column sitting exactly ON the threshold is the worst
+      // case — too narrow to hold its label, but not stripped of the padding
+      // that is squeezing it. It gets the strip.
+      if (!w || w > NARROW_COL_W) return;
       rules.push(sel + ' > thead > tr > :nth-child(' + n + '),');
       // overflow:hidden as well: a header's filter control and a cell's button
       // group have their own intrinsic widths, and at a sliver they'd paint
@@ -1175,6 +1191,19 @@ function setupColumnLayout(tableEl, options) {
       var savedW = widths[colIds[lastIdx]];
       target = Math.max(MIN_COL_W, (typeof savedW === "number" && savedW > 0) ? savedW : 0);
     }
+    // Never starve the auto-fill column: it absorbs every deficit, and once it
+    // is narrower than its label's min-content the header wraps a letter per
+    // line and stretches the whole thead. A width declared on the th is an
+    // explicit statement of how much the column needs, so it wins; otherwise
+    // fall back to AUTOFILL_MIN_W. Overflow goes to the wrapper's horizontal
+    // scroll, which is recoverable — a 124px-tall header is not.
+    //
+    // LAST, after the crushed-table fallback above and not before it: floored
+    // first, `target` can never be below MIN_COL_W, so that branch would be
+    // dead code and an over-committed table would hand the auto-fill column
+    // 36px instead of the saved width it is supposed to keep.
+    var declaredLast = parseFloat(ths[lastIdx].style.width) || 0;
+    target = Math.max(target, AUTOFILL_MIN_W, declaredLast);
     setColWidth(lastIdx, target);
     rewriteHideStyle();
   }
