@@ -41,6 +41,9 @@
       case "up":       return HEALTH_NODE_COLORS.up;
       case "degraded": return HEALTH_NODE_COLORS.degraded;
       case "down":     return HEALTH_NODE_COLORS.down;
+      // No down-detection automation covers it, so there is no verdict to
+      // paint. Distinct from the grey "unknown", which means no samples.
+      case "passive":  return HEALTH_NODE_COLORS.passive;
       default:         return HEALTH_NODE_COLORS.unknown;
     }
   }
@@ -775,6 +778,7 @@
         { label: "Degraded",          color: HEALTH_NODE_COLORS.degraded },
         { label: "Down",              color: HEALTH_NODE_COLORS.down },
         { label: "Maintenance",       color: HEALTH_NODE_COLORS.maintenance },
+        { label: "Passive",           color: HEALTH_NODE_COLORS.passive, desc: "No down-detection automation covers it — still polled, no verdict" },
         { label: "Dep. Down",         color: HEALTH_NODE_COLORS.unknown },
         { label: "Unmonitored",       color: HEALTH_NODE_COLORS.unmonitored },
       ],

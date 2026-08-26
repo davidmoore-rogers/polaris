@@ -81,7 +81,7 @@ function normalizePortName(name: string | null | undefined): string {
   return trimmed;
 }
 
-export type MonitorHealth = "up" | "degraded" | "down" | "unknown";
+export type MonitorHealth = "up" | "degraded" | "down" | "unknown" | "passive";
 
 // Map view's traffic-light: examines the last 10 AssetMonitorSample rows for
 // the asset (independent of the global failureThreshold used by the rest of
@@ -100,14 +100,20 @@ function computeMonitorHealth(samples: { success: boolean }[]): MonitorHealth {
   return "degraded";
 }
 
-// Translate Asset.monitorStatus (five-state machine) to the three-state
-// MonitorHealth used by the topology graph color function.
+// Translate Asset.monitorStatus (six-state machine) to the MonitorHealth used
+// by the topology graph color function.
+//
+// "passive" is its OWN member rather than folding into "unknown": every map and
+// topology surface paints unknown grey with a "no samples yet" tooltip, which
+// is flatly wrong about a device that is being polled and charted and simply
+// has no down-detection automation covering it.
 export function monitorStatusToHealth(status: string | null): MonitorHealth {
   switch (status) {
     case "up":         return "up";
     case "warning":
     case "recovering": return "degraded";
     case "down":       return "down";
+    case "passive":    return "passive";
     default:           return "unknown";
   }
 }

@@ -3013,7 +3013,13 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
  * reads as a deliberate healthy state, distinct from grey Unmonitored and
  * green Up. A roster-reported failure renders badge-monitor-down instead. */
 .badge-monitor-standby { background: rgba(0,150,136,0.14); color: #4db6ac; border: 1px solid rgba(0,150,136,0.32); }
-:is([data-theme="morning"],[data-theme="noon"]) .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+/* Passive: no down-detection automation covers this device, so Polaris renders
+ * NO verdict about it (business rule 36). It is still polled and still charted.
+ * Deliberately the only HOLLOW monitor pill — the absence of a fill reads as the
+ * absence of a judgement, which is exactly what the state means, and it keeps
+ * indigo from being confused with the lavender Maintenance fill at pill size. */
+.badge-monitor-passive { background: transparent; color: #9fa8da; border: 1px solid rgba(92,107,192,0.55); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitored       { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-warning  { background: rgba(245,127,23,0.10); color: #f57f17; border-color: rgba(245,127,23,0.30); }
@@ -3022,6 +3028,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-standby    { background: rgba(0,150,136,0.10); color: #00695c; border-color: rgba(0,150,136,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-passive    { background: transparent; color: #3949ab; border-color: rgba(57,73,171,0.45); }
 
 /* Event level badges */
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
@@ -3201,6 +3208,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .dep-tree-pip-down { color: #ef9a9a; }
 .dep-tree-pip-dep  { color: #b0bec5; }
 .dep-tree-pip-dep-test { color: #ce93d8; }
+.dep-tree-pip-passive  { color: #9fa8da; }
 .dep-tree-pip-unk,
 .dep-tree-pip-unmon { color: var(--color-deprecated); }
 .dep-tree-test-banner {
@@ -3217,6 +3225,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 :is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-down { color: #c62828; }
 :is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-dep  { color: #455a64; }
 :is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-dep-test { color: #7b1fa2; }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-passive  { color: #3949ab; }
 :is([data-theme="morning"],[data-theme="noon"]) .dep-tree-test-banner { background: rgba(123,31,162,0.06); border-color: rgba(123,31,162,0.45); }
 :is([data-theme="morning"],[data-theme="noon"]) .dep-tree-test-banner strong { color: #7b1fa2; }
 
@@ -4957,6 +4966,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .fg-marker.monitor-down        { background: #c62828; }
 .fg-marker.monitor-dep-down    { background: #607d8b; }
 .fg-marker.monitor-maintenance { background: #9575cd; }
+.fg-marker.monitor-passive     { background: #5c6bc0; }
 .fg-cluster {
   width: 40px; height: 40px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -4970,6 +4980,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .fg-cluster.monitor-down        { background: #c62828; }
 .fg-cluster.monitor-dep-down    { background: #607d8b; }
 .fg-cluster.monitor-maintenance { background: #9575cd; }
+.fg-cluster.monitor-passive     { background: #5c6bc0; }
 
 /* ── Site Map widget (SolarWinds-style status dots + weather) ───────────── */
 /* Darken the basemap only in dark theme so dots/radar pop; light theme renders normally. */

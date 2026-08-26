@@ -1834,6 +1834,30 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/downDetectionService.ts
+
+**What it owns:** WHO DECIDES A DEVICE IS DOWN (business rule 36). The per-asset resolution of the covering `monitorStatus == down` automation and its `missedPolls` count, cached fleet-wide for `DOWN_DETECTION_TTL_MS` (60s) and invalidated on every automation CRUD write. Precedence is business rule 18's `scopeRank` ladder (never a second system); same-rank ties resolve to the smaller count, then older `createdAt`, then lower `id` (`pickDownWinner`, pure). A device covered by no down automation resolves to `null` = the `passive` monitor status.
+
+**Public API:** `resolveDownThreshold(assetId)` (the probe path's question), `pickDownWinner(rules, asset, sink?)` (pure core), `describeDownDetectionFor(assetId)` (the slide-over/effective-settings view), `previewDownDetectionRemoval(ruleId)` (backs `GET /automations/:id/removal-impact`), `countPassiveAssets()`, `invalidateDownDetectionCache()`, `DOWN_DETECTION_TTL_MS`, `DEFAULT_MISSED_POLLS`, `isDownDetectionTrigger`.
+
+**Used by:**
+- `src/services/monitoringService.ts` / `src/utils/monitorStatus.ts` — `recordProbeResult` resolves the threshold once per probe; `null` parks the asset at `passive` (counters keep advancing; `runsHeavyCadences` keeps telemetry alive when the last probe succeeded; `isConfigStatusEdge` keeps passive transitions out of `monitor.status_changed` Events and dependency propagation).
+- `src/api/routes/notificationRules.ts` — `GET /automations/:id/removal-impact` (the delete/disable confirmation's passive-count warning).
+- `src/api/routes/assets.ts` — the effective-monitor-settings payload's `downDetection` block (missedPolls or `passive`).
+- `src/services/notificationRuleService.ts` / `notificationTypes.ts` — `validateMissedPolls` (a count may only sit on a bare `monitorStatus == down` trigger) and the wizard schema.
+- `src/jobs/seedBaselineAutomations.ts` — the V3 seed mirrors each install's pre-cutover `failureThreshold` into automations through this vocabulary.
+
+**Invariants:**
+- **One ladder, not two** — down-detection authority and alert precedence share rule 18's carve-out groups; every `monitorStatus == down` automation shares ONE `triggerSignature` keyed by operator+value (never dimensionFilter).
+- **`null` is a verdict about the CONFIG, not the device** — passive devices are still polled/sampled/charted; nothing may map "no covering automation" to down or up.
+- **Cache invalidation is write-driven** — every automation create/update/delete/enable calls `invalidateDownDetectionCache()`; the TTL is the backstop, not the mechanism.
+- **A zero-rule fleet warns once** (`monitor.down_detection_absent`) — the automation that would alert about the blindness is what was deleted, so the Event is the only witness.
+- `failureThreshold` on the monitor-settings tiers is DORMANT — read only by the V3 seed, never by the probe path.
+
+**When changing this:** the probe hot path calls `resolveDownThreshold` once per probe at fleet scale — keep the resolution O(1) against the cached index, never a per-probe query. Renumbering note: this feature's rule is 36 (34 was taken by network Discovery while the branch was in flight).
+
+---
+
 ## services/probeLossQuery.ts
 
 **What it owns:** The single windowed failed-probe-ratio SQL over `asset_monitor_samples` (UTC-wall-clock-anchored `now() AT TIME ZONE 'UTC'` window, measured from the later of each asset's first successful probe inside it and its `recoveryStartedAt`, grouped per asset).
@@ -3551,6 +3575,32 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `POST /agents/windows-ssh/generate` must keep BOTH gates: `serverSettingsSystem:fullwrite` AND `credentials:write`. It mints a fleet-wide admin credential; the second gate is not redundant.
 - Import ssh2's `utils` off the DEFAULT export. It is CommonJS and cjs-module-lexer surfaces `Client` but not `utils`, so a named import throws at module load under Node's ESM loader even though Vitest interops it fine.
 - Tests: `tests/unit/windowsSshOnboarding.test.ts` (in-memory prisma double so credentialService's real validation/masking runs).
+
+---
+
+## services/downDetectionService.ts
+
+**What it owns:** The answer to "what makes THIS device down, and who decided that?" Down used to be a Monitor Settings value (`failureThreshold`, resolved through the (integration, assetType) tier hierarchy). It is now owned by the `monitorStatus == down` AUTOMATION covering each asset, via its `missedPolls` count — so an operator can say "core switches after 2 missed polls, page the NOC; workstations after 10, in-app only" from one surface. This service resolves which automation governs each asset and caches that resolution for the probe hot path.
+
+**Public API:** `resolveDownThreshold(assetId)` → the missed-poll count or **null = PASSIVE**; `describeDownDetectionFor(assetId)` (diagnostics: winner, rank, whether it came via the all-assets fallback, any same-rank conflict — feeds the asset modal, the Alerts tab's Down-detection panel and `GET /assets/:id/effective-monitor-settings`); `previewDownDetectionRemoval(ruleId)` (what deleting or disabling one automation would do: governs / would-fall-back-to-another / would-become-PASSIVE + sample hostnames — builds its own view rather than reading the snapshot's winners, because "who would win instead" is a different question from "who wins", and it only runs when an operator opens a confirm dialog); `countPassiveAssets()`; `invalidateDownDetectionCache()`; `pickDownWinner(rules, asset, sink?)` (pure, the precedence decision); `resetDownDetectionStateForTests()`; `DOWN_DETECTION_TTL_MS`; re-exports `DEFAULT_MISSED_POLLS` + `isDownDetectionTrigger` (both DEFINED in notificationTypes, because validateRuleV2 + the schema catalog need them and importing this service from there would close a cycle).
+
+**Writers of the inputs it reads:** `notificationRuleService.createRule/updateRule/deleteRule` (the rule set — all three call `invalidateDownDetectionCache()` UNCONDITIONALLY); every asset writer in the codebase (scope membership — covered by the TTL only, see Invariants).
+
+**Used by:** `monitoringService.recordProbeResult` (THE hot-path consumer — one call per probe per asset); `jobs/seedBaselineAutomations` (V3 seed, invalidates after seeding). Diagnostics consumers (asset modal / effective-monitor-settings) read `describeDownDetectionFor`.
+
+**Invariants:**
+- **NEVER query on the resolve path.** `resolveDownThreshold` runs once per probe per asset — 2000 assets on a 60s cadence — so it must stay ONE `Map.get` over a cached snapshot. `tests/unit/downDetectionCache.test.ts` pins "2000 concurrent lookups ⇒ exactly 2 queries"; that assertion is the point of the file. Not even an indexed `findFirst` is acceptable here: `probePatchBuffer` and `sampleWriteBuffer` exist specifically to collapse per-probe pool acquisitions.
+- **The cache stores the RESOLVED winner per asset**, never the rule set for a per-probe walk. Overlapping automations are the central use case, so a per-probe walk would be O(assets x rules) on the hot path.
+- **One precedence system, not two.** The winner is chosen by business rule 18's `scopeRank` ladder, and every down automation shares ONE `triggerSignature` (keyed by compared value, NOT by device filter) precisely so the threshold group and the carve-out group are the same set by construction. Change `triggerSignature`'s monitorStatus branch and you change both at once — which is the intent; splitting them would let the automation that alerts differ from the automation whose count governs.
+- **Coverage is scope AND device filter.** `ruleCoversAsset` ANDs `deviceFilterMatch` into `scopeMatchesAsset`. Since the signature no longer pins the filter, omitting this would let a `hostname matches "core-"` automation govern every asset in its scope.
+- **Same-rank tie ladder: smaller count, then older `createdAt`, then lower `id`.** Smaller-count-wins matches `getMetricSeverityTiers`' existing more-sensitive-wins convention and is the safe direction (both tied automations still FIRE — rule 18 leaves same-rank ties alone — so taking the smaller means neither ever fires later than its own configuration promised). The last two only ever break a tie between EQUAL counts, where the threshold is identical and the tiebreak exists solely to give the winner a stable identity for diagnostics; both are immutable so two Polaris processes never disagree.
+- **`fallback` is not an optimization, it is the correctness fix for a new asset.** An asset discovered since the last rebuild is absent from `byAsset` and would otherwise read passive for up to a TTL. An all-assets automation (no scope narrowing, no device filter) covers ANY asset by definition, so answering from it is exact and can never over-claim.
+- **Asset scope drift rides the TTL alone — deliberately.** Instrumenting every asset writer is not viable (`discoveryEngine` alone has dozens of write sites, plus the merge services and the asset routes). One TTL is under one probe cycle, so the worst case is a stale-but-valid threshold; the only case where staleness could produce a WRONG verdict is the new asset, and `fallback` makes that exact. Do not half-instrument this.
+- **Degrade to PASSIVE, never to a guessed number.** A failed rebuild serves `lastGoodIndex`; with no snapshot at all every asset reads passive. Refusing to render a verdict is strictly safer than inventing one, it is a state the system already models, samples and counters still land, and `createTtlCache` never caches a rejection so it self-heals on the next probe. `invalidateDownDetectionCache()` deliberately does NOT clear `lastGoodIndex` — that is the crash mat, not the answer.
+- **Conflicts are reported per rule PAIR, not per asset** (capped at `MAX_CONFLICTS`): one bad config across a 2000-asset fleet must not write 2000 log lines or pin 2000 rows.
+- **The zero-rule Event fires on the TRANSITION**, not every rebuild. A fleet with no down automation is judged by nothing, and the thing that would normally alert about that is exactly what was deleted — but a warning every 60s forever is its own kind of useless.
+
+**When changing this:** Adding a way for an automation to define down → it must flow through `pickDownWinner` (keep it pure and unit-tested) AND through `isDownDetectionTrigger`, or the resolver and the validator will disagree about which rules count. Changing the TTL → keep it between 30s and 120s (below, the rebuild stops amortizing across a probe cycle; above, this is the only mechanism catching asset scope drift). Adding a column to the coverage predicates → add it to `DOWN_SCOPE_SELECT` too, and resist reusing the engine's `SCOPE_SELECT`, which drags array columns this resolver never reads. Touching the state machine that consumes this → `tests/unit/monitorStatusStateMachine.test.ts` mirrors the transition logic inline and must move with it.
 
 ---
 

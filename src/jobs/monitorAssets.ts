@@ -46,6 +46,7 @@ import {
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
 import { lossSamplerAppliesTo, lossSampleIsDue } from "../utils/lossSampler.js";
+import { runsHeavyCadences } from "../utils/monitorStatus.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { prisma } from "../db.js";
@@ -220,10 +221,13 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       anySysInfoStream &&
       !(eff.interfacesPolling === "rest_api" && isManagedSwitchOrAp);
 
-    // Heavy-cadence suppression: only "up" AND not dependency-suppressed
-    // runs telemetry / systemInfo / fastFiltered. See the matching comment
-    // in monitoringService.runMonitorPass.
-    const isUp = a.monitorStatus === "up" && !a.dependencySuppressed;
+    // Heavy-cadence suppression: "up" AND not dependency-suppressed runs
+    // telemetry / systemInfo / fastFiltered — plus a PASSIVE asset whose last
+    // probe succeeded, since a passive device is still polled and its charts
+    // are meant to keep filling. See the matching comment in
+    // monitoringService.runMonitorPass; the shared predicate is what keeps
+    // these two documented-lockstep twins from drifting.
+    const isUp = runsHeavyCadences(a);
 
     // Per-cadence transport labels for the work-duration histogram. Each
     // cadence is labeled with the polling method it actually uses
@@ -303,10 +307,13 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     }
   }
 
-  const total = candidates.length;
-  const up    = candidates.filter(a => a.monitorStatus === "up").length;
-  const down  = candidates.filter(a => a.monitorStatus === "down").length;
-  setMonitoredAssets(total, { up, down, unknown: total - up - down });
+  const total   = candidates.length;
+  const up      = candidates.filter(a => a.monitorStatus === "up").length;
+  const down    = candidates.filter(a => a.monitorStatus === "down").length;
+  // Passive gets its own bucket: folding it into "unknown" would read as
+  // "never probed" about devices that are being polled perfectly well.
+  const passive = candidates.filter(a => a.monitorStatus === "passive").length;
+  setMonitoredAssets(total, { up, down, passive, unknown: total - up - down - passive });
 }
 
 async function probeTick(): Promise<void> {

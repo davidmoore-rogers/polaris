@@ -73,6 +73,11 @@ export function classifyPresenceSignal(a: PresenceCandidate, freshFloorMs: numbe
   if (a.lastSeen && a.lastSeen.getTime() >= freshFloorMs) return { kind: "fresh" };
   const agentSeen = a.managedAgent?.lastSeenAt;
   if (agentSeen && agentSeen.getTime() >= freshFloorMs) return { kind: "agent", evidenceAt: agentSeen };
+  // "passive" is deliberately absent here and needs no branch: a passive asset
+  // is still probed, and a SUCCESSFUL probe bumps lastSeen (business rule 12),
+  // so an answering passive device short-circuits at the `fresh` check above and
+  // never reaches this test. One whose lastSeen has gone stale genuinely has no
+  // probe evidence to offer and should fall through to the ping, which it does.
   if (
     a.monitored &&
     (a.monitorStatus === "up" || a.monitorStatus === "recovering") &&

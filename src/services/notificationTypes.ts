@@ -370,6 +370,19 @@ const assetStateTrigger = z.object({
   value: z.union([z.string().max(200), z.number(), z.boolean()]),
   forDurationSec: z.number().int().min(0).max(86400).default(0),
   dimensionFilter: dimensionFilterSchema,
+  /**
+   * DOWN-DETECTION AUTHORITY — valid only on `monitorStatus == down`, where it
+   * is not a filter on the reading but the DEFINITION of it: the number of
+   * consecutive missed polls after which recordProbeResult flips this
+   * automation's devices to "down". An asset covered by no down-detection
+   * automation is never judged and reads "passive".
+   *
+   * Optional in the schema, required by the wizard. Optional because a
+   * pre-upgrade client's POST must not 400, and because the pre-cutover
+   * baseline "Asset down" row carries none — such a rule still governs its
+   * devices, at DEFAULT_MISSED_POLLS.
+   */
+  missedPolls: z.number().int().min(1).max(100).optional(),
 });
 
 const hostMetricTrigger = z.object({
@@ -1490,6 +1503,74 @@ export function scopeRank(scope: RuleScope): number {
   return rank;
 }
 
+/**
+ * Minimal asset shape needed to evaluate scope membership. Extends the
+ * condition-evaluator's field vocabulary (notificationTypes.ScopeConditionAsset)
+ * so the flat-scope matcher and the condition tree can never drift apart —
+ * this layer just requires the dimensions the flat matcher always reads.
+ */
+export interface ScopeAsset extends ScopeConditionAsset {
+  assetType: string | null;
+  tags: string[];
+  discoveredByIntegrationId: string | null;
+}
+
+/**
+ * Does `scope` select `asset`? AND across the provided dimensions, OR within
+ * each list. `allAssets` short-circuits true. A scope with no dimensions and
+ * allAssets unset matches NOTHING (the builder requires an explicit selection).
+ * KEEP IN LOCKSTEP with the engine's SQL `scopeWhere` + loadScopeAssets
+ * subnet post-filter (notificationEngine.ts) — this is the in-memory twin.
+ */
+export function scopeMatchesAsset(scope: RuleScope, asset: ScopeAsset): boolean {
+  if (scope.allAssets) return true;
+  let anyDimension = false;
+
+  if (scope.assetTypes && scope.assetTypes.length > 0) {
+    anyDimension = true;
+    if (!scope.assetTypes.includes(asset.assetType ?? "")) return false;
+  }
+  if (scope.tags && scope.tags.length > 0) {
+    anyDimension = true;
+    const set = new Set(asset.tags.map((t) => t.toLowerCase()));
+    if (!scope.tags.some((t) => set.has(t.toLowerCase()))) return false;
+  }
+  if (scope.assetIds && scope.assetIds.length > 0) {
+    anyDimension = true;
+    if (!scope.assetIds.includes(asset.id)) return false;
+  }
+  if (scope.integrationIds && scope.integrationIds.length > 0) {
+    anyDimension = true;
+    if (!scope.integrationIds.includes(asset.discoveredByIntegrationId ?? "")) return false;
+  }
+  if (scope.manufacturers && scope.manufacturers.length > 0) {
+    anyDimension = true;
+    const mfr = (asset.manufacturer ?? "").toLowerCase();
+    if (!mfr || !scope.manufacturers.some((m) => mfr.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.models && scope.models.length > 0) {
+    anyDimension = true;
+    const model = (asset.model ?? "").toLowerCase();
+    if (!model || !scope.models.some((m) => model.includes(m.toLowerCase()))) return false;
+  }
+  if (scope.subnetCidrs && scope.subnetCidrs.length > 0) {
+    anyDimension = true;
+    const ip = asset.ipAddress ?? "";
+    if (!ip) return false;
+    const inAny = scope.subnetCidrs.some((c) => {
+      try { return ipInCidr(ip, scopeCidrOf(c)); } catch { return false; }
+    });
+    if (!inAny) return false;
+  }
+  // Nested condition tree (the wizard's builder). ANDs with any flat
+  // dimensions above when both are present.
+  if (scope.condition) {
+    anyDimension = true;
+    if (!evaluateScopeCondition(scope.condition, asset)) return false;
+  }
+  return anyDimension;
+}
+
 // ─── Trigger signature (carve-out "same trigger" key) ───────────────────────
 // Two automations carve-out only when they watch the SAME thing. The signature
 // is the metric/field + its dimension filter (strict: a sensor-class filter and
@@ -1505,8 +1586,64 @@ function stableDimFilter(df: Record<string, unknown> | undefined | null): string
 
 export function triggerSignature(trigger: Trigger): string | null {
   if (trigger.type === "asset_metric") return `am:${trigger.metric}:${stableDimFilter(trigger.dimensionFilter)}`;
-  if (trigger.type === "asset_state") return `as:${trigger.field}:${stableDimFilter(trigger.dimensionFilter)}`;
+  if (trigger.type === "asset_state") {
+    // monitorStatus is the one state field that is a SINGLE per-asset column
+    // with no reading dimensions of its own (neither FIELD_DIMENSIONS nor
+    // STATE_FIELD_DIMENSIONS carries an entry for it), so the only
+    // dimensionFilter it can legally hold is a DEVICE filter — one that narrows
+    // the asset SET rather than the reading. Two automations watching
+    // "monitorStatus == down" with different device filters are therefore still
+    // watching the same one thing on overlapping devices, and must be able to
+    // carve each other out; keying on the filter would put them in different
+    // groups and let both claim authority over the same asset. Hence: filter
+    // dropped, and the compared VALUE added in its place, because "== down" and
+    // "== warning" genuinely ARE different things to watch — and only
+    // "== down" carries down-detection authority (see downDetectionService).
+    //
+    // The device filter does NOT stop mattering; it moves to where coverage is
+    // actually tested (isAssetShadowed / carveOutAggregate both AND
+    // deviceFilterMatch into their scope test), so a filtered peer only shadows
+    // the assets it can genuinely fire on.
+    if (trigger.field === "monitorStatus") {
+      return `as:monitorStatus:${trigger.operator}${String(trigger.value).toLowerCase()}`;
+    }
+    return `as:${trigger.field}:${stableDimFilter(trigger.dimensionFilter)}`;
+  }
   return null;
+}
+
+/**
+ * The missed-poll count applied to a device governed by a down-detection
+ * automation that carries no explicit count — the pre-cutover baseline row, or
+ * a body from a client older than the field.
+ *
+ * MUST track `HARDCODED_FLOOR.failureThreshold` in monitoringService: it is the
+ * same number, and the point of the default is that such a rule keeps behaving
+ * exactly as it did before the count became operator-visible. Defined here
+ * rather than in downDetectionService because the schema catalog needs it and
+ * importing the service would close a cycle.
+ */
+export const DEFAULT_MISSED_POLLS = 3;
+
+/**
+ * Does this trigger DEFINE what "down" means for the devices it covers?
+ *
+ * A `monitorStatus == down` automation is no longer just a reader of the column
+ * — its `missedPolls` count is what `recordProbeResult` compares
+ * consecutiveFailures against for every asset it governs (most-specific-wins,
+ * business rule 18's ladder). An asset covered by no such automation is never
+ * judged at all: it reads `passive`.
+ *
+ * Lives here rather than in downDetectionService because the schema layer
+ * (validateRuleV2) needs it and importing the service would close a cycle.
+ */
+export function isDownDetectionTrigger(trigger: Trigger): boolean {
+  return (
+    trigger.type === "asset_state" &&
+    trigger.field === "monitorStatus" &&
+    trigger.operator === "==" &&
+    String(trigger.value).toLowerCase() === "down"
+  );
 }
 
 // ─── Input schema (accepts v2 AND legacy bodies; canonical output is v2) ────
@@ -1779,6 +1916,48 @@ function validateRepeat(
   }
 }
 
+/**
+ * `missedPolls` is down-detection AUTHORITY, so it may only sit where the
+ * monitoring layer will actually read it: a bare `monitorStatus == down`
+ * trigger. Two rejections, both because the alternative is a number that looks
+ * configured and silently governs nothing:
+ *
+ *  - on any other state field / comparator / value (e.g. `== warning`), where
+ *    recordProbeResult would never consult it;
+ *  - inside a multi-leaf COMPOSITE, where "down" would be defined partly by a
+ *    condition the probe path cannot evaluate (a CPU reading, another device's
+ *    state). Note a SINGLE-leaf composite is not rejected — it has already
+ *    collapsed to a bare trigger by the time this runs (collapseCompositeTrigger
+ *    in the input transform), which is exactly how the wizard submits.
+ */
+function validateMissedPolls(trigger: Trigger | undefined, ctx: z.RefinementCtx): void {
+  if (!trigger) return;
+  if (trigger.type === "asset_state") {
+    if (trigger.missedPolls != null && !isDownDetectionTrigger(trigger)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["trigger", "missedPolls"],
+        message:
+          'a missed-poll count only applies to a "monitor status is down" automation — it is the definition of down for the devices that automation covers',
+      });
+    }
+    return;
+  }
+  if (trigger.type === "composite") {
+    const offender = collectTriggerLeaves(trigger).find(
+      (l) => l.type === "asset_state" && (l as { missedPolls?: number }).missedPolls != null,
+    );
+    if (offender) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["trigger", "children"],
+        message:
+          "a missed-poll count cannot sit inside a multi-condition trigger — down detection is decided by the probe loop, which can only see whether the device answered. Put the count on an automation whose only condition is \"monitor status is down\".",
+      });
+    }
+  }
+}
+
 function validateRuleV2(
   v: {
     trigger?: Trigger;
@@ -1795,6 +1974,7 @@ function validateRuleV2(
   if (trigger?.type === "composite") validateCompositeTrigger(trigger, ctx);
   validateSeverityBands(v, ctx);
   validateRepeat(v, ctx);
+  validateMissedPolls(trigger, ctx);
   if (reset.mode === "timed" && reset.afterSec == null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
   }
@@ -2353,7 +2533,10 @@ export const METRIC_META: Record<string, { label: string; unit: string }> = {
 
 // Asset-state field metadata: label + input kind + (for enum/bool) valid values.
 export const FIELD_META: Record<string, { label: string; kind: "enum" | "bool" | "number" | "dynamic"; values?: string[] }> = {
-  monitorStatus: { label: "Monitor status", kind: "enum", values: ["up", "warning", "recovering", "down", "unknown"] },
+  // "passive" = no down-detection automation covers the device, so Polaris
+  // renders no verdict for it. It is still polled and still charted — the
+  // counters keep advancing, they are simply never compared to a threshold.
+  monitorStatus: { label: "Monitor status", kind: "enum", values: ["up", "warning", "recovering", "down", "passive", "unknown"] },
   status: { label: "Lifecycle status", kind: "enum", values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
   consecutiveFailures: { label: "Consecutive probe failures", kind: "number" },
   dependencySuppressed: { label: "Dependency-suppressed", kind: "bool", values: ["true", "false"] },
@@ -2593,6 +2776,26 @@ export function buildSchemaCatalog() {
     // the wizard's "+ Condition → Device identifier" filter rows. Absent on a
     // pre-upgrade server; the wizard then offers no identifier rows.
     deviceFilterDimensions: DEVICE_FILTER_DIMENSIONS,
+    // Down-detection authority: which leaf shape carries the missed-poll count,
+    // and what an uncovered device reads instead. Sent as data rather than
+    // hardcoded in the wizard so the count control, its bounds and the "passive"
+    // vocabulary can't drift from what the server enforces — and so a
+    // pre-upgrade server (no key) degrades to the old value-only state row
+    // instead of rendering a control the API would reject.
+    downDetection: {
+      field: "monitorStatus",
+      operator: "==",
+      value: "down",
+      countKey: "missedPolls",
+      min: 1,
+      max: 100,
+      default: DEFAULT_MISSED_POLLS,
+      passiveStatus: "passive",
+      help:
+        "How many polls in a row a device must miss before Polaris calls it down. " +
+        "This automation owns that number for every device it covers — the most specific automation wins. " +
+        "A device no down automation covers is never called down: it stays Passive, still polled and still charted.",
+    },
     // Per-dimension alerting vocabulary — which state fields report per
     // dimension, and what one dimension is called. The reset step reads both to
     // say whether a custom reset condition clears one alert or every alert on

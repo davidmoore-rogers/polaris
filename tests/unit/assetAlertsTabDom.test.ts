@@ -36,6 +36,10 @@ import { APP_SHELL_STUBS } from "./_appShellStubs.js";
 const g = globalThis as Record<string, any>;
 
 const assetsLines = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8").split(/\r?\n/);
+// The panel states the resulting wall-clock time using the SHARED helper the
+// settings cards and the wizard also read, so load the real module rather than
+// stub it — the point of the assertion is that the two halves agree.
+const DOWN_AFTER_SRC = readFileSync(resolve(__dirname, "../../public/js/monitor-down-after.js"), "utf8");
 
 /** Slice a top-level `[async ]function NAME(...) {` … `}` block out of assets.js. */
 function fnSrc(name: string): string {
@@ -53,6 +57,9 @@ const FN_NAMES = [
   "_assetNotificationsTabHTML",
   "_sortAssetAlerts",
   "_loadAssetNotificationsTab",
+  // Paints the "which automation decides Down for this device" panel above the
+  // tables. Sliced in because _loadAssetNotificationsTab calls it directly.
+  "_paintAssetDownDetectionPanel",
   "_wireAssetAlertSelection",
   "_alertCountLabel",
   "_ackPromptOpts",
@@ -83,15 +90,26 @@ interface Ctx {
 let ctx: Ctx;
 
 /** Mount the tab shell and run one load against the stubbed API. */
-async function mount(opts?: { perm?: string; alerts?: any[] }) {
+async function mount(opts?: { perm?: string; alerts?: any[]; downDetection?: any }) {
   const perm = opts?.perm ?? "fullwrite";
   const RANK: Record<string, number> = { none: 0, read: 1, write: 2, fullwrite: 3 };
   g.permAtLeast = (_key: string, level: string) => RANK[perm] >= RANK[level];
   g.escapeHtml = (s: any) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
   g.showToast = (msg: string, type?: string) => ctx.toasts.push({ msg, type: type || "success" });
   g.showConfirm = vi.fn(async () => true);
+  // The module is an IIFE that assigns onto `window`.
+  g.window = g.window || g;
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  new Function("window", DOWN_AFTER_SRC)(g.window);
   g.api = {
-    assets: { alerts: vi.fn(async () => ({ active: opts?.alerts ?? makeAlerts(), matchingRules: [] })) },
+    assets: {
+      alerts: vi.fn(async () => ({ active: opts?.alerts ?? makeAlerts(), matchingRules: [] })),
+      // Read by the down-detection panel. Default: a covered device.
+      effectiveMonitorSettings: vi.fn(async () => ({
+        resolved: { intervalSeconds: 60, probeTimeoutMs: 5000 },
+        downDetection: opts?.downDetection ?? { passive: false, missedPolls: 3, automationName: "Asset down", conflict: null },
+      })),
+    },
     alerts: {
       acknowledge: vi.fn(async (ids: string[], note?: string) => { ctx.acked.push({ ids, note }); return ctx.ackResult(); }),
       clear: vi.fn(async (ids: string[]) => { ctx.cleared.push(ids); return ctx.clearResult(); }),
@@ -348,5 +366,49 @@ describe("asset Alerts tab — permission gating", () => {
     expect(document.getElementById("asset-alert-bulk-clear")).toBeNull();
     expect(document.querySelectorAll(".asset-alert-clear").length).toBe(0);
     expect(document.querySelectorAll(".asset-alert-sel").length).toBe(3);
+  });
+});
+
+describe("asset Alerts tab — down detection panel", () => {
+  const panel = () => document.getElementById("asset-down-detection-panel") as HTMLElement | null;
+
+  it("names the governing automation, its count, and the resulting wall-clock time", async () => {
+    // Neither table on this tab answers "which automation decides Down for this
+    // device": the governing automation may never have fired.
+    await mount();
+    await new Promise((r) => setTimeout(r, 10));
+    const txt = panel()!.textContent || "";
+    expect(txt).toContain("Asset down");
+    expect(txt).toContain("3 missed polls");
+    expect(txt).toMatch(/2m 5s/);       // 60s interval x 2, plus the 5s timeout
+    expect(txt).toContain("60s poll interval");
+  });
+
+  it("says PASSIVE plainly, and that no alert will ever be raised", async () => {
+    await mount({ downDetection: { passive: true, missedPolls: null, automationName: null, conflict: null } });
+    await new Promise((r) => setTimeout(r, 10));
+    const txt = panel()!.textContent || "";
+    expect(txt).toContain("Passive");
+    expect(txt).toMatch(/never declare it Warning or Down/i);
+    expect(txt).toMatch(/no alert will ever be raised/i);
+    // And a way out, for someone who can act on it.
+    expect(panel()!.querySelector('a[href="/automations.html"]')).toBeTruthy();
+  });
+
+  it("offers no create link to an operator who cannot author automations", async () => {
+    await mount({ perm: "read", downDetection: { passive: true, missedPolls: null, automationName: null, conflict: null } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(panel()!.textContent).toContain("Passive");
+    expect(panel()!.querySelector('a[href="/automations.html"]')).toBeFalsy();
+  });
+
+  it("surfaces a same-specificity tie and which count won", async () => {
+    await mount({ downDetection: { passive: false, missedPolls: 2, automationName: "Core switches", conflict: { ruleIds: ["a", "b"], counts: [2, 10], chosen: 2 } } });
+    await new Promise((r) => setTimeout(r, 10));
+    const txt = panel()!.textContent || "";
+    expect(txt).toContain("Core switches");
+    expect(txt).toMatch(/equally-specific/i);
+    expect(txt).toContain("10");
+    expect(txt).toMatch(/smaller count/i);
   });
 });

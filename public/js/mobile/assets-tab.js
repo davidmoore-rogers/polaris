@@ -231,6 +231,8 @@
       case "up":      return "up";
       case "down":    return "down";
       case "unknown": return "unk";
+      // No down-detection automation covers it — still polled, no verdict.
+      case "passive": return "passive";
       default:        return "unk";
     }
   }
@@ -240,6 +242,7 @@
     if (a.monitorStatus === "up")      return "Up — last RTT " + (a.lastResponseTimeMs != null ? a.lastResponseTimeMs + " ms" : "n/a");
     if (a.monitorStatus === "down")    return "Down";
     if (a.monitorStatus === "unknown") return "No samples yet";
+    if (a.monitorStatus === "passive") return "Passive — no down-detection automation covers this device";
     return "Monitored";
   }
 

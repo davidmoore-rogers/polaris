@@ -62,9 +62,10 @@ import {
   startProbePatchWriteTimer,
   setProbePatchBufferDepth,
 } from "../metrics.js";
+import type { MonitorStatus } from "../utils/monitorStatus.js";
 
 export interface ProbePatch {
-  monitorStatus: "up" | "warning" | "recovering" | "down" | "unknown";
+  monitorStatus: MonitorStatus;
   lastMonitorAt: Date;
   lastResponseTimeMs: number | null;
   consecutiveFailures: number;

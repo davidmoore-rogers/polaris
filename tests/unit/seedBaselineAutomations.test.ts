@@ -11,6 +11,15 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const settings = new Map<string, { key: string; value: unknown }>();
 const createdRules: string[] = [];
+const createdBodies: any[] = [];
+const deletedRuleIds: string[] = [];
+const loggedEvents: any[] = [];
+/** Monitored fleet the V3 pass reads. Each test sets this before seeding. */
+let fleetAssets: any[] = [];
+/** The pre-cutover "Asset down" row V3 looks for, or null. */
+let existingAssetDownRule: any = null;
+/** Effective failureThreshold per assetType, as the settings tiers resolve it. */
+let thresholdByType: Record<string, number> = {};
 
 vi.mock("../../src/db.js", () => ({
   prisma: {
@@ -21,14 +30,37 @@ vi.mock("../../src/db.js", () => ({
         return create;
       }),
     },
+    asset: { findMany: vi.fn(async () => fleetAssets) },
+    notificationRule: { findFirst: vi.fn(async () => existingAssetDownRule) },
   },
+}));
+
+vi.mock("../../src/services/eventLogService.js", () => ({
+  logEvent: vi.fn(async (e: any) => { loggedEvents.push(e); }),
+}));
+
+// The V3 pass reads each asset's EFFECTIVE threshold through the real resolver;
+// stub it to the per-type fixture so these tests drive the mirroring logic
+// rather than the settings hierarchy, which has its own suite.
+vi.mock("../../src/services/monitoringService.js", () => ({
+  resolveMonitorSettings: vi.fn(async (a: any) => ({
+    failureThreshold: thresholdByType[a.assetType] ?? 3,
+  })),
+}));
+
+vi.mock("../../src/services/downDetectionService.js", () => ({
+  invalidateDownDetectionCache: vi.fn(),
 }));
 
 vi.mock("../../src/services/notificationRuleService.js", () => ({
   createRule: vi.fn(async (input: { name: string }) => {
     createdRules.push(input.name);
+    createdBodies.push(input);
     return { id: `r-${createdRules.length}`, ...input };
   }),
+  // V3 retires the old row through the SERVICE, not prisma.delete, so the
+  // rule's active notifications get soft-cleared first.
+  deleteRule: vi.fn(async (id: string) => { deletedRuleIds.push(id); }),
 }));
 
 // The module runs itself as a startup task at import time — neuter the
@@ -46,6 +78,12 @@ import { globToRegExp } from "../../src/services/notificationEngine.js";
 beforeEach(() => {
   settings.clear();
   createdRules.length = 0;
+  createdBodies.length = 0;
+  deletedRuleIds.length = 0;
+  loggedEvents.length = 0;
+  fleetAssets = [];
+  existingAssetDownRule = null;
+  thresholdByType = {};
 });
 
 describe("seed bodies", () => {
@@ -73,22 +111,29 @@ describe("marker gating (V2 reaches existing installs)", () => {
   it("fresh install: seeds both sets and stamps both markers", async () => {
     const res = await seedBaselineAutomations();
     expect(res.skipped).toBe(false);
-    expect(res.created).toBe(BASELINE_RULES.length + EVENT_BASELINE_RULES.length);
+    // +1 for the V3 down-detection rule, which is computed rather than
+    // listed in a static set.
+    expect(res.created).toBe(BASELINE_RULES.length + EVENT_BASELINE_RULES.length + 1);
     expect(settings.has("seedBaselineAutomationsSeededAt")).toBe(true);
     expect(settings.has("seedBaselineAutomationsV2SeededAt")).toBe(true);
+    expect(settings.has("seedBaselineAutomationsV3SeededAt")).toBe(true);
   });
 
   it("pre-V2 install (v1 marker stamped): seeds ONLY the event set", async () => {
     settings.set("seedBaselineAutomationsSeededAt", { key: "seedBaselineAutomationsSeededAt", value: {} });
     const res = await seedBaselineAutomations();
     expect(res.skipped).toBe(false);
-    expect(res.created).toBe(EVENT_BASELINE_RULES.length);
-    expect(createdRules).toEqual(EVENT_BASELINE_RULES.map((r) => (r as { name: string }).name));
+    expect(res.created).toBe(EVENT_BASELINE_RULES.length + 1);
+    expect(createdRules).toEqual([
+      ...EVENT_BASELINE_RULES.map((r) => (r as { name: string }).name),
+      "Asset down", // the V3 down-detection rule
+    ]);
   });
 
   it("fully seeded install: no-op", async () => {
     settings.set("seedBaselineAutomationsSeededAt", { key: "x", value: {} });
     settings.set("seedBaselineAutomationsV2SeededAt", { key: "y", value: {} });
+    settings.set("seedBaselineAutomationsV3SeededAt", { key: "z", value: {} });
     const res = await seedBaselineAutomations();
     expect(res).toEqual({ created: 0, skipped: true });
     expect(createdRules).toEqual([]);
@@ -154,5 +199,133 @@ describe("actionPattern globs vs the real logEvent action strings", () => {
       trigger: { detailsMatch?: Record<string, unknown> };
     };
     expect(rule.trigger.detailsMatch).toEqual({ direction: "escalated" });
+  });
+});
+
+describe("V3 down-detection seed", () => {
+  const asset = (id: string, assetType: string, integrationId: string | null = null) =>
+    ({ id, assetType, discoveredByIntegrationId: integrationId, discoveredByIntegration: { type: "fortimanager" } });
+
+  /** Skip V1/V2 so each test sees only what V3 created. */
+  function onlyV3() {
+    settings.set("seedBaselineAutomationsSeededAt", { key: "a", value: {} });
+    settings.set("seedBaselineAutomationsV2SeededAt", { key: "b", value: {} });
+  }
+  const downRules = () => createdBodies.filter((b) => b.trigger?.field === "monitorStatus");
+
+  it("an install with no monitored assets still gets a working rule at the default", async () => {
+    onlyV3();
+    await seedBaselineAutomations();
+    const rules = downRules();
+    expect(rules).toHaveLength(1);
+    expect(rules[0]).toMatchObject({ name: "Asset down" });
+    expect(rules[0].trigger.missedPolls).toBe(3);
+    expect(rules[0].scope).toEqual({ allAssets: true });
+  });
+
+  it("a uniformly-tuned fleet becomes ONE all-assets rule at that value", async () => {
+    onlyV3();
+    fleetAssets = [asset("a", "switch"), asset("b", "firewall"), asset("c", "server")];
+    thresholdByType = { switch: 5, firewall: 5, server: 5 };
+    await seedBaselineAutomations();
+    const rules = downRules();
+    expect(rules).toHaveLength(1);
+    expect(rules[0].trigger.missedPolls).toBe(5);
+  });
+
+  it("a class tuned away from the rest gets its OWN narrower rule", async () => {
+    // This is the whole point of V3: without it, that class silently changes
+    // its time-to-down on upgrade.
+    onlyV3();
+    fleetAssets = [
+      asset("a", "server"), asset("b", "server"), asset("c", "server"),
+      asset("d", "firewall"),
+    ];
+    thresholdByType = { server: 3, firewall: 2 };
+    await seedBaselineAutomations();
+    const rules = downRules();
+    expect(rules).toHaveLength(2);
+    const all = rules.find((r) => r.scope.allAssets);
+    const fw  = rules.find((r) => !r.scope.allAssets);
+    expect(all.trigger.missedPolls).toBe(3);           // the dominant value
+    expect(fw.scope.assetTypes).toEqual(["firewall"]); // rank 1, so it wins for firewalls
+    expect(fw.trigger.missedPolls).toBe(2);
+  });
+
+  it("takes the MORE SENSITIVE value when one class disagrees across integrations, and says so", async () => {
+    // scopeRank does not rank integrationIds, so this genuinely cannot be
+    // expressed as two rules — the seed must not pretend otherwise.
+    onlyV3();
+    // Three servers make 3 the unambiguous dominant value, so the switch class
+    // is the one that gets its own rule and the assertion below is unambiguous.
+    fleetAssets = [
+      asset("a", "switch", "int-1"), asset("b", "switch", "int-2"),
+      asset("c", "server"), asset("d", "server"), asset("e", "server"),
+    ];
+    let call = 0;
+    thresholdByType = { server: 3 };
+    const mod = await import("../../src/services/monitoringService.js");
+    (mod.resolveMonitorSettings as any).mockImplementation(async (a: any) => {
+      if (a.assetType !== "switch") return { failureThreshold: 3 };
+      call += 1;
+      return { failureThreshold: call === 1 ? 10 : 2 };
+    });
+    await seedBaselineAutomations();
+    const sw = downRules().find((r) => !r.scope.allAssets);
+    expect(sw.trigger.missedPolls).toBe(2);
+    const conflictEvent = loggedEvents.find((e) => e.action === "automation.seed.threshold_conflict");
+    expect(conflictEvent).toBeTruthy();
+    expect(conflictEvent.level).toBe("warning");
+    expect(conflictEvent.details.chosen).toBe(2);
+    (mod.resolveMonitorSettings as any).mockImplementation(async (a: any) => ({
+      failureThreshold: thresholdByType[a.assetType] ?? 3,
+    }));
+  });
+
+  it("retires a PRISTINE Asset down row through deleteRule, after creating the replacement", async () => {
+    onlyV3();
+    const t = new Date("2026-01-01T00:00:00Z");
+    existingAssetDownRule = { id: "old-1", createdAt: t, updatedAt: t };
+    await seedBaselineAutomations();
+    expect(deletedRuleIds).toEqual(["old-1"]);
+    // Create-then-retire: the replacement must exist before the old row goes,
+    // or the fleet is momentarily left with no down detection at all.
+    expect(createdRules).toContain("Asset down");
+  });
+
+  it("KEEPS an operator-edited Asset down row and tells them the count is now theirs", async () => {
+    onlyV3();
+    existingAssetDownRule = {
+      id: "old-2",
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+      updatedAt: new Date("2026-02-01T00:00:00Z"), // any save bumps this
+    };
+    await seedBaselineAutomations();
+    expect(deletedRuleIds).toEqual([]);
+    const kept = loggedEvents.find((e) => e.action === "automation.seed.v3_retained");
+    expect(kept).toBeTruthy();
+    expect(kept.level).toBe("warning");
+    expect(kept.message).toMatch(/default of 3/);
+  });
+
+  it("does NOT retire the old row when the replacement failed to save", async () => {
+    onlyV3();
+    const t = new Date("2026-01-01T00:00:00Z");
+    existingAssetDownRule = { id: "old-3", createdAt: t, updatedAt: t };
+    const svc = await import("../../src/services/notificationRuleService.js");
+    (svc.createRule as any).mockImplementationOnce(async () => { throw new Error("db down"); });
+    await seedBaselineAutomations();
+    // Retiring here would leave the fleet with no down detection at all.
+    expect(deletedRuleIds).toEqual([]);
+  });
+
+  it("every generated body passes the real ruleInputSchema", async () => {
+    onlyV3();
+    fleetAssets = [asset("a", "switch"), asset("b", "server"), asset("c", "server")];
+    thresholdByType = { switch: 7, server: 3 };
+    await seedBaselineAutomations();
+    for (const body of downRules()) {
+      expect(() => ruleInputSchema.parse(body), body.name).not.toThrow();
+    }
   });
 });

@@ -885,6 +885,7 @@ function _renderSearchDropdown(results) {
     "down":        "badge-monitor-down",
     "recovering":  "badge-monitor-recovering",
     "pending":     "badge-monitor-recovering",
+    "passive":     "badge-monitor-passive",
     "dep-down":    "badge-monitor-dep-down",
     "dep-test":    "badge-monitor-dep-test",
   };

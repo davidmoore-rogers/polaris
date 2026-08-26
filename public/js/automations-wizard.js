@@ -201,6 +201,48 @@ function makeAutomationSentences(s) {
   function fieldLabel(f) { var x = s.fieldMeta && s.fieldMeta[f]; return x ? x.label : f; }
   function changeLabel(c) { return (s.changeTypeMeta && s.changeTypeMeta[c]) || c; }
 
+  // ── Down detection ──────────────────────────────────────────────────────
+  // A `monitor status == down` automation does not merely READ the column — its
+  // missedPolls count is what the probe loop compares consecutiveFailures
+  // against for every device it covers (business rule 36). Four surfaces have to
+  // agree on the question "is this one of those?": the wizard's condition row,
+  // the automations list's type badge, the asset Alerts tab, and the passive
+  // pill's explanation — so the predicate is exported rather than re-derived.
+  // The shape comes from schema.downDetection, so a pre-upgrade server (no key)
+  // degrades to the plain state row instead of rendering a control the API
+  // would reject.
+  function downDetectionMeta() { return s.downDetection || null; }
+  function isDownDetectionLeaf(leaf) {
+    var dd = downDetectionMeta();
+    if (!dd || !leaf || leaf.type !== "asset_state") return false;
+    return leaf.field === dd.field &&
+           String(leaf.operator || "==") === String(dd.operator || "==") &&
+           String(leaf.value).toLowerCase() === String(dd.value).toLowerCase();
+  }
+  function isDownDetectionTrigger(tr) {
+    if (!tr) return false;
+    // Authority lives on a BARE trigger only. A multi-leaf composite is
+    // rejected server-side (the probe loop cannot evaluate a CPU reading on the
+    // way to deciding down), so treating one as a down-detection automation
+    // here would label a rule the server refuses to give authority to.
+    return isDownDetectionLeaf(tr);
+  }
+  function missedPollsOf(leaf) {
+    var dd = downDetectionMeta();
+    var n = Number(leaf && leaf.missedPolls);
+    return n > 0 ? Math.round(n) : ((dd && dd.default) || 3);
+  }
+  // Does this leaf actually DECLARE a count, i.e. is it the automation's own
+  // definition of down? Distinct from the shape test above, and the distinction
+  // matters for every sentence: a `monitor status == down` leaf inside a
+  // multi-condition trigger carries NO authority (the server refuses a count
+  // there — the probe loop cannot evaluate a CPU reading on the way to deciding
+  // down), so phrasing it as "misses 3 polls in a row" would state a count that
+  // does not exist and that nothing would honour. Such a leaf reads as the plain
+  // status comparison it really is.
+  function leafDeclaresDownCount(leaf) {
+    return isDownDetectionLeaf(leaf) && leaf.missedPolls != null;
+  }
   // ── State (0/1) metrics ────────────────────────────────────────────────
   // A state metric's reading is a flag, so its threshold is 0 or 1 and the
   // number is meaningless to read back: the automation is about "Alarm", not
@@ -319,6 +361,28 @@ function makeAutomationSentences(s) {
       return (DIM_PHRASE[leaf.dim] || leaf.dim + " = {value}").replace("{value}", String(leaf.value || "…"));
     }
     if (leaf.type === "asset_state") {
+      // A down-detection leaf is not a status comparison to read back — it is a
+      // statement about what the operator wants "down" to MEAN, so it reads as
+      // the device behaviour rather than as the column value it produces.
+      if (leafDeclaresDownCount(leaf)) {
+        var dMiss = missedPollsOf(leaf);
+        var dOut = "the device misses " + dMiss + " poll" + (dMiss === 1 ? "" : "s") + " in a row";
+        var dDf = leaf.dimensionFilter || {};
+        Object.keys(dDf).forEach(function (k) {
+          if (dDf[k]) dOut += " " + (DIM_PHRASE[k] || k + " = {value}").replace("{value}", dDf[k]);
+        });
+        return dOut;
+      }
+      // The INVERTED down leaf (resetSentence's auto path runs the trigger
+      // through invertedLeaf): recovery from an outage is an event — the device
+      // answered — not a status value to compare against.
+      if (leaf.field === "monitorStatus" && leaf.operator === "!=" && String(leaf.value).toLowerCase() === "down") {
+        return "the device answers a poll again";
+      }
+      // "passive" is a coverage fact, not a device state, so it says so.
+      if (leaf.field === "monitorStatus" && leaf.operator === "==" && String(leaf.value).toLowerCase() === "passive") {
+        return "no down-detection automation covers the device";
+      }
       var sOut = fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
       // State leaves carry dimension filters too (interface for the ifOper
       // trio, tunnel for ipsecStatus, hostname everywhere) — render them the
@@ -518,6 +582,12 @@ function makeAutomationSentences(s) {
 
   /** The value side: `median(CPU usage[if~"wan"], 15m)`. */
   function formulaTerm(leaf) {
+    // The formula view exists to name the MECHANISM the prose smooths over, so
+    // a down-detection leaf shows the counter the probe loop actually compares
+    // rather than the status column that comparison produces.
+    if (leafDeclaresDownCount(leaf)) {
+      return "consecutive_misses(response poll" + formulaDims(leaf, false).replace(/^\[/, ", ").replace(/\]$/, "") + ")";
+    }
     // A state leaf's dimension filters (interface / tunnel / hostname) render
     // inside the term like a metric's: `Interface oper status[if~"wan"]`.
     if (leaf.type === "asset_state") return fieldLabel(leaf.field) + formulaDims(leaf, false);
@@ -545,6 +615,9 @@ function makeAutomationSentences(s) {
   /** The comparison side: `>= 65 °C`, or `== "Alarm"` for a flag. */
   function formulaCompare(leaf, operator, threshold) {
     var op = operator || leaf.operator;
+    // Pairs with formulaTerm's counter: the comparison the probe loop makes is
+    // `>= N`, not `== "down"`.
+    if (leafDeclaresDownCount(leaf)) return ">= " + missedPollsOf(leaf);
     if (leaf.type === "asset_state") {
       return op + ' "' + (leaf.value == null || leaf.value === "" ? "…" : leaf.value) + '"';
     }
@@ -703,9 +776,15 @@ function makeAutomationSentences(s) {
    */
   function resetCaveat(tr, reset) {
     if (!tr) return "";
-    if (tr.type === "asset_state" && tr.field === "monitorStatus" && String(tr.value) === "down") {
-      return " After an outage that happens at the <strong>first successful probe</strong>" +
-        " — the status reads <code>recovering</code> then, not <code>up</code>.";
+    // NOTE this tests the TRIGGER, so a composite carrying a down leaf never
+    // reaches it (invertedLeaf returns null for trees and resetSentence's auto
+    // path bails first). Pre-existing, and left as-is: the caveat is about the
+    // single-trigger case an operator actually authors here.
+    if (tr.type === "asset_state" && tr.field === "monitorStatus" && String(tr.value).toLowerCase() === "down") {
+      return " After an outage that happens at the <strong>first successful poll</strong>" +
+        " — the status reads <code>recovering</code> then, not <code>up</code>." +
+        " A full return to <code>up</code> takes " + missedPollsOf(tr) +
+        " consecutive success" + (missedPollsOf(tr) === 1 ? "" : "es") + ".";
     }
     var numeric = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
     var noBand = !reset || reset.clearThreshold == null || isNaN(reset.clearThreshold);
@@ -754,6 +833,9 @@ function makeAutomationSentences(s) {
     isBooleanMetric: isBooleanMetric, stateProbeOf: stateProbeOf, stateMapOf: stateMapOf,
     stateValueLabel: stateValueLabel, stateLeafClause: stateLeafClause,
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
+    isDownDetectionLeaf: isDownDetectionLeaf, isDownDetectionTrigger: isDownDetectionTrigger,
+    missedPollsOf: missedPollsOf, downDetectionMeta: downDetectionMeta,
+    leafDeclaresDownCount: leafDeclaresDownCount,
     tgLeafPhrase: tgLeafPhrase, tgTreePhrase: tgTreePhrase,
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
     invertedLeaf: invertedLeaf, invertedTree: invertedTree, resetCaveat: resetCaveat,
@@ -1198,6 +1280,8 @@ async function openAutomationWizard(existing, opts) {
       triggerSentence = _sent.triggerSentence, triggerFormula = _sent.triggerFormula,
       resetSentence = _sent.resetSentence, invertedTree = _sent.invertedTree,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
+      isDownDetectionLeaf = _sent.isDownDetectionLeaf, missedPollsOf = _sent.missedPollsOf,
+      downDetectionMeta = _sent.downDetectionMeta,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
   var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", sdwanRulePattern: "any SD-WAN rule — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
@@ -2412,14 +2496,33 @@ async function openAutomationWizard(existing, opts) {
       valueControl = '<input type="number" step="any" class="tgl-threshold" value="' + (leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : "") + '" placeholder="value" style="width:110px">' +
         (unit ? '<span class="tgl-unit" style="font-size:0.8rem;color:var(--color-text-tertiary);white-space:nowrap">' + escapeHtml(unit) + '</span>' : "");
     }
+    // The missed-poll count rides the same row as the condition it qualifies.
+    // Deliberately NOT a separate block below the tree: with two or more
+    // conditions there would be no way to tell which leaf it modified, which is
+    // the exact failure mode the "Sustained for" field's own history is about.
+    var ddControls = "";
+    var ddMeta = downDetectionMeta();
+    if (isState && ddMeta && isDownDetectionLeaf(leaf)) {
+      ddControls =
+        '<span class="tgl-dd-word" style="font-size:0.85rem;white-space:nowrap;color:var(--color-text-secondary)">after</span>' +
+        '<input type="number" class="tgl-misses" min="' + ddMeta.min + '" max="' + ddMeta.max + '"' +
+          ' value="' + missedPollsOf(leaf) + '" style="width:72px"' +
+          ' title="' + escapeHtml(ddMeta.help || "") + '">' +
+        '<span class="tgl-dd-word" style="font-size:0.85rem;white-space:nowrap;color:var(--color-text-secondary)">missed poll(s)</span>';
+    }
+    // A monitorStatus value is one of six names — an ordered comparator over it
+    // is meaningless ("status >= down"), and allowing one would also let a rule
+    // look like a down-detection automation without being one.
+    var enumState = isState && s.fieldMeta && s.fieldMeta[leaf.field] && s.fieldMeta[leaf.field].kind === "enum";
     var line1 =
       '<div style="display:flex;gap:6px;align-items:center">' +
         '<span class="aw-grip" draggable="true" title="Drag to move">&#x2842;</span>' +
         '<select class="tgl-what" style="flex:1;min-width:0">' + tgWhatOptions(kind, what) + '</select>' +
         // Ordered comparators can't apply to a flag, so the operator select
         // offers only is / is-not rather than letting an operator write ">= 1".
-        '<select class="tgl-op" style="width:64px">' + opt(isFlag ? ["==", "!="] : s.comparators, leaf.operator || (isState || isFlag ? "==" : ">=")) + '</select>' +
+        '<select class="tgl-op" style="width:64px">' + opt(isFlag || enumState ? ["==", "!="] : s.comparators, leaf.operator || (isState || isFlag ? "==" : ">=")) + '</select>' +
         valueControl +
+        ddControls +
         '<button type="button" class="btn btn-sm btn-danger scr-remove" title="Remove condition">&times;</button>' +
       '</div>';
     var line2 = "";
@@ -2432,12 +2535,20 @@ async function openAutomationWizard(existing, opts) {
       // the liftable dims render inline only as UNLIFTED LEFTOVERS (a stored
       // value tgFilterLift couldn't raise into a row) — see tgInlineDims.
       var fDims = kind === "host" ? [] : tgInlineDims((s.fieldDimensions && s.fieldDimensions[leaf.field]) || [], leaf.dimensionFilter);
-      if (fDims.length) {
+      var isDD = ddMeta && isDownDetectionLeaf(leaf);
+      if (fDims.length || isDD) {
         var fDf = leaf.dimensionFilter || {};
         line2 =
           '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
             fDims.map(function (d) { return dimControlHtml(d, fDf, leaf.field); }).join("") +
             (fDims.some(function (d) { return DIM_PICKERS[d]; }) ? '<span class="tgl-dim-note" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
+            // Both painted asynchronously (syncDownDetection) and rendered
+            // rather than omitted, so there is somewhere to paint into: the
+            // derived time-to-down depends on the scoped devices' poll
+            // intervals, and the coverage line on the carve-out preview.
+            (isDD ? '<span class="tgl-dd-multi" style="flex-basis:100%;font-size:0.78rem;display:none"></span>' : "") +
+            (isDD ? '<span class="tgl-dd-derived" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
+            (isDD ? '<span class="tgl-dd-coverage" style="flex-basis:100%;font-size:0.78rem"></span>' : "") +
           '</div>';
       }
     }
@@ -2507,6 +2618,10 @@ async function openAutomationWizard(existing, opts) {
       var sDf = {};
       rowEl.querySelectorAll(".tgl-dim").forEach(function (el) { var v = el.value.trim(); if (v) sDf[el.getAttribute("data-dim")] = v; });
       if (Object.keys(sDf).length) sLeaf.dimensionFilter = sDf;
+      // Only stamped when the control is actually present, so a non-down leaf
+      // can never carry a stray count into the payload (the server rejects it).
+      var mEl = rowEl.querySelector(".tgl-misses");
+      if (mEl && String(mEl.value).trim() !== "") sLeaf.missedPolls = Number(mEl.value);
       return sLeaf;
     }
     var leaf = {
@@ -2609,6 +2724,17 @@ async function openAutomationWizard(existing, opts) {
         // change handler re-applies the loaded dimension option lists after this.
         var prow = t.closest(".scr-row");
         if (prow) prow.outerHTML = tgLeafRowHtml(tgCollectLeaf(prow, kindFn()), kindFn());
+      } else if (t.classList.contains("tgl-value")) {
+        // The missed-poll control exists only for the down-detection value, so
+        // picking "Down" has to re-render the row to reveal it (and picking
+        // anything else to hide it) — same reason changing the state probe
+        // relabels its value control above. Scoped to monitorStatus rows so an
+        // unrelated enum row doesn't churn on every selection.
+        var vrow = t.closest(".scr-row");
+        var vwhat = vrow && vrow.querySelector(".tgl-what");
+        if (vrow && vwhat && vwhat.value === "f:monitorStatus") {
+          vrow.outerHTML = tgLeafRowHtml(tgCollectLeaf(vrow, kindFn()), kindFn());
+        }
       }
       onChange();
     });
@@ -2656,6 +2782,67 @@ async function openAutomationWizard(existing, opts) {
    * tiers share the base's window, so their own duration field (a per-tier hold)
    * is never marked required.
    */
+  // The devices a down-detection draft would govern, and how long its count
+  // actually takes on them. Cached per scope (the _dimValues idiom): the poll
+  // interval is NOT one number for a fleet — it resolves per asset through the
+  // monitor-settings hierarchy — so the honest answer comes from the server's
+  // preview, and the caption says which number it is showing.
+  var _awDownIntervals = null;      // { key, data } | null
+  var _awDownIntervalsPending = false;
+
+  /** Drop every missedPolls in a trigger tree (see the call site in collectStep3). */
+  function stripMissedPolls(node) {
+    if (!node) return;
+    if (node.missedPolls != null) delete node.missedPolls;
+    (node.children || []).forEach(stripMissedPolls);
+  }
+  function syncDownDetection(panel) {
+    var rows = panel.querySelectorAll('.scr-row');
+    // Down-detection authority lives on a BARE trigger only — the server
+    // refuses a count inside a multi-condition trigger. So the control is
+    // hidden the moment a second condition appears, with a note saying why,
+    // rather than sitting there collecting a number nothing would honour.
+    var multi = rows.length > 1;
+    Array.prototype.forEach.call(rows, function (row) {
+      var m = row.querySelector('.tgl-misses');
+      if (!m) return;
+      var show = !multi;
+      m.style.display = show ? '' : 'none';
+      Array.prototype.forEach.call(row.querySelectorAll('.tgl-dd-word'), function (el) {
+        el.style.display = show ? '' : 'none';
+      });
+      var note = row.querySelector('.tgl-dd-multi');
+      if (note) {
+        note.style.display = show ? 'none' : '';
+        note.textContent = 'Down detection needs this to be the only condition — the probe loop can only see whether the device answered. ' +
+          'As one of several conditions this just reads the status column.';
+      }
+    });
+    Array.prototype.forEach.call(rows, function (row) {
+      var missEl = row.querySelector('.tgl-misses');
+      var derived = row.querySelector('.tgl-dd-derived');
+      if (!missEl || !derived) return;
+      var n = Number(missEl.value) > 0 ? Math.round(Number(missEl.value)) : 3;
+      var iv = _awDownIntervals && _awDownIntervals.data;
+      var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
+      if (!calc) { derived.textContent = ''; return; }
+      var mode = iv && iv.mode > 0 ? iv.mode : 60;
+      var to   = iv && iv.timeoutMs > 0 ? iv.timeoutMs : 5000;
+      var c = calc(n, mode, to);
+      var human = window.PolarisMonitorDownAfter.human(c.realSec);
+      if (!iv) {
+        // Say so rather than presenting a guessed interval as this fleet's.
+        derived.textContent = '≈ ' + human + ' at a ' + mode + 's poll interval — this fleet’s actual intervals were unavailable.';
+      } else if (iv.min === iv.max) {
+        derived.textContent = '≈ ' + human + ' at the ' + mode + 's poll interval these devices use.';
+      } else {
+        var lo = window.PolarisMonitorDownAfter.human(calc(n, iv.min, to).realSec);
+        var hi = window.PolarisMonitorDownAfter.human(calc(n, iv.max, to).realSec);
+        derived.textContent = '≈ ' + human + ' at the ' + mode + 's interval most of these devices use' +
+          ' (range across the matched devices: ' + lo + ' to ' + hi + ').';
+      }
+    });
+  }
   function syncDurationRequirement(panel) {
     var wrap = panel.querySelector("#tf-duration-min");
     wrap = wrap && wrap.closest(".aw-dur");
@@ -2664,6 +2851,18 @@ async function openAutomationWizard(existing, opts) {
     var aggs = root ? root.querySelectorAll(".scr-row .tgl-agg") : [];
     var aggregated = false;
     Array.prototype.forEach.call(aggs, function (el) { if (el.value && el.value !== "latest") aggregated = true; });
+    // A tree made ENTIRELY of down-detection conditions already has a debounce:
+    // the missed-poll count IS the hold. A second "Sustained for" on top would
+    // be two clocks meaning almost the same thing, and would stack invisibly on
+    // the wall-clock time to Down. A MIXED composite keeps the field, where it
+    // legitimately applies to the whole tree.
+    var ddRows = root ? root.querySelectorAll(".scr-row .tgl-misses") : [];
+    var allRows = root ? root.querySelectorAll(".scr-row") : [];
+    if (allRows.length && ddRows.length === allRows.length) {
+      wrap.style.display = "none";
+      return;
+    }
+    wrap.style.display = "";
     var star = wrap.querySelector(".aw-dur-req");
     var note = wrap.querySelector(".aw-dur-note");
     var input = wrap.querySelector("#tf-duration-min");
@@ -2758,6 +2957,7 @@ async function openAutomationWizard(existing, opts) {
     refreshTriggerSentence();
     refreshDimOptions(panel);
     syncDurationRequirement(panel);
+    syncDownDetection(panel);
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -2782,11 +2982,11 @@ async function openAutomationWizard(existing, opts) {
     // Delegated: any input/select change re-renders the sentence (the tree's
     // own change handler also calls it — a second render is harmless) and
     // re-syncs the severity mode (single dropdown vs multi tiers + accent).
-    panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncDurationRequirement(panel); });
+    panel.addEventListener("input", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncDurationRequirement(panel); syncDownDetection(panel); });
     // syncBandsToBase runs AFTER syncSeverityMode so tiers built lazily on this
     // same event (first tick of the multi-severity checkbox, from a draft that
     // predates in-progress edits to the base condition) are corrected at once.
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); syncDownDetection(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -2825,6 +3025,11 @@ async function openAutomationWizard(existing, opts) {
           type: "composite", kind: kind, op: tree.op, children: tree.children,
           forDurationSec: aggregated ? (ratio ? Math.round(sustainMins) * 60 : 0) : mins * 60,
         });
+        // A count only means something on a BARE trigger; the server rejects
+        // one inside a multi-condition trigger. tgCollapse has already folded a
+        // single-leaf tree down to that bare trigger, so anything still
+        // composite here must shed its counts rather than 400 on save.
+        if (draft.trigger && draft.trigger.type === "composite") stripMissedPolls(draft.trigger);
       }
     } else if (cat === "event") {
       var ev = { type: "event", actionPattern: panel.querySelector("#tf-action").value.trim() };
@@ -2938,11 +3143,23 @@ async function openAutomationWizard(existing, opts) {
       need.label + " on the device, not just the one you mean.";
   }
 
-  function tgValidateLeaf(leaf, label) {
+  function tgValidateLeaf(leaf, label, isSoleCondition) {
     var dimProblem = tgValidateRequiredDimension(leaf, label);
     if (dimProblem) return dimProblem;
     if (leaf.type === "asset_state") {
       if (leaf.value == null || String(leaf.value).trim() === "") return label + ": choose or enter a value.";
+      // A count is required only where it can DO anything: on the automation's
+      // sole condition. Inside a multi-condition trigger the control is hidden
+      // and the server rejects a count outright, so demanding one there would
+      // make a perfectly legal composite unsaveable.
+      var vdd = downDetectionMeta();
+      if (vdd && isSoleCondition && isDownDetectionLeaf(leaf)) {
+        var n = Number(leaf.missedPolls);
+        if (!(isFinite(n) && n >= vdd.min && n <= vdd.max && n === Math.round(n))) {
+          return label + ": enter how many consecutive missed polls make the device Down (" +
+            vdd.min + "–" + vdd.max + "). This automation is the only place that number lives.";
+        }
+      }
       return null;
     }
     if (leaf.threshold == null || isNaN(leaf.threshold)) return label + ": enter a numeric threshold.";
@@ -2974,7 +3191,7 @@ async function openAutomationWizard(existing, opts) {
       if (!leaves.length) return "Add at least one condition.";
       if (leaves.length > (tgMeta.maxLeaves || 10)) return "At most " + (tgMeta.maxLeaves || 10) + " conditions per trigger.";
       for (var i = 0; i < leaves.length; i++) {
-        var p = tgValidateLeaf(leaves[i], "Condition " + (i + 1));
+        var p = tgValidateLeaf(leaves[i], "Condition " + (i + 1), leaves.length === 1);
         if (p) return p;
       }
       // Empty sub-groups collapse to nothing meaningful — flag them.

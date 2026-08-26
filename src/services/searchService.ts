@@ -808,6 +808,10 @@ export function assetMonitorPillState(a: AssetMonitorPillFields): { kind: string
   if (s === "warning")    return { kind: "warning",    label: "Warning" };
   if (s === "down")       return { kind: "down",       label: "Down" };
   if (s === "recovering") return { kind: "recovering", label: "Recovering" };
+  // Explicit, not folded into the Pending fallback: passive means "no
+  // down-detection automation covers this device", which is a very different
+  // statement from "never probed".
+  if (s === "passive")    return { kind: "passive",    label: "Passive" };
   return { kind: "pending", label: "Pending" };
 }
 

@@ -314,7 +314,7 @@ async function topNWithSeverity(rows: TopNRow[], relevance: AlertRelevance): Pro
 }
 
 export interface StatusSummary {
-  statusCounts: { total: number; up: number; down: number; warning: number; unknown: number; recovering: number; maintenance: number };
+  statusCounts: { total: number; up: number; down: number; warning: number; unknown: number; recovering: number; passive: number; maintenance: number };
   uptimePercent: number | null;
   activeAlertCount: number;
 }
@@ -343,7 +343,11 @@ export async function getStatusSummary(assetIds: string[] | null = null): Promis
     prisma.asset.count({ where: { monitored: true, status: "maintenance", ...idf } }),
   ]);
 
-  const counts = { total: maintenanceCount, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: maintenanceCount };
+  // `passive` needs its own bucket or the `key in counts` fallback below funnels
+  // it into `unknown`, which the UI renders as "Pending / never probed" — a lie
+  // about a device that is being polled perfectly well and simply has no
+  // down-detection automation covering it.
+  const counts = { total: maintenanceCount, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, passive: 0, maintenance: maintenanceCount };
   for (const row of byStatus) {
     const n = row._count._all;
     counts.total += n;
@@ -353,8 +357,10 @@ export async function getStatusSummary(assetIds: string[] | null = null): Promis
   }
 
   // Uptime % over the infra subset: up / (up + down). Excludes warning /
-  // recovering / unknown so the gauge reflects hard reachability, matching the
-  // SolarWinds infra uptime tile. Null when there's no infra to measure.
+  // recovering / unknown / passive so the gauge reflects hard reachability,
+  // matching the SolarWinds infra uptime tile. Passive belongs in neither half
+  // by construction: a device Polaris renders no verdict about has no uptime to
+  // report. Null when there's no infra to measure.
   let infraUp = 0;
   let infraDown = 0;
   for (const row of infraByStatus) {
@@ -1294,7 +1300,7 @@ export const NOC_FEED_NAMES = [
 export type NocFeedName = (typeof NOC_FEED_NAMES)[number];
 
 const EMPTY_STATUS: StatusSummary = {
-  statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, maintenance: 0 },
+  statusCounts: { total: 0, up: 0, down: 0, warning: 0, unknown: 0, recovering: 0, passive: 0, maintenance: 0 },
   uptimePercent: null,
   activeAlertCount: 0,
 };

@@ -138,6 +138,14 @@ describe("assetIsAnsweringProbes", () => {
     expect(assetIsAnsweringProbes({ monitorStatus: "unknown" })).toBe(false);
     expect(assetIsAnsweringProbes({ monitorStatus: null })).toBe(false);
   });
+
+  it("excludes passive — there is no asset-down alert to supersede a loss alert there", () => {
+    // A dark passive device sits at 100% loss indefinitely, and the alert that
+    // would normally own that outage is exactly what is missing. Admitting it
+    // would park a permanently-firing, never-clearing loss alert on every
+    // device an operator just told Polaris to stop judging.
+    expect(assetIsAnsweringProbes({ monitorStatus: "passive" })).toBe(false);
+  });
 });
 
 describe("packet-loss gate", () => {

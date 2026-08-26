@@ -419,7 +419,11 @@ async function buildFmgWarmCacheIps(
       where: {
         discoveredByIntegrationId: integrationId,
         assetType: "firewall",
-        monitorStatus: "up",
+        // "passive" alongside "up": a gate no down-detection automation covers
+        // is never "up" by construction, and excluding it would silently drop
+        // it from the warm cache so discovery falls back to the slower serial
+        // resolver for it. Degradation rather than breakage, but invisible.
+        monitorStatus: { in: ["up", "passive"] },
         ipAddress: { not: null },
         hostname: { not: null },
       },

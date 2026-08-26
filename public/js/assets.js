@@ -848,6 +848,8 @@ async function fetchAssetsPage() {
         a._monitor = ["Monitored", "Down"];
       } else if (a.monitorStatus === "recovering") {
         a._monitor = ["Monitored", "Recovering"];
+      } else if (a.monitorStatus === "passive") {
+        a._monitor = ["Monitored", "Passive"];
       } else {
         // "unknown" (never probed) and any unrecognized value fall through
         // here. Filter chip is "Pending" — operators read it as "we don't
@@ -3184,6 +3186,22 @@ function assetMonitorBadge(asset) {
   if (s === "warning")    return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
   if (s === "down")       return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
   if (s === "recovering") return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Recovering</span>';
+  // No down-detection automation covers this device, so Polaris renders no
+  // verdict about it (business rule 36). Deliberately NOT folded into Pending:
+  // this device is being polled perfectly well, and "Pending" says the opposite.
+  // The tooltip separates answering from dark using consecutiveFailures, which
+  // keeps advancing while passive precisely so this stays answerable.
+  if (s === "passive") {
+    var pBits = ["Passive — no down-detection automation covers this device",
+                 "Polling continues and samples are recorded",
+                 "Polaris will not declare Warning or Down"];
+    pBits.push((asset.consecutiveFailures || 0) === 0
+      ? "Its last poll succeeded"
+      : "Its last " + asset.consecutiveFailures + " poll(s) failed");
+    if (clickCls) pBits.push("Click for options");
+    var pTitle = ' title="' + escapeHtml(pBits.join("\n")) + '"';
+    return '<span class="badge badge-monitor-passive' + clickCls + '"' + pTitle + toggleAttrs + '>Passive</span>';
+  }
   // unknown / null / unrecognized → Pending. Same blue treatment as
   // Recovering (different label).
   return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Pending</span>';
@@ -3764,14 +3782,18 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '<p class="hint">Range 100..60000 ms; default is 5000 ms. Inherits from the resolved tier when blank.</p>' +
     '</div>';
   }
-  function failureThresholdInput() {
-    // Per-asset failure threshold isn't a column on Asset — it resolves from
-    // the class / integration / manual tier. Render the input read-only here
-    // with a hint so operators see it in the right place but edit it at the
-    // tier where it lives.
+  function declaringDownHint() {
+    // How many missed polls make this device Down is the covering
+    // down-detection automation's number (business rule 36), so the old
+    // "edit it at the tier where it lives" pointer would now send operators to
+    // a field that no longer exists. Filled in asynchronously by
+    // _populateAssetMonitorTierBadges, which is the one place that already has
+    // the per-asset answer — and which names the automation, since "3 missed
+    // polls" without saying WHOSE 3 is the question this panel exists to
+    // answer.
     return '<div class="form-group">' +
-      '<label>Failure Threshold</label>' +
-      '<p class="hint">Inherited from the resolved tier. Edit at the integration\'s Monitoring tab or via the Monitoring Settings button (Assets page).</p>' +
+      '<label>Declaring Down</label>' +
+      '<p class="hint" id="f-down-detection">Resolving…</p>' +
     '</div>';
   }
 
@@ -3799,7 +3821,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       httpPathInput() +
       intervalInput("f-monitorInterval", "Poll Interval Override (seconds)", interval, 5, 86400, "Minimum 5 seconds. Inherits from the resolved tier when blank.") +
       probeTimeoutInput() +
-      failureThresholdInput();
+      declaringDownHint();
   }
   function bodyCpuMemory() {
     return streamPollingBlock("telemetry", "f-cpuMemoryPolling", "f-cpuMemoryCredential", "f-telemetryMib", pollingCurrent.cpuMemoryPolling, telCredId, telMibId, _autoMibNames.telemetry) +
@@ -4240,6 +4262,44 @@ async function _wireMonitorEditTab(asset) {
  * "(from class override: 60s)" badge next to each cadence/timeout label.
  * Best-effort — failure leaves the badges blank.
  */
+/**
+ * Name the automation that decides this device is Down, and the count it asks
+ * for — plus the resulting wall-clock time, using this asset's OWN resolved
+ * interval and timeout (which is why this lives beside the tier-badge walk:
+ * that fetch already has both halves).
+ *
+ * Three states, and the passive one is the reason this isn't just a number:
+ * a device no automation covers is never declared Down at all, and printing a
+ * threshold for it would be a lie.
+ */
+function _paintDownDetectionHint(eff, asset) {
+  var el = document.getElementById("f-down-detection");
+  if (!el) return;
+  var dd = eff && eff.downDetection;
+  if (!dd) { el.textContent = "Could not resolve which automation decides Down for this device."; return; }
+  if (dd.passive) {
+    el.innerHTML = "<strong>Passive</strong> — no down-detection automation covers this device. " +
+      "Polaris records its polls but will never declare it Warning or Down. " +
+      '<a href="/automations.html">Manage down detection &rarr;</a>';
+    return;
+  }
+  var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
+  var resolved = eff.resolved || {};
+  var txt = "Down after <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
+  if (calc) {
+    var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+    txt += " ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) +
+      " at this device's " + c.interval + "s poll interval";
+  }
+  if (dd.automationName) txt += ", set by <strong>" + escapeHtml(dd.automationName) + "</strong>";
+  txt += ".";
+  if (dd.conflict) {
+    txt += " <span style=\"color:var(--color-warning)\">Another equally-specific automation asks for " +
+      dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +
+      " — Polaris uses the smaller count. Narrow one of the two device filters to make the choice explicit.</span>";
+  }
+  el.innerHTML = txt;
+}
 async function _populateAssetMonitorTierBadges(asset) {
   var eff;
   try { eff = await api.assets.effectiveMonitorSettings(asset.id); } catch (e) { return; }
@@ -4249,6 +4309,8 @@ async function _populateAssetMonitorTierBadges(asset) {
   // re-evaluation immediately for any slots already in the DOM.
   _effectiveResolvedByAssetId.set(asset.id, eff.resolved);
   _updateStaleBannersFromEffective(asset.id, asset);
+
+  _paintDownDetectionHint(eff, asset);
 
   function tierLabel(tier) {
     if (tier === "asset")       return null; // own override — no badge needed; the input itself IS the value
@@ -10570,8 +10632,19 @@ function assetMonitoringViewHTML(a) {
  * stream produces recovering cells. Seeding `unknown` instead would paint the
  * first cells of every bar blue, since the machine's unknown→success arrow is
  * the same one down uses.
+ *
+ * `threshold === null` is the PASSIVE case (business rule 36): no automation
+ * defines Down for this device, so a failed poll is amber and never escalates
+ * to red — rendering red would assert a verdict Polaris deliberately never
+ * reaches — and with no `down` there is nothing to recover from, so successes
+ * are plain green.
  */
 function _intermittencyStates(samples, threshold) {
+  if (threshold === null) {
+    return (samples || []).map(function (s) {
+      return { timestamp: s.timestamp, status: s.success ? "up" : "warning" };
+    });
+  }
   var thr = (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
   var cf = 0;
   var cs = 0;
@@ -10626,10 +10699,15 @@ async function _renderIntermittencyBar(assetId, effP) {
       (effP || api.assets.effectiveMonitorSettings(assetId)).catch(function () { return null; }),
     ]);
     allSamples = (results[0] && Array.isArray(results[0].samples)) ? results[0].samples : [];
+    // The count comes from the covering down-detection automation now, not
+    // from the settings tier (business rule 36) — and `passive` means there is
+    // no count at all, so no sample can be "the Nth consecutive failure that
+    // makes it Down". Rendering red there would assert a verdict Polaris
+    // deliberately never reaches.
+    var ddInfo = results[1] && results[1].downDetection;
+    if (ddInfo && ddInfo.passive) threshold = null;
+    else if (ddInfo && Number.isFinite(ddInfo.missedPolls)) threshold = ddInfo.missedPolls;
     if (results[1] && results[1].resolved) {
-      if (Number.isFinite(results[1].resolved.failureThreshold)) {
-        threshold = results[1].resolved.failureThreshold;
-      }
       // Populate the shared cache so stale-banner slots see the resolved
       // class/integration cadence as soon as this fetch lands (covers the
       // case where the response-time chart loads before the System tab is
@@ -16590,6 +16668,8 @@ function _depTreeStatusPip(node) {
     case "warning":    return '<span class="dep-tree-pip dep-tree-pip-warn" title="Warning">▲</span>';
     case "recovering": return '<span class="dep-tree-pip dep-tree-pip-rec"  title="Recovering">▲</span>';
     case "down":       return '<span class="dep-tree-pip dep-tree-pip-down" title="Down">▼</span>';
+    // Hollow glyph, matching the hollow pill: no verdict was rendered.
+    case "passive":    return '<span class="dep-tree-pip dep-tree-pip-passive" title="Passive — no down-detection automation covers this device">◇</span>';
     default:           return '<span class="dep-tree-pip dep-tree-pip-unk"  title="Pending">●</span>';
   }
 }
@@ -18021,7 +18101,17 @@ function _assetNotificationsTabHTML() {
         (shape.canClear ? '<button class="btn btn-sm btn-secondary" id="asset-alert-bulk-clear" disabled>Clear selected</button>' : "") +
       '</div>'
     : "";
-  return '<div class="section-block">' +
+  // Down detection FIRST: "which automation decides this device is down?" is
+  // the question an operator opens this tab with once the count lives on
+  // automations, and the answer is not in either table below — the governing
+  // automation may not have fired, and a PASSIVE device has no automation at
+  // all. Filled in asynchronously by _paintAssetDownDetectionPanel.
+  var downBlock = '<div class="section-block">' +
+    '<h4 style="margin:0 0 0.5rem">Down detection</h4>' +
+    '<p class="hint" id="asset-down-detection-panel">Resolving…</p>' +
+  '</div>';
+
+  return downBlock + '<div class="section-block">' +
     '<h4 style="margin:0 0 0.5rem">Active alerts <span id="asset-notif-active-count" style="color:var(--color-text-tertiary);font-weight:400"></span></h4>' +
     bulkBar +
     // Self-bounding sticky header (max-height set here, no JS sizer — see the
@@ -18085,7 +18175,55 @@ function _sortAssetAlerts(active) {
   });
 }
 
+/**
+ * Answer "which automation decides this device is Down, and at what count?" —
+ * the question this tab is opened with now that the number lives on
+ * automations rather than in Monitor Settings.
+ *
+ * Neither table below answers it: the governing automation may not have fired,
+ * and a PASSIVE device has no automation at all. The passive case gets the
+ * loudest treatment and a way out, because it is the state where Polaris will
+ * never tell anyone this device went down.
+ */
+function _paintAssetDownDetectionPanel(assetId) {
+  var el = document.getElementById("asset-down-detection-panel");
+  if (!el) return;
+  api.assets.effectiveMonitorSettings(assetId).then(function (eff) {
+    var el2 = document.getElementById("asset-down-detection-panel");
+    if (!el2) return;
+    var dd = eff && eff.downDetection;
+    if (!dd) { el2.textContent = "Could not resolve which automation decides Down for this device."; return; }
+    if (dd.passive) {
+      var canEdit = permAtLeast("automationManagement", "fullwrite");
+      el2.innerHTML =
+        '<strong style="color:var(--color-warning)">Passive</strong> — no down-detection automation covers this device. ' +
+        'Polaris records its polls but will never declare it Warning or Down, and no alert will ever be raised about it going offline.' +
+        (canEdit ? ' <a href="/automations.html">Create a down-detection automation &rarr;</a>' : '');
+      return;
+    }
+    var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
+    var resolved = eff.resolved || {};
+    var txt = "Down for this device is decided by ";
+    txt += dd.automationName ? "<strong>" + escapeHtml(dd.automationName) + "</strong>" : "an automation";
+    txt += " — <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
+    if (calc) {
+      var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+      txt += ", ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) + " at this device's " + c.interval + "s poll interval";
+    }
+    txt += ".";
+    if (dd.conflict) {
+      txt += ' <span style="color:var(--color-warning)">Another equally-specific automation asks for ' +
+        dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +
+        ' — Polaris uses the smaller count. Narrow one of the two device filters to make the choice explicit.</span>';
+    }
+    el2.innerHTML = txt;
+  }).catch(function () {
+    var el3 = document.getElementById("asset-down-detection-panel");
+    if (el3) el3.textContent = "Could not resolve which automation decides Down for this device.";
+  });
+}
 function _loadAssetNotificationsTab(assetId) {
+  _paintAssetDownDetectionPanel(assetId);
   var sentencesReady = _assetRuleSentences();
   api.assets.alerts(assetId).then(function (data) {
     var active = _sortAssetAlerts((data && data.active) || []);
@@ -19230,7 +19368,6 @@ function _credentialOptionsForAny(selectedId) {
 
 var MON_TIER_DEFAULTS = {
   intervalSeconds:           60,
-  failureThreshold:          3,
   // Dormant since 2026-08-19 (the fast-confirm re-probe was removed; in-run
   // resolution is the ICMP loss sampler's job and feeds packet loss only). Kept
   // to mirror the server's floor so a stored value still renders as inherited.
@@ -19641,7 +19778,6 @@ async function _monsetSaveManual() {
   // _classStreamSubtabHTML(isPrimary=false) shape.
   var body = {
     intervalSeconds:           _monsetReadField("f-manual-mon-intervalSeconds",           MON_TIER_DEFAULTS.intervalSeconds),
-    failureThreshold:          _monsetReadField("f-manual-mon-failureThreshold",          MON_TIER_DEFAULTS.failureThreshold),
     // Fast-confirm re-probe cadence (business rule 30). The input itself is
     // rendered by the SHARED _classStreamSubtabHTML from integrations.js, so the
     // manual tier picks it up with no markup of its own.
@@ -19716,7 +19852,6 @@ function _monsetOverrideSummary(o) {
   var parts  = [];
   var labels = {
     intervalSeconds:           "probe",
-    failureThreshold:          "threshold",
     // Dormant field — kept in the label map so an install that stored this
     // override before 2026-08-19 still gets a readable summary chip for it.
     fastConfirmIntervalSec:    "confirm-reprobe",
@@ -19920,7 +20055,6 @@ async function _monsetSaveOverride(existing) {
   // numeric inputs — see numInput() inside that helper).
   var fields = {
     intervalSeconds:           readOptional("monset-ov-intervalSeconds"),
-    failureThreshold:          readOptional("monset-ov-failureThreshold"),
     probeTimeoutMs:            readOptional("monset-ov-probeTimeoutMs"),
     cpuMemoryTimeoutMs:        readOptional("monset-ov-cpuMemoryTimeoutMs"),
     temperatureTimeoutMs:      readOptional("monset-ov-temperatureTimeoutMs"),

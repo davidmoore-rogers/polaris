@@ -88,6 +88,56 @@ describe("isAssetShadowed", () => {
   });
 });
 
+describe("device filters bound coverage", () => {
+  // A peer's trigger dimensionFilter narrows the asset SET exactly as its scope
+  // does. Coverage used to be scope-only, which was safe while triggerSignature
+  // pinned the filter (differently-filtered rules were never compared). Now
+  // that monitorStatus rules group by value instead, a filtered peer must only
+  // shadow the assets it can genuinely fire on — otherwise a "core-" automation
+  // would silence the baseline on every device in the fleet.
+  const filteredDown = (df: any) => ({ ...downTrigger, dimensionFilter: df });
+  const core: ScopeAsset = { id: "c1", hostname: "core-sw-1", assetType: "switch", tags: [], discoveredByIntegrationId: null };
+  const edge: ScopeAsset = { id: "e1", hostname: "edge-sw-9", assetType: "switch", tags: [], discoveredByIntegrationId: null };
+
+  it("a filtered higher-rank peer shadows only the assets its filter matches", () => {
+    const baseline = rule("baseline", downTrigger, { allAssets: true });
+    const peer = rule("peer", filteredDown({ hostnamePattern: "core-" }), { assetTypes: ["switch"] });
+    const idx = buildShadowIndex([baseline, peer]);
+    expect(shadowed(idx, baseline, core)).toBe(true);
+    expect(shadowed(idx, baseline, edge)).toBe(false);
+  });
+
+  it("an unfiltered peer still shadows everything in its scope", () => {
+    const baseline = rule("baseline", downTrigger, { allAssets: true });
+    const peer = rule("peer", downTrigger, { assetTypes: ["switch"] });
+    const idx = buildShadowIndex([baseline, peer]);
+    expect(shadowed(idx, baseline, core)).toBe(true);
+    expect(shadowed(idx, baseline, edge)).toBe(true);
+  });
+
+  it("carveOutAggregate honours a peer's device filter in BOTH directions", () => {
+    const higher: CarveOutPeer = { id: "hi", name: "Core switches", scope: { assetTypes: ["switch"] } as any, rank: SCOPE_RANK.assetType, dimensionFilter: { hostnamePattern: "core-" } as any };
+    // direction 1: the draft is all-assets, the filtered peer outranks it
+    const d1 = carveOutAggregate(SCOPE_RANK.allAssets, [core, edge], [higher]);
+    expect(d1.excludedBy.has("c1")).toBe(true);
+    expect(d1.excludedBy.has("e1")).toBe(false);
+    expect(d1.summary.carvedOut?.count).toBe(1);
+
+    // direction 2: the draft is more specific, so the filtered peer is what it
+    // carves FROM — and only for the assets that peer actually covers.
+    const lower: CarveOutPeer = { ...higher, rank: SCOPE_RANK.allAssets };
+    const d2 = carveOutAggregate(SCOPE_RANK.hostname, [core, edge], [lower]);
+    expect(d2.summary.carvesFrom?.[0]?.count).toBe(1);
+    expect(d2.summary.carvesFrom?.[0]?.sampleHostnames).toEqual(["core-sw-1"]);
+  });
+
+  it("a peer with an empty dimensionFilter object covers its whole scope", () => {
+    const peer: CarveOutPeer = { id: "hi", name: "All", scope: { allAssets: true }, rank: SCOPE_RANK.assetType, dimensionFilter: {} as any };
+    const { excludedBy } = carveOutAggregate(SCOPE_RANK.allAssets, [core, edge], [peer]);
+    expect(excludedBy.size).toBe(2);
+  });
+});
+
 describe("carveOutAggregate (preview, both directions)", () => {
   const a101f: ScopeAsset = { id: "101f", hostname: "fortigate-101f", assetType: "firewall", tags: [], discoveredByIntegrationId: null };
   const sw: ScopeAsset = { id: "sw1", hostname: "switch-1", assetType: "switch", tags: [], discoveredByIntegrationId: null };

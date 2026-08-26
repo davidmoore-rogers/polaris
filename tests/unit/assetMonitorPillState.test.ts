@@ -52,6 +52,14 @@ describe("assetMonitorPillState", () => {
     expect(assetMonitorPillState({ ...base, monitorStatus: "bogus" })).toEqual({ kind: "pending", label: "Pending" });
   });
 
+  it("renders passive as its own state, NOT as Pending", () => {
+    // "Pending" means never probed. A passive device is polled and charted
+    // perfectly well — it simply has no down-detection automation covering it,
+    // so Polaris renders no verdict (business rule 36). Folding it into the
+    // unrecognized-value fallback would tell the operator the opposite.
+    expect(assetMonitorPillState({ ...base, monitorStatus: "passive" })).toEqual({ kind: "passive", label: "Passive" });
+  });
+
   it("Dep. Down overlay outranks the five-state machine", () => {
     expect(
       assetMonitorPillState({ ...base, monitorStatus: "up", dependencySuppressed: true }),

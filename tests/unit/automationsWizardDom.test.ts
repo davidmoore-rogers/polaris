@@ -2050,6 +2050,91 @@ describe("trigger filter rows", () => {
       expect(modes).toEqual(["timed", "manual"]);
     });
   });
+
+  describe("down detection", () => {
+    const downRule = (over: Record<string, unknown> = {}) => ({
+      id: "r-down", name: "Asset down", description: null, enabled: true, severity: "critical",
+      trigger: { type: "asset_state", field: "monitorStatus", operator: "==", value: "down", missedPolls: 3, forDurationSec: 0 },
+      scope: { allAssets: true }, reset: { mode: "auto" }, cooldownSec: null, messageTemplate: "{asset} is down",
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }], escalation: null, severityBands: null, bandNotify: null,
+      ...over,
+    });
+
+    async function openOnTrigger(rule: unknown) {
+      doc.body.innerHTML = "";
+      savedPayloads.length = 0;
+      await (g.openAutomationWizard as (r: unknown) => Promise<void>)(rule);
+      for (let i = 0; i < 2; i++) {
+        (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    }
+
+    it("renders the missed-poll count on the condition row and round-trips it", async () => {
+      await openOnTrigger(downRule());
+      const miss = doc.querySelector(".tgl-misses") as unknown as { value: string } | null;
+      expect(miss).toBeTruthy();
+      expect(miss!.value).toBe("3");
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(savedPayloads).toHaveLength(1);
+      expect((savedPayloads[0] as { trigger: { missedPolls: number } }).trigger.missedPolls).toBe(3);
+      expect(() => ruleInputSchema.parse(savedPayloads[0])).not.toThrow();
+    });
+
+    it("saves an edited count, and the sentence says what it means", async () => {
+      await openOnTrigger(downRule());
+      const w = g.window as InstanceType<typeof Window>;
+      const miss = doc.querySelector(".tgl-misses") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      miss.value = "7";
+      miss.dispatchEvent(new w.Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      // The PHRASING is pinned deterministically in automationSentences.test.ts
+      // against the factory directly; here we only care that the edited number
+      // reaches the payload.
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect((savedPayloads[0] as { trigger: { missedPolls: number } }).trigger.missedPolls).toBe(7);
+    });
+
+    it("refuses to save a blank count rather than silently governing at the default", async () => {
+      await openOnTrigger(downRule());
+      const w = g.window as InstanceType<typeof Window>;
+      const miss = doc.querySelector(".tgl-misses") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      miss.value = "";
+      miss.dispatchEvent(new w.Event("input", { bubbles: true }));
+      toastErrors.length = 0;
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(savedPayloads).toHaveLength(0);
+      expect(toastErrors.join(" ")).toMatch(/consecutive missed polls/i);
+    });
+
+    it("hides the count on a MULTI-condition trigger and strips it from the payload", async () => {
+      // Authority lives on a bare trigger only — the probe loop cannot evaluate
+      // a CPU reading on the way to deciding down, and the server rejects a
+      // count inside a composite. The control must not sit there collecting a
+      // number nothing would honour.
+      await openOnTrigger(downRule({
+        trigger: {
+          type: "composite", kind: "asset", op: "and", forDurationSec: 0,
+          children: [
+            { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
+            { type: "asset_metric", metric: "cpuPct", aggregation: "latest", windowSec: 0, operator: ">", threshold: 90 },
+          ],
+        },
+      }));
+      const miss = doc.querySelector(".tgl-misses") as unknown as { style: { display: string } } | null;
+      if (miss) expect(miss.style.display).toBe("none");
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(savedPayloads).toHaveLength(1);
+      const p = savedPayloads[0] as { trigger: { type: string; children?: { missedPolls?: number }[] } };
+      expect(p.trigger.type).toBe("composite");
+      (p.trigger.children || []).forEach((c) => expect(c.missedPolls).toBeUndefined());
+      expect(() => ruleInputSchema.parse(p)).not.toThrow();
+    });
+  });
 });
 
 // ─── Export / import / view code ────────────────────────────────────────────

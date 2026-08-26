@@ -62,7 +62,8 @@ const SCHEMA = {
     hwSensorValue: { label: "Hardware sensor", unit: "(sensor unit)" },
   },
   sensorClassUnits: { temperature: "°C", fan: "RPM" },
-  fieldMeta: { monitorStatus: { label: "Monitor status" } },
+  fieldMeta: { monitorStatus: { label: "Monitor status", kind: "enum", values: ["up", "warning", "recovering", "down", "passive", "unknown"] } },
+  downDetection: { field: "monitorStatus", operator: "==", value: "down", countKey: "missedPolls", min: 1, max: 100, default: 3, passiveStatus: "passive" },
   changeTypeMeta: { new_asset: "a new device" },
 };
 
@@ -202,11 +203,16 @@ describe("makeAutomationSentences", () => {
       { mode: "auto" },
       { type: "asset_state", field: "monitorStatus", operator: "==", value: "down" },
     );
-    expect(out).toContain("is not down");
+    // Recovery from an outage is an EVENT — the device answered — not a status
+    // value to compare against, so the inverted clause says so rather than
+    // reading back "monitor status is not down".
+    expect(out).toContain("the device answers a poll again");
     // The gap that matters: the alert clears when the device answers ONCE, not
     // when it is healthy again.
-    expect(out).toMatch(/first successful probe/i);
+    expect(out).toMatch(/first successful poll/i);
     expect(out).toContain("recovering");
+    // And the count is the automation's own, so the caveat can name it.
+    expect(out).toMatch(/3 consecutive successes/);
   });
 
   it("keeps the caveat off a state trigger that isn't about being down", () => {
