@@ -134,11 +134,17 @@
               <th data-sf-key="assignedTo" data-sf-type="string" data-col-default-hidden="true">Assigned To</th>
               <th data-sf-key="purchaseOrder" data-sf-type="string" data-col-default-hidden="true">Purchase Order</th>
               <th data-sf-key="dnsName" data-sf-type="string" data-col-default-hidden="true">DNS Name</th>
+              <!-- Geographic pin (drives the Device Map site marker for
+                   firewalls). Sortable but data-sf-nofilter: the columns are
+                   nullable floats, and the text-operator filter's contains
+                   semantics don't translate to numbers server-side. -->
+              <th style="width:110px" data-sf-key="latitude" data-sf-type="number" data-sf-nofilter data-col-default-hidden="true">Latitude</th>
+              <th style="width:110px" data-sf-key="longitude" data-sf-type="number" data-sf-nofilter data-col-default-hidden="true">Longitude</th>
               <th style="width:120px" data-sf-key="lastSeen" data-sf-type="date">Last Seen</th>
             </tr>
           </thead>
           <tbody id="assets-tbody">
-            <tr><td colspan="20" class="empty-state">Loading...</td></tr>
+            <tr><td colspan="22" class="empty-state">Loading...</td></tr>
           </tbody>
         </table>
       </div>

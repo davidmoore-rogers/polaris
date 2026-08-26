@@ -861,7 +861,7 @@ async function fetchAssetsPage() {
     _assetsData = all.map(_mapAsset);
     renderAssetsPage();
   } catch (err) {
-    tbody.innerHTML = '<tr><td colspan="20" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="22" class="empty-state">Error: ' + escapeHtml(err.message) + '</td></tr>';
   }
 }
 
@@ -879,6 +879,14 @@ async function loadAssets() {
 function _copyableCell(value) {
   if (!value) return '-';
   return '<span class="copy-cell" title="Click to copy" data-copy="' + escapeHtml(value) + '">' + escapeHtml(value) + '</span>';
+}
+
+// Latitude / Longitude cell: up to 5 decimal places (~1 m of precision),
+// trailing zeros trimmed. 0 is a valid coordinate, so the null check is
+// explicit rather than truthiness (String(0) is "0", which _copyableCell keeps).
+function _coordCell(v) {
+  if (v == null || typeof v !== "number" || !isFinite(v)) return "-";
+  return _copyableCell(String(Math.round(v * 1e5) / 1e5));
 }
 
 var _macTooltipTimer = null;
@@ -1363,8 +1371,8 @@ function renderAssetsPage() {
   if (_assetsData.length === 0) {
     var hasFilters = _assetsSF && _assetsSF._filters && Object.keys(_assetsSF._filters).length > 0;
     tbody.innerHTML = hasFilters
-      ? '<tr><td colspan="20" class="empty-state">No results match the current filters.</td></tr>'
-      : '<tr><td colspan="20" class="empty-state">No assets found. Add one to get started.</td></tr>';
+      ? '<tr><td colspan="22" class="empty-state">No results match the current filters.</td></tr>'
+      : '<tr><td colspan="22" class="empty-state">No assets found. Add one to get started.</td></tr>';
     _renderAssetsPageControls();
     _assetsUpdateSelectAll();
     return;
@@ -1398,6 +1406,8 @@ function renderAssetsPage() {
       '<td>' + escapeHtml(a.assignedTo || "-") + '</td>' +
       '<td>' + _copyableCell(a.purchaseOrder) + '</td>' +
       '<td>' + _copyableCell(a.dnsName) + '</td>' +
+      '<td class="mono">' + _coordCell(a.latitude) + '</td>' +
+      '<td class="mono">' + _coordCell(a.longitude) + '</td>' +
       '<td>' + (a.lastSeen ? formatDate(a.lastSeen) : "-") + '</td>' +
       '</tr>';
   }).join("");

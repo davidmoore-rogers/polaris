@@ -358,6 +358,8 @@ const ASSET_SORT_COLUMNS: Record<string, string> = {
   purchaseOrder: "purchaseOrder",
   dnsName: "dnsName",
   description: "description",
+  latitude: "latitude",
+  longitude: "longitude",
   lastSeen: "lastSeen",
   createdAt: "createdAt",
 };
@@ -476,6 +478,10 @@ const ASSET_LIST_SELECT = {
   statusChangedBy: true,
   location: true,
   learnedLocation: true,
+  // Latitude / Longitude list columns (hidden by default) — the geographic pin
+  // that places a firewall on the Device Map.
+  latitude: true,
+  longitude: true,
   lastSeen: true,
   acquiredAt: true,
   createdAt: true,
