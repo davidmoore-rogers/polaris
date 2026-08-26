@@ -15,17 +15,20 @@ new app does, but render it with exactly these parts.
 | `js/polaris-ui.js` | `<new-app>/public/js/polaris-ui.js` | No — extend, don't edit |
 | `js/table-sf.js` | `<new-app>/public/js/table-sf.js` | **No.** Verbatim. |
 | `page-template.html` | each page | Yes — that's the point |
-| `logo.png` | `public/logo.png` | Replace with the new app's mark |
+| `logo.png` | `<new-app>/public/logo.png` | Replace with the new app's mark |
+| `css/polaris-mobile.css` | `<new-app>/public/css/polaris-mobile.css` | **No.** Verbatim. Only if the app ships a phone surface. |
+| `mobile-template.html` | `<new-app>/public/mobile.html` | Yes — that's the point |
+| `email/alert-email-template.html` + `.txt` | the notification service's default templates | Yes — the tokens are yours to choose |
 
 Rule: **never restyle a component that already exists here.** If a surface
 doesn't seem to fit, reach for the closest existing pattern rather than
 inventing a new container, palette entry, or z-index.
 
 > **Inside the Polaris repo itself**, `public/` is the LIVING source —
-> `design/js/` and `design/css/` are the portable snapshots, re-synced
-> deliberately when the kit is updated, never edited to chase `public/`. A new
-> app copies from `design/`; Polaris work happens in `public/`. Part II below
-> indexes the Polaris canon.
+> `design/js/`, `design/css/` and `design/email/` are the portable snapshots,
+> re-synced deliberately when the kit is updated, never edited to chase
+> `public/`. A new app copies from `design/`; Polaris work happens in
+> `public/`. Part II below indexes the Polaris canon.
 
 ---
 
@@ -688,6 +691,259 @@ Never hand-pick `9999`. If something must sit higher, add it to this list.
 
 ---
 
+## 12. Mobile — a separate app, not a responsive desktop
+
+The phone surface is its **own SPA** (`mobile.html` + `polaris-mobile.css` +
+`js/mobile/*`), not the desktop stylesheet at a narrow breakpoint. That is a
+deliberate split: the desktop is a dense multi-column table tool and the phone
+is a Material 3 list-and-sheet app. They share the server, the auth flow, the
+theme *key*, and nothing else.
+
+Copy `css/polaris-mobile.css` verbatim and start from `mobile-template.html`.
+
+### Design language
+
+**Material 3**, not the desktop's Polaris chrome — tonal surfaces, pill
+buttons, a bottom navigation bar with an active pill indicator. Roboto +
+Roboto Mono, loaded from Google Fonts.
+
+Every colour is an `--md-*` token in the `:root` block at the top of the
+stylesheet. Never write a raw hex in mobile app code; the one exception the
+stylesheet itself makes is **status colour** (monitor pills, map markers,
+topology nodes), which stays literal on purpose — a health colour must not
+change hue with the basemap.
+
+Token families: key colours (`--md-primary` … `--md-on-tertiary-container`),
+neutral surfaces (`--md-surface`, five `--md-surface-cont-*` steps,
+`--md-on-surface`, `--md-outline`), semantic (`--md-success`, `--md-warning`,
+`--md-error*`), shape (`--shape-xs` 4 → `--shape-xl` 28 → `--shape-full`),
+elevation (`--elev-1..3`), layout (`--topbar-h` 64, `--navbar-h` 80).
+
+### Themes
+
+Mobile ships **two** themes where the desktop ships three. The desktop's
+morning/noon split is a warmth difference this token set has no room for, so
+the light palette is selected by *family*:
+`:is([data-theme="morning"],[data-theme="noon"])`. The toggle in More →
+Appearance stays a two-way Dark/Light and writes the same shared
+`polaris-theme` key, which is what keeps the two apps coherent when a user
+moves between them.
+
+### Shell
+
+```
+.app[data-tab]                    height:100% flex column
+  .m3-topbar                      64px, .leading / .title / .trailing
+  .m3-searchbar                   56px pill, --md-surface-cont-high, elev-1
+  .app-body                       flex:1, THE only scroller
+  .m3-navbar                      80px, grid repeat(5, 1fr)
+```
+
+- `body` is `overflow:hidden`. Scrolling happens inside `.app-body`, never on
+  the body — otherwise iOS bounces past the navbar.
+- `.app-body` is `overscroll-behavior-y: contain` so the pull-to-refresh puck
+  gets unambiguous touchmove deltas.
+- `data-tab=""` hides the navbar (boot / login). `data-tab="__fullbleed"`
+  hides the topbar slot, search slot and navbar — for a full-screen canvas
+  surface that renders its own floating chrome.
+- **Five tabs.** The navbar grid is `repeat(5, 1fr)`; a sixth breaks it and a
+  fourth looks broken. Overflow goes behind a **More** tab with sub-pages.
+
+### Installed-PWA insets
+
+`viewport-fit=cover` + `black-translucent` means the app paints edge to edge,
+so the shell reserves the notch itself:
+`@media all and (display-mode: standalone)` puts `env(safe-area-inset-*)`
+padding on `.app`. Padding on the flex column shrinks the box, so `.app-body`
+and the fixed-height navbar both land inside the safe area — which is exactly
+what the overlay anchors already assume
+(`calc(var(--navbar-h) + env(safe-area-inset-bottom))`). Scoped to
+display-mode so a normal browser tab is byte-identical.
+
+### Keyboard (iOS)
+
+iOS Safari does not shrink the layout viewport when the keyboard opens, so a
+flex-centred login form ends up behind the keyboard with nothing to scroll.
+Watch `window.visualViewport`, and while the keyboard is up put `.kb-open` on
+`.app` with `--vv-height` / `--vv-offset-top`. That pins `.app` to the visible
+rect, which makes the content taller than its container and turns `.app-body`
+back into a real scroller. Top-align at the same time — overflow *above* a
+`justify-content:center` flex item is unreachable, since scrollTop can't go
+negative. Android shrinks the layout viewport natively, so the delta check
+must leave it alone.
+
+### Component vocabulary
+
+| Need | Use |
+|---|---|
+| Row in a list | `.list-item` (`.two-line` / `.three-line`), `.leading` avatar + `.content` + `.trailing` |
+| Entity summary | `.asset-card` — `.top` (`.ico` avatar, `.name`, status `.dot`) + `.meta` row of facts |
+| Grouping label | `.section-head` — 11px uppercase, primary, with a `.count` |
+| Filters | `.chip-row` of `.chip` / `.chip.selected` (horizontal scroll) |
+| Action | `.btn` + `.btn-filled` / `-tonal` / `-outlined` / `-text` / `-error`; `.fab` / `.fab-ext` |
+| Input | `.tf-outlined` (`.field` + floating `.lbl` + `.support`) |
+| Feedback | `.snackbar` (z 1100, above every sheet) |
+| Detail | `.sheet` + `.scrim` (1001 / 1000), or the three-state `.asset-sheet` (901 / 900) |
+| Status | `.dot.up|warn|down|unk|dep-down|passive|maint`, `.status-pill.*` |
+| Nothing to show | `.empty-state` (icon circle + `.ttl` + `.desc`) |
+| Loading | `.spinner` inside `.loading-screen` |
+| Key/value facts | `.kv-row` (`.k` / `.v`) |
+
+### Touch rules
+
+- Hit targets **never below 44px** — `.icon-btn` is 48, `.btn` is 40 tall with
+  24px side padding, `.list-item` min-height 56.
+- `touch-action: manipulation` on every interactive element (already applied to
+  `button`, `.list-item`, `.chip`) to kill the double-tap zoom delay.
+- Phones are **portrait-only**. `@media (orientation: landscape) and
+  (max-height: 480px)` replaces the whole UI with a rotate-back prompt; iOS
+  Safari ignores `screen.orientation.lock()` outside an installed PWA, so this
+  CSS fallback is the actual lockout for half the install base. Tablets
+  (taller than 480px in landscape) are unaffected.
+- Honour `prefers-reduced-motion` on anything that loops.
+
+### How it scales across phone sizes
+
+**There are no width breakpoints.** The stylesheet has exactly three media\nqueries and none of them is a width: `display-mode: standalone` (safe-area\ninsets), `prefers-reduced-motion`, and the landscape lockout. Don't add one —\nif something breaks at a size, the fix is almost always fluid, not a\nbreakpoint.
+
+Everything adapts by being fluid instead:
+
+- **Shell.** `.app` is a `height:100%` flex column. Topbar (64px) and navbar\n  (80px) are fixed; `.app-body` is `flex:1` and takes whatever is left. A\n  taller phone simply shows more list.
+- **Navbar.** `grid: repeat(5, 1fr)` — the tabs divide the width evenly at any\n  size. This is the real reason the five-tab cap matters.
+- **Full-width components.** `.m3-searchbar`, `.asset-card`, `.list-item`,\n  `.sheet`, `.snackbar` sit on a fixed 16px side margin and stretch. Nothing\n  is a fixed pixel width.
+- **Overflow rows scroll, they don't wrap.** `.chip-row` is `overflow-x: auto`\n  with the scrollbar hidden.
+- **Text truncates rather than reflows.** `.headline`, `.asset-card .name` and\n  the topbar `.title` are ellipsis-clipped, so a narrow screen loses\n  characters instead of gaining lines and shifting everything below.
+- **Sheets are viewport-bounded**, not content-bounded: `max-height: 90vh`\n  (`.sheet`) / `80vh` (`.asset-sheet`), anchored at\n  `calc(var(--navbar-h) + env(safe-area-inset-bottom))`.
+- **Device chrome** is the only true per-device variation handled explicitly,\n  via `env(safe-area-inset-*)` on `.app` in standalone.
+
+Practical range is ~320px to tablet width in portrait. The tightest point is\nthe navbar at 320px — 64px pills in 64px columns with labels like "Reserved"\nat 12px. If a tab label doesn't fit there, shorten the label; don't shrink the\npill or drop to four columns.
+
+### Sheet layering
+
+The z-index scheme is its own, and tighter than the desktop's:
+
+```
+  900   asset scrim
+  901   asset sheet          (peek / expanded / dismissed)
+  950   bottom navbar        — above the asset sheet, below the generic sheet
+ 1000   generic scrim
+ 1001   generic sheet        — drilldowns take the full screen
+ 1100   snackbar             — fires from inside sheets, must outrank them
+```
+
+The navbar sitting *between* the two sheet layers is the whole trick: the
+asset sheet can peek with the nav still tappable, while a deeper drilldown
+covers everything.
+
+---
+
+## 13. Email notifications
+
+Start from `email/alert-email-template.html` and its `.txt` sibling. Both are
+templates in a `{token}` vocabulary — **not** server-side string building, and
+not rendered samples.
+
+### The one rule that shapes everything else
+
+**What the app sends and what the operator can edit are the same text.** The
+automation wizard prefills a new Notify action with exactly these strings, so
+the email in the inbox is always the template on the screen: edit it, reorder
+it, drop the charts, and that is what ships. A stored rule that carries no
+custom composition renders through the default, so changing the default needs
+no migration.
+
+### HTML rules
+
+- **Tables, not flexbox or grid.** Outlook renders through Word.
+- **Inline styles only.** No `<style>` block, no classes, no variables.
+- **No remote images.** Images ride as inline `cid:` attachments.
+- **Always a real plain-text alternative** — pager gateways show only that, and
+  it spells links out instead of hiding them behind anchors.
+- Buttons are bulletproof table buttons (`<td>` background + block-level `<a>`),
+  not styled anchors.
+- Card is `width="600"` with `max-width:100%`, on a `#f5f6f8` page.
+- Fixed-width label column (`width="140"` on the `<td>` **and** in its style —
+  Outlook sizes from the attribute) plus `word-break:break-word` on the value.
+  Auto layout gives the labels most of the card the moment the fact list gets
+  short.
+
+### Fixed palette
+
+An email has no theme. `#f5f6f8` page · `#ffffff` card · `#e5e7eb` border ·
+`#1f2430` heading · `#374151` body · `#6b7280` label · `#9ca3af` footnote ·
+`#d1d5db` secondary-button border.
+
+Severity colour — one map shared by email, chat cards, and the public
+acknowledge page:
+
+| Severity | Hex |
+|---|---|
+| notice | `#6b7280` |
+| informational / info | `#2563eb` |
+| warning | `#d97706` |
+| serious | `#ea580c` |
+| critical / error | `#dc2626` |
+| resolved | `#16a34a` |
+| *(unknown)* | `#808080` |
+
+Keep it in one pure module with no ORM import, so the unauthenticated
+acknowledge page can share it.
+
+### Structure
+
+1. **Severity bar** — 5px of `{severity.color}` across the top.
+2. **Headline + letterhead** — two cells. Left: severity eyebrow, subject,
+   then the *trigger sentence* in the builder's own words with the reading in
+   it. Right: the install's logo/name/subtitle, filled at delivery.
+3. **Facts** — label/value rows, asset rows first (free-text description last
+   so it can't push IP and location out of the first glance), then event rows.
+4. **Context block** — what was on the port, for an interface alert.
+5. **Charts** — last hour of the metrics that explain the alert, as inline CID
+   images, under one `data-section="charts"` row.
+6. **Actions** — primary button in the severity colour, secondary outlined.
+7. **Footnote** — who sent it and which automation.
+
+Don't print the rule's `{message}` under the trigger sentence: the two say the
+same thing, and the duplicate reads as a bug. `{message}` keeps its real homes
+— the in-app alert card and every chat/push body, which have no trigger
+sentence.
+
+Use a local-time token, not ISO. `2026-08-12T18:46:01.561Z` is a 24-character
+unbreakable string that wraps mid-token in a table cell.
+
+### Prune passes — run on the RENDERED body
+
+Every token can render empty, and empty rows read as broken rather than as
+"not applicable". Four passes, in order:
+
+| Pass | Drops |
+|---|---|
+| `pruneEmptyRows` | any two-cell `<tr>` whose **value** cell is empty |
+| `pruneEmptyDivs` | exactly-empty `<div>`s (the header lines aren't rows) |
+| `pruneDeadLinks` | a button whose `href` rendered `""`, plus its spacer cell |
+| `pruneEmptyChartSection` | the `data-section="charts"` row when no `<img>`/`<p>` landed in it |
+
+`pruneEmptyRows` must **fail its match** on a row containing a nested
+`<table>` or a second `<tr>`. Without those exclusions it starts at a layout
+row and runs to the first `</tr>` *inside* it — which looks exactly like an
+empty label/value pair, so the drop takes the facts table's opening tag with
+it and the unmatched `</table>` closes the card early, spilling the charts and
+buttons outside the box. That is also why the letterhead cell wraps its
+contents in a one-cell table: a row containing a `<table>` can never be
+mistaken for a fact row.
+
+The text body gets the same treatment: drop `Label:` lines with nothing after
+the colon, then collapse the blank-line runs.
+
+### Deferred tokens
+
+`{brand.header}`, `{interface.lldp}` and `{chart.*}` are filled at **delivery**
+time, not compose time — they carry attachments or need a live query. Attach a
+CID image only when the substituted HTML actually references it, or every
+message drags a logo nobody displays.
+
+---
+
 # Part II — Polaris-specific surfaces (this repo only)
 
 Everything above is the **portable contract** — hand it to a new app unchanged.
@@ -1333,4 +1589,3 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 - **Tag the element with a class for the shipped variant** (`.brand-mark`) so CSS can size fixed-aspect artwork differently from an arbitrary operator upload sharing the same `<img>`.
 - A **server-rendered** derivative (here: the logo with a symbol composited on) beats a per-surface CSS overlay the moment more than two surfaces show it — one URL, one geometry, and it works in contexts with no stylesheet of yours (a preview box, an email, an icon). Give it `no-cache` + a strong ETag if its path is fixed, and have it **redirect to the plain asset** rather than 404 when the derivative doesn't apply.
 - Follow the OS only while the user has **no** stored preference, and don't persist that resolution — unsaved *is* the "follow my system" state. Match on `light` so a browser stating no preference keeps the product's existing default.
-
