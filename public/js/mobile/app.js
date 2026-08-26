@@ -13,24 +13,44 @@
 // reload). Same `polaris-theme` localStorage key the desktop uses, so a
 // preference set on either surface flows to the other.
 // Nothing saved (first launch of the installed app, typically) follows the OS
-// — matching on "light" so a browser with no stated preference still lands on
-// dark, the historical default. Same rule as js/theme-init.js and app.js.
+// — "morning" for a light preference, "nightfall" otherwise. Same rule as
+// js/theme-init.js and app.js, and a retired id (the old "dark"/"light") names
+// no token block, so it falls back the same way as no preference at all.
+//
+// The desktop's three themes come in two FAMILIES, and mobile.css carries one
+// palette per family — so this SPA reads and writes family-wise (see
+// PolarisTheme below) while still storing a real theme id, which is what keeps
+// the shared `polaris-theme` key valid for the desktop app.
+var MOBILE_THEME_IDS = { light: "morning", dark: "nightfall" };
 (function () {
+  var KNOWN = ["morning", "noon", "nightfall"];
   var saved = null;
   try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (saved && KNOWN.indexOf(saved) === -1) saved = null;
   if (!saved) {
     var light = false;
     try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
-    saved = light ? "light" : "dark";
+    saved = light ? "morning" : "nightfall";
   }
   document.documentElement.setAttribute("data-theme", saved);
 })();
 
 // Tiny shared get/set so map-tab and more-tab can flip theme without
-// duplicating the localStorage key.
+// duplicating the localStorage key. `get` answers the FAMILY ("light"|"dark")
+// — that is the granularity every caller here wants (one basemap pair, one
+// Material palette pair, one two-way toggle row) — while `set` writes a
+// concrete theme id the desktop also understands. `getId` is the raw value for
+// anything that needs it.
 window.PolarisTheme = {
-  get: function () { return document.documentElement.getAttribute("data-theme") || "dark"; },
-  set: function (theme) {
+  getId: function () { return document.documentElement.getAttribute("data-theme") || "nightfall"; },
+  get: function () {
+    var id = document.documentElement.getAttribute("data-theme");
+    return (id === "morning" || id === "noon") ? "light" : "dark";
+  },
+  set: function (family) {
+    // Accepts a family ("light"/"dark") or a concrete theme id, so a caller
+    // that already knows which theme it wants can say so.
+    var theme = MOBILE_THEME_IDS[family] || family;
     document.documentElement.setAttribute("data-theme", theme);
     try { localStorage.setItem("polaris-theme", theme); } catch (e) {}
     // Keep the installed app's chrome (Android status bar / task switcher)
@@ -39,7 +59,7 @@ window.PolarisTheme = {
     // frozen at install time and only affects the launch splash, so a
     // light-mode user still gets a dark splash — cosmetic and unavoidable.
     var meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute("content", theme === "dark" ? "#1d2024" : "#eef0f7");
+    if (meta) meta.setAttribute("content", window.PolarisTheme.get() === "dark" ? "#1d2024" : "#eef0f7");
   },
 };
 

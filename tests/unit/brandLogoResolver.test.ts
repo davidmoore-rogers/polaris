@@ -6,9 +6,13 @@
  * window.PolarisBrandLogo — the tests/unit/appmapFilter.test.ts approach.
  *
  * What's pinned here is the promise the Customization tab makes: the shipped
- * Polaris art follows the THEME, an operator's logo replaces it PER SURFACE,
- * and the Application Name is text that appears only beside a custom logo
- * (the Polaris art already carries the wordmark).
+ * Polaris art follows the theme FAMILY, an operator's logo replaces it PER
+ * SURFACE, and the Application Name is text that appears only beside a custom
+ * logo (the Polaris art already carries the wordmark).
+ *
+ * Family, not id, is the load-bearing part since the three-theme cutover:
+ * morning and noon are both daylight and share one set of art, and the retired
+ * `light`/`dark` ids name no theme at all.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -36,7 +40,7 @@ let BrandLogo: {
   preferredTheme: () => string;
   currentTheme: () => string;
 };
-let theme = "dark";
+let theme = "nightfall";
 let prefersLight = false;
 
 beforeAll(() => {
@@ -68,11 +72,30 @@ const custom = (over: Branding = {}): Branding => ({
 
 describe("theme-aware Polaris art", () => {
   it("serves the dark-theme wordmark on a dark background and the light one on light", () => {
-    theme = "dark";
+    theme = "nightfall";
     expect(BrandLogo.resolve(null, "login").src).toBe(BrandLogo.ASSETS.login.dark);
-    theme = "light";
+    theme = "morning";
     expect(BrandLogo.resolve(null, "login").src).toBe(BrandLogo.ASSETS.login.light);
+    theme = "nightfall";
+  });
+
+  it("picks by FAMILY, so both daylight themes take the light art", () => {
+    theme = "morning";
+    expect(BrandLogo.currentTheme()).toBe("light");
+    theme = "noon";
+    expect(BrandLogo.currentTheme()).toBe("light");
+    expect(BrandLogo.resolve(null, "sidebar").src).toBe(BrandLogo.ASSETS.sidebar.light);
+    theme = "nightfall";
+  });
+
+  it("treats a retired dark/light id as the dark family rather than as a theme", () => {
+    // A browser carrying the pre-cutover value is handed the dark art, which
+    // is what DEFAULT_THEME resolves to everywhere else.
+    theme = "light";
+    expect(BrandLogo.currentTheme()).toBe("dark");
     theme = "dark";
+    expect(BrandLogo.currentTheme()).toBe("dark");
+    theme = "nightfall";
   });
 
   it("uses horizontal art on the login card and vertical art in the sidebar", () => {
@@ -113,15 +136,15 @@ describe("custom logo placement", () => {
   });
 
   it("points at the server-composited render when the accent is on, per theme", () => {
-    theme = "dark";
+    theme = "nightfall";
     expect(BrandLogo.resolve(custom({ logoAccent: true }), "login").src)
       .toBe("/api/v1/server-settings/branding/logo-accent.png?theme=dark");
     // The symbol art is theme-paired too, so a theme flip has to change the
     // URL — that is also what makes the <img> re-fetch.
-    theme = "light";
+    theme = "morning";
     expect(BrandLogo.resolve(custom({ logoAccent: true }), "login").src)
       .toBe("/api/v1/server-settings/branding/logo-accent.png?theme=light");
-    theme = "dark";
+    theme = "nightfall";
   });
 
   it("treats a payload cached before these fields existed as 'show my logo'", () => {

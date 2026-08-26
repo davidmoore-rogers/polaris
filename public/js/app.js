@@ -3,51 +3,118 @@
  */
 
 // ─── Theme ──────────────────────────────────────────────────────────────────
+//
+// Three themes in two families: `nightfall` is dark, `morning`/`noon` share
+// the daylight overrides in styles.css. Listed in day order, which is the order
+// the picker shows them in. The retired `dark`/`light` ids are not recognized
+// anywhere any more — a browser holding one falls through to DEFAULT_THEME.
+//
+// Adding a theme = one entry here, one token block in styles.css, one id in
+// theme-init.js's KNOWN list. Nothing else.
+var THEMES = [
+  { id: "morning",   label: "Morning",   family: "light", icon: _sunriseIcon },
+  { id: "noon",      label: "Noon",      family: "light", icon: _sunIcon },
+  { id: "nightfall", label: "Nightfall", family: "dark",  icon: _starIcon },
+];
+// The fallback for an unknown or retired saved value. Deliberately NOT
+// THEMES[0]: display order and the default move independently, so reordering
+// the picker never changes what a new install lands on.
+var DEFAULT_THEME = "nightfall";
 
 // No saved preference (fresh browser, or a user who has never touched the
-// toggle) follows the OS; matching on "light" leaves dark as the fallback for
-// a browser that states no preference. Mirrors js/theme-init.js, which does
-// the same for the login + setup pages. Deliberately does not persist: staying
-// unsaved is what keeps the user tracking their system, and _setTheme is the
-// opt-out.
+// picker) follows the OS; matching on "light" leaves nightfall as the fallback
+// for a browser that states no preference. Mirrors js/theme-init.js, which
+// does the same for the login + setup pages. Deliberately does not persist:
+// staying unsaved is what keeps the user tracking their system, and _setTheme
+// is the opt-out.
 (function () {
   var saved = null;
   try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (saved && !_themeExists(saved)) saved = null;
   if (!saved) {
     var light = false;
     try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
-    saved = light ? "light" : "dark";
+    saved = light ? "morning" : DEFAULT_THEME;
   }
   document.documentElement.setAttribute("data-theme", saved);
 })();
 
-function _getCurrentTheme() {
-  return document.documentElement.getAttribute("data-theme") || "dark";
+function _themeExists(id) {
+  for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return true;
+  return false;
 }
 
+/** The theme record for `id`, or DEFAULT_THEME's when it names nothing. */
+function _getTheme(id) {
+  for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
+  for (var k = 0; k < THEMES.length; k++) if (THEMES[k].id === DEFAULT_THEME) return THEMES[k];
+  return THEMES[0];
+}
+
+function _getCurrentTheme() {
+  return document.documentElement.getAttribute("data-theme") || DEFAULT_THEME;
+}
+
+// True for the daylight family. Use this instead of comparing against a theme
+// id anywhere a surface picks an image, a basemap or a chart palette by
+// brightness — an id check misses morning and noon.
+function isLightTheme(id) {
+  return _getTheme(id || _getCurrentTheme()).family === "light";
+}
+window.isLightTheme = isLightTheme;
+
 function _setTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
-  localStorage.setItem("polaris-theme", theme);
-  // The sidebar toggle is a long-lived button naming the theme it will switch
-  // TO, so it has to be repainted here — nothing else rebuilds it. (The user
-  // menu's rows are rebuilt per open, which is why this had no work to do
-  // while the toggle lived there.)
+  var t = _getTheme(theme);
+  document.documentElement.setAttribute("data-theme", t.id);
+  try { localStorage.setItem("polaris-theme", t.id); } catch (e) {}
+  // The sidebar control is a long-lived button labelled with the CURRENT theme
+  // (it opens the full list rather than flipping between two), so it has to be
+  // repainted here — nothing else rebuilds it.
   var btn = document.getElementById("btn-theme-toggle");
   if (btn) {
-    var isDark = theme === "dark";
     var svg = btn.querySelector("svg");
-    if (svg) svg.outerHTML = isDark ? _sunIcon() : _moonIcon();
+    if (svg) svg.outerHTML = t.icon();
     var label = btn.querySelector("span");
-    if (label) label.textContent = isDark ? "Light Mode" : "Dark Mode";
+    if (label) label.textContent = t.label;
   }
+  // Anything that cached colors at render time — canvases, Leaflet layers,
+  // Cytoscape stylesheets, hand-rolled SVG charts — listens for this rather
+  // than hooking the picker.
+  document.dispatchEvent(new CustomEvent("themechange", { detail: { theme: t.id, family: t.family } }));
+}
+
+// The footer control opens the full list: past two themes a toggle buries the
+// rest behind a cycle through the ones you didn't want.
+function openThemeMenu(anchor) {
+  var current = _getCurrentTheme();
+  showRowMenu(anchor, THEMES.map(function (t) {
+    return {
+      label: t.label + (t.id === current ? "  ✓" : ""),
+      icon: t.icon(),
+      onSelect: function () { _setTheme(t.id); },
+    };
+  }), { label: "Theme" });
+}
+
+// Kept for callers that predate the theme list: steps to the next theme.
+function toggleTheme() {
+  var i = THEMES.indexOf(_getTheme(_getCurrentTheme()));
+  _setTheme(THEMES[(i + 1) % THEMES.length].id);
 }
 
 function _sunIcon() {
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
 }
 
-function _moonIcon() {
-  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>';
+function _sunriseIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17 18a5 5 0 00-10 0"/><line x1="12" y1="2" x2="12" y2="9"/><line x1="4.22" y1="10.22" x2="5.64" y2="11.64"/><line x1="1" y1="18" x2="3" y2="18"/><line x1="21" y1="18" x2="23" y2="18"/><line x1="18.36" y1="11.64" x2="19.78" y2="10.22"/><line x1="23" y1="22" x2="1" y2="22"/><polyline points="8 6 12 2 16 6"/></svg>';
+}
+
+// Nightfall: a filled crescent built as a MASKED DISC — one circle kept, an
+// offset circle punched out. Hand-fitted arcs collapse to a hairline or read
+// as a full ring at the 15px this renders at; the mask keeps the taper.
+function _starIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none"><mask id="pk-moon"><circle cx="12" cy="12" r="9" fill="#fff"/><circle cx="18" cy="10" r="9" fill="#000"/></mask><circle cx="12" cy="12" r="9" fill="currentColor" mask="url(#pk-moon)"/></svg>';
 }
 
 // ─── Current User ────────────────────────────────────────────────────────────
@@ -409,16 +476,20 @@ function renderNav() {
       ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
         <a href="/server-settings.html" class="sidebar-bottom-link${current === '/server-settings.html' ? ' active' : ''}">${ICONS.settings}<span>Server Settings</span></a>
       </div>` : ''}
-      <!-- The theme toggle sits here, below Server Settings and above the
+      <!-- The theme picker sits here, below Server Settings and above the
            version line. Push enrollment and logout stay in the user menu
            behind the page-header badge (renderUserBadge) — push in
            particular must stay reachable for an alerts:read role that cannot
            open /automations.html, where the only enrollment control once
            lived. The padding/border pair depends on whether the Server
            Settings block above rendered: without it this block owns the
-           separator from the nav. -->
+           separator from the nav.
+
+           The button is labelled with the CURRENT theme and opens the full
+           list (openThemeMenu) — with three themes a two-way toggle would make
+           the third reachable only by cycling past one you didn't want. -->
       <div style="padding:${(isAdmin() || canManageAssets()) ? '0.25rem' : '0.5rem'} 0.5rem 0.5rem;${(isAdmin() || canManageAssets()) ? '' : 'border-top:1px solid var(--color-border-light);'}">
-        <button type="button" id="btn-theme-toggle" class="theme-toggle">${_getCurrentTheme() === 'dark' ? _sunIcon() : _moonIcon()}<span>${_getCurrentTheme() === 'dark' ? 'Light Mode' : 'Dark Mode'}</span></button>
+        <button type="button" id="btn-theme-toggle" class="theme-toggle" aria-haspopup="menu" aria-expanded="false">${_getTheme(_getCurrentTheme()).icon()}<span>${_getTheme(_getCurrentTheme()).label}</span></button>
       </div>
       <div id="sidebar-version" style="padding:0 0.75rem 0.75rem;text-align:center;font-size:0.7rem;color:var(--color-text-tertiary);letter-spacing:0.02em"></div>
     </div>
@@ -427,7 +498,7 @@ function renderNav() {
   var themeBtn = document.getElementById("btn-theme-toggle");
   if (themeBtn) {
     themeBtn.addEventListener("click", function () {
-      _setTheme(_getCurrentTheme() === "dark" ? "light" : "dark");
+      openThemeMenu(themeBtn);
     });
   }
 

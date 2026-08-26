@@ -85,8 +85,10 @@
     });
   });
 
+  // The FAMILY, not the theme id: appmapStylesheet branches on
+  // `theme === "dark"`, and there are three themes but two palettes.
   function pageTheme() {
-    return document.documentElement.getAttribute("data-theme") || "dark";
+    return (typeof isLightTheme === "function" && isLightTheme()) ? "light" : "dark";
   }
 
   function esc(s) {

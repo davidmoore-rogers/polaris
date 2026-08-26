@@ -90,7 +90,9 @@
       var v = localStorage.getItem("polaris-sitemap-theme");
       if (v === "light" || v === "dark") return v;
     } catch (_) {}
-    return (document.documentElement.getAttribute("data-theme") || "dark") === "light" ? "light" : "dark";
+    // The app theme's FAMILY: this picks one of two basemaps, and an id
+    // comparison misses every daylight theme but the retired `light`.
+    return (typeof isLightTheme === "function" && isLightTheme()) ? "light" : "dark";
   }
 
   PolarisWidgets.register({

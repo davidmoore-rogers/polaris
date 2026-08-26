@@ -20,18 +20,30 @@
 // ─── Theme (same key as the main app, so the wallboard follows the browser's
 //     last-chosen Polaris theme) ─────────────────────────────────────────────
 // A wallboard browser has usually never chosen a theme, so with nothing saved
-// follow the OS (matching on "light" keeps dark as the fallback) — same rule
-// as js/theme-init.js and app.js.
+// follow the OS ("morning" for a light preference, "nightfall" otherwise) —
+// same rule as js/theme-init.js and app.js. A retired id (the old
+// "dark"/"light") names no token block, so it falls back the same way.
 (function () {
+  var KNOWN = ["morning", "noon", "nightfall"];
   var saved = null;
   try { saved = localStorage.getItem("polaris-theme"); } catch (e) {}
+  if (saved && KNOWN.indexOf(saved) === -1) saved = null;
   if (!saved) {
     var light = false;
     try { light = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches; } catch (e) {}
-    saved = light ? "light" : "dark";
+    saved = light ? "morning" : "nightfall";
   }
   document.documentElement.setAttribute("data-theme", saved);
 })();
+
+// The dash has no theme picker, but the widgets it hosts share code with the
+// dashboard's, which asks for the current theme's FAMILY. app.js is not loaded
+// here, so supply the same accessor.
+function isLightTheme(id) {
+  var t = id || document.documentElement.getAttribute("data-theme");
+  return t === "morning" || t === "noon";
+}
+window.isLightTheme = isLightTheme;
 
 // ─── Identity globals (populated from the Dash listener's synthetic
 //     /auth/me, which answers as the built-in readonly role) ────────────────

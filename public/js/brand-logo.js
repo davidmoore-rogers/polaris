@@ -6,7 +6,9 @@
 //   1. The shipped Polaris art is THEME-AWARE. The wordmark is light blue on
 //      the dark variant and near-black on the light one, so painting the wrong
 //      file on the wrong background makes the logo disappear. Horizontal art
-//      for the login card, vertical for the sidebar column.
+//      for the login card, vertical for the sidebar column. Which variant is
+//      chosen by theme FAMILY, not id — morning and noon both take the light
+//      art, with no third asset.
 //   2. An operator's own logo REPLACES it — per surface (Server Settings →
 //      Customization has a checkbox for each), optionally with the Polaris
 //      symbol composited onto its corner (rendered server-side, see
@@ -14,23 +16,41 @@
 //      makes sense NEXT TO a custom logo: the Polaris art already spells the
 //      name out, so a caption under it would just say it twice.
 //
-// Theme changes are picked up by observing data-theme on <html> rather than by
-// hooking each surface's theme setter — the desktop toggle, the mobile toggle
-// and the OS-preference listener below all end at that attribute.
+// Theme changes are picked up from the `themechange` event app.js fires AND by
+// observing data-theme on <html>, rather than by hooking each surface's theme
+// setter — the desktop picker, the mobile toggle and the OS-preference listener
+// below all end at that attribute, and the surfaces that have no app.js (login,
+// mobile, dash) only ever see the attribute move.
 
 (function (global) {
   "use strict";
 
+  // Where the shipped art lives, derived from THIS FILE's own URL (…/js/ → …/).
+  // Computed rather than read off a global: a page can evaluate this script
+  // more than once, and a fresh evaluation would reset a global the page had
+  // set. It also means the assets resolve correctly if Polaris is ever served
+  // from a subdirectory. Falls back to the site root, which is where every
+  // current mount serves them from.
+  var BASE = (function () {
+    try {
+      var el = document.currentScript ||
+        document.querySelector('script[src*="brand-logo.js"]');
+      var src = el && el.getAttribute("src");
+      if (src) return src.replace(/js\/brand-logo\.js.*$/, "");
+    } catch (e) { /* fall through to the site root */ }
+    return "/";
+  })();
+
   var ASSETS = {
     // Login card — wide art, wordmark beside the star.
     login: {
-      dark:  "/img/brand/polaris-horiz-dark.png",
-      light: "/img/brand/polaris-horiz-light.png",
+      dark:  BASE + "img/brand/polaris-horiz-dark.png",
+      light: BASE + "img/brand/polaris-horiz-light.png",
     },
     // Sidebar — stacked art, star above the wordmark, for a narrow column.
     sidebar: {
-      dark:  "/img/brand/polaris-vert-dark.png",
-      light: "/img/brand/polaris-vert-light.png",
+      dark:  BASE + "img/brand/polaris-vert-dark.png",
+      light: BASE + "img/brand/polaris-vert-light.png",
     },
   };
 
@@ -39,19 +59,43 @@
   // still the stored value on any install seeded before then, and this list is
   // only consulted on a payload cached before the server started sending
   // `customLogo` — mistaking that legacy value for an upload would paint a 404.
-  // Mirrors DEFAULT_LOGO_URLS in src/services/brandingService.ts.
+  // Mirrors DEFAULT_LOGO_URLS in src/services/brandingService.ts. Compared
+  // against a STORED branding value, so these stay the literal paths the server
+  // records — never BASE-prefixed.
   var DEFAULT_LOGOS = ["/img/brand/polaris-symbol-dark.png", "/logo.png"];
 
+  // The daylight themes. Duplicated from app.js's THEMES rather than imported
+  // because this file loads BEFORE app.js and also runs on surfaces that never
+  // load it at all (login.html, the mobile SPA, the dash wallboard). Where
+  // app.js is present it is the authority, so defer to its isLightTheme.
+  var LIGHT_THEMES = ["morning", "noon"];
+  // The theme id to hand the OS-preference path per family. `light` picks
+  // morning (the softer of the two) to match theme-init.js.
+  var FAMILY_DEFAULT = { light: "morning", dark: "nightfall" };
+
+  /**
+   * The current theme's FAMILY ("light" | "dark") — which is also the key the
+   * ASSETS table and the server-side accent renderer are indexed by, so this
+   * keeps its name and its return values across the three-theme cutover.
+   */
   function currentTheme() {
-    return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+    if (typeof global.isLightTheme === "function") return global.isLightTheme() ? "light" : "dark";
+    var id = document.documentElement.getAttribute("data-theme");
+    return LIGHT_THEMES.indexOf(id) === -1 ? "dark" : "light";
   }
 
-  /** The OS preference, used only when the operator has never picked a theme. */
+  /** The OS preference's family, used only when the operator has never picked
+   *  a theme. Returns a family, not an id — see preferredThemeId. */
   function preferredTheme() {
     try {
       if (global.matchMedia && global.matchMedia("(prefers-color-scheme: light)").matches) return "light";
     } catch (e) { /* matchMedia missing — fall through to the historical default */ }
     return "dark";
+  }
+
+  /** The concrete theme id to apply for the OS preference. */
+  function preferredThemeId() {
+    return FAMILY_DEFAULT[preferredTheme()];
   }
 
   function savedTheme() {
@@ -142,14 +186,21 @@
    */
   function onThemeChange(cb) {
     var last = currentTheme();
+    var fire = function () {
+      var now = currentTheme();
+      if (now === last) return;   // morning → noon is one family: no re-fetch
+      last = now;
+      cb(now);
+    };
+    // The `themechange` event _setTheme fires is the direct signal; the
+    // observer additionally covers a theme set by other means (theme-init.js's
+    // pre-CSS boot, the OS-preference listener above, another tab syncing).
+    document.addEventListener("themechange", fire);
     try {
-      new MutationObserver(function () {
-        var now = currentTheme();
-        if (now === last) return;
-        last = now;
-        cb(now);
-      }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    } catch (e) { /* no MutationObserver — the logo just won't restyle live */ }
+      new MutationObserver(fire).observe(document.documentElement, {
+        attributes: true, attributeFilter: ["data-theme"],
+      });
+    } catch (e) { /* no MutationObserver — the event path still covers the picker */ }
   }
 
   /**
@@ -163,7 +214,9 @@
     if (!mq) return;
     var handler = function () {
       if (savedTheme()) return;
-      document.documentElement.setAttribute("data-theme", preferredTheme());
+      // A THEME ID, not the family — data-theme names a theme, and the
+      // retired `light`/`dark` ids match no token block any more.
+      document.documentElement.setAttribute("data-theme", preferredThemeId());
     };
     if (mq.addEventListener) mq.addEventListener("change", handler);
     else if (mq.addListener) mq.addListener(handler);
@@ -198,6 +251,7 @@
     setFavicon: setFavicon,
     currentTheme: currentTheme,
     preferredTheme: preferredTheme,
+    preferredThemeId: preferredThemeId,
     savedTheme: savedTheme,
     isCustom: isCustom,
     customOn: customOn,

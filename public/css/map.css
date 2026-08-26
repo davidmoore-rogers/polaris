@@ -198,12 +198,16 @@
   background: var(--color-bg-secondary);
 }
 
-/* Leaflet tweaks for dark theme */
-[data-theme="dark"] .leaflet-control-attribution {
+/* Leaflet tweaks for the dark family. Written as "not a daylight theme" rather
+   than naming the dark theme: the dark side is the default ground (:root), so a
+   theme added there should get these without editing this file. Keyed on the
+   retired `dark` id until the three-theme cutover, where it silently matched
+   nothing. */
+:root:not([data-theme="morning"]):not([data-theme="noon"]) .leaflet-control-attribution {
   background: rgba(0,0,0,0.6);
   color: #bbb;
 }
-[data-theme="dark"] .leaflet-control-attribution a {
+:root:not([data-theme="morning"]):not([data-theme="noon"]) .leaflet-control-attribution a {
   color: #7ab8ff;
 }
 

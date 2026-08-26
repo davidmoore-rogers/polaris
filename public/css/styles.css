@@ -1,4 +1,8 @@
-/* ─── Design Tokens ────────────────────────────────────────────────────────── */
+/* ─── Design Tokens ───────────────────────────────────────────────────────────
+   :root is the dark base that `nightfall` refines; the daylight base below
+   overrides it wholesale for `morning`/`noon`. Neither is a theme on its own —
+   theme-init.js always sets a data-theme, and the retired `dark`/`light` ids
+   are no longer recognized anywhere. */
 :root {
   --color-bg-primary: #151528;
   --color-bg-secondary: #0d0d1a;
@@ -15,6 +19,10 @@
   --color-text-secondary: #a0a0b3;
   --color-text-tertiary: #7d7d93;
   --color-accent: #4fc3f7;
+  --color-primary: #4fc3f7;   /* alias of --color-accent (legacy name used by
+                                 spinners, the sidebar update badge and the
+                                 search-select focus ring, which referenced it
+                                 before anything defined it) */
   --color-accent-hover: #29b6f6;
   --color-success: #00c853;
   --color-warning: #ffd600;
@@ -33,8 +41,15 @@
   --sidebar-width: 220px;
 }
 
-/* ─── Light Theme ──────────────────────────────────────────────────────────── */
-[data-theme="light"] {
+/* ─── Daylight base (morning, noon) ───────────────────────────────────────────
+   Not a theme of its own — the shared ground both daylight themes stand on.
+   The component CSS below assumes light-on-dark (badge tints, primary-button
+   text, heading colors); those assumptions are undone ONCE here for both, and
+   each theme then overrides only its own hues in its token block further down.
+   Keep the neutral values here rather than duplicating them per theme.
+   `:is(...)` and not a comma split: `[data-theme="light"] .badge-x` rewritten
+   as two comma-separated selectors would drop the descendant on the second. */
+:is([data-theme="morning"],[data-theme="noon"]) {
   --color-bg-primary: #f3f4f8;
   --color-bg-secondary: #e8e9f0;
   --color-bg-tertiary: #edeef4;
@@ -46,6 +61,7 @@
   --color-text-secondary: #555570;
   --color-text-tertiary: #8080a0;
   --color-accent: #0288d1;
+  --color-primary: #0288d1;
   --color-accent-hover: #0277bd;
   --color-success: #2e7d32;
   --color-warning: #f57f17;
@@ -57,57 +73,55 @@
   --shadow-sm: 0 1px 4px rgba(0,0,0,.08);
   --shadow-md: 0 8px 32px rgba(0,0,0,.12);
 }
-[data-theme="light"] .page-header h2,
-[data-theme="light"] .modal-header h3,
-[data-theme="light"] .slideover-header-top h3,
-[data-theme="light"] .integration-card-title strong,
-[data-theme="light"] .recent-item-title span {
-  color: var(--color-text-primary);
-}
-[data-theme="light"] .btn-primary {
+/* The five headings that used to hardcode #fff and needed rescuing here now
+   paint var(--color-text-primary) directly, so this block is gone. Pure white
+   was wrong in the dark family too — nightfall's text is #e4e7f6, not #fff. */
+:is([data-theme="morning"],[data-theme="noon"]) .btn-primary {
   color: #fff;
 }
-[data-theme="light"] .badge-available  { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
-[data-theme="light"] .badge-active     { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
-[data-theme="light"] .badge-reserved   { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
-[data-theme="light"] .badge-deprecated { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
-[data-theme="light"] .badge-conflict   { background: rgba(211,47,47,0.10); color: #d32f2f; border-color: rgba(211,47,47,0.30); }
-[data-theme="light"] .badge-released   { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
-[data-theme="light"] .badge-expired    { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
-[data-theme="light"] .badge-v4         { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
-[data-theme="light"] .badge-v6         { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
-[data-theme="light"] .badge-vlan       { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
-[data-theme="light"] .badge-admin      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
-[data-theme="light"] .badge-network-admin { background: rgba(230,126,0,0.10); color: #e67e00; border-color: rgba(230,126,0,0.30); }
-[data-theme="light"] .badge-assets-admin { background: rgba(0,151,167,0.10); color: #00838f; border-color: rgba(0,151,167,0.30); }
-[data-theme="light"] .badge-readonly { background: rgba(117,117,117,0.10); color: #616161; border-color: rgba(117,117,117,0.30); }
-[data-theme="light"] .badge-maintenance    { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
-[data-theme="light"] .badge-decommissioned { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
-[data-theme="light"] .badge-disabled       { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
-[data-theme="light"] .badge-storage        { background: rgba(156,39,176,0.10); color: #7b1fa2; border-color: rgba(156,39,176,0.30); }
-[data-theme="light"] .badge-quarantined    { background: rgba(183,28,28,0.12); color: #b71c1c; border-color: rgba(183,28,28,0.35); }
-[data-theme="light"] .badge-level-info    { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
-[data-theme="light"] .badge-level-warning { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
-[data-theme="light"] .badge-level-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
-[data-theme="light"] .badge-level-notice        { background: rgba(100,116,139,0.10); border-color: rgba(100,116,139,0.30); color: #475569; }
-[data-theme="light"] .badge-level-informational { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
-[data-theme="light"] .badge-level-serious       { background: rgba(234,88,12,0.10); border-color: rgba(234,88,12,0.30); color: #c2410c; }
-[data-theme="light"] .badge-level-critical      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
-[data-theme="light"] .integration-type-badge { background: rgba(230,81,0,0.10); color: #e65100; border-color: rgba(230,81,0,0.30); }
-[data-theme="light"] .modal-overlay { background: rgba(0,0,0,.35); }
-[data-theme="light"] .slideover-overlay { background: rgba(0,0,0,.2); }
-[data-theme="light"] .sidebar-nav a:hover { background: rgba(2,136,209,0.08); }
-[data-theme="light"] .sidebar-nav a.active { background: rgba(2,136,209,0.12); }
-[data-theme="light"] .sidebar-bottom-link:hover { background: rgba(2,136,209,0.08); }
-[data-theme="light"] .sidebar-bottom-link.active { background: rgba(2,136,209,0.12); }
-[data-theme="light"] .sidebar-bottom-link-logout:hover { background: rgba(198,40,40,0.08); color: var(--color-danger); }
-[data-theme="light"] tbody tr:hover { background: rgba(2,136,209,0.04); }
-[data-theme="light"] .ip-table tbody tr:hover { background: rgba(2,136,209,0.04); }
-[data-theme="light"] tr.row-panel-active,
-[data-theme="light"] tr.row-panel-active:hover { background: rgba(2,136,209,0.08) !important; box-shadow: inset 3px 0 0 #0288d1; }
-[data-theme="light"] .toast-success { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
-[data-theme="light"] .toast-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
-[data-theme="light"] input:focus, [data-theme="light"] select:focus, [data-theme="light"] textarea:focus {
+:is([data-theme="morning"],[data-theme="noon"]) .badge-available  { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-active     { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-reserved   { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-deprecated { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-conflict   { background: rgba(198,40,40,0.10); color: var(--color-danger); border-color: rgba(198,40,40,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-released   { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-expired    { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-v4         { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-v6         { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-vlan       { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-admin      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-network-admin { background: rgba(230,126,0,0.10); color: #e67e00; border-color: rgba(230,126,0,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-assets-admin { background: rgba(0,151,167,0.10); color: #00838f; border-color: rgba(0,151,167,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-readonly { background: rgba(117,117,117,0.10); color: #616161; border-color: rgba(117,117,117,0.30); }
+/* .badge-maintenance's daylight override lives with the monitor-state block
+   below, for the same reason as its base rule — see the note there. */
+:is([data-theme="morning"],[data-theme="noon"]) .badge-decommissioned { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-passive         { background: rgba(69,90,100,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-disabled       { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-storage        { background: rgba(156,39,176,0.10); color: #7b1fa2; border-color: rgba(156,39,176,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-quarantined    { background: rgba(183,28,28,0.12); color: #b71c1c; border-color: rgba(183,28,28,0.35); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-info    { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-warning { background: rgba(245,127,23,0.10); border-color: rgba(245,127,23,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-notice        { background: rgba(100,116,139,0.10); border-color: rgba(100,116,139,0.30); color: #475569; }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-informational { background: rgba(2,136,209,0.10); border-color: rgba(2,136,209,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-serious       { background: rgba(234,88,12,0.10); border-color: rgba(234,88,12,0.30); color: #c2410c; }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-level-critical      { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .integration-type-badge { background: rgba(230,81,0,0.10); color: #e65100; border-color: rgba(230,81,0,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .modal-overlay { background: rgba(0,0,0,.35); }
+:is([data-theme="morning"],[data-theme="noon"]) .slideover-overlay { background: rgba(0,0,0,.2); }
+:is([data-theme="morning"],[data-theme="noon"]) .sidebar-nav a:hover { background: rgba(2,136,209,0.08); }
+:is([data-theme="morning"],[data-theme="noon"]) .sidebar-nav a.active { background: rgba(2,136,209,0.12); }
+:is([data-theme="morning"],[data-theme="noon"]) .sidebar-bottom-link:hover { background: rgba(2,136,209,0.08); }
+:is([data-theme="morning"],[data-theme="noon"]) .sidebar-bottom-link.active { background: rgba(2,136,209,0.12); }
+:is([data-theme="morning"],[data-theme="noon"]) .sidebar-bottom-link-logout:hover { background: rgba(198,40,40,0.08); color: var(--color-danger); }
+:is([data-theme="morning"],[data-theme="noon"]) tbody tr:hover { background: rgba(2,136,209,0.04); }
+:is([data-theme="morning"],[data-theme="noon"]) .ip-table tbody tr:hover { background: rgba(2,136,209,0.04); }
+:is([data-theme="morning"],[data-theme="noon"]) tr.row-panel-active,
+:is([data-theme="morning"],[data-theme="noon"]) tr.row-panel-active:hover { background: rgba(2,136,209,0.08) !important; box-shadow: inset 3px 0 0 #0288d1; }
+:is([data-theme="morning"],[data-theme="noon"]) .toast-success { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .toast-error   { background: rgba(198,40,40,0.10); border-color: rgba(198,40,40,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) input:focus, :is([data-theme="morning"],[data-theme="noon"]) select:focus, :is([data-theme="morning"],[data-theme="noon"]) textarea:focus {
   box-shadow: 0 0 0 2px rgba(2,136,209,0.20);
 }
 
@@ -132,14 +146,14 @@
   background: rgba(79,195,247,0.08);
   color: var(--color-text-primary);
 }
-[data-theme="light"] .theme-toggle:hover {
+:is([data-theme="morning"],[data-theme="noon"]) .theme-toggle:hover {
   background: rgba(2,136,209,0.08);
 }
 
 /* ─── Reset ────────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { font-size: 14px; color-scheme: dark; }
-[data-theme="light"] { color-scheme: light; }
+:is([data-theme="morning"],[data-theme="noon"]) { color-scheme: light; }
 body {
   font-family: var(--font-sans);
   color: var(--color-text-primary);
@@ -156,6 +170,91 @@ code {
   padding: 1px 6px;
   border-radius: var(--radius-sm);
   color: var(--color-text-secondary);
+}
+
+
+/* ─── Morning ────────────────────────────────────────────────────────────────
+   Dawn quadrant of the clockface: gilt sun on aged parchment. Warm neutrals,
+   burnished-gold accent, everything a half-step softer than the retired `light`
+   so long reading sessions in a bright room don't glare. */
+[data-theme="morning"] {
+  --color-bg-primary: #f7efe1;
+  --color-bg-secondary: #efe4d1;
+  --color-bg-tertiary: #f3e9d9;
+  --color-surface: #fffaf1;
+  --color-bg-elevated: #f1e6d4;
+  --color-border: #dcccb2;
+  --color-border-light: #eaddc9;
+  --color-text-primary: #2e2415;
+  --color-text-secondary: #6b5a41;
+  --color-text-tertiary: #9c8a6c;
+  --color-accent: #b5811a;
+  --color-primary: #b5811a;
+  --color-accent-hover: #96690f;
+  --color-success: #4b7a2f;
+  --color-warning: #cf7a15;
+  --color-danger: #b0301d;
+  --color-danger-hover: #8e2314;
+  --color-deprecated: #8d8272;
+  --shadow-sm: 0 1px 4px rgba(70,50,20,.10);
+  --shadow-md: 0 8px 32px rgba(70,50,20,.16);
+}
+
+/* ─── Noon ───────────────────────────────────────────────────────────────────
+   Sun at its height, the clockface's red-rust flank: near-white ground, the
+   highest text contrast of any theme, terracotta accent. The one to reach for
+   on a projector or in direct sunlight. */
+[data-theme="noon"] {
+  --color-bg-primary: #fbf6f0;
+  --color-bg-secondary: #f2ebe2;
+  --color-bg-tertiary: #f7f1e9;
+  --color-surface: #ffffff;
+  --color-bg-elevated: #f6efe5;
+  --color-border: #ded1c1;
+  --color-border-light: #eee5d9;
+  --color-text-primary: #201612;
+  --color-text-secondary: #5a453c;
+  --color-text-tertiary: #8f7367;
+  --color-accent: #b5451c;
+  --color-primary: #b5451c;
+  --color-accent-hover: #933413;
+  --color-success: #2f7d4f;
+  --color-warning: #c96a00;
+  --color-danger: #9b1c1c;
+  --color-danger-hover: #7d1212;
+  --color-deprecated: #7d7369;
+  --shadow-sm: 0 1px 4px rgba(40,20,10,.10);
+  --shadow-md: 0 8px 32px rgba(40,20,10,.18);
+}
+
+/* ─── Nightfall ──────────────────────────────────────────────────────────────
+   Star-and-moon quadrant of the clockface: indigo ground, sky-blue accent for
+   names and the active nav item, and the engraving's hot red for destructive
+   verbs. Only hues move from the dark base — contrast pairings are unchanged,
+   so nothing needs a per-theme component override below. */
+[data-theme="nightfall"] {
+  --color-bg-primary: #141427;
+  /* Kept a step below bg-primary and on its hue, so the body ground still
+     reads as behind the table wrapper rather than beside it. */
+  --color-bg-secondary: #0d0d1c;
+  --color-bg-tertiary: #101021;
+  --color-surface: #181c39;
+  --color-bg-elevated: #22284d;
+  --color-border: #232a52;
+  --color-border-light: #1a1f3e;
+  --color-text-primary: #e4e7f6;
+  --color-text-secondary: #9aa0c6;
+  --color-text-tertiary: #6f759e;
+  --color-accent: #4bbcee;
+  --color-primary: #4bbcee;
+  --color-accent-hover: #2ba6dc;
+  --color-success: #3ddc97;
+  --color-warning: #f2c14e;
+  --color-danger: #f71341;
+  --color-danger-hover: #d10f36;
+  --color-deprecated: #6b7093;
+  --shadow-sm: 0 1px 4px rgba(0,0,0,.4);
+  --shadow-md: 0 8px 32px rgba(0,0,0,.6);
 }
 
 /* ─── Layout ───────────────────────────────────────────────────────────────── */
@@ -489,11 +588,11 @@ code {
 .integration-failed-name {
   color: var(--color-text-primary);
 }
-[data-theme="light"] .integration-failed-status {
+:is([data-theme="morning"],[data-theme="noon"]) .integration-failed-status {
   border-color: rgba(198,40,40,0.40);
   background: rgba(198,40,40,0.07);
 }
-[data-theme="light"] .integration-failed-status:hover {
+:is([data-theme="morning"],[data-theme="noon"]) .integration-failed-status:hover {
   background: rgba(198,40,40,0.12);
 }
 
@@ -511,7 +610,7 @@ code {
   flex-shrink: 0;
   color: var(--color-warning);
 }
-[data-theme="light"] .signing-failure-alert {
+:is([data-theme="morning"],[data-theme="noon"]) .signing-failure-alert {
   border-color: rgba(230,145,0,0.40);
   background: rgba(230,145,0,0.07);
 }
@@ -571,8 +670,8 @@ code {
   display: flex;
   justify-content: flex-end;
 }
-[data-theme="light"] .pg-tuning-header { color: var(--color-warning); }
-[data-theme="light"] .pg-tuning-values { color: var(--color-warning); }
+:is([data-theme="morning"],[data-theme="noon"]) .pg-tuning-header { color: var(--color-warning); }
+:is([data-theme="morning"],[data-theme="noon"]) .pg-tuning-values { color: var(--color-warning); }
 
 /* ─── Capacity Critical Alert (sidebar, non-dismissible) ───────────────────── */
 .capacity-critical-alert {
@@ -586,7 +685,7 @@ code {
 }
 .capacity-critical-alert .pg-tuning-header { color: var(--color-danger); }
 .capacity-critical-alert .pg-tuning-text { color: var(--color-text-primary); }
-[data-theme="light"] .capacity-critical-alert {
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-critical-alert {
   border-color: rgba(198,40,40,0.40);
   background: rgba(198,40,40,0.08);
 }
@@ -599,7 +698,10 @@ code {
 .capacity-card {
   border-left: 3px solid var(--color-text-tertiary);
 }
-.capacity-card.capacity-card-watch { border-left-color: var(--color-info, #4fc3f7); }
+/* "watch" is the informational tier — the accent, not a hardcoded cyan.
+   --color-info has never been defined, so this always painted its fallback and
+   stayed dark-theme blue on a light ground. */
+.capacity-card.capacity-card-watch { border-left-color: var(--color-accent); }
 .capacity-card.capacity-card-amber { border-left-color: var(--color-warning); }
 .capacity-card.capacity-card-red   { border-left-color: var(--color-danger); }
 
@@ -652,10 +754,10 @@ code {
 .capacity-reason-watch { border-color: rgba(79,195,247,0.35); background: rgba(79,195,247,0.06); }
 .capacity-reason-amber { border-color: rgba(255,214,0,0.35);  background: rgba(255,214,0,0.06); }
 .capacity-reason-red   { border-color: rgba(239,83,80,0.40);  background: rgba(239,83,80,0.07); }
-[data-theme="light"] .capacity-reason-ok    { border-color: rgba(39,174,96,0.30);   background: rgba(39,174,96,0.05); }
-[data-theme="light"] .capacity-reason-watch { border-color: rgba(2,136,209,0.30);  background: rgba(2,136,209,0.06); }
-[data-theme="light"] .capacity-reason-amber { border-color: rgba(245,127,23,0.30); background: rgba(245,127,23,0.06); }
-[data-theme="light"] .capacity-reason-red   { border-color: rgba(198,40,40,0.30);  background: rgba(198,40,40,0.06); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-reason-ok    { border-color: rgba(39,174,96,0.30);   background: rgba(39,174,96,0.05); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-reason-watch { border-color: rgba(2,136,209,0.30);  background: rgba(2,136,209,0.06); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-reason-amber { border-color: rgba(245,127,23,0.30); background: rgba(245,127,23,0.06); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-reason-red   { border-color: rgba(198,40,40,0.30);  background: rgba(198,40,40,0.06); }
 .capacity-reason-head {
   display: flex;
   align-items: flex-start;
@@ -1122,7 +1224,7 @@ code {
   border-color: rgba(255,214,0,0.4);
   font-weight: 600;
 }
-[data-theme="light"] .btn-warning {
+:is([data-theme="morning"],[data-theme="noon"]) .btn-warning {
   background: rgba(245,127,23,0.12);
   color: var(--color-warning);
   border-color: rgba(245,127,23,0.35);
@@ -2157,7 +2259,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-text-secondary);
 }
 .merge-banner .btn { flex-shrink: 0; }
-[data-theme="light"] .merge-banner { background: rgba(211,47,47,0.06); border-color: rgba(211,47,47,0.20); }
+:is([data-theme="morning"],[data-theme="noon"]) .merge-banner { background: rgba(211,47,47,0.06); border-color: rgba(211,47,47,0.20); }
 
 /* ─── Badges ───────────────────────────────────────────────────────────────── */
 .badge {
@@ -2239,7 +2341,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-assets-admin { background: rgba(0,188,212,0.12); color: #00bcd4; border: 1px solid rgba(0,188,212,0.25); }
 .badge-readonly { background: rgba(158,158,158,0.12); color: #9e9e9e; border: 1px solid rgba(158,158,158,0.25); }
 .badge-user      { background: rgba(0,200,83,0.18); color: var(--color-success); border: 1px solid rgba(0,200,83,0.40); }
-[data-theme="light"] .badge-user { background: rgba(46,125,50,0.14); border-color: rgba(46,125,50,0.40); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-user { background: rgba(46,125,50,0.14); border-color: rgba(46,125,50,0.40); }
 
 .vip-badge {
   display: inline-block;
@@ -2256,7 +2358,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   cursor: default;
   text-transform: uppercase;
 }
-[data-theme="light"] .vip-badge {
+:is([data-theme="morning"],[data-theme="noon"]) .vip-badge {
   background: rgba(156,39,176,0.10);
   color: #7b1fa2;
   border-color: rgba(156,39,176,0.30);
@@ -2833,15 +2935,15 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
  * reads as a deliberate healthy state, distinct from grey Unmonitored and
  * green Up. A roster-reported failure renders badge-monitor-down instead. */
 .badge-monitor-standby { background: rgba(0,150,136,0.14); color: #4db6ac; border: 1px solid rgba(0,150,136,0.32); }
-[data-theme="light"] .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
-[data-theme="light"] .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
-[data-theme="light"] .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
-[data-theme="light"] .badge-monitor-warning  { background: rgba(245,127,23,0.10); color: #f57f17; border-color: rgba(245,127,23,0.30); }
-[data-theme="light"] .badge-monitor-recovering { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
-[data-theme="light"] .badge-monitor-dep-down   { background: rgba(96,125,139,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
-[data-theme="light"] .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
-[data-theme="light"] .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }
-[data-theme="light"] .badge-monitor-standby    { background: rgba(0,150,136,0.10); color: #00695c; border-color: rgba(0,150,136,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitored        { background: rgba(46,125,50,0.10); border-color: rgba(46,125,50,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-warning  { background: rgba(245,127,23,0.10); color: #f57f17; border-color: rgba(245,127,23,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-recovering { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-dep-down   { background: rgba(96,125,139,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-standby    { background: rgba(0,150,136,0.10); color: #00695c; border-color: rgba(0,150,136,0.30); }
 
 /* Event level badges */
 .badge-level-info    { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); font-size: 0.7rem; letter-spacing: 0.5px; }
@@ -3031,12 +3133,12 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-text-secondary);
 }
 .dep-tree-test-banner strong { color: #ce93d8; margin-right: 4px; }
-[data-theme="light"] .dep-tree-row-self { background: rgba(79,195,247,0.06); border-color: rgba(79,195,247,0.30); }
-[data-theme="light"] .dep-tree-pip-down { color: #c62828; }
-[data-theme="light"] .dep-tree-pip-dep  { color: #455a64; }
-[data-theme="light"] .dep-tree-pip-dep-test { color: #7b1fa2; }
-[data-theme="light"] .dep-tree-test-banner { background: rgba(123,31,162,0.06); border-color: rgba(123,31,162,0.45); }
-[data-theme="light"] .dep-tree-test-banner strong { color: #7b1fa2; }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-row-self { background: rgba(79,195,247,0.06); border-color: rgba(79,195,247,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-down { color: #c62828; }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-dep  { color: #455a64; }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-pip-dep-test { color: #7b1fa2; }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-test-banner { background: rgba(123,31,162,0.06); border-color: rgba(123,31,162,0.45); }
+:is([data-theme="morning"],[data-theme="noon"]) .dep-tree-test-banner strong { color: #7b1fa2; }
 
 /* ─── Charts / Dashboard-specific ──────────────────────────────────────────── */
 .overview-grid {
@@ -3715,13 +3817,13 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .ip-dot-dhcp-reservation { background: #ce93d8; box-shadow: 0 0 4px rgba(206,147,216,0.5); }
 .ip-dot-dhcp-lease       { background: #ffb74d; box-shadow: 0 0 4px rgba(255,183,77,0.5); }
 .ip-dot-conflict         { background: #ef5350; box-shadow: 0 0 4px rgba(239,83,80,0.5); }
-[data-theme="light"] .ip-dot-dhcp-reservation { background: #9c27b0; box-shadow: 0 0 4px rgba(156,39,176,0.3); }
-[data-theme="light"] .ip-dot-dhcp-lease       { background: #ef6c00; box-shadow: 0 0 4px rgba(239,108,0,0.3); }
-[data-theme="light"] .ip-dot-conflict         { background: #d32f2f; box-shadow: 0 0 4px rgba(211,47,47,0.3); }
+:is([data-theme="morning"],[data-theme="noon"]) .ip-dot-dhcp-reservation { background: #9c27b0; box-shadow: 0 0 4px rgba(156,39,176,0.3); }
+:is([data-theme="morning"],[data-theme="noon"]) .ip-dot-dhcp-lease       { background: #ef6c00; box-shadow: 0 0 4px rgba(239,108,0,0.3); }
+:is([data-theme="morning"],[data-theme="noon"]) .ip-dot-conflict         { background: #d32f2f; box-shadow: 0 0 4px rgba(211,47,47,0.3); }
 
 .conflict-label { cursor: help; color: #ef5350; font-weight: 600; }
 .conflict-icon { font-size: 0.85em; }
-[data-theme="light"] .conflict-label { color: #d32f2f; }
+:is([data-theme="morning"],[data-theme="noon"]) .conflict-label { color: #d32f2f; }
 
 /* Click-to-copy cells in the IP panel (IP / hostname / MAC). Subtle hover
    underline so the affordance is discoverable without screaming for attention;
@@ -3739,7 +3841,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   text-underline-offset: 2px;
   background: rgba(79, 195, 247, 0.08);
 }
-[data-theme="light"] .copy-on-click:hover {
+:is([data-theme="morning"],[data-theme="noon"]) .copy-on-click:hover {
   background: rgba(25, 118, 210, 0.08);
 }
 
@@ -3807,7 +3909,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   color: var(--color-text-primary);
   font-weight: 600;
 }
-[data-theme="light"] .mac-tooltip-latest {
+:is([data-theme="morning"],[data-theme="noon"]) .mac-tooltip-latest {
   background: rgba(2, 136, 209, 0.08);
 }
 .mac-tooltip-meta {
@@ -3868,14 +3970,14 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   background: rgba(79, 195, 247, 0.12);
   color: var(--color-accent);
 }
-[data-theme="light"] .copy-cell:hover {
+:is([data-theme="morning"],[data-theme="noon"]) .copy-cell:hover {
   background: rgba(2, 136, 209, 0.10);
 }
 .copy-cell-flash {
   background: rgba(79, 195, 247, 0.25) !important;
   color: var(--color-accent) !important;
 }
-[data-theme="light"] .copy-cell-flash {
+:is([data-theme="morning"],[data-theme="noon"]) .copy-cell-flash {
   background: rgba(2, 136, 209, 0.18) !important;
 }
 

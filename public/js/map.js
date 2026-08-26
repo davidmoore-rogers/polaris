@@ -199,7 +199,10 @@
         }
       }
     } catch (e) { /* fall through */ }
-    return (document.documentElement.getAttribute("data-theme") || "dark");
+    // The app theme's FAMILY, not its id: this value indexes a basemap pair,
+    // and there are three themes but only two basemaps. An id comparison here
+    // put nightfall on the light OpenStreetMap tiles.
+    return (typeof isLightTheme === "function" && isLightTheme()) ? "light" : "dark";
   }
   function setMapTheme(theme) {
     try {

@@ -248,10 +248,9 @@
   function renderGraph(data) {
     var elements = window.PolarisTopologyRender.buildTopologyElements(data);
 
-    // Inherit the page-wide theme. Mobile defaults to dark per
-    // mobile.css's CSS variables, but reading data-theme on <html> lets
-    // a future light-mode toggle flow through.
-    var theme = document.documentElement.getAttribute("data-theme") || "dark";
+    // Inherit the page-wide theme — its FAMILY, since topologyStylesheet
+    // branches on `theme === "dark"` and there is one palette per family.
+    var theme = window.PolarisTheme ? PolarisTheme.get() : "dark";
 
     if (_cy) {
       try { _cy.destroy(); } catch (e) {}

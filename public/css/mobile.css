@@ -48,8 +48,8 @@
   --md-warning:                 #ffd54a;
 
   /* GPS pin stroke — flips per theme so the stick figure stays legible
-     against either basemap. Light mode override lives in the
-     [data-theme="light"] block below. */
+     against either basemap. Light mode override lives in the daylight
+     block below. */
   --user-pin-stroke:            #f3f4f6;
 
   /* Shape tokens */
@@ -70,14 +70,19 @@
   --navbar-h:  80px;
 }
 
-/* Light theme — applied when <html data-theme="light"> is set by the
-   bootstrap in mobile/app.js (or by the More → Appearance toggle).
+/* Daylight themes — applied when <html data-theme> is one of the desktop's
+   daylight ids (morning / noon), set by the bootstrap in mobile/app.js or by
+   the More → Appearance toggle. Mobile ships ONE Material light palette for
+   both: the desktop's morning/noon split is a warmth difference this SPA's
+   token set has no room for, and the toggle here stays a two-way Dark/Light.
+   Matching on the family rather than an id is what keeps the shared
+   `polaris-theme` key coherent across the two apps.
    Variable names mirror the dark :root block above so component rules
    don't have to branch on theme. Status colors (monitor health pills,
    topology node colors in topology-render.js) deliberately stay literal
    in their component blocks — they're status colors, not theme colors,
    and need the same hue regardless of basemap. */
-[data-theme="light"] {
+:is([data-theme="morning"],[data-theme="noon"]) {
   --md-primary:                 #005ac1;
   --md-on-primary:              #ffffff;
   --md-primary-container:       #d8e2ff;
