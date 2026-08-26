@@ -61,13 +61,19 @@ RUN echo "deb http://deb.debian.org/debian bookworm-backports main" \
  && rm -rf /var/lib/apt/lists/*
 
 # Java 17 (headless) + the jsign jar for the optional agent code-signing
-# feature (Integrations → Polaris Agents → Code signing — Azure Trusted
-# Signing of the two Windows agent binaries during the in-app build). The
+# feature (Integrations → Polaris Agents → Code signing — internal-CA
+# signing of the two Windows agent binaries during the in-app build). The
 # jar lands at /opt/polaris/tools/jsign.jar, one of agentSigningService's
 # default probe locations. Adds ~250 MB (JRE) — signing stays opt-in at
 # runtime; the tooling is pre-installed so it works the moment an operator
 # configures it. SHA-256-pinned: signing tools must not be swappable by a
 # compromised download host.
+#
+# The signing KEYSTORE is deliberately NOT part of the image: baking a
+# fleet-trusted private key into a distributable layer would publish it to
+# every registry the image reaches. Operators mount their PKCS#12 under the
+# persistent state dir (/app/state/tools/codesign.pfx) and point the
+# keystore path at it — see docs/INSTALL.md → "Optional: Code signing".
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       default-jre-headless \

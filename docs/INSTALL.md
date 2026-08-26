@@ -1239,6 +1239,8 @@ sudo install -o polaris -g polaris -m 0400 codesign.pfx /opt/polaris/tools/codes
 
 On RHEL with SELinux enforcing, `sudo restorecon -v /opt/polaris/tools/codesign.pfx`. The path must be **absolute** (the API rejects a relative one): the signing child inherits whatever working directory the build process has, which differs between the single-process and split-role layouts.
 
+**On Docker/Podman**, put the keystore under the persistent state dir instead — `./state/tools/codesign.pfx` on the host, which the container sees at `/app/state/tools/codesign.pfx` (that is also one of jsign's default jar probe locations, so the convention already exists). Set the keystore path to the in-container path, not the host one. Do **not** bake the keystore into a derived image: it is a fleet-trusted private key, and an image layer follows the image into every registry and cache it touches.
+
 ### Configure in Polaris
 
 Integrations → **Polaris Agents** → **Code signing (internal CA)**:
