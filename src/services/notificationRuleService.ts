@@ -201,11 +201,16 @@ export async function listScopeOptions(): Promise<{
   models: string[];
   subnets: { id: string; name: string; cidr: string }[];
   regions: string[];
-  /** How deep region NESTING goes right now (1 = nothing is nested). The two
-   *  recipient pickers use it to decide how many "Asset's L<n> Region Users"
-   *  entries to offer — rides this payload for the same reason the region names
-   *  do, since GET /map/regions is gated `mapRegions:read`. */
-  regionLevels: { maxLevel: number };
+  /** How deep region NESTING goes right now (1 = nothing is nested), plus the
+   *  derived level of each region keyed by its LOWER-CASED name. The two
+   *  recipient pickers read `maxLevel` to decide how many "Asset's L<n> Region
+   *  Users" entries to offer; the address book's Regions list reads `byName`
+   *  for its Level column. Both ride this payload for the same reason the
+   *  region names do, since GET /map/regions is gated `mapRegions:read`.
+   *  `byName` levels are the GLOBAL derived level — display only. Routing walks
+   *  the containment edges instead (see regionHierarchyService), because a
+   *  global level is asset-relative-wrong on an uneven tree. */
+  regionLevels: { maxLevel: number; byName: Record<string, number> };
   roles: { id: string; name: string }[];
 }> {
   // MONITORED devices only. These lists exist to be picked from, and a
@@ -216,7 +221,7 @@ export async function listScopeOptions(): Promise<{
   // event and change triggers fire on them. The subnet list is IPAM, not
   // inventory, so it is unfiltered by the same reasoning.
   const monitoredOnly = { monitored: true } as const;
-  const [mfrRows, modelRows, subnets, regions, regionMaxLevel, roles] = await Promise.all([
+  const [mfrRows, modelRows, subnets, regions, regionLevelsOut, roles] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -240,12 +245,19 @@ export async function listScopeOptions(): Promise<{
     // would silently degrade to free text. This endpoint is already behind
     // automationManagement:read, which the wizard has by definition.
     listRegions().catch(() => []),
-    // Nesting depth for the level-scoped recipient entries. Falls back to a
-    // flat catalogue on failure, which makes the pickers offer no level
-    // entries at all rather than offering ones that resolve to nobody.
+    // Nesting depth for the level-scoped recipient entries, and the per-region
+    // level the address book displays. Falls back to a flat catalogue on
+    // failure, which makes the pickers offer no level entries at all rather
+    // than offering ones that resolve to nobody — and leaves the Level column
+    // blank rather than claiming everything is L1.
     regionLevelIndex()
-      .then((ix) => ix.maxLevel)
-      .catch(() => 1),
+      .then((ix) => ({
+        maxLevel: ix.maxLevel,
+        // The index is already keyed by the normalized (bare, lower-cased)
+        // name, so a caller looks a region up without re-deriving that.
+        byName: Object.fromEntries(Array.from(ix.byName, ([k, e]) => [k, e.level])),
+      }))
+      .catch(() => ({ maxLevel: 1, byName: {} as Record<string, number> })),
     // Roles for the recipient picker's role tokens. Ids, not names: a rename
     // must never silently reroute an automation. Rides this payload for the
     // same reason regions do — GET /roles is gated `roles:read`, which an
@@ -259,7 +271,7 @@ export async function listScopeOptions(): Promise<{
     // Bare names — how User/Role/GroupMapping.regionTags store them. The
     // `region:` prefix exists only on ASSET tags.
     regions: regions.map((r) => r.name).filter((n) => !!n && n.trim() !== "").sort(),
-    regionLevels: { maxLevel: regionMaxLevel },
+    regionLevels: regionLevelsOut,
     roles,
   };
 }

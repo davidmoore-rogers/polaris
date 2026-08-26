@@ -468,6 +468,22 @@
       },
     },
     source: { label: "Source", width: "110px", cell: function (en) { return sourceBadge(en.source); } },
+    /**
+     * Where a region sits in the nesting drawn on the Device Map: L1 is an
+     * innermost region, and each step up contains the level below it. Shown so
+     * the list an operator routes from says which rows are the local teams and
+     * which are the divisions above them — the same L1/L2 vocabulary the
+     * recipient picker's "Asset's L<n> Region Users" entries use.
+     *
+     * Blank rather than "L1" when the catalogue couldn't be levelled: claiming
+     * everything is innermost would be a statement about the map, not an
+     * admission that the derivation failed.
+     */
+    level: {
+      label: "Level",
+      width: "80px",
+      cell: function (en) { return en.level ? "L" + en.level : "—"; },
+    },
   };
 
   // ─── Tab surface ───────────────────────────────────────────────────────────
@@ -519,7 +535,9 @@
         '<p class="hint" style="margin-top:0">Regions come from the polygons drawn on the Device Map. ' +
           'An automation’s <strong>Notify</strong> action can route to a region to reach every user tagged ' +
           'with it, or to the region of the device that triggered the alert. Nothing here is edited on this ' +
-          'page — draw or rename a region on the Device Map, and tag users with it under Users.</p>' +
+          'page — draw or rename a region on the Device Map, and tag users with it under Users. ' +
+          '<strong>Level</strong> follows from how the polygons nest: L1 is an innermost region, and each level ' +
+          'above it contains the one below.</p>' +
         '<div id="ab-tab-regions"><p class="empty-state">Loading…</p></div>' +
       '</div>';
   }
@@ -668,10 +686,18 @@
   function loadTabRegions() {
     var box = document.getElementById("ab-tab-regions");
     if (!box) return;
-    var cols = [AB_CELLS.name, AB_CELLS.description, AB_CELLS.source];
+    var cols = [AB_CELLS.name, AB_CELLS.level, AB_CELLS.description, AB_CELLS.source];
     return loadFilterSchema().then(function (schema) {
+      // Levels ride the filter-schema payload alongside the names themselves —
+      // GET /map/regions is gated `mapRegions:read`, which someone browsing the
+      // address book need not hold. Keyed lower-cased, as the server derives it.
+      var levels = (schema.options && schema.options.regionLevels && schema.options.regionLevels.byName) || {};
       var regions = ((schema.options && schema.options.regions) || []).map(function (name) {
-        return { source: "region", id: name, name: name, description: "Every user tagged with this region" };
+        return {
+          source: "region", id: name, name: name,
+          level: levels[String(name).toLowerCase()],
+          description: "Every user tagged with this region",
+        };
       });
       box.innerHTML = abTable(cols, regions, regions.length ? "" :
         '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>');

@@ -155,7 +155,12 @@ beforeAll(() => {
           maxDepth: 5,
           maxRules: 100,
         },
-        options: { regions: ["Ashfield", "Memphis"], regionLevels: { maxLevel: schemaMaxLevel } },
+        options: {
+          regions: ["Ashfield", "Memphis"],
+          // Nested: Memphis contains Ashfield, so the Regions pane has one row
+          // at each level and the Level column has something to tell apart.
+          regionLevels: { maxLevel: schemaMaxLevel, byName: { ashfield: 1, memphis: 2 } },
+        },
       }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
       update: async (_id: string, body: Record<string, unknown>) => { updated.push(body); return { contact: { id: _id, ...body } }; },
@@ -250,6 +255,47 @@ describe("renderTab", () => {
     expect(regions.textContent).toContain("Memphis");
     // Read-only: regions are drawn on the Device Map, never edited here.
     expect(doc.querySelectorAll("#ab-tab-regions [data-ab-edit]")).toHaveLength(0);
+  });
+
+  it("shows each region's nesting level in the Regions pane", async () => {
+    await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+    await flush();
+    const head = doc.querySelector("#ab-tab-regions thead") as unknown as { textContent: string };
+    expect(head.textContent).toContain("Level");
+    // Level sits in its own column, second — and the container reads HIGHER
+    // than the region it contains, which is the whole point of showing it.
+    const levelOf = (name: string) => {
+      const rows = Array.from(doc.querySelectorAll("#ab-tab-regions tbody tr")) as unknown as {
+        textContent: string;
+        querySelectorAll: (sel: string) => unknown[];
+      }[];
+      const row = rows.find((r) => r.textContent.includes(name));
+      const cells = Array.from(row!.querySelectorAll("td")) as unknown as { textContent: string }[];
+      return cells[1].textContent.trim();
+    };
+    expect(levelOf("Ashfield")).toBe("L1");
+    expect(levelOf("Memphis")).toBe("L2");
+  });
+
+  it("leaves the level blank when the catalogue could not be levelled", async () => {
+    // The server answers an empty byName when the derivation fails. An em dash,
+    // never "L1" — that would be a claim about how the map is drawn.
+    const contactsApi = (g.api as { contacts: { filterSchema: () => Promise<{ options: Record<string, unknown> }> } }).contacts;
+    const orig = contactsApi.filterSchema;
+    contactsApi.filterSchema = async () => {
+      const payload = await orig();
+      payload.options.regionLevels = { maxLevel: 1, byName: {} };
+      return payload;
+    };
+    try {
+      await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
+      await flush();
+      const regions = doc.getElementById("ab-tab-regions") as unknown as { textContent: string };
+      expect(regions.textContent).toContain("Ashfield");
+      expect(regions.textContent).not.toContain("L1");
+    } finally {
+      contactsApi.filterSchema = orig;
+    }
   });
 
   it("narrows the people list from the search box", async () => {

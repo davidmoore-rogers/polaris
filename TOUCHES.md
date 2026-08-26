@@ -2292,7 +2292,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **Cross-service deps:** `mapRegionService.getRegionHierarchy` (the derived forest), `utils/tagNormalize.stripRegionPrefix`, `notificationTypes.MAX_DEVICE_REGION_LEVELS`.
 
-**Used by:** `notificationRecipientService.expandDeliveries` (the `recipientDeviceRegionLevels` arm of `usersForTarget`, through a closure memoized per notification), `notificationRuleService.listScopeOptions` (publishes `regionLevels.maxLevel` so both recipient pickers know how many level entries to offer).
+**Used by:** `notificationRecipientService.expandDeliveries` (the `recipientDeviceRegionLevels` arm of `usersForTarget`, through a closure memoized per notification), `notificationRuleService.listScopeOptions` (publishes `regionLevels.maxLevel` so both recipient pickers know how many level entries to offer, plus `regionLevels.byName` — the per-region GLOBAL level keyed lower-cased, DISPLAY ONLY, which the address book's Regions pane renders as its Level column).
 
 **Invariants:**
 - **Levels are ASSET-RELATIVE, never global.** Global levels count outward from the leaves and therefore have GAPS on an uneven tree: a division holding one bare leaf and one 3-deep chain is L4 with children at L1 and L3. Filtering a snapshot on `level === 2` reaches NOBODY for a device in the bare leaf while reaching a mid-chain region for a device in the deep branch — one automation paging a division manager for one alert and a local tech for the next. Level 1 is therefore "the innermost region(s) the asset carries" and each step out follows a containment edge.
