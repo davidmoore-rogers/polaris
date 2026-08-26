@@ -229,12 +229,15 @@
   };
 
   // Stamp (or clear) a row of pills on the widget's header title — the same
-  // style the group headers use, so "Down Assets (Firewall) [4]" reads as the
-  // overall total. `el` is the widget body; resolves the shell header via
-  // closest(). No-ops outside a dashboard shell (e.g. the widget library
-  // preview renders without the .dashboard-widget wrapper). An empty list
-  // removes the pills. Re-call on every render tick — updateConfig rewrites the
-  // title's textContent, which drops them until the next render re-stamps.
+  // style the group headers use, so "[4] Down Assets (Firewall)" reads as the
+  // overall total. The pills lead the title: it is a single ellipsized line, so
+  // a count appended after the name is the first thing a narrow column drops —
+  // and the count is the part an operator scans the wall for. `el` is the
+  // widget body; resolves the shell header via closest(). No-ops outside a
+  // dashboard shell (e.g. the widget library preview renders without the
+  // .dashboard-widget wrapper). An empty list removes the pills. Re-call on
+  // every render tick — updateConfig rewrites the title's textContent, which
+  // drops them until the next render re-stamps.
   //
   // `pills` is [{ text, className, title? }]; the whole set is re-rendered every
   // call, so counts AND colors track the current data.
@@ -247,12 +250,14 @@
     if (!host) {
       host = document.createElement("span");
       host.className = "widget-header-count";
-      host.style.marginLeft = "8px";
+      host.style.marginRight = "6px";
       host.style.display = "inline-flex";
       host.style.gap = "4px";
       host.style.verticalAlign = "middle";
-      title.appendChild(host);
     }
+    // Always re-seat at the head: a host built before this ordering (or left
+    // behind by an in-place title rewrite) would otherwise keep trailing.
+    if (title.firstChild !== host) title.insertBefore(host, title.firstChild);
     host.innerHTML = pills.map(function (p) {
       return '<span class="widget-pill ' + (p.className || "widget-pill-red") + '"' +
         (p.title ? ' title="' + escapeHtml(p.title) + '"' : "") + '>' +
