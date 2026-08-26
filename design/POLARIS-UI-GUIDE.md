@@ -1,57 +1,730 @@
-# Polaris — Primaries Index
+# Polaris UI Kit — hand this to Claude Code
 
-A lookup index of **canonical implementations** to model new work after. Answers the question **"there are five places that already do this — which one is the reference?"**
+Paste this file (or point Claude Code at it) at the start of any new app that
+should look like Polaris. It is the **visual and interaction contract**: shell,
+tables, modals, slide-ins, badges, forms, z-index. It contains none of Polaris's
+domain logic (asset discovery, IPAM, topology, monitoring) — build whatever the
+new app does, but render it with exactly these parts.
 
-This file complements [CLAUDE.md](CLAUDE.md) (narrative architecture) and [TOUCHES.md](TOUCHES.md) (cross-cutting writers/readers/invariants). Use `TEMPLATES.md` whenever you're about to build a new instance of a pattern that already exists somewhere — pick the canonical one and copy its shape.
+## What to copy into the new app
 
-## How to use
+| From this kit | To the new app | Change it? |
+|---|---|---|
+| `css/polaris-ui.css` | `<new-app>/public/css/polaris-ui.css` | **No.** Verbatim. Add new rules in a separate `app.css` loaded after it. |
+| `js/theme-init.js` | `<new-app>/public/js/theme-init.js` | No |
+| `js/polaris-ui.js` | `<new-app>/public/js/polaris-ui.js` | No — extend, don't edit |
+| `js/table-sf.js` | `<new-app>/public/js/table-sf.js` | **No.** Verbatim. |
+| `page-template.html` | each page | Yes — that's the point |
+| `logo.png` | `public/logo.png` | Replace with the new app's mark |
 
-1. Find the pattern that matches what you're building (chart, modal, slide-over, sortable table, etc.).
-2. Open the **Canonical implementation** file/line and read it.
-3. Match its conventions — DOM structure, helper calls, persistence keys, refresh model.
-4. Only diverge when the new surface genuinely needs something the canonical doesn't (note the divergence in your PR).
-5. **Keep this file current.** Per CLAUDE.md's commit-review rule, every commit re-reads `TEMPLATES.md` for staleness — if your change replaced the canonical, moved its file, or invalidated a convention, fix it in the same commit.
+Rule: **never restyle a component that already exists here.** If a surface
+doesn't seem to fit, reach for the closest existing pattern rather than
+inventing a new container, palette entry, or z-index.
 
-## Format
+> **Inside the Polaris repo itself**, `public/` is the LIVING source —
+> `design/js/` and `design/css/` are the portable snapshots, re-synced
+> deliberately when the kit is updated, never edited to chase `public/`. A new
+> app copies from `design/`; Polaris work happens in `public/`. Part II below
+> indexes the Polaris canon.
 
-Per-pattern sections:
-- **What it is** — one-sentence scope
-- **Canonical implementation** — entry-point `path/file.ts → symbolName()`
-- **Key conventions** — DOM/data shape, helpers, persistence keys, refresh model
-- **When adding a new instance** — checklist before merging
+---
 
-> **Reference convention:** code references are `path/file.ts → symbolName()` — line numbers are deliberately omitted (they drift). Grep the symbol name.
+## 1. Design tokens
 
-## Sections
+Every color, radius, shadow, and font goes through a CSS variable. **Never write
+a raw hex value in app code** except inside the `rgba()` tints listed below.
 
-- [Shared frontend utils](#shared-frontend-utils)
-- [Time-series chart (SVG)](#time-series-chart-svg)
-- [Modal](#modal)
-- [Wizard (stepper modal)](#wizard-stepper-modal)
-- [Full-screen blocking overlay](#full-screen-blocking-overlay)
-- [Slide-over panel](#slide-over-panel)
-- [Token/pill filter box (multi-dimension, typeahead-committed)](#tokenpill-filter-box-multi-dimension-typeahead-committed)
-- [Sortable + filterable data table](#sortable--filterable-data-table)
-- [Per-instance multi-lane worker (constrained + unconstrained endpoints)](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints)
-- [Cross-asset graph derivation + persisted DAG](#cross-asset-graph-derivation--persisted-dag)
-- [Setting-backed admin CRUD with periodic + on-demand reconciler](#setting-backed-admin-crud-with-periodic--on-demand-reconciler)
-- [Discovery-driven managed tag namespace](#discovery-driven-managed-tag-namespace)
-- [Serialized check-then-insert (per-scope advisory lock + DB backstop)](#serialized-check-then-insert-per-scope-advisory-lock--db-backstop)
-- [Encrypt-at-rest for a JSON config column](#encrypt-at-rest-for-a-json-config-column)
-- [Prometheus metric instrumentation](#prometheus-metric-instrumentation)
-- [Current-state table refreshed per scrape (delete-replace)](#current-state-table-refreshed-per-scrape-delete-replace)
-- [High-volume append-only time-series writes (batch-flush buffer)](#high-volume-append-only-time-series-writes-batch-flush-buffer)
-- [Tiered time-series rollups (hourly + daily aggregates over detail samples)](#tiered-time-series-rollups-hourly--daily-aggregates-over-detail-samples)
-- [Operator-declared value mapping → normalized sample → alertable dimension](#operator-declared-value-mapping--normalized-sample--alertable-dimension)
-- [Per-integration verbose debug logging](#per-integration-verbose-debug-logging)
-- [Permission-gated route + dynamic-role function key](#permission-gated-route--dynamic-role-function-key)
-- [Operator-customizable widget surface](#operator-customizable-widget-surface)
-- [Queue-on-transient-failure with retry tick + recovery hook](#queue-on-transient-failure-with-retry-tick--recovery-hook)
-- [Integration type (config + discovery + sync + frontend modal)](#integration-type-config--discovery--sync--frontend-modal)
-- [Polling methods section (per-stream subtab strip)](#polling-methods-section-per-stream-subtab-strip)
-- [Mobile bottom sheet](#mobile-bottom-sheet)
-- [Mobile pull-to-refresh](#mobile-pull-to-refresh)
-- [On-screen keyboard fit (login/form screens)](#on-screen-keyboard-fit-loginform-screens)
+```
+--color-bg-primary   #151528   panels, cards, tables, modals, slide-overs
+--color-bg-secondary #0d0d1a   page background (body)
+--color-bg-tertiary  #111122   sidebar, table thead, modal/slideover header+footer
+--color-surface      #1e1e36   raised surface / secondary-button hover
+--color-bg-elevated  #26264a   popovers, dropdowns, row-hover highlight
+--color-border       #252540   default 1px border
+--color-border-light #1e1e36   table row separators
+--color-text-primary   #e6e6e6
+--color-text-secondary #a0a0b3
+--color-text-tertiary  #7d7d93  labels, hints, placeholders
+--color-accent       #4fc3f7   the ONE brand color (links, focus, active nav, primary btn)
+--color-accent-hover #29b6f6
+--color-success #00c853   --color-warning #ffd600
+--color-danger  #ff1744   --color-danger-hover #d50000   --color-deprecated #757575
+--font-sans "Inter", system stack     --font-mono "Roboto Mono", Consolas
+--radius-sm 4px  --radius-md 8px  --radius-lg 12px
+--shadow-sm 0 1px 4px rgba(0,0,0,.3)   --shadow-md 0 8px 32px rgba(0,0,0,.5)
+--sidebar-width 220px
+```
+
+`html { font-size: 14px }` — every `rem` in the kit is relative to 14px, so a
+`0.85rem` button label is ~12px. Keep the same scale.
+
+The token values above are the dark base (`:root`), which `nightfall` refines.
+`morning`/`noon` replace them wholesale from the daylight base. See **1b.
+Themes** for the full list and the rules for adding one; theme is stored in
+`localStorage["polaris-theme"]` and applied by `theme-init.js` **in `<head>`
+before the stylesheet** to avoid a flash.
+
+Tint convention: `background: rgba(<color>,0.12)` + `border: 1px solid
+rgba(<color>,0.25)` + `color: var(--color-<semantic>)`.
+
+---
+
+## 1b. Themes
+
+Three themes on `<html data-theme>`, in two families:
+
+| id | family | character |
+|---|---|---|
+| `morning` | light | warm parchment, burnished-gold accent, softest contrast |
+| `noon` | light | near-white, terracotta accent, highest contrast |
+| `nightfall` | dark | **default**; indigo ground, sky-blue accent, hot-red danger |
+
+Listed in day order, which is the order the picker shows. Display order and the
+default are separate: `DEFAULT_THEME` names the fallback, so reordering the list
+never changes what a new or unrecognized install lands on.
+
+There is no plain `light` or `dark` any more. The CSS keeps two *bases* that
+are not themes: `:root` (dark, refined by `nightfall`) and the daylight base
+`:is([data-theme="morning"],[data-theme="noon"])`, which undoes the
+component CSS's light-on-dark assumptions once for both.
+
+Rules:
+
+- **Never hardcode a color.** Every value comes from a token
+  (`--color-bg-*`, `--color-surface`, `--color-bg-elevated`, `--color-border*`,
+  `--color-text-*`, `--color-accent`/`--color-primary`, `--color-success`,
+  `--color-warning`, `--color-danger`, `--shadow-*`). A literal hex is a bug in
+  four of the five themes.
+- **Tint with `color-mix`**, not a second hardcoded rgba:
+  `color-mix(in srgb, var(--color-danger) 12%, transparent)`.
+- **Branch on family, not id.** Use `isLightTheme()` when a page picks an image
+  or chart palette by brightness — never compare against a theme id. The CSS
+  does the same with `:is([data-theme="morning"],[data-theme="noon"])`; match
+  that pattern for any new daylight override.
+- **Adding a theme** = one `THEMES` entry in `polaris-ui.js`, one token block in
+  the CSS, one id in `theme-init.js`'s `KNOWN` list. Nothing else.
+- `setTheme(id)` persists to `localStorage["polaris-theme"]` and fires a
+  `themechange` event on `document` (`detail: {theme, family}`) — listen for it
+  to repaint canvases, maps, and charts that cached their colors.
+- The sidebar footer control opens the full list via `openThemeMenu()`; past two
+  themes a toggle buries the rest. `toggleTheme()` still steps to the next one.
+- Unrecognized saved values fall back to `DEFAULT_THEME` (`nightfall`), so a
+  user carrying the retired `dark`/`light` id lands somewhere sane rather than
+  on an unstyled page.
+- With nothing saved, `theme-init.js` follows the OS: `morning` for a light
+  preference, `nightfall` otherwise.
+
+---
+
+## 2. Page shell
+
+```html
+<div class="layout">              <!-- flex, max-width: calc(100vh * 16/9), centered -->
+  <aside class="sidebar" id="sidebar"></aside>
+  <main class="main">            <!-- flex:1, padding: 2rem 2.5rem -->
+    <div class="page-header">
+      <h2>Page Title</h2>        <!-- 1.35rem, 700, UPPERCASE, letter-spacing .5px -->
+      <div class="page-header-actions">…buttons…</div>
+    </div>
+    …content…
+  </main>
+</div>
+```
+
+- **Centering**: the whole app is centered by `.layout`'s
+  `max-width: calc(100vh * 16 / 9); margin: 0 auto` — a 16:9 column, never
+  full-bleed on ultrawide. Slide-overs respect it:
+  `right: max(0px, calc((100vw - 100vh * 16 / 9) / 2))`. Don't add your own
+  page-level max-width or centering wrapper.
+- **Sidebar**: 220px, sticky, full height, `--color-bg-tertiary`, right border.
+  Order: brand block → `.sidebar-nav` → (spacer `margin-top:auto`) → bottom
+  links + theme toggle.
+- **Logo**: the shipped art is THEME-PAIRED — the wordmark is light blue on the
+  dark files and near-black on the light ones, so the wrong file on the wrong
+  ground makes the logo disappear. `img/brand/polaris-{horiz,vert,symbol}-{dark,light}.png`:
+  **horiz** for a login card, **vert** for the sidebar column, **symbol** (star
+  alone) for favicons. `renderSidebar()` paints and maintains it for you; pass
+  `logo:` only to override with an operator upload. Elsewhere use
+  `watchBrandLogo(img, "login"|"sidebar")` — it picks by theme FAMILY, so
+  morning and noon both get the light art with no extra asset, and it repaints
+  on `themechange`. Shipped art carries `.brand-mark` (fixed-aspect wordmark,
+  no radius, 120px in the sidebar); an operator upload never does, because any
+  shape at all has to be sized differently. Asset paths resolve from the
+  script's own URL, so the kit works in a subdirectory unchanged.
+- `.sidebar-brand` is `text-align: center` with a bottom border;
+  `.sidebar-logo` is `width:100%; max-width:70px; margin: 0 auto 6px;
+  border-radius:8px`. Logo is always centered and capped at 70px — never
+  left-aligned, never a hardcoded pixel size on the `<img>`. An optional
+  `<p>` tagline under it renders 0.7rem uppercase, letter-spacing 1px,
+  `--color-text-tertiary`.
+- **Nav items**: `<a>` with `display:flex; gap:10px; padding:.5rem .75rem;
+  border-radius:var(--radius-md)`, 18px stroke SVG at `opacity:.7`.
+  Hover `rgba(79,195,247,.08)`; `.active` gets `rgba(79,195,247,.12)`, accent
+  text, weight 550, full-opacity icon. Use `renderSidebar()` from
+  `polaris-ui.js` and let it stamp `.active` from the URL.
+- Sticky header variant: add `.page-header-sticky` (z-index 1050, background
+  must be `--color-bg-secondary`).
+
+### Sidebar footer (bottom-left)
+
+Fixed vertical order, bottom of the sidebar, pushed down by `margin-top:auto`:
+
+1. **Status panels** — `<div class="query-status">`, one per concern (running
+   operations, failed integrations, update state), hidden until they have
+   content. Header row = 12px `.query-spinner` + `.query-status-label`
+   (`N thing(s) running`, accent, 600). Below it a `.query-status-list`; each
+   `<li>` is a flex row of a text block + a red `.query-abort-btn` (`✕`).
+   Inside the block: `.query-status-name` (what is running), an optional
+   `.query-status-progress` line (`93/200 complete · 2 skipped`), then
+   `.query-status-device` lines for the in-flight items — all truncating,
+   never wrapping. Panel is `rgba(79,195,247,.06)` on a 1px accent-tinted
+   border, `--radius-md`, `margin: 0 .5rem`. Use
+   `renderStatusPanel({label, subtitle, progress, items, onAbort})` — e.g.
+   label `1 discovery running`, subtitle `Discovering FortiManager`, items
+   `FortiGate1`, `FortiGate2`;
+   `.query-abort-all-btn` is the full-width variant when several are running.
+2. **Divider** — `border-top: 1px solid var(--color-border-light)`.
+3. **Bottom links** — `.sidebar-bottom-link` (same geometry as nav items):
+   Server Settings (permission-gated), then `.theme-toggle` — labelled with the
+   CURRENT theme name and opening the theme menu, not a two-way switch — then
+   Logout as
+   `.sidebar-bottom-link .sidebar-bottom-link-logout` (red hover).
+   Logout is always last and always the only red item.
+4. **Version** — `#sidebar-version`, centered, 0.7rem, tertiary,
+   `v0.9.1867`.
+5. **Update line** — only when an update exists: `#sidebar-update-badge`
+   holding `.sidebar-update-link` (accent, centered, pulsing
+   `.sidebar-update-dot`) reading `Update available: v0.9.1870`, linking to
+   the settings tab that performs the update. Call
+   `setSidebarUpdate(version, href)`; pass a falsy version to clear it.
+
+`renderSidebar()` builds 1–4 for you; pass `version`, `updateAvailable`,
+`updateHref`, and `onLogout`/`logoutHref`.
+
+### Header actions + user badge (top-right)
+
+`.page-header-actions` is a right-aligned flex row, gap .5rem:
+secondary buttons first, the single `.btn-primary` last, then the user badge.
+
+- `.user-badge` — sits after the buttons with `padding-left: .75rem;
+  border-left: 1px solid var(--color-border)` so it reads as a separate zone.
+- Contents: 30px circular `.user-badge-avatar` with 2 initials on a
+  deterministic per-username color, `.user-badge-name` (0.82rem secondary,
+  hidden under 768px), and the role as a `.badge` at 0.7rem/1px 6px.
+- Never a dropdown menu or caret — the badge is display only; account actions
+  live in the sidebar footer.
+- Use `renderUserBadge({username, role, roleColor})`; it's idempotent, so it's
+  safe to call again after the user fetch resolves.
+
+Icons: 24×24 viewBox, `fill="none" stroke="currentColor" stroke-width="2"`
+(Feather-style), rendered at 16px in buttons / 18px in nav. No emoji, no icon
+fonts, no filled icon sets.
+
+---
+
+## 3. Buttons
+
+```html
+<button class="btn btn-primary">+ Add Thing</button>
+<button class="btn btn-secondary">Secondary</button>
+<button class="btn btn-danger">Delete</button>
+<button class="btn btn-sm btn-secondary">Small</button>
+<button class="btn-icon">…</button>
+```
+
+- `.btn` — inline-flex, gap 6px, `.45rem .9rem`, 0.85rem/500, `--radius-md`.
+- `.btn-primary` — accent fill, **dark** text (`#0d0d1a`), weight 600. One per
+  header, at the far right of `.page-header-actions`.
+- `.btn-secondary` — `--color-bg-primary` fill, border `--color-border`, hover
+  turns border accent. The default for everything else.
+- `.btn-danger` / `.btn-warning` / `.btn-success` — tinted, not solid (danger is
+  `rgba(255,23,68,.15)` on accent-red text).
+- `.btn-sm` for anything inside a table row, bulk bar, or pagination.
+- Copy: `+ Add Thing`, `Save`, `Cancel`, `Delete selected`, `Import / Export ▾`.
+  Sentence case, no ALL CAPS, no exclamation marks.
+- Dropdown: `.btn-dropdown-wrap > button + .btn-dropdown-menu`, with
+  `.dropdown-heading` and `.dropdown-divider` inside for grouped items.
+
+---
+
+## 4. Tables — the centerpiece
+
+Markup (see `page-template.html`):
+
+```html
+<div class="table-wrapper table-wrapper-sticky" id="x-table-wrapper">
+  <table id="x-table">
+    <thead><tr>
+      <th class="cb-col"><input type="checkbox" id="x-select-all"></th>
+      <th data-col-id="name" data-col-required="true"
+          data-sf-key="name" data-sf-type="string">Name</th>
+      <th data-col-id="status" style="width:130px"
+          data-sf-key="status" data-sf-type="string"
+          data-sf-options="active|maintenance=Maintenance|disabled">Status</th>
+      <th data-col-id="count" data-sf-key="count" data-sf-type="number" data-sf-nofilter>Count</th>
+      <th data-col-id="notes" data-sf-key="notes" data-sf-type="string" data-col-default-hidden="true">Notes</th>
+      <th data-col-id="updatedAt" data-sf-key="updatedAt" data-sf-type="date">Updated</th>
+    </tr></thead>
+    <tbody id="x-tbody"><tr><td colspan="6" class="empty-state">Loading...</td></tr></tbody>
+  </table>
+</div>
+```
+
+Wire-up — **order matters**:
+
+```js
+var sf     = new TableSF("x-tbody", render);              // 1. sort + filter UI
+var layout = setupColumnLayout(table, { onChange: savePrefs }); // 2. resize + gear
+```
+
+`TableSF` rewrites each `<th>`'s innerHTML, which wipes the resize handles if
+you call `setupColumnLayout` first. Symptom: sorting works, resizing silently
+doesn't.
+
+**Re-apply the layout after every wholesale `tbody` re-render.** New `<td>`s know
+nothing about hidden/resized columns, so a `data-col-default-hidden` column comes
+back as a 0px-wide cell that still holds text — one character per line, rows
+hundreds of pixels tall. At the end of your render function:
+
+```js
+applyTableLayout(table, "things");                 // tables rebuilt on refresh
+// or, when you own the widget instance:
+layout.setPrefs(layout.getPrefs());
+```
+
+For dynamic tables inside a modal or panel, always prefer
+`applyTableLayout(table, "<stable-type-key>")` — key it by table *type*, never by
+record id.
+
+### Header attributes
+
+| Attribute | Effect |
+|---|---|
+| `data-sf-key="dotted.path"` | sortable + filterable; supports `block.name`, `_count.items` |
+| `data-sf-type` | `string` (default) · `number` · `date` · `ip` · `array` |
+| `data-sf-options="a\|b=Label B\|c"` | multi-select checkbox popover instead of a text box — use for every enum column |
+| `data-sf-nofilter` | sortable, no filter control (numeric columns where a box is noise) |
+| `data-col-id="name"` | stable column id for resize/visibility prefs — always set it |
+| `data-col-required="true"` | can't be hidden (identity + actions columns) |
+| `data-col-default-hidden="true"` | ships off; operator can enable in the gear |
+
+### Behavior you get for free
+
+- Per-column sort (caret in the header, accent when active).
+- Text filters with an operator chooser: contains / not-contains / empty /
+  not-empty. Date columns get a from→to range popover.
+- Column resize by dragging the divider on a header's right edge — affects only
+  the two adjacent columns; the rightmost resizable column auto-fills.
+- Show/hide chooser behind a **gear that floats at the table's top-right corner
+  on hover** — this replaced the old "Columns ▾" toolbar button; never add one
+  back. Pass `onScreenshot` to get a camera button beside it.
+- Cell content truncates with an ellipsis (`table-layout: fixed`). Opt a
+  long-prose column back into wrapping with `<td class="cell-wrap">`.
+- Frozen header: the `.table-wrapper-sticky` class + `renderPageControls`
+  (which calls `sizeStickyTableWrappers()`) bound the wrapper to the viewport so
+  it scrolls internally. Inside a slide-over use `.table-wrapper-panel-sticky`
+  and your own panel-relative sizer instead — never the viewport one.
+
+### Client vs server mode
+
+- **Client-side** (default, up to a few thousand rows): pipe rows through
+  `sf.apply(rawData)` before rendering, and never mutate `rawData`.
+- **Server-side** (large datasets): keep `TableSF` for the header UI but
+  **never call `sf.apply()`**. In `onChange`, read `sf._sortKey`, `sf._sortDir`,
+  `sf._filters`, reset the offset, and re-fetch. Multi-select arrays → CSV
+  params; text filters → `<field>` + `<field>Op`; date → `since`/`until`; sort →
+  `sortBy`/`sortDir`, **whitelisted server-side** (never pass a user string to
+  an ORM `orderBy`). Call `sf.setColumnOptions(key, values)` after each fetch
+  for operator-extensible enums.
+
+### Table visuals
+
+- `thead th`: 0.72rem, 600, UPPERCASE, letter-spacing 1px, tertiary text,
+  `--color-bg-tertiary` background.
+- `tbody td`: 0.6rem/1rem padding, bottom border `--color-border-light`.
+  Row hover `rgba(79,195,247,.04)`. `.mono` class for IDs/IPs/serials.
+- Row tied to an open slide-over: `tr.row-panel-active` (accent inset bar).
+- Empty/loading: one row with `<td colspan="N" class="empty-state">`.
+- Cell actions go in `<td class="actions">` with `.btn.btn-sm` buttons.
+
+### Pagination + selection
+
+- One row above the table and one below: `<div id="pagination-top"></div>` /
+  `<div id="pagination"></div>`, filled by
+  `renderPageControls("pagination", total, size, page, onPage, onSize, opts)` —
+  grid `1fr auto 1fr`: centered page nav, right-aligned action buttons + the
+  "Show N" selector (top row only). No separate "Show" filter bar above the
+  table.
+- Bulk bar sits between the header and the table and is **always visible**:
+  `.bulk-bar.bulk-bar-idle` with a `.bulk-bar-count` label ("No things
+  selected"); on selection drop `-idle` (accent outline, buttons enable). Push
+  the destructive button right with `margin-left:auto`.
+
+### Row verbs — a menu on the name, not an Actions column
+
+Per-row verbs (Open / Edit / Clone / Delete) hang off the row's **name cell**,
+never a column of buttons: one affordance, no column competing with the data,
+and a verb can be added without re-cutting the layout.
+
+- Trigger: `rowMenuTriggerHTML(name)` → `.row-menu-trigger` — accent text with
+  a small ▾ appended, underlined on hover, so it reads as the name until
+  touched. Keep it as the first cell's only content.
+- Open with `showRowMenu(anchor, items, {align, label})`; items are
+  `{label, onSelect, icon?, danger?, disabled?, title?}`, `{separator:true}`,
+  or `{heading:"…"}`. Destructive verbs get `danger: true` and go last.
+- The menu is `.row-context-menu` — `position: fixed`, body-mounted, z-index
+  900. That's deliberate: list tables scroll inside `.table-wrapper-sticky`,
+  which clips an absolutely positioned menu. It flips above the anchor near the
+  viewport bottom, closes on Escape/Tab/outside-click and on a scroll that
+  moved its anchor, does arrow-key navigation, and returns focus on close —
+  all handled for you.
+- `align: "end"` right-aligns it; use that for a trigger in the page header.
+
+### View tabs above a table
+
+Per-user saved views, each carrying its own filter + sort state: `.table-tabs`
+strip (a lighter sibling of `.page-tabs`) directly above the bulk bar, with
+`.table-tab` children, `.table-tab-dot` when the view has filters, an inline
+`.table-tab-close`, `.table-tab-input` for rename-in-place, and a trailing
+`.table-tab-add` `+`. The strip scrolls horizontally — it never wraps to a
+second row. Use this instead of a filter-preset dropdown when operators keep
+several working sets open at once.
+
+### Saved filter presets
+
+`.saved-filters-menu` is a `.btn-dropdown-menu` whose rows are flex pairs:
+`.sfl-load` (name + optional `.sfl-badge` + `.sfl-owner`) plus a trailing
+`.sfl-newtab` and `.sfl-del`. Empty state is a single `.sfl-empty` line. The
+save dialog uses `.sfl-vis` radio rows (private / shared) and a `.sfl-preview`
+block that states exactly what will be saved.
+
+---
+
+## 5. Modals
+
+```js
+openModal(title, bodyHTML, footerHTML, options);   // options: {wide|large|xl}
+closeModal();
+if (await showConfirm("Delete 3 things?")) …       // never window.confirm()
+await showFormModal("Add Thing", formHTML, "Create");
+```
+
+- Shape: `.modal-overlay > .modal > [.modal-header, .modal-body, .modal-footer]`.
+  One shared `#modal-overlay`, reused.
+- Widths: default 480px · `wide` 672 · `large` ≤1200 (form + table) ·
+  `xl` ≤1360 with zero body padding (full-bleed).
+- Header (`--color-bg-tertiary`, h3 1rem/600) is the **drag handle**.
+- **Backdrop click does not dismiss** — it flashes the close X. Explicit close
+  only, so in-progress edits survive a stray click.
+- Escape closes, Tab is trapped, focus returns to the trigger; `role="dialog"`
+  + `aria-modal` + `aria-labelledby` are built in.
+- Footer buttons right-aligned, gap 8px: Cancel (`btn-secondary`) then the
+  primary action.
+- Re-bind listeners after every open — the body HTML is replaced wholesale.
+- Tabs inside a modal: `.settings-tabs > .settings-tab(.active)` +
+  `.settings-tab-panel(.active)`; a `.page-tabs` strip that is a **direct child**
+  of `.modal-body` auto-pins sticky.
+- Multi-step flows: `.stepper > .stepper-step(.active|.done|.clickable) >
+  .stepper-num` + `.stepper-line`, one `.step-panel(.visible)` per step, inside
+  a `{large:true}` modal. Validate on Next only; allow jumping back to visited
+  steps.
+
+### Integration modals — one shape for all of them
+
+Every "connect us to another system" dialog is the SAME dialog. Build it with
+`openIntegrationModal({product, action, tabs, requires, onTest, onSave})` rather
+than by hand — hand-built ones drift (Polaris grew seven and ended up with two
+tab implementations and three footer orders).
+
+- **Title** is `"<Action> <Product> Integration"` — `Add FortiManager
+  Integration`, not a bare `Add Integration`. The operator already chose a
+  product to get here; the title should confirm it.
+- **Tabs**: General first (identity + connection), Monitoring second where it
+  exists, then feature tabs. One tab per concern; a concern with three fields is
+  a section inside General, not a tab of its own.
+- **Field ids are unique across tabs** (`f-host`, `f-apiToken`) so one pass
+  collects the whole form. A per-tab read silently drops anything the operator
+  never opened.
+- **Footer**: `Test Connection` · `Cancel` · `Create`/`Save Changes`. Test is a
+  secondary on the LEFT — it is the rehearsal, not the commitment.
+- **Test is gated** on the fields the request actually needs (`requires:
+  [["f-host","host"], …]`), and the toast NAMES what is missing. Never fire a
+  request you know will fail and report the server's error as if it were news.
+- **Saving is never blocked on a passing test.** An operator configuring ahead
+  of a firewall change has a legitimate reason to save something that cannot
+  connect yet; `onSave` receives `{tested}` if you want to warn.
+- Both buttons disable and relabel while in flight (`Testing…`, `Creating…`) —
+  these calls reach a remote system and can take seconds.
+- `onSave` throwing keeps the modal open with the error in a toast; returning
+  `false` keeps it open silently.
+
+---
+
+### Wizards (stepper modal)
+
+Use a wizard ONLY when the task has real sequence — each step narrowing what
+the next can offer (the automation builder: basics → scope → trigger →
+actions → review). A long but flat form stays one modal with tabs; splitting it
+into steps just hides fields behind clicks.
+
+- `createWizard({prefix, steps, onEnter, collect, validate, editing})` →
+  `bodyHtml(panels)`, `footerHtml(saveLabel)`, `wire({onSave, onCancel})`,
+  `goToStep(n)`, `markAllVisited()`. Feed the body to `openModal(…, {wide:true})`,
+  then call `wire()`.
+- The `.stepper` strip is the modal-body's FIRST child so the CSS pins it while
+  a long step scrolls. Steps are `.stepper-step` (`.active`, `.done`,
+  `.clickable`) joined by `.stepper-line` (`.done`); panels are `.step-panel`
+  with one `.visible`.
+- **Visited steps are clickable.** An operator who typed step 4 wrong should not
+  have to walk back through 3 and 2 to fix it. `editing: true` marks every step
+  visited and shows Save from any step.
+- Footer order: `Cancel`, `← Back`, then `Next →` / the single primary Save.
+  Next validates the current step and toasts the problem; it never advances past
+  an invalid step silently.
+- Steps whose content depends on earlier answers render on ENTRY via `onEnter(n)`,
+  not up front — otherwise they show stale options from a scope the operator
+  has since changed.
+- Each step change resets `.modal-body` scroll to the top.
+
+---
+
+### Off-click, lock, and the bloom hint
+
+A backdrop click is never allowed to silently discard a half-filled form. Two
+mechanisms, both already in `polaris-ui.js`:
+
+- **Panel lock** — a lock toggle sits immediately left of the X on every modal
+  and slide-over header (`.panel-lock-btn`, injected automatically by a
+  MutationObserver, accent-colored when engaged). It is global **per type**:
+  one switch governs all modals, another all slide-overs, saved per user in
+  `localStorage["polaris.panellock.<user>"]`. Locked, a backdrop click keeps
+  the panel open; unlocked, it dismisses. The X and Escape always close,
+  regardless. Call `initPanelLock({user})` once per page; read the state with
+  `isPanelLocked("modal"|"slideover")` anywhere a flow would otherwise close a
+  panel the operator pinned open. Call it from the SAME ready path that waits
+  for the rest of the runtime (`renderSidebar`/`TableSF`) — calling it before
+  the scripts resolve leaves the observer unwired and the preference keyed to
+  `anon`. It is safe to call repeatedly and safe to call late; state lives on
+  `window.__polarisPanelLock` so a re-evaluated script keeps the lock.
+- **Escalating flash + bloom** — when a click is refused, the close button
+  answers instead of nothing happening: `flashModalCloseBtn(closeBtn)` flashes
+  it brighter on each successive off-click and grows a radial red bloom behind
+  it in quarter-size steps (nothing on the 1st click — one stray click is an
+  accident — full size by the 5th). A 1s pause resets the escalation. Timing is
+  set inline at 0.45s ease-out so the glow and bloom fade together; the bloom is
+  a single body-level element at z-index 100000 that re-homes into
+  `document.fullscreenElement` when one exists, since the top layer paints over
+  fixed elements.
+
+Wire any new overlay's backdrop handler to `flashModalCloseBtn` rather than a
+bare `close()` — never leave an off-click doing nothing at all.
+
+---
+
+### Modal form anatomy (the long config modal)
+
+A tall settings form stays ONE modal with tabs — never a wizard, never a new
+page. Reading order inside `.modal-body`:
+
+1. **Tab strip** — `.page-tabs` as the body's *first child* so the CSS pins it
+   (sticky, horizontally scrollable, flush under the header) with
+   `.page-tab` buttons; panels are `.page-tab-panel`, `.active` on one.
+   Use `tabbedBodyHTML(prefix, tabs)` + `wireModalTabs(prefix)`. Keep field
+   ids unique across tabs so one read pass collects the whole form.
+2. **Identity field first** — `Name *` at the top of the General tab.
+3. **Info box** — `infoBox(html)`: accent-tinted block stating compatibility /
+   scope constraints up front (versions, on-prem vs cloud). Bold the specific
+   values inside it.
+4. **Section rule + heading** — `formDivider()` then
+   `sectionHeading("Connection Settings")` (0.75rem uppercase, 1px tracking,
+   tertiary). Sections group 3–8 fields; more than that, add a tab.
+5. **Fields** — `.form-group > label + input + p.hint`. Required fields carry a
+   literal ` *` in the label. Placeholders are always examples
+   (`e.g. fmg.example.com`), never restatements of the label. Hints are one
+   sentence, sentence case, no period-stacking; they say where to get the value
+   or what the default means.
+6. **Paired fields** — a grid, not two form-groups in flow:
+   `display:grid;grid-template-columns:1fr auto;gap:8px` (host + port). Narrow
+   numerics get an explicit `width:80–90px`.
+7. **Checkboxes** — `checkboxRow(id, label, checked)`: `width:auto` box, label
+   with `margin:0`, 8px gap. A consequential toggle gets a warning hint
+   directly beneath (`p.hint` in `--color-warning`) that names the risk in
+   plain language. Use `calloutHTML("warning"|"tip"|"note", title, body)` when
+   the note needs a title.
+8. **Sub-value of a toggle** — indented number + unit on one flex row
+   (`12` + `hours`) with its own hint.
+9. **Last section** — low-traffic diagnostics (`DEBUG`) at the very bottom,
+   behind its own heading, described honestly (log volume, auto-off).
+10. **Footer** — `.modal-footer`, right-aligned: destructive-adjacent /
+    utility actions first (`Test Connection`), then `Cancel`, then the single
+    `.btn-primary` (`Create` / `Save`). Never two primaries.
+
+---
+
+## 6. Slide-ins (slide-over panels)
+
+Use for entity detail views; a modal is for forms and confirmations. The panel
+can stay open while the user works the page underneath.
+
+```
+.slideover-overlay > .slideover >
+   .slideover-resize-handle
+   .slideover-header > [.slideover-header-top (h3 + close btn), .slideover-meta]
+   .slideover-body
+   .slideover-footer
+```
+
+- Enters from the right, `width: clamp(520px, 42vw, 1100px)`, 0.25s transform.
+  Build the DOM, then add `.open` on the **next animation frame** or there's no
+  animation (`openSlideover()` does this).
+- User-resizable from the left edge; persist per surface:
+  `initSlideoverResize(panel, "app.panel.width.thing")`.
+- Backdrop click closes (check `e.target === overlay`). Escape closes only when
+  the panel is topmost. Deliberately **not** `aria-modal` and no hard focus
+  trap — it coexists with the page.
+- `.slideover-body` is `padding: 0`. **Every** state you render — loading,
+  empty, error, populated — supplies its own gutter, and the canonical value is
+  `padding: 1rem 1.25rem 1rem 2.5rem` (the extra left matches the header's
+  indent past the resize handle). Wrap the whole body content in one padded div.
+- Nested panels layer on top; only the topmost closes on its X.
+- Cancel every timer in the panel's close function, and gate async writes on
+  "is this overlay still open and still the same entity" before touching the DOM.
+- Silent refreshes capture/restore `body.scrollTop` around the swap.
+- Header/footer are `--color-bg-tertiary`; `.slideover-meta` is a wrapping flex
+  row of 0.78rem secondary-text facts.
+
+---
+
+## 7. Badges, pills, small parts
+
+- `.badge` — pill (`radius: 99px`), 0.72rem/600, capitalized, 2px 8px.
+  Semantic variants already defined: `badge-active`, `badge-available`,
+  `badge-reserved`, `badge-expired`, `badge-conflict`, `badge-deprecated`,
+  `badge-released`, `badge-disabled`, `badge-maintenance`, `badge-admin`,
+  `badge-readonly`, `badge-level-info|warning|error|critical`, `badge-v4/v6`.
+  Reuse the closest one; **don't mint new colors**. New states get a new
+  variant following the `rgba(x,.12)` / `rgba(x,.25)` / semantic-text recipe.
+- `.badge-clickable` when a pill triggers an action (hover brighten, active
+  scale, focus ring).
+- Cards: `.card` (`--color-bg-primary`, `--radius-lg`, 1rem 1.25rem,
+  `shadow-sm`) with `.card-title` (0.75rem, 600, UPPERCASE, letter-spacing 1px).
+- KPIs: `.kpi-grid` (`repeat(auto-fit, minmax(180px,1fr))`, gap 10px) of
+  `.kpi-card > .kpi-label + .kpi-value` — value is **mono**, 1.75rem, 700.
+- Utilization: `.util-row > .util-bar-track > .util-bar-fill` (6px, pill).
+- Toasts: `showToast(msg, "success"|"error")` — bottom-right stack, tinted,
+  auto-dismiss 3.5s, with a copy button. Use for every mutation result.
+- Blocking overlay (app is briefly unusable, e.g. restart):
+  `.blocking-overlay > .blocking-overlay-card` with a `.spinner`. Not
+  dismissible — nothing else should use it.
+- Spinners: `.spinner` (or `.query-spinner` at 12px in a sidebar panel).
+
+---
+
+## 8. Forms
+
+- `.form-group > label + control (+ .hint)`. Labels 0.8rem/500 secondary;
+  hints 0.72rem tertiary.
+- Inputs/selects/textareas are full-width by default, `--color-bg-secondary`
+  fill, `--radius-md`, 0.85rem, focus = accent border + 2px accent ring. Don't
+  restyle them per page.
+- Read-only display value: `.form-group .form-value`. Locked field:
+  `.field-locked`.
+- Filter/toolbar clusters: `.filter-bar` (sticky flex row, uppercase 0.72rem
+  labels).
+- Grid multi-column forms with a plain inline
+  `display:grid; grid-template-columns: 1fr 1fr; gap: 12px` inside the modal
+  body — no new classes.
+
+---
+
+## 9. Z-index scheme — extend it, never invent
+
+```
+table sticky thead    10
+filter bar            20
+gear / col wrap       30
+global search drop   900
+modal-overlay       1000   (1075 when opened from inside a slide-over)
+slideover-overlay   1050
+monitor popover     1100
+sf popovers/chooser 1200
+confirm dialog      1300
+toast               2000
+blocking overlay    2100
+```
+
+Never hand-pick `9999`. If something must sit higher, add it to this list.
+
+---
+
+## 10. Copy + content rules
+
+- Page titles: one or two words, uppercase via CSS (write them normally).
+- Column headers: short nouns, uppercase via CSS.
+- Empty states: plain sentence, no illustration — `"No things yet."` /
+  `"No results match these filters."`
+- Confirms name the count and consequence: `"Delete 3 things? This cannot be
+  undone."`
+- Toasts are terse past tense: `"Thing saved"`, `"2 things deleted"`.
+- Tooltips (`title=`) explain *why*, not *what* — every non-obvious button has
+  one.
+- No emoji anywhere in the UI.
+
+---
+
+## 11. Checklist for any new page
+
+1. Copy `page-template.html`; set the title and the `<th>` set.
+2. `renderSidebar({ logo, tagline, items, bottomItems })` on DOMContentLoaded.
+3. `new TableSF(...)` → then `setupColumnLayout(...)`.
+4. Persist filters + sort + column layout in one
+   `localStorage["<app>-prefs-<scope>-<username>"]` blob; restore before the
+   first fetch (`sf._filters = …; sf.restoreFilterUI();`).
+5. `renderPageControls(...)` after every render; `clearPageControls` on empty.
+6. Row click → slide-over; header button → modal; every mutation → `showToast`;
+   every destructive action → `await showConfirm`.
+7. `escapeHtml()` around **every** dynamic value that lands in an HTML string.
+8. Check both themes before calling it done.
+
+---
+
+# Part II — Polaris-specific surfaces (this repo only)
+
+Everything above is the **portable contract** — hand it to a new app unchanged.
+This part is the **Polaris canon**: which file in THIS repo is the reference
+implementation of each pattern, plus the surfaces Polaris built on top of the
+kit that a new app won't have (the mobile SPA, dashboard widgets, the condition
+builder, per-stream polling subtabs). It absorbed the UI half of the retired
+Primaries index in 2026-08. Read Part I for the shape; read this part for which
+file to copy.
+
+Per-pattern sections carry: **What it is** / **Canonical implementation**
+(`path/file.ts → symbolName()` — no line numbers, they drift; grep the symbol) /
+**Key conventions** / **When adding a new instance**. Per CLAUDE.md's
+commit-review rule, every commit re-reads this file for staleness — if your
+change replaced a canonical, moved its file, or invalidated a convention, fix
+it in the same commit.
+
+## Kit API → Polaris equivalent
+
+Polaris predates parts of the kit runtime, so where Part I names a kit API,
+this repo's equivalent is:
+
+| Part I names | Polaris has | Where |
+|---|---|---|
+| `polaris-ui.js` (the runtime) | `app.js` (+ `api.js` for fetch/escapeHtml) | `public/js/` |
+| `renderSidebar()` | `renderNav()` | `public/js/app.js` |
+| `renderStatusPanel()` / `setSidebarUpdate()` | `renderQueryStatus()` + the per-concern `.query-status` panels | `public/js/app.js` |
+| `getTheme` / `setTheme` / `getCurrentTheme` | `_getTheme` / `_setTheme` / `_getCurrentTheme` (same `THEMES` / `DEFAULT_THEME` / `isLightTheme` / `openThemeMenu` / `toggleTheme`) | `public/js/app.js` |
+| `brandLogoSrc` / `applyBrandLogo` / `watchBrandLogo` | `PolarisBrandLogo.resolve` / `.applyTo` / `.onThemeChange` (adds custom logos, the accent composite, favicons) | `public/js/brand-logo.js` |
+| `createWizard()` | hand-rolled steppers — the Automations 6-step builder is the canonical (see "Wizard (stepper modal)" below) | `public/js/automations-wizard.js` |
+| `polaris-ui.css` | `styles.css` | `public/css/` |
+
+Everything else in Part I (`openModal`, `showConfirm`, `showFormModal`,
+`openIntegrationModal`, `tabbedBodyHTML`/`wireModalTabs`, the form parts,
+`renderPageControls`, `showRowMenu`, `revealOverlay`, `syncSelectedRows`,
+`TableSF` + `setupColumnLayout`, `initPanelLock`, toasts) exists in Polaris
+under the same names.
 
 ---
 
@@ -169,6 +842,32 @@ Per-pattern sections:
 - Resolve a Promise from the close path so the caller can `await` the layer and branch on the result (`null`/`false` = dismissed).
 
 **When adding a new instance:** reuse `buildOverlay` — it is in `app.js`, so it is available on every page. (A DOM test that needs it cannot eval all of `app.js`, and stubbing it would make any assertion about overlay structure or z-index vacuous; `tests/fixtures/appOverlay.ts` brace-slices the real function out of `app.js` and evals just that. Note it ends in `requestAnimationFrame`, which Node does not define — without a stub it throws AFTER appending the dialog but BEFORE the click handlers attach, so every button renders inert.) Never call `openModal` from inside an open modal unless you deliberately want a replace-and-reopen flow — for that, follow `openImportPdfModal._reopen` in `assets.js`.
+
+---
+
+## Integration modal (one shape for all seven)
+
+**What it is:** Any "connect us to another system" dialog — the Add / Edit form for FortiManager, standalone FortiGate, Active Directory, Entra ID, Windows Server, vCenter and Azure Arc.
+
+**Canonical implementation:** `openIntegrationModal(cfg)` in `public/js/app.js`, driven by `_integrationTabs(ctx)` / `_INTEGRATION_REQUIRED_FIELDS` / `_productForType` / `_wireIntegrationModal` in `public/js/integrations.js`. Both flows go through it: `openCreateModal(type)` and `openEditModal(id)`.
+
+**Why it exists:** Polaris grew seven of these by hand and they drifted — two tab implementations, footers in three orders, and per-type required-field checks copy-pasted with different rules. The dialog is the same dialog every time; only the tab CONTENT differs.
+
+**Key conventions:**
+- **Title is `"<Action> <Product> Integration"`** — `Add FortiManager Integration`, never a bare `Add Integration` or `Edit Integration`. The operator picked a product to get here and the title should confirm it. `_productForType` is the one name table.
+- **Tab order: General first** (identity + connection), **Monitoring second** where it exists, then feature tabs. A concern with three fields is a section inside General, not a tab of its own.
+- **Field ids unique ACROSS tabs** (`f-host`, `f-apiToken`) so one read pass collects the whole form — a per-tab read silently drops whatever the operator never opened.
+- **Footer: `Test Connection` · `Cancel` · `Create`/`Save Changes`.** Test is a secondary on the LEFT — it's the rehearsal, not the commitment. Cancel is a wired listener, never an inline `onclick="closeModal()"`.
+- **Test is gated on `requires`, and the toast NAMES what is missing.** Never fire a request you know will fail and report the server's error as if it were news. Secret fields are dropped from `requires` on the Edit flow, where a stored secret renders blank ("leave blank to keep current") and demanding it would refuse to test an unchanged credential.
+- **Saving is never blocked on a passing test.** An operator configuring ahead of a firewall change has a legitimate reason to save something that cannot connect yet; `onSave` receives `{tested}` if it wants to act on it (the create flow uses it to inherit the result onto the new integration, so Discover isn't gated on a redundant re-test).
+- **Both buttons disable and relabel while in flight** (`Testing…`, `Creating…`) — these calls reach a remote system and can take seconds. The shell owns that, plus the try/catch that turns a throw into a toast, so `onTest` / `onSave` are plain async functions.
+- **The tab list is built ONCE per type**, by `_integrationTabs(ctx)`, and both flows walk it. Create is just Edit with an empty stored `config`, so every tab reads out of `config` and degrades to its off/default state. Two hand-maintained arrays is how a tab added to one flow silently missed the other.
+- **The shell does NOT scrape the form.** Unlike the UI kit's version, `onTest` / `onSave` read it themselves through `_formConfigForType` and the per-class block readers, which handle nested blocks, arrays and keep-current secrets.
+
+**When adding a tab or a type:**
+- Add the tab to `_integrationTabs` — once. Both flows pick it up.
+- Add the type to `_INTEGRATION_PRODUCTS`, to `_INTEGRATION_REQUIRED_FIELDS` (marking secret fields with a third `true`), and to `_NON_FORTINET_TABBED` if it carries a Monitoring tab.
+- Add its per-type wiring to `_wireIntegrationModal`, not to the flows.
 
 ---
 
@@ -420,7 +1119,7 @@ Per-pattern sections:
 - **Every visible column is explicitly pinned, never `width:auto`, and the leftover is SPREAD rather than dumped:** `fitColumnsToContainer` (scheduled after every `applyWidths`, re-run by a self-disconnecting `ResizeObserver` watching the table AND its parent — the parent because a container shrink doesn't change a fully-pinned table's own size) sizes the visible columns to sum to exactly `container content width` (writes only on change, so the observer doesn't re-fire). When the base widths sum NARROWER than the container, the slack is distributed across every resizable column **in proportion to its base width**, the rightmost visible resizable column taking the rounding residual so the right edge lands on the border. It used to hand the whole remainder to that one column, which is what left a narrow table (Users, Roles, Group Mappings) with cramped columns and one enormous last column holding all the blank space. Columns pinned to a declared width — utility `cb-col`/`fav-col` and static-width `data-col-no-resize` — are the "honor the declared width" tier: they're subtracted from the budget first and never stretch, which is why an icon-sized column (the Users table's 24px online-dot) must be marked `data-col-no-resize="true"` or it grows with everything else. Arithmetic, not measure-based, for three reasons. (1) **Scroll-clamp ratchet:** transiently clearing a column's width to "measure the auto-fill result" shrinks the table for one layout pass; when the table overflows horizontally that clamps the wrapper's `scrollLeft` and yanks the view left on every drag frame. Never transiently un-size a column (`applyWidths` doesn't touch the last one at all). (2) **Colspan first `<tbody>` row** (interfaces table's section header): an auto-width column has no per-column width basis, so fixed layout strands the leftover as a trailing gap instead of growing the column. (3) **Distribution circularity:** fixed layout spreads any un-specified remainder across *every* column, so rendered widths can't be trusted as inputs — `baseWidthOf` reads the stored/declared width first and only falls back to a rect, otherwise each pass would treat the previous stretch as the new base. The **crushed** case (base widths already sum past the container → no slack, leftover < `MIN_COL_W`) keeps every column at its base and falls back to the last column's saved/measured width so it stays visible and the wrapper's scrollbar reaches it — never a ~0px collapse whose header content paints into unreachable overflow. (`UNMEASURED_COL_W` = 40px is a different thing and not a floor: the width handed to a column that never measured at all, so it lands somewhere readable rather than at a sliver nobody chose.) `tests/unit/tableColumnFit.test.ts` pins the arithmetic (proportional spread, declared widths untouched, exact sum, re-fit after a hide, no shrink when over-committed).
 - **The floor is a 5px sliver, and the padding comes off with it.** `MIN_COL_W = 5` is the one minimum under every width `setupColumnLayout` writes — the drag clamp (both the dragged column and the neighbor it trades with), the fit pass, and `setPrefs` (so a stale or hand-edited saved width can't seed a sub-floor base for the fit pass to scale from). It's deliberately far below anything readable: the point is that a column an operator parks out of the way still *exists* and still has a grabbable handle to pull it back out, rather than reading as gone. That only renders honestly because of the companion rule — a table cell's border box can't be narrower than its own padding (`0.6rem 1rem` ≈ 33px with borders), so a column under `NARROW_COL_W` (36px) gets `padding: 1px` + `overflow: hidden` from the same generated per-table stylesheet the hidden-column rules use (`rewriteHideStyle`, keyed on DISPLAY position, rewritten only when the text actually changes because it runs on every drag frame). Without it a drag to 5px stops dead around 33px and the floor looks broken; without the `overflow: hidden` a sliver's filter control or button group paints over the neighboring column instead of being clipped by it.
 - **A drag commits the stretch first, so it tracks the pointer 1:1.** `commitStretchedWidths` (called on `mousedown`, right after `ensureAllWidthsMeasured`) folds the fit pass's rendered widths back into `widths`. Without it the delta would apply to a base that sums narrower than the container, so the divider would move by `dx × scale`. A committed base sums to the container width, so a drag creates no new slack — narrowing a column widens its neighbour, never the whole table. Only *stale* (seeded / restored) narrow widths get stretched; an operator's own layout is left alone.
-- **Fixed utility columns** (`cb-col` checkbox / `fav-col` favorite-star) are non-resizable: they get no drag handle, are skipped by `lastVisibleResizableIdx` (never the auto-fill column), and are pinned to a fixed 20px (`FIXED_COL_W`) so they never take a share of the leftover the fit pass spreads. They're also always `required` (non-hideable).
+- **Fixed utility columns** (`cb-col` checkbox / `fav-col` favorite-star) are non-resizable: they get no drag handle, are skipped by `lastVisibleResizableIdx` (never the auto-fill column), and are pinned to a fixed **34px** (`FIXED_COL_W`) so they never take a share of the leftover the fit pass spreads — a page opts one out with an inline `style="width:…"` on its `th`. They're also always `required` (non-hideable). **Set the width in `table-sf.js`, never in CSS**: under `table-layout: fixed` the `<col>` beats a stylesheet rule and the pin loop overwrites `widths[]` anyway, so a CSS width on `.cb-col` is inert. The **auto-fill (last resizable) column is floored** at `max(AUTOFILL_MIN_W = 36, its declared width)` — starved below its label's min-content it wraps one letter per line and stretches the whole `thead` to ~124px, so overflow goes to the wrapper's horizontal scroll instead (recoverable; a broken header is not). Apply that floor AFTER the crushed-table saved-width fallback, not before, or the fallback becomes unreachable and an over-committed table hands the last column 36px instead of its saved width.
 - **Static-width columns** (`data-col-no-resize="true"` on the `<th>`) are the tier between utility and resizable: no drag handle, skipped by `lastVisibleResizableIdx`, but they keep their own width rather than the 20px utility pin. That width comes from the **inline `style="width:…px"` on the `<th>`, which is the single source of truth** — always declare one, and never rely on a measured render: `thead th` sets `overflow-wrap: anywhere`, so a header's min-content is one character, and an over-committed table's auto-layout pass can crush a declared 120px column to ~40px. With no handle to drag, such a measurement used to lock in permanently (and persist via `getPrefs`), so `setupColumnLayout` now pins these columns from the declared width up front and `setPrefs` ignores saved widths for them exactly as it does for cb/fav. They're also the tier the fit pass leaves alone — declaring one is how a column says "this width is my max, don't spend leftover on me". To resize one, edit the inline width in the HTML. Use it for columns whose content is a fixed-size token — enum badges, MACs, timestamps (Assets Type / State / Status / Monitored Via / MAC Address; Events Timestamp / Level; IPAM CIDR / Version / Networks / Created / VLAN / Status / Reservations; Automations Severity / Enabled).
 - **Cell content truncates** with an ellipsis rather than wrapping. This only renders in `table-layout:fixed`, so `setupColumnLayout` **seeds fixed layout on first visible render** (`seedFixedLayout`): it measures each visible column's natural width and locks it in (utility + static-width columns are already pinned, so the seed only fills in the resizable ones). It bails when any column measures 0 (table rendered off-screen in an inactive SPA section), leaving auto-layout intact until a later visible re-render or a `setPrefs` width restore. The truncation CSS is scoped to `table[data-sf-table-id]` and exempts `.actions` (button groups keep wrapping), the cb/fav columns, and `td.cell-wrap` — the opt-in class for long-prose cells that should word-wrap inside their column width instead of ellipsizing (the Events page Message column uses it); the `.sf-label` header text ellipsizes too. Consequence: these tables no longer reflow to fill the container on window resize the way auto-layout did.
 
@@ -474,375 +1173,6 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
-## Per-instance multi-lane worker (constrained + unconstrained endpoints)
-
-**What it is:** A per-instance worker that segregates traffic to a flaky external system by endpoint family — endpoints subject to the system's parallel-connection limit ride a strict single-consumer FIFO lane (concurrency=1); endpoints without that constraint ride an unbounded lane that just tracks inflight count for observability. Distinct from a single-cap worker pool: the value is *cross-feature serialization for the constrained endpoints only*, while letting unconstrained endpoints parallelize freely.
-
-**Canonical implementation:** `FmgWorker` in [src/services/fmgWorker.ts](src/services/fmgWorker.ts). One `FmgWorker` per integration id; module-level `Map<integrationId, FmgWorker>` keyed off the integration row's id. Proxy lane (strict 1) carries `/sys/proxy/json` calls — FMG drops parallel calls past 1-2 there. Native lane (unbounded) carries every other call (`/pm/config/...`, `/dvmdb/...`, auth) — those hit FMG's own DB and have no parallel-call constraint.
-
-**Key conventions:**
-- Public API is two submit methods: `submitProxy<T>(label, task, signal): Promise<T>` (strict lane) and `submitNative<T>(label, task, signal): Promise<T>` (unbounded lane). Plus read-only `proxyQueueDepth` / `proxyInFlightLabel` / `nativeInFlightCount` for telemetry. Don't expose the queue itself.
-- Lane dispatch lives at ONE call site — the shared low-level helper that every code path funnels through (in FmgWorker's case, `rpc()` in `fortimanagerService.ts`). The helper inspects the payload (e.g. URL pattern) and routes to the right lane. Callers above the helper don't pick the lane.
-- Proxy lane: FIFO single-consumer drain loop owned by the class. AbortSignal pre-dispatch drops the entry and rejects with `AbortError(...)`. In-flight abort is the *task's* responsibility (via fetch signal threading) — the worker doesn't force-cancel.
-- Native lane: no queue, no semaphore. `submitNative` just bumps an inflight counter, awaits the task, and decrements (in a finally so throws don't leak the counter). Pre-submit abort throws `AbortError` immediately; in-flight abort is the task's responsibility via the fetch signal.
-- Lazy creation, never torn down. `getXxxWorker(id)` returns the existing worker or creates one. Workers leak on instance-delete; that's intentional (cheap; tearing down races with concurrent `getXxxWorker` callers).
-- Telemetry: proxy lane publishes queue-depth gauge + 0/1 inflight gauge so operators can spot `queue_depth>0 AND inflight=1` as "constrained lane is the bottleneck." Native lane publishes a single inflight-count gauge — sustained high values indicate genuine parallelism (good), not a bottleneck.
-- Test reset: provide a `__resetXxxWorkersForTests()` symbol so tests start with a clean registry.
-- Label is a short string used for telemetry and audit logs. Format like `"fmg.<rpcMethod>:<resourceUrl>"` — derived from the inner task, not freeform.
-
-**When adding a new instance:**
-- Identify the shared low-level helper that all callers funnel through. The lane-dispatch predicate lives ONLY in that helper. Don't scatter `submitProxy` / `submitNative` calls across high-level entry points — the next contributor will forget one.
-- Decide which endpoints belong in the constrained lane. Document the rule in the worker file's header so future code paths route correctly. For FmgWorker: `/sys/proxy/json` ⇒ proxy lane, everything else ⇒ native lane.
-- Thread the keying id (typically integrationId) through every public function that ends up calling the helper. The id flows from the route handler → service → low-level helper.
-- Public functions take the id as the LAST optional parameter so unsaved-state callers (e.g. pre-create test connection on a draft integration) can omit it; in that case the worker is bypassed and the call runs direct (no contention possible since there's no other code talking to this instance yet).
-- Wire three gauges to `src/metrics.ts`: proxy-lane queue depth (count), proxy-lane inflight (0/1), native-lane inflight (count). Keep names parallel to FmgWorker's so dashboards generalize.
-- Document the "load-bearing tests" for both lanes:
-  - Proxy lane: one proxy task A in-flight, submit proxy task B from a different feature surface, confirm B waits until A completes. This is the cross-feature-serialization invariant the constrained lane exists to enforce.
-  - Native lane: submit three native tasks simultaneously, confirm all three are started concurrently (not queued).
-  - Cross-lane independence: a blocked proxy task does NOT block native tasks, and vice versa.
-
----
-
-## Cross-asset graph derivation + persisted DAG
-
-**What it is:** A dependency / topology graph derived from heterogeneous discovery signals (controller-stamped fields + interface-name inference + LLDP), persisted as parent→child edges with a per-node BFS layer, refreshed at end of every discovery cycle, and read by both runtime logic (e.g. monitoring suppression) and the topology UI. Distinct from a per-request topology computation — persisting the DAG gives runtime callers a single source of truth without re-walking signals on every probe.
-
-**Canonical implementation:** `recomputeDependencyTree()` + `reconcileDependencySuppression()` + `propagateAfterStatusChange()` in [src/services/dependencyTreeService.ts](src/services/dependencyTreeService.ts), backed by the `AssetDependencyParent` model + `Asset.dependencyLayer` / `Asset.dependencySuppressed` columns.
-
-**Key conventions:**
-- **Pure helpers exported for tests.** `buildDependencyEdgesFromInputs(assets, interfaceEdges, lldpEdges)`, `assignLayers(assets, edges)`, `evaluateSuppression(states, parents)` are pure functions — no DB, no side effects. The DB-bound `recomputeDependencyTree` / `reconcileDependencySuppression` are thin wrappers that load inputs, call the pure helper, and write the diff. New tests cover the pure helpers; the wrappers are exercised via integration tests.
-- **Signal precedence at edge-build time.** When the same parent→child pair surfaces from multiple signals, keep the strongest. Convention (`physicalRank`): mesh (4) > interface (3) > lldp (2) > controller (1) — most-physical evidence of a real link wins the audit-trail row, with logical controller management as the weakest fallback. Implemented as a `(child|parent) → edge` map that keeps the higher-ranked signal.
-- **BFS layer assignment from a known root set, with edge pruning.** Layer-1 nodes are assigned by domain rule (here: every FortiGate). BFS outward; a candidate edge is kept only when `layer[parent] + 1 === layer[child]`. Same-layer edges (siblings, MCLAG pairs) and reverse edges are dropped. Cycles can't form once layers are settled — disconnected components or chains through unmonitored intermediates surface as `unresolved`.
-- **Persistence is replace-and-recreate per scope, not diff.** `recomputeDependencyTree(integrationId)` deletes computed rows for in-scope assets, re-inserts from `keptEdges`, updates `dependencyLayer` — all in one `prisma.$transaction`. Operator override rows (`source="override"`) are never touched. In-scope is the integration's discovered assets; out-of-scope rows are owned by another integration's recompute and left alone.
-- **…except when the pass can't be scoped, in which case DIFF.** The graph gained a second half in 2026-08: `syncEndpointDependencyEdges` attaches every non-infra asset as a LEAF (one parent, `source="endpoint"`). It can't use the per-integration scope axis — an endpoint's upstream device is resolved from its own columns against the global infra inventory, and most endpoints are discovered by an integration that never calls the recompute — so it runs fleet-wide on every finalize and writes a diff instead (insert missing / delete gone / retype a changed `detectedVia` / stamp the layer only where it differs). Two reasons to prefer that shape over delete-replace once the scope axis is gone: a fleet-wide delete-replace on every discovery finalize rewrites the whole table several times an hour for rows that change only when a device moves ports (dead-tuple churn the capacity advisor then reports on), and concurrent finalizes computing the same answer can't churn each other's rows. **Use a distinct `source` value per half** — it keeps each pass's delete-scope from touching another's rows, and makes a whole half revertible with one DELETE.
-- **A leaf half attaches with ONE parent, and that's a semantic decision, not a simplification.** The multi-parent rule here is all-down, which models REDUNDANT parents (a dual-homed switch). Series relationships — an endpoint under an access switch under a gate — must NOT be expressed by listing both: "some parent is ok" would then be satisfied by the healthy gate while the switch the device actually hangs off is dead. Resolve the most-specific parent only and let the chain do the rest (the switch is itself suppressed by its gate). Whenever you add a signal to such a half, it takes a place in the precedence ladder rather than becoming a co-parent.
-- **Override resolution at read time.** When loading effective parents, "if any override row exists for an asset, use the override set; else use the computed set." Empty override set = explicit "no parents" pin. Read-time resolution avoids any write coupling between operator edits and discovery cycles.
-- **Reconciler is the source of truth for runtime state; event hook is a latency optimization.** The 60s `reconcileDependencySuppression()` walks every monitored asset in BFS layer order, computes desired suppression under the domain rule (here: all-down multi-parent), writes only diffs. The event hook (`propagateAfterStatusChange`) calls the same reconciler on every probe-result transition for sub-second propagation, but correctness never depends on it firing — server restart mid-transition / race / dropped event are all caught by the next periodic tick.
-- **Discovery hook runs at the END of the discovery function**, after all asset writes and projection-apply phases — not interleaved. Gated on `mode in {full, finalize}` so per-device skip-deprecation passes don't trigger partial recomputes.
-- **One-shot startup backfill** (`backfillDependencyTree.ts`) runs `recomputeDependencyTree()` 30 s after boot so existing installs see populated rows without waiting for the next scheduled discovery cycle.
-
-**When adding a new instance:**
-- Identify your domain's "layer-1 root rule" (here: assetType === "firewall"). Hardcoded in the BFS layer assigner; write tests that cover the orphan case (no path from any root → null layer).
-- Define your edge-strength order over the available signals. Document it in the service header comment so future contributors don't re-litigate which signal wins.
-- Pick the "in-scope" axis for incremental recompute (here: `discoveredByIntegrationId`). The full graph load is cheap; the per-scope writeback is what matters for keeping cycles isolated to the active integration's writes.
-- Pure helpers go in the service file with explicit `export`. DB-bound wrappers stay in the same file but mark them clearly with a comment header so test contributors know which functions to mock vs which to call directly.
-- Add a TOUCHES.md cross-cutting section on day one — runtime callers and UI surfaces will discover the DAG quickly and reach for it; the index keeps the writers/readers visible.
-
----
-
-## Setting-backed admin CRUD with periodic + on-demand reconciler
-
-**What it is:** A small, admin-managed collection of configuration objects (allocation templates, map regions, …) persisted as a JSON blob in the `Setting` table, with a CRUD API and an optional reconciler that propagates each object's effects through the rest of the system. The reconciler runs inline on every CRUD edit (so operators see immediate effect) AND on a periodic safety-net job (so anything the inline path missed gets caught — restart mid-edit, external state drift, etc.).
-
-**Canonical implementations (parallel):**
-- **No reconciler** (storage-only): `allocationTemplateService` in [src/services/allocationTemplateService.ts](src/services/allocationTemplateService.ts) + [src/api/routes/allocationTemplates.ts](src/api/routes/allocationTemplates.ts).
-- **With reconciler** (storage + side effects on other entities): `mapRegionService` in [src/services/mapRegionService.ts](src/services/mapRegionService.ts) + [src/api/routes/mapRegions.ts](src/api/routes/mapRegions.ts) + [src/jobs/reconcileMapRegions.ts](src/jobs/reconcileMapRegions.ts).
-- **Single scalar setting, not a collection** (one operator-set value the whole install reads): `assetSourcePriorityService` in [src/services/assetSourcePriorityService.ts](src/services/assetSourcePriorityService.ts), second instance `reservationMacService` in [src/services/reservationMacService.ts](src/services/reservationMacService.ts). Shape: `createSettingStore` from [src/services/settingsStore.ts](src/services/settingsStore.ts) (TTL-cached, per-process) + a **pure normalizer** + `logEvent` on save. The split that matters: the READ path self-heals an unusable stored value to the default so a drifted row can never throw on a hot path, while the WRITE path throws `AppError(400)` — an operator typing something invalid needs to hear why, not watch it silently revert. Cross-process propagation is bounded by the TTL; if another role must see the change at a defined moment instead, add an explicit refresh at that moment (`refreshProjectionPriority` at the top of every discovery run).
-
-**Key conventions:**
-- **Storage shape.** Single `Setting` row keyed on a stable string (`"networkAllocationTemplates"`, `"mapRegions"`); the `value` JSON is an array of records each carrying its own UUID id (don't store as an object map keyed by id — operators reorder, services iterate, an array preserves intent). Helpers `loadAll()` / `persistAll()` go through `prisma.setting.upsert`.
-- **Validation lives in the service, not the route.** Route uses a Zod schema for shape + obvious bounds; service re-validates and throws `AppError(400 | 404 | 409)` for semantic rules (uniqueness, cross-record consistency). The service is the source of truth so non-route callers (jobs, other services) get the same protection.
-- **Uniqueness on user-visible names is case-insensitive.** Block renames onto another record's name with a 409. Don't rely on Postgres uniqueness — the Setting JSON has none.
-- **Reconciler removals are provenance-bounded.** Inline reconciler runs after every create/update/delete (await before responding so the operator sees consistent state on the next page load). When the reconciled effect must also UNDO itself as the world changes (a device moves out of a region), record every add in a provenance table and strip only recorded pairs — never "every row carrying the value", which destroys operator hand-edits. Two instances of the pattern: `tagAssignmentService` + `TagAutoAssignment` (criteria tags) and `mapRegionService` + `RegionTagAssignment` (region tags; keyed by record id, not tag name, so a rename doesn't disturb it, with a targetType because subnets are targets too). Wholesale cleanup (rename, delete) stays owned by the route handler's dedicated helpers. Add BEFORE recording provenance, so a crash between the two errs toward operator-owned rather than toward stripping a value that was never written.
-- **Audit trail.** Each CRUD route writes a `<resource>.<verb>` Event via `logEvent()` (`region.created` / `region.updated` / `region.deleted`); the reconciler writes a separate `<resource>.tags_reconciled`-style event when something actually changed (don't spam events on no-op cycles). Inline reconcile events are children of the CRUD event; periodic ones stand alone.
-- **Auth gate.** `requireNetworkAdmin` (or `requireAdmin` for a more sensitive surface) at the route mount — pick the gate that matches the audience that should be able to see + edit. If the surface only renders while editing (e.g. map regions), gate read access too so non-editors never need the data.
-- **Tag registry mirror (when applicable).** If the reconciled effect is "stamp a tag onto assets," upsert a corresponding `Tag` registry row on create, rotate it on rename, delete it on delete. Operators expect managed tags to appear in the same picker as manual tags.
-
-**When adding a new instance:**
-- Pick a unique `Setting` key. Document it in CLAUDE.md's Setting "Notable keys" list.
-- Mirror the public service API to `allocationTemplateService` (storage-only) or `mapRegionService` (with reconciler) — pick the closer one and copy its shape verbatim.
-- Service-level uniqueness validation must run before persistence. Tests cover the create-create / update-rename collision.
-- If you have a reconciler: provide three entry points — `applyOne(record)` (used inline by create / polygon-only update; two-way when provenance-backed), `applyRename(record, previousName)` (rename branch), `applyDelete(record)` (delete branch), and `reconcileAll()` (periodic + discovery hook). Periodic job uses `reconcileAll()`; never call the rename/delete helpers from there (those are CRUD-only).
-- Add a TOUCHES.md `services/<feature>.ts` section for the service AND a cross-cutting section if your reconciler writes to a shared namespace (e.g. asset tags). The index keeps the additive vs authoritative writer split visible.
-
----
-
-## Serialized check-then-insert (per-scope advisory lock + DB backstop)
-
-**What it is:** An invariant that can only be enforced by reading existing rows, deciding, then inserting — "no overlapping subnets in this block", "no second active X for this Y". A plain `findMany` + decide + `create` is a race: two concurrent requests both read the pre-insert state, both pass, both insert. Wrapping it in a transaction gives ATOMICITY but not ISOLATION — at Postgres READ COMMITTED (the default, and never overridden in this codebase) an in-transaction re-read still cannot see another transaction's uncommitted rows and takes no locks.
-
-**Canonical implementation:** `lockBlockForSubnetWrites` + `createSubnetRowChecked` in [src/services/subnetService.ts](src/services/subnetService.ts), with the DB backstop in [prisma/migrations/20260806000000_subnet_block_cidr_unique](prisma/migrations/20260806000000_subnet_block_cidr_unique/migration.sql) and the self-heal in [src/jobs/enforceSubnetUniqueIndex.ts](src/jobs/enforceSubnetUniqueIndex.ts). Callers: `createSubnet`, `allocateNextSubnet`, `bulkAllocate`, and the DHCP-discovery create in `discoveryEngine`.
-
-**Key conventions:**
-- **One lock primitive, one guarded-insert seam.** Export `lock<Scope>ForWrites(tx, scopeId)` for batch writers that already own a transaction and insert many rows under one lock, and `create<Row>Checked(data)` for single-row writers (its own transaction: lock, re-read, re-decide, insert). Every writer must go through one of them — a single bare `prisma.x.create` re-opens the race, so the invariant is only as strong as its least careful caller. Discovery counts as a caller: it runs in its own process, concurrently with the web UI.
-- **Lock, THEN read.** The advisory lock must be the FIRST statement inside the transaction, before the read whose result the decision depends on. A lock taken after the read is decorative. Assert the ordering in a test (`prisma.$executeRaw.mock.invocationCallOrder[0] < prisma.x.findMany.mock.invocationCallOrder[0]`) — it is the kind of thing a later refactor silently reorders.
-- **`pg_advisory_xact_lock(classid, objid)`, not the session form.** The xact form releases on commit OR rollback with no unlock bookkeeping to leak. `classid` partitions namespaces so two unrelated lock users can never collide on a coincidentally-equal objid — allocate a new one per feature and comment it next to the existing values (`0x504c5253` "PLRS" = retention prune in `monitoringService.ts`, `0x504c5254` "PLRT" = subnet writes). `objid = hashtext(scopeId)`; a hash collision only makes two unrelated scopes briefly serialize, which is harmless.
-- **Lock the narrowest scope that makes the invariant safe.** Per-block, not global — unrelated blocks stay fully parallel.
-- **Add a DB constraint as the backstop, even a partial one.** A UNIQUE index catches the exact-duplicate case (which is the usual race outcome) even from a future path that forgets the lock. Where the full invariant is not expressible as a constraint, say so in the migration and the service header rather than leaving the reader to wonder: stock PostgreSQL has no GiST-indexable `&&` for `inet`/`cidr`, so a general overlap exclusion constraint does not build without a third-party extension.
-- **A constraint that existing data violates must not fail the migration.** Detect the violation, `RAISE WARNING` naming the offending rows, skip creation, and ship a NOT-marker-guarded startup job that retries every boot so the constraint appears on its own once an operator cleans up. Failing the migration blocks the whole upgrade over historical data.
-- **Translate the constraint violation into the service's normal error.** Catch `err.code === "P2002"` at the seam and rethrow the same `AppError(409, …)` the in-transaction check raises, so callers see one error shape.
-- **A "give me any free X" caller should RETRY, not 409.** `allocateNextSubnet` picks a CIDR outside the lock, so a concurrent writer can take it; a 409 would be the wrong answer to "any free /24". Re-pick against committed state and try again (bounded attempts), and only retry the overlap/duplicate 409 — a genuine "scope full" 409 returns immediately.
-
-**When adding a new instance:**
-- Grep for every writer of the table BEFORE you start; the one you miss is the one that breaks the invariant.
-- Allocate a new advisory-lock `classid` and comment it beside the existing ones.
-- Unit-test with a mocked `$transaction` that runs its callback against the same mock, so the lock-then-read-then-insert ordering is observable.
-- Note the invariant in CLAUDE.md's Business Rules list, pointing at the seam functions by name so the next author knows not to call `create` directly.
-
----
-
-## Encrypt-at-rest for a JSON config column
-
-**What it is:** Secrets stored inside a JSON column (device credentials, integration API keys, outbound-channel secrets) that must not be readable from a `pg_dump`, a volume snapshot, or a psql session. Masking on the API read path is a UI courtesy, not encryption.
-
-**Canonical implementation:** [src/utils/secretBox.ts](src/utils/secretBox.ts) (seal/open) + [src/utils/configSecretFields.ts](src/utils/configSecretFields.ts) (which keys, and the walks) + the two extension layers in [src/db.ts](src/db.ts) — per-model `secretHooks()` for seal-on-write, all-models `openNestedSecrets` for open-on-read — + [src/jobs/backfillSecretEncryption.ts](src/jobs/backfillSecretEncryption.ts) (converts existing rows). Covers `Credential.config`, `Integration.config`, `NotificationChannel.config`, `Setting.value`. Unit tests: [tests/unit/secretBox.test.ts](tests/unit/secretBox.test.ts) (the envelope) + [tests/unit/secretsAtRest.test.ts](tests/unit/secretsAtRest.test.ts) (the walks).
-
-**Key conventions:**
-- **Enforce in the Prisma extension, not the service.** The extension is the one seam every caller passes through. Several legacy route files still read these models with inline `prisma.x.findUnique` (see the interim-state note in CLAUDE.md), and encrypting at the service layer leaves those reading ciphertext.
-- **Seal per model; OPEN across all models.** Sealing has to know which JSON column of which model it is rewriting, so it registers per model. Opening does not — and must not, because **Prisma query extensions fire for TOP-LEVEL operations only**. `asset.findUnique({ include: { monitorCredential: true } })` runs the `asset` hooks and never the `credential` ones, so a per-model open returns ciphertext for every relation read: the monitor hot path's credentials, reservation push's FortiGate token, description sync's integration. That shipped, and it broke SNMP / WinRM / SSH / FortiOS polling and DHCP push on the first install to set the key, while top-level readers (SNMP Walk tab, credential Test, discovery) kept working — a confusing split to debug from. The open pass is therefore its own `$extends` layer over `$allModels.$allOperations`, walking whole results. Two things make that affordable and safe: a read-only `containsSecretField` pre-scan so the rebuild only runs on results that actually carry a sealed value (~2.5 ms worst case on a 2000-row × 40-column result, zero allocation otherwise), and an `isWalkable` plain-object check so the rebuild does not turn `Date` / `Buffer` / `Decimal` columns into `{}`. Giving the layer an explicitly-typed callback keeps Prisma's result types fully intact — verify with a probe file that assigns a model field to the wrong type and confirm `tsc` still errors.
-- **Seal values, not rows.** Non-secret fields in the same blob stay queryable, which matters: `monitorOverrideService` reads `integrations.config #>> '{fortigateMonitor,addAsMonitored}'` in raw SQL. Raw SQL bypasses the extension entirely — enumerate the raw readers of the column and confirm none of them touch a secret field.
-- **Field list is a NAME UNION, not per-type.** The services keep their per-type lists for MASKING; encryption deliberately does not reuse them. A per-type list that MISSES a field stores a real secret in plaintext silently; a union that includes a field which happens not to be secret for some type merely encrypts a harmless value. Over-sealing is a non-event, under-sealing is the bug.
-- **Self-describing token, so plaintext and sealed coexist.** `psec:v1:<iv>:<tag>:<ct>`. `sealValue` is idempotent (no-ops on already-sealed input) and `openValue` passes plaintext through, which is what lets a partially-backfilled install work — and what lets the backfill be safely re-runnable.
-- **Fresh IV per value.** Deterministic ciphertext would leak "these two devices share a community string" to anyone reading the dump.
-- **Key absent must mean PRE-FEATURE behavior, not breakage.** With no key, sealing is a no-op and values store as plaintext exactly as before. An in-app update that made a new env var mandatory would leave installs unable to reach their own devices. Surface the absence as a capacity watch reason plus a boot warning instead.
-- **The open path must never throw.** A wrong or missing key logs once per process and returns `""`, so a key mismatch degrades to "this credential stopped authenticating" (diagnosable, fixable by re-entering it) rather than an exception on every monitor tick.
-- **Backfill is NOT marker-guarded.** The key may be configured later than the upgrade that ships the code, so the job must retry on later boots. It reads through the UNEXTENDED client (`prismaBase`) because it has to see the RAW stored value to tell sealed from unsealed, and writes through the extended one.
-
-**When adding a new instance:**
-- Add the JSON key to `SECRET_CONFIG_KEYS` in the SAME change as the masking entry, and the model to `SECRET_BEARING_MODELS` + `secretJsonFieldFor` + the `secretHooks()` registration in db.ts. A model in the registry without a hook never gets SEALED on write (reads still open, since that layer is model-agnostic).
-- Confirm no raw SQL reads that column's secret fields.
-- Document the key-loss consequence wherever the operator will look: `.env.example`, `docs/INSTALL.md`, and the capacity reason's suggestion text.
-
----
-
-## Server-generated keypair (private half never leaves the server)
-
-**What it is:** Polaris mints an asymmetric keypair itself, stores the private half sealed, and hands out only the public half. Better than asking the operator to generate one and paste it in: the private key never exists in a browser, a clipboard, a ticket, or a file on someone's laptop.
-
-**Canonical implementations:** [src/services/windowsSshOnboardingService.ts](src/services/windowsSshOnboardingService.ts) `generateKeypair` (SSH deployment key → `Credential.config`) and [src/services/notificationChannelService.ts](src/services/notificationChannelService.ts) `generateVapidKeys` (Web Push VAPID → `NotificationChannel.config`). Frontend: the confirm-gated Regenerate button — `ch-gen-vapid` in [public/js/automations.js](public/js/automations.js), `wssh-generate` in [public/js/agent-ssh-onboarding.js](public/js/agent-ssh-onboarding.js). Tests: [tests/unit/windowsSshOnboarding.test.ts](tests/unit/windowsSshOnboarding.test.ts).
-
-**Key conventions:**
-- **No read path returns the private half — ever.** Return the public key plus a `<field>Set: true` marker or a fingerprint. Resist a "show it once at generation" affordance: it re-introduces the browser/clipboard/screenshot exposure the pattern exists to remove, in exchange for an escrow copy nobody reliably keeps.
-- **Say the recovery story out loud, in the UI.** There is no escrow, so losing the sealing key (or restoring a backup onto a host with a different `POLARIS_SECRET_KEY`) means regenerate. That is acceptable only if regeneration is cheap — which is why the artifact the public half feeds (an onboarding script, a subscription registration) must be **idempotent and re-runnable**.
-- **The public half is NOT a secret — keep it out of the masking list.** Masking it means you cannot re-render whatever consumes it without rotating the key, which for a fleet-wide key means re-touching every endpoint. (`SshConfig.publicKey` is deliberately absent from `SECRET_FIELDS_BY_TYPE.ssh`.)
-- **Generate BEFORE creating the row when validation demands the secret.** `validateSshConfig` requires a password or a private key, so there is no "create empty, then key it" path.
-- **Rotation replaces the config; it cannot merge.** `mergeConfigPreservingSecrets` treats an empty string for a secret field as "keep the stored value" (that is what lets an edit modal round-trip a mask), so a merge can never CLEAR a now-stale sibling secret. Call `validateConfig` explicitly and write the whole config.
-- **Stamp rotation at `warning` level.** Rotating invalidates every peer that trusts the old key until they are re-provisioned; that belongs in the audit log at a level that stands out.
-- **Confirm-gate the Regenerate button** and spell out the blast radius in the confirm text, not just a hint below it.
-- Verify the generated key round-trips through the SAME parser the consuming path uses (`sshUtils.parseKey` here) and fail loudly at generation rather than shipping a credential that silently never authenticates.
-
-**When adding a new instance:** pick the library's own generator over shelling out (`ssh2`'s `utils.generateKeyPairSync` already emits the OpenSSH format `ssh2.connect` accepts — no conversion, no `ssh-keygen` dependency). Watch CJS interop: ssh2 is CommonJS and cjs-module-lexer surfaces `Client` but **not** `utils`, so `import { utils } from "ssh2"` throws at module load under Node's real ESM loader while passing cleanly under Vitest — import off the default export.
-
----
-
-## Prometheus metric instrumentation
-
-**What it is:** Adding a new metric (counter / gauge / histogram) or instrumenting a new code path with an existing one. Single Registry singleton + helper functions per metric — callers never import metric objects directly. Default Node.js metrics from `prom-client.collectDefaultMetrics` are registered alongside Polaris-specific ones, all under one `/metrics` endpoint.
-
-**Canonical implementation:** [src/metrics.ts](src/metrics.ts) — every metric is defined here with its labels, buckets (for histograms), and a typed helper export (e.g. `recordProbe`, `setDbPoolGauges`, `startSampleWriteTimer`). Mounted at `/metrics` in [src/app.ts](src/app.ts) with optional `METRICS_TOKEN` Bearer-token auth. For periodic-job timing, [src/jobs/_metrics.ts](src/jobs/_metrics.ts) exports `runInstrumentedJob(name, fn)` — every job in `src/jobs/` wraps its tick body in this helper.
-
-**Key conventions:**
-- **One Registry singleton.** `registry = new Registry()` at module top; `collectDefaultMetrics({ register: registry })` runs at module load. Never create a second registry — `prom-client`'s global registry is intentionally not used.
-- **Helpers, not raw metric objects.** Every metric gets a typed helper: `startXTimer()` / `recordX(...)` / `setX(...)`. Callers never `import { someHistogram }` — they import the helper. This localizes label changes / renames / bucket tweaks to one file. The metric object itself is module-private.
-- **Cardinality discipline.** Only bounded label sets cross the boundary: `cadence` (4 values), `transport` (5), `outcome` (2-3), `status` (3), `queue` (4), `state` (3), `severity` (4), `mode` (2), `table` (~8), `route` (matched Express template, not URL), `status_class` (4), `job` (~25), `volume` + `roles` (per-host, ~4), `integration_type` (~6). The only intentionally-unbounded label is `integrationId` (counted in dozens, justified by per-integration FMG worker isolation).
-- **Histogram buckets are explicit, not default.** Pick buckets that span the actual operation's latency range — defaults from `prom-client` (0.005 .. 10) waste resolution on most Polaris operations. Pass-duration buckets go up to 900 s; probe buckets go down to 0.01 s; HTTP buckets fit between.
-- **Cursor/pg-boss mode mutual-exclusion is explicit.** Mode-specific metrics (`polaris_monitor_queue_depth` cursor-only, `polaris_pgboss_*` pg-boss-only) keep emitting in the inactive mode but stay at 0. Use `polaris_monitor_queue_mode{mode}` to pick which family is authoritative.
-- **`.reset()` before re-stamping volatile label sets.** When the set of label values is computed each tick (volumes from statfs, sample tables from pg_class), call `metric.reset()` first so dropped values don't leave orphan series. Don't `.reset()` for stable label sets (cadences, transports, queues).
-- **Histograms observe successful work only.** Failures / aborts / errors increment a counter (`polaris_*_total{outcome}`) without polluting the latency distribution. Achieved by structuring the helper as `startTimer() ... await op() ... stop()` — a throw before `stop()` drops the observation.
-- **HTTP middleware uses `req.route?.path` at finish time.** Captured in `res.once("finish", ...)` so the Express router has had a chance to match. Unmatched paths roll up to `"unmatched"`. Combine with `req.baseUrl` for routers mounted on a sub-path. `/metrics` and `/health` are explicitly skipped so scrape requests don't show up as application traffic.
-- **`runInstrumentedJob(name, fn)` for periodic jobs.** Wraps the tick body without changing existing error semantics — thrown errors propagate to the caller's existing try/catch. Job names are stable, machine-readable identifiers; multi-tick modules use `<module>.<loop>` (e.g. `monitorAssets.probe` / `monitorAssets.heavy`).
-- **Documentation in two places.** Every new metric family gets a one-paragraph entry in CLAUDE.md's Observability section AND a writers/readers/invariants entry in `TOUCHES.md`'s `cross-cutting/observability-metrics`.
-
-**When adding a new metric:**
-- Define the metric object + helpers in `src/metrics.ts`. Helpers go right after the definitions, in the existing `// ─── Helpers ───` block.
-- Decide on histogram buckets by walking through the actual range the operation can take. Powers-of-10 spaced for >1s metrics, 0.005/0.025/0.1/0.5/1/5 for HTTP-class metrics, 0.01..15 for probe-class.
-- Consider cardinality before adding a label. If the value is per-asset / per-row / per-UUID, push it into the histogram buckets or aggregate it by class instead.
-- Wire the helper into the call site. ONE call site per metric family if possible — the FMG worker's queue-depth gauge is updated only inside `FmgWorker`, not elsewhere; the discovery duration histogram fires only at the `recordSample()` callsite.
-- Add the documentation entries (CLAUDE.md Observability + TOUCHES.md cross-cutting/observability-metrics) in the same commit.
-
-**When instrumenting a new job:**
-- Wrap the tick body in `runInstrumentedJob("name", async () => { ... })`. Keep the existing outer try/catch for error logging — the helper's catch re-throws so log paths are preserved.
-- Pick a stable, machine-readable name (no spaces, no version suffixes, no UUIDs). One-shot startup migrations use the module basename; multi-tick modules use `<module>.<loop>`.
-- If the new job ships with the same commit that adds an unrelated capability, the metric label is one observation that confirms the job is actually firing on a real install — useful smoke check during the first deploy.
-
----
-
-## Current-state table refreshed per scrape (delete-replace)
-
-**Canonical:** `persistPhysicalEntities` / `persistMacTable` / `persistTrunkMembers` in `src/services/monitoringService.ts`; `persistFortigateArpTables` in `src/services/arpTableService.ts` (the discovery-cadence variant, below); `persistInterfaces` in `src/services/interfaceInventoryService.ts` (the fullest worked example — it has its own service, tests and a backfill job).
-
-Use this when the device reports a SET that replaces the previous one and history answers no question worth storing: an interface list, an FDB table, an FRU inventory, LLDP neighbours, SD-WAN rules. The tell is that every consumer asks "what is it now?" — if you find yourself writing `DISTINCT ON (assetId, key) ORDER BY timestamp DESC` against a hypertable, you wanted this table, not that one.
-
-The shape:
-
-- **Plain table with a real FK to Asset** (`onDelete: Cascade`), `@@unique([assetId, <key>])`, `@@index([assetId])`. The no-foreign-key rule is hypertables-only — this deliberately is not one. Not a retention entity, not pruned, not in `sampleWriteBuffer` / `sampleRollupService` / `sampleRetentionService` / `timescaleService` / `capacityService`.
-- **Delete-then-`createMany` in ONE `$transaction`.** A concurrent reader must see the old set or the new set, never an empty intermediate — these tables back UI tables, and an empty read renders as "this device has nothing". Wrap in `retryOnDeadlock` if the writer can run concurrently per asset. An empty incoming array is a legal delete-only transaction: `...(rows.length > 0 ? [createMany] : [])`.
-- **`firstSeen` / `lastSeen`.** Pre-read the existing rows into a Map and carry `firstSeen` forward for a key still present, resetting when it disappears and returns (or when its identity changes — `persistPhysicalEntities` resets on a serial change, i.e. a module swap). `lastSeen` is the SCRAPE's timestamp, never `now`, so a backfilled or stale row is identifiable.
-- **`undefined` preserves, `[]` wipes** — enforced by the CALLER via `Array.isArray(...)`, never a truthiness check, so "the transport can't supply this" and "the device has none" stay distinguishable. Note the one deliberate exception: `persistInterfaces` callers skip an empty array instead of wiping, because an empty interface list is ambiguous (a FortiOS token without monitor scope answers `200 OK` with empty results) and blanking the System tab is the worse failure. Decide which case you're in and say so in a comment.
-- **Cap rows per asset with a LOUD warn**, counting drops rather than slicing silently. A partial set that looks complete is worse than a truncated one an operator knows about.
-- **Dedupe the incoming rows on the unique key** if the device can repeat one — otherwise a single duplicate aborts an entire otherwise-good scrape.
-- **Instrumentation triple** at the call site: `startSampleWriteTimer("<table>")` + `startPhase("systeminfo.persist.<name>")` + `end({ count })`.
-- **Watch for a second write cadence.** Every precedent has exactly one writer. `AssetInterface` has two candidates — the full system-info pass and the fast pinned re-walk — and only the full pass may write, because the fast pass sees a filtered subset (a delete-replace from it would wipe everything outside that subset) and leaves some columns null. If your stream has a fast path, decide this explicitly.
-
-**The discovery-cadence variant** (`persistFortigateArpTables` in `src/services/arpTableService.ts`, the first of these written from a discovery run rather than a monitor scrape) changes one thing about the shape above: **what "this device answered" means**. (That table has since moved to accumulate+age and gained a second writer — see the note at the end of this section — but the did-query problem below is what any discovery-sourced current-state table still has to solve.) A monitor scrape persists what one collector just returned for one asset, so `undefined` vs `[]` is decided right there. A discovery run collects for the whole fleet into one flat array and syncs it in a single pass, so "no rows for gate X" is ambiguous by construction — X could hold no neighbours, or its live read could have failed (offline behind an FMG proxy, admin profile without monitor scope, run aborted mid-fleet). Row presence cannot answer that. So the collector carries a per-device **did-query flag** (`didArpQuery` → `DiscoveryResult.arpQueriedDevices`, set on a clean response BEFORE the row count is known and forced false for an offline device), and the writer delete-replaces only the devices on that list. If you add another discovery-sourced current-state table, add the flag with it — deriving the scope from which devices have rows is the one shortcut that silently blanks a healthy device's tab. Two other differences worth copying: the fleet-wide read that resolves device → asset is done ONCE for the whole batch rather than per device, so the write cost tracks the device count rather than the asset count; and the instrumentation triple above does not apply, since the timing is already covered by the sync's own `phaseMark`.
-
-**When history is wanted, this pattern is the wrong one — switch to accumulate + age.** `AssetArpEntry` did exactly that once the ARP Table tab needed time ranges: `INSERT … ON CONFLICT DO UPDATE` bumping `lastSeen` with `firstSeen` left out of the update list, plus a flat retention entity pruning on `lastSeen`. Three consequences worth knowing before you copy it. (1) Volume is per DISTINCT ROW, not per scrape — a binding present all month is one row, where a snapshot table at a 600 s cadence would be ~52M rows/month across 40 devices. (2) The delete-replace rule that a second writer is dangerous **inverts**: two cadences can safely write the same accumulate table, because each bumps what it saw and touches nothing else, which is what let the 600 s monitor pass and the 12 h discovery pass coexist. (3) A nullable column in the business key becomes a bug — Postgres treats NULLs as DISTINCT, so `ON CONFLICT` never matches those rows and each poll inserts another; use a `""` sentinel and map it back at the API boundary. History is an INTERVAL, not a timeline: anything that appears and disappears between two polls is never recorded at all, which is a limitation the UI has to state rather than hide.
-
-`persistLldpNeighbors` is the **exception, not the template**: it does a keyed diff with a 48h sticky window because a missed LLDP advertisement shouldn't drop a neighbour. Don't copy it unless you have that same failure mode.
-
-Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree line (both enforced by `npm run check:docs`), and a `## services/<name>.ts` TOUCHES.md entry.
-
----
-
-## High-volume append-only time-series writes (batch-flush buffer)
-
-**What it is:** Persistent time-series tables that receive many small writes from a hot loop. Per-row `prisma.<table>.create()` calls each consume one Prisma pool connection, and at high concurrency the pool fills before the operation matters. The canonical fix is an in-memory per-table buffer with a periodic flush — accumulate rows, then issue one `createMany` per N-second window.
-
-**Canonical implementation:** [src/services/sampleWriteBuffer.ts](src/services/sampleWriteBuffer.ts) — handles the eight monitor sample tables (`asset_monitor_samples`, `asset_telemetry_samples`, `asset_hardware_sensor_samples`, `asset_interface_samples`, `asset_storage_samples`, `asset_ipsec_tunnel_samples`, `asset_perf_sla_samples`, `asset_sdwan_rule_samples`). Boot wiring in [src/app.ts](src/app.ts) — `startSampleWriteBuffer()` after queue init, `shutdownFlushSampleBuffers()` awaited in the SIGTERM/SIGINT hook. The two SD-WAN streams (added 2026-06) are the most recent end-to-end worked example — see `TOUCHES.md → SD-WAN stream change-checklist`.
-
-**Key conventions:**
-- **Append-only tables only.** Conflict-handling, dedupe, and per-asset replace semantics break the model. If you need to overwrite or delete prior rows, do that synchronously in the caller before the enqueue (cf. `recordSystemInfoResult`, which keeps the `$transaction` for `assetAssociatedIp` and the per-asset replace in `persistLldpNeighbors` synchronous). A third contract exists for **accumulate+age** tables (rows upsert on a business key bumping `lastSeen` — behind a churn gate — with `firstSeen` preserved, and a fixed-window prune instead of delete-replace): the canonical is `persistProcessConnections` in [src/services/monitoringService.ts](src/services/monitoringService.ts) (`asset_process_connections`) — one batched `INSERT … ON CONFLICT (business key) DO UPDATE SET lastSeen … WHERE lastSeen < EXCLUDED.lastSeen - interval 'N minutes'`, JS-side dedup first (duplicate tuples in one statement raise "cannot affect row a second time"), sentinel-filled NOT NULL key columns (Postgres NULLs are distinct in unique indexes), and deliberately NO index on `lastSeen` so bumps stay HOT.
-- **Buffer is sync to enqueue, async to flush.** The hot loop calls `enqueue*(row)` and returns immediately — no await on the buffer. The flush is fire-and-forget, driven by `setInterval` and a per-table size threshold (5,000 rows in this implementation).
-- **Snapshot the array up front.** `flushTable` splices the buffer into a local snapshot before the `await prisma.<table>.createMany` so concurrent enqueues during the awaited write land in a fresh array. On retry-exhausted failure, re-prepend the snapshot for the next tick.
-- **Per-table flush guard.** A `flushing[key]` boolean prevents re-entry on the same table — a 2 s tick that fires while a slow flush is still mid-write becomes a no-op for that table.
-- **Use `retryOnDeadlock` from `src/utils/dbRetry.ts`.** Postgres deadlocks (SQLSTATE 40P01) on bulk insert are rare but real; the retry helper covers them with jittered backoff.
-- **Trade-off documented in code:** up to one flush-interval of data is lost on hard crash. For STATE writes (per-asset replace, last-write-wins, threshold counters that need read-your-writes) use the parallel pattern in [src/services/probePatchBuffer.ts](src/services/probePatchBuffer.ts) instead — same `setInterval` shape, but a `Map<id, patch>` instead of an array, merge-on-enqueue, and one `UPDATE … FROM (VALUES …)` per flush instead of `createMany`. The two buffers are intentionally separate because the contracts are incompatible: append-only forbids dedupe, replace requires it.
-- **Instrument both flush duration and depth.** `polaris_sample_write_duration_seconds{table}` (histogram) wrapping each flush + `polaris_sample_buffer_depth{table}` (gauge) updated on every enqueue and flush — the pair distinguishes "flush is slow" from "enqueue rate exceeds flush throughput".
-- **SIGTERM-safe.** Exported `shutdown*` function clears the timer and runs one final `flushAllSampleBuffers()`. Awaited from the graceful-shutdown hook in `app.ts` so a restart doesn't drop the in-flight buffer.
-- **Test hooks under `__test__`.** Expose `getBufferDepth(key)` and `reset()` so unit tests can verify buffer state without exposing the buffers themselves to production callers.
-
-**When adding a new table:**
-- Append a `BufferKey`, a `TABLE_LABEL` entry, an `enqueueXxx` helper, and a `writeBatch` switch arm — five touch points in one file. Tests mirror the same shape.
-- Confirm the new table is append-only with no FK on `(assetId, ...)` that requires per-row uniqueness mid-flush; if it does, you probably want synchronous semantics (LLDP-style) instead.
-- Update `TOUCHES.md`'s `services/sampleWriteBuffer.ts` entry's Writers list to name the new caller.
-
----
-
-## Tiered time-series rollups (hourly + daily aggregates over detail samples)
-
-**What it is:** Long-range chart queries that would otherwise scan millions of detail rows are served from hourly + daily aggregate tables. Detail keeps recent (7 days default), hourly keeps medium (30 days), daily keeps long (1 year). The same query API returns same-shape responses on every tier — only sample count and granularity differ. SolarWinds-style storage policy adapted to Polaris's monitor sample tables.
-
-**Canonical implementation:** [src/services/sampleRollupService.ts](src/services/sampleRollupService.ts) (writer) + [src/services/sampleHistoryService.ts](src/services/sampleHistoryService.ts) (reader) + [src/services/sampleQueryRouter.ts](src/services/sampleQueryRouter.ts) (tier picker) + [src/jobs/runSampleRollup.ts](src/jobs/runSampleRollup.ts) (periodic driver). Retention policy backed by [src/services/sampleRetentionService.ts](src/services/sampleRetentionService.ts) and `Setting("sampleRetention")`, edited from the Maintenance card.
-
-**Key conventions:**
-- **Upsert writes, not append-only.** Rollup buckets MUST be rewritten in place on re-runs (handles late-arriving samples after a flush window crosses an hour rollover). The detail-tier `sampleWriteBuffer` pattern is the WRONG canonical here — rollup writes need INSERT...ON CONFLICT DO UPDATE semantics, which the append-only buffer intentionally rejects.
-- **One SQL statement per (table, tier).** Each rollup is a single `INSERT INTO <table>_<tier> SELECT date_trunc('<unit>', timestamp) ... GROUP BY ... ON CONFLICT (bucketStart, assetId[, extraKey]) DO UPDATE SET ...`. Portable across Timescale and plain Postgres via `date_trunc` (not `time_bucket` which is Timescale-only).
-- **Daily reads from hourly, NOT detail.** At scale (2000+ assets) a daily tick that re-scanned detail would be untenable. Layering daily on hourly keeps the daily tick bounded.
-- **Aggregation shape:** Gauge tables (monitor, telemetry, temperature, storage) carry `sampleCount + avg/min/max` per bucket. Counter tables (interface, ipsec) carry `first/last` counter endpoints + `lastBucketSampleAt` so the read layer derives rate as `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets. IPsec additionally counts per-status sample occurrences within each bucket.
-- **Per-tier composite uniqueness.** `@@unique([bucketStart, assetId, <extraKey>?])` enforces one row per (asset, bucket, extra-key) so the rollup's ON CONFLICT clause has a target. Composite PK `(id, bucketStart)` separately so Timescale's "all PK columns must include the partitioning column" rule is satisfied without breaking the upsert semantics.
-- **Tier-routed reads use the same shape across tiers.** The reader translates rollup aggregate columns back to the source-table field names so chart renderers don't branch on tier — they get smoother values with smaller `sampleCount` per point. Counter charts get an explicit branch via `bucketSeconds > 0` because their semantic genuinely changes (cumulative counter vs pre-computed rate). The response carries `tier` + `bucketSeconds` discriminator fields the frontend uses for a "Hourly avg" / "Daily avg" stats-line badge.
-- **Two ticking loops, independent guards.** Hourly tick every 30 min, daily tick at 02:30 UTC. Each has its own `running` boolean so a slow tier can't block the other. Lookback windows (2 h hourly, 2 d daily) cover late-arriving samples without redoing the whole table.
-- **Stamp lastSuccess per tick.** `Setting("sampleRollup.<tier>.lastSuccess")` updated on every successful run; capacityService consumes for a `sample_rollup_lagging` watch reason that catches stuck rollups before long-range charts silently fall back to detail-table scans.
-- **Instrument writer + reader paths separately.** `polaris_sample_rollup_duration_seconds{tier,table}` (histogram, per INSERT) + the existing `polaris_job_duration_seconds{job="sampleRollup.<tier>"}` / `polaris_job_total{job, outcome}` from `runInstrumentedJob`. The HTTP histogram already times reads.
-
-**When adding a new aggregate column:**
-- Add the column to BOTH `*_hourly` and `*_daily` schema definitions.
-- Update both branches of the SQL builder in `sampleRollupService.ts` (hourly aggregation from detail; daily aggregation from hourly with weighted averages and first/last propagation).
-- Update the matching reader translation in `sampleHistoryService.ts` so the rollup row maps back to the chart-consumable shape.
-- Update `capacityService.DEFAULT_BYTES_PER_ROW` for the new rollup row size.
-- Tests mirror the same shape; commit the Prisma migration generated from `migrate diff`.
-
-**When adding a new sample stream:**
-- New `RetentionStream` enum value in `sampleRetentionService.ts` + matching default tier in `defaultSampleRetention()`.
-- New source + hourly + daily schema models. Add all three to `timescaleService.ROLLUP_TABLES` (and `SAMPLE_TABLES` for the source).
-- New SQL builders in `sampleRollupService.ts` (a hourly and a daily entry).
-- New reader in `sampleHistoryService.ts` matching the source's shape.
-- New prune helper in `monitoringService.ts` that calls `pruneOneTable` per (table × tier).
-- Capacity SAMPLE_TABLES enumeration in `capacityService.ts` gets three new entries (detail / hourly / daily).
-- Maintenance UI card gets a new stream row in `SAMPLE_RETENTION_STREAMS`.
-- Update `TOUCHES.md`'s cross-cutting/tiered-sample-retention section's Writers list to name the new caller.
-
-**When changing retention defaults:**
-- Update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts`.
-- The migration job `consolidateSampleRetention.ts` reads these constants for fresh-install seeding; no separate update.
-- Existing installs are unaffected — their stored `Setting("sampleRetention")` keeps whatever the operator set.
-
----
-
-## Operator-declared value mapping → normalized sample → alertable dimension
-
-**What it is:** A device publishes something whose NUMBER is meaningless without vendor knowledge — a status enum, an alarm bit, a present/absent flag. Rather than teaching Polaris every vendor's convention (or making the operator encode it as a threshold and hope), the operator DECLARES the mapping once at config time, the collector applies it and stores the already-normalized result, and everything downstream compares normalized values only. Use this whenever "what does 2 mean here?" is a per-vendor question.
-
-**Canonical implementation:** **state probes** — a `ManufacturerCustomWidget` with `widgetType="state"`.
-- Pure mapping + evaluation: `src/utils/stateProbes.ts` (`StateMap`, `evaluateStateMap`, `joinStateRows`, `normalizeStateMap`, `validateStateMap`, `describeStateMap`) — dependency-free, fully unit-tested in `tests/unit/stateProbes.test.ts`.
-- Declaration: `ManufacturerCustomWidget.stateMap` + `labelSymbol` (nullable), validated on write by `stateFieldsForWrite` in `manufacturerProfileService.ts`, authored on Server Settings → Identification (`_widgetStateOptionsForm` in `public/js/server-settings.js`).
-- Collection: the state branch of `collectAndRecordCustomWidgets` (`monitoringService.ts`) → `AssetStateSample` (0/1 rows).
-- Consumption: the `customStateValue` asset_metric (`notificationTypes` + `notificationEngine`), the builder's probe/row pickers (`notificationDimensionService`), and the Custom MIB tab's per-row pills (`_renderCustomWidgetState` in `public/js/assets.js`).
-
-**Key conventions:**
-- **Declare the mapping, don't infer it.** The mode set exists because real MIBs disagree: `nonzero` (plain alarm bit) / `zero` (inverted health register) / `equals` / `notEquals` (SNMPv2 TruthValue, where `true(1)` is the GOOD state) / `gte` / `lte`. Comparisons are numeric when both sides parse as numbers and case-insensitive strings otherwise, so ONE declaration covers an agent answering `2` and one answering `"alarm"`.
-- **"Unreadable" is a third outcome, and it must not collapse into the healthy one.** `evaluateStateMap` returns `0 | 1 | null`; the collector DROPS nulls rather than storing 0. Storing 0 would be a positive claim of health that clears a live alert — and on a probe whose interesting state is the false one, would fire a brand-new alert about hardware that isn't present. The row simply stops being reported and the engine's vanished-dimension sweep owns it. (Mirror rule downstream: `Number.isFinite`, never `|| null`, in the engine's `valueFn`.)
-- **Store normalized, keep the raw for forensics.** `AssetStateSample.value` is the boolean the engine compares; `rawValue` carries what the device actually said, surfaced only as a tooltip. When a mapping looks wrong the raw value is the thing you need, but it is not what an operator reads day to day.
-- **A per-row stream needs a stable key AND a human label, and they are different columns.** `rowKey` (the OID index) is what the engine keys firing state on; `rowLabel` (resolved from a sibling `labelSymbol` walk joined on that same index) is what the operator filters and reads. Splitting them is what lets a row be renamed without clearing one alert and opening another — and a table whose rows are only identifiable by an index that shifts per model is barely alertable at all.
-- **Normalize on READ too.** `shapeWidget` passes the stored map through `normalizeStateMap` (which never throws) rather than trusting it, so a row written before a mode existed — or hand-edited in SQL — degrades to a usable mapping instead of throwing once per scrape on the telemetry hot path. Validation strictness belongs on the authoring path (`validateStateMap` → 400).
-- **Cap the fan-out loudly.** A table probe pointed at too broad a subtree costs a DB row per scrape AND an engine firing-state row per element; `MAX_STATE_ROWS_PER_PROBE` truncates at 500 with a warn-level log naming the probe, because a probe silently dropping rows looks exactly like a healthy one.
-- **A boolean metric rides the existing threshold machine, but must not inherit its numeric UI.** `customStateValue` lives in `ASSET_METRICS` and saves as a plain `== 1` comparison — the engine's debounce / sustain / reset / per-dimension state all work unchanged, and a third trigger type would have meant a second copy of them. `BOOLEAN_METRICS` / `isBooleanMetric` is then the single test every numeric-only surface checks: severity bands (server-rejected + hidden), hysteresis, unit hints, chart threshold shading.
-- **Render the operator's words, never the digit.** The two labels travel with the probe (`/automations/schema.stateProbes`) so the value control, the trigger sentence, the preview table, and the asset tab all say "Alarm" / "OK". Every one of them falls back to generic "true/false" when the probe can't be resolved (deleted profile, stale schema) rather than printing a UUID or throwing.
-
-**When adding another declared-mapping stream:**
-- Put the decision table in a dependency-free util with the tri-state return, and unit-test the null cases FIRST — they are the ones that cause silent wrong alerting rather than a visible crash.
-- Decide early whether the alerting dimension is the device or a sub-row. If it's a sub-row, give it real columns in its own table (indexed `(assetId, <probeId>, timestamp)`) rather than a JSON array on an existing sample table: the engine reads it every 60s and the builder needs a `GROUP BY` for its picker.
-- A boolean stream gets NO rollup companions — an average over 0/1 is a duty cycle, not a state. Register it in `STANDALONE_SAMPLE_TABLES` and prune it on an umbrella window (see "Tiered time-series rollups" for the tiered alternative).
-- Mirror any mode-set change into the client's label/needs-values tables (`STATE_MODE_LABELS`, `STATE_MODES_WITH_VALUES`, `_stateMapSummary` in `public/js/server-settings.js`).
-
----
-
-## Per-integration verbose debug logging
-
-**What it is:** Operator flips one checkbox on an integration's edit modal and gets step-by-step structured logs of that integration's discovery + sync + monitor-worker activity. Off by default; logs emit at pino info level (tagged `verbose: true`) so journalctl shows them immediately — no `LOG_LEVEL=debug` restart dance. Reused across discovery, sync, and per-job worker pickup/finish so an operator never has to wonder "which knob lights this up."
-
-**Canonical implementation:** Four touchpoints, all consistent on the same payload shape:
-- **Config flag:** `verboseLogging: z.boolean().optional().default(false)` on every integration's Zod schema in [src/api/routes/integrations.ts](src/api/routes/integrations.ts) (mirrors the `useProxy` / `pushReservations` / `pushQuarantine` pattern).
-- **Discovery → pino:** the `onProgress` closure reads `integration.config.verboseLogging` once at run start and `logger.info({ verbose: true, integrationId, integrationName, step, level, device }, message)` for each callback.
-- **Sync phases → pino:** `phaseMark(name)` cursor in `syncDhcpSubnets`. Each call logs the elapsed time of the previous phase; final `phaseMark("__end__")` closes the last one.
-- **Worker pickup/finish → pino:** the publisher in `monitorAssets.publishDueWork` reads `discoveredByIntegration.config.verboseLogging` and stamps `verboseDebug: true` on the job payload; `runDedicatedWorker` / `dispatchFloatingJob` in `queueService.ts` read it back and emit lines with the worker slot id.
-
-**Key conventions:**
-- **One structured-payload shape** for all four surfaces: `verbose: true`, optional `integrationId` + `integrationName`, plus surface-specific fields (`step` or `phase`, or `workerSlot` + `jobId` + `cadence` + `assetId`, plus `elapsedMs` and `outcome` where measured). Don't invent a parallel shape for new debug surfaces — operators rely on `jq 'select(.verbose==true)'` working uniformly.
-- **Off by default everywhere.** New integration types must default to `false`; new debug surfaces must read a config flag (per-integration) or env var (global) before emitting at info level. No always-on debug noise.
-- **Pino, not Events.** Verbose lines never write to the `Event` table — that's reserved for the existing audit surface. Events table inflation from a 1000-FortiGate discovery would balloon retention.
-- **Stable worker slot ids** via [src/utils/workerSlotPool.ts](src/utils/workerSlotPool.ts). Acquired on entry, released on exit (try/finally). Reused across jobs so an operator can follow one slot through journalctl.
-- **No restart needed** to flip the toggle. The discovery `onProgress` and the publisher both read the current config at runtime; the next discovery cycle / next monitor tick picks up the change.
-- **UI shape:** appended to every integration's General tab as a uniform "Debug" section via `verboseLoggingFormHTML(defaults)` in [public/js/integrations.js](public/js/integrations.js). Same checkbox id (`f-verboseLogging`) across types so `readVerboseLoggingFromForm()` works without per-type branching.
-
-**When adding a new integration type:**
-- Schema gets `verboseLogging: z.boolean().optional().default(false)`.
-- Frontend form helper appends `verboseLoggingFormHTML(d)` at the bottom of its return value.
-- Reader (`getXxxFormConfig`) adds `verboseLogging: readVerboseLoggingFromForm()` to the returned config.
-
-**When adding a new pg-boss queue:**
-- Allocate a slot pool in `slotPools` with the matching size.
-- Use `runDedicatedWorker(cadence, job, exec)` for the handler; verbose pickup/finish logs land automatically when `job.data.verboseDebug` is true.
-
-**When adding a new sync phase:**
-- Insert `phaseMark("X")` right under the `// Phase X — ...` comment. The previous phase's elapsed time is logged at the next phaseMark call; the final phase is closed by `phaseMark("__end__")` at the bottom of `syncDhcpSubnets`.
-- `phaseMark` is also the sync's cooperative cancel point: it throws `DiscoveryAbortError` when the run's abort signal has fired (every mark except `__end__`, which would discard a fully-committed sync). Keep individual phases reasonably bounded — a cancel only lands between marks; a wedge inside one phase is covered by the `discoveryCancelWatchdog` force-exit, not by the throw.
-
----
-
-## Permission-gated route + dynamic-role function key
-
-**What it is:** A new functional area that needs its own dimension in the per-role permission matrix. Every route gate is `requirePermission(functionKey, level)` from `src/api/middleware/permissions.ts` — it covers session callers AND role-bound bearer tokens (a token resolves the Role it was bound to at mint time). The function-key catalogue is the single source of truth that the matrix UI consumes via `GET /api/v1/roles/functions`.
-
-**Canonical implementation:**
-- Middleware: `src/api/middleware/permissions.ts` (`requirePermission` / `requireOwnership` / `hasPermission` / `ensureRoleSnapshot`).
-- Function-key catalogue: `FUNCTION_KEYS` constant in `permissions.ts`.
-- CRUD service template: `src/services/roleService.ts` (built-in protection + cache-version bump + per-field diff Event).
-- Route layer template: `src/api/routes/roles.ts` (per-method `requirePermission` gates; Zod schema for permission shape).
-- Frontend matrix consumer: `public/js/users.js` `openRoleSlideover` + `regionPickerHtml`.
-
-**Key conventions:**
-- Reads + writes are gated per-route, not per-mount. Reads use `requirePermission(key, "read")`; writes use `requirePermission(key, "write")`. Mount-level guards exist only where a coarser gate is correct (the legacy `/server-settings` blanket is the last hold-out).
-- Ownership-dimensioned functions (today: `subnets`, `reservations`) use `requireOwnership(key)` which is `requirePermission(key, "write")` + sets `req.permissionLevel` for the handler to branch on (`if (req.permissionLevel !== "fullwrite" && row.createdBy !== req.session?.username) ...`).
-- Every Role write calls `bumpRoleVersion(roleId, updatedAt)` from `permissions.ts` so live session snapshots refresh on the next request without sweeping the session store.
-- Built-in roles carry `isBuiltIn=true`; the two undeletable+unrenameable ones (admin + readonly) additionally carry `isProtected=true`. Service-layer write paths enforce both invariants — never trust the frontend's hidden state.
-- Frontend capability checks go through `permAtLeast(functionKey, level)` from `public/js/app.js`; legacy `isAdmin()` / `canManageNetworks()` / `canManageAssets()` shims have been rewritten to consult the matrix, but new call sites should use `permAtLeast` directly so the code is self-documenting at a grep.
-
-**When adding a new function key:**
-- Append the row to `FUNCTION_KEYS` in `permissions.ts`. Pick a stable camelCase `key`; set `hasOwnershipDimension: true` only when "Read-Write" really means "edit/delete own only."
-- Write a migration that adds the new key to every existing `Role.permissions` JSON (admin → fullwrite, readonly → read for readable-by-non-admin surfaces else none, the three editable built-ins → match the closest existing routes' behavior).
-- Wire the route layer guards using `requirePermission(newKey, level)`.
-- Add a CLAUDE.md "Function-key catalogue" entry. The frontend matrix UI picks the new row up automatically via `GET /roles/functions`.
-
-**When renaming a function key:** model on the Automations cutover (`notifications`→`alerts` / `notificationManagement`→`automationManagement`, migration `20260721000000_automations_rbac_rename`). Three coordinated pieces, all required: (1) a migration that rewrites every stored `Role.permissions` JSON (old key removed, value carried onto the new key); (2) the old→new pair in `LEGACY_KEY_ALIASES` in `permissions.ts` so `permissionOf` resolves pre-deploy session snapshots without forcing re-login (the cold `roleVersionMap` trusts snapshots at boot); (3) `normalizePermissions`'s legacy fold so matrices posted by stale clients / imported role JSON keep their access. Update every `requirePermission`/`hasPermission` call site to the new name — the alias layer is for stored data, not for code.
-
-**When adding a new region-scoped column:**
-- Mirror the existing `Role.regionTags` / `User.regionTags` shape: `String[] @default([])` + comment `Empty = unrestricted`.
-- Validation lives in the service layer (`normalizeRegionTags` in `roleService.ts` is the template): trim, drop empties, dedupe case-insensitively, cap length + count.
-- The consumer (filter / list scoping) consults `auth.me.regionTags.effective` from the frontend or `req.session.roleSnapshot` + `req.session.userId → user.regionTags` on the backend — never branch on role NAME for region semantics.
-
----
-
 ## Operator-customizable widget surface
 
 **What it is:** A page where the operator enters an explicit EDIT MODE, chooses which widgets appear via a full picker (Group-By + search + favorites), arranges them into resizable COLUMNS, and configures per-widget options via a gear popover. Layout persists server-side per user. Read-only by default with a "Customize Page" affordance; empty state prompts the operator to customize. The Dashboard home page is the first instance; future operator-customizable surfaces should match this shape.
@@ -883,122 +1213,6 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 
 ---
 
-## Queue-on-transient-failure with retry tick + recovery hook
-
-**What it is:** A pattern for outbound device-side writes (push a DHCP reservation to a FortiGate, push a quarantine MAC, etc.) where the operator's intent must survive a transient outage on the target. Instead of failing-atomic on every error, the service **classifies** errors into permanent (operator action required — roll back) vs transient (retry-eligible — keep the Polaris row in a `"pending"` state) and a 60s periodic reconciler drives pending rows to success once the target is reachable. An event-driven recovery hook (target's `monitorStatus` flips to `up`) fires the same reconciler for sub-cadence latency.
-
-**Canonical implementation:** Queued DHCP reservation push — `reservationService.retryPendingReservations()` + `attemptQueuedPush()` (internal helper) + `retryReservationNow()` (operator-triggered) + `triggerRetryAfterStatusChange(assetId)` (recovery hook) in [src/services/reservationService.ts](src/services/reservationService.ts). Error classification: `classifyPushError(err)` in [src/services/reservationPushService.ts](src/services/reservationPushService.ts). Periodic job: [src/jobs/retryQueuedReservationPushes.ts](src/jobs/retryQueuedReservationPushes.ts). Recovery-hook call site: `recordProbeResult()` in [src/services/monitoringService.ts](src/services/monitoringService.ts) (gated on `nextStatus === "up"`).
-
-**Key conventions:**
-- **Single source of truth for permanent vs transient.** `classifyPushError(err) → "permanent" | "transient"` lives in the SERVICE that owns the device transport (not the orchestrator) and is consumed by BOTH the create-time path and the retry path. Returning "transient" by default for unknown shapes keeps the operator's claim alive across error types nobody enumerated yet — a multi-day outage is worse than a few extra retries on a permanent error that will repeat.
-- **Persist on transient at create time, abort-and-rollback on permanent.** The create path's try/catch branches on `classifyPushError`: transient → stamp `pushStatus="pending"` + `pushQueuedAt=now` + `pushAttempts=1` + `pushError=<message>`, emit `<feature>.push.queued` (info) Event, return the row; permanent → existing delete-Polaris-row + emit `.push.failed` (warning) + throw.
-- **Pre-flight skip when the gate is known down.** Before the transport attempt, a cheap `Asset.findFirst` on the target's firewall asset (joined on `hostname=fortigateDevice + discoveredByIntegrationId`) — if `monitored=true AND monitorStatus="down"`, skip the transport entirely and queue immediately (saves the 15-30s transport timeout on the operator's UI thread).
-- **Retry tick gates in order: eligibility → discovery-supersede → readiness.**
-  1. Eligibility re-check (subnet deprecated, integration deleted / disabled, push toggle flipped off, target hostname cleared) → `pushStatus=null` + `.cancelled` Event. Cancellation never deletes the Polaris row — operator's claim stands; they just won't get a device push.
-  2. Discovery-supersede (another active row at same key now) → `pushStatus="failed_permanent"` + `.collided` Event. Discovery is authoritative.
-  3. Readiness gates: monitored target with `monitorStatus !== "up"` → skip without incrementing attempts. Unmonitored target → exponential backoff `min(60 * 2^(attempts-1), 1800)`s keyed on `pushAttempts` + `pushLastAttemptAt`.
-- **State machine values on the existing status column.** Don't add a separate `queued` boolean. Extend the existing status enum (`pushStatus`) with `"pending"` and `"failed_permanent"` so callers reading the field already handle the new values via the enum-comprehension default ("anything not 'synced' is not yet on the device"). `sourceType` stays at its create-time value (`"manual"`) until the push verifies — only successful push flips it to the device-aware enum value.
-- **Recovery hook is a latency optimization; reconciler is correctness.** The recovery hook (`triggerRetryAfterStatusChange`) fires inside `recordProbeResult` only on the up edge of `monitor.status_changed`. It count-gates on pending rows (`prisma.<table>.count(...)`) — zero pending → early return — so most up-transitions cost one indexed COUNT(\*). When non-zero, fire-and-forget kicks the reconciler. Correctness never depends on the hook firing; the 60s tick catches every case the hook misses (server restart, race, count-gate cold cache).
-- **Edit / release on a pending row skip device contact entirely.** The update path early-branches on `pushStatus === "pending"` to just rewrite the queued payload (no device call); the release path skips both unpush AND lease-release for pending rows (nothing on the device). Cleaner audit Event (`.queued.released` info) than the `.unpush.failed` warning the regular release would log.
-- **Operator override: `retry-now` bypasses readiness gates only.** `POST /<resource>/:id/retry-push` (ownership-gated — own rows for `write`, all for `fullwrite`) flips `failed_permanent` rows back to `pending` first so the retry path treats them uniformly, then runs `attemptQueuedPush` with `bypassReadinessGates: true`. Eligibility re-check and discovery-supersede still apply.
-- **Discovery collision handling on the device-state-read path.** When discovery ingests a fresh row at a key matching a pending Polaris row: (a) **fast-path adopt** if the natural-identity field matches (same MAC for DHCP reservations) — promote in place to `synced` with device-side pointers stamped from the discovered entry, emit `.queued.adopted`; (b) **hard collision** otherwise — flip pending to `failed_permanent` + skip the discovery insert at this key (the unique-on-active constraint would block it anyway), emit `.queued.collided`. To enable (a) without a second REST roundtrip, the discovery-output shape carries device-side pointers at extraction time.
-- **Events — info for routine, warning for action-required.** `.queued`, `.queued.succeeded`, `.queued.retry_failed`, `.queued.released`, `.queued.adopted`, `.queued.cancelled`, `.queued.retry_manual` — info. `.queued.failed_permanent`, `.queued.collided` — warning. The retry_failed deliberately is info, NOT warning, so a multi-day outage doesn't generate one warning every 60s.
-- **No TTL by default.** Per operator decision: pending rows live forever until success, release, or operator-triggered retry-now. Add a TTL only when the operational cost of forgotten queued rows actually shows up; otherwise the "give up" decision is the operator's, not Polaris's.
-
-**When adding a new instance:**
-- Identify the device transport that already classifies errors (or write a `classifyXError` exporter on the service that owns it). Mirror the AppError-status-aware shape — `400/404/409 → permanent`, `502` with specific permanent wording → permanent, everything else → transient.
-- Extend the existing status column with `"pending"` and `"failed_permanent"`. Add three migration-additive columns: `<X>QueuedAt`, `<X>Attempts`, `<X>LastAttemptAt`. Index on `(<status column>, <queuedAt>)` for the retry-tick scan.
-- Write the service helpers: `retryPending<X>s()` (batch tick entry), `retry<X>Now(id, actor)` (operator-triggered single row), `trigger<X>RetryAfterStatusChange(assetId)` (recovery hook). Factor a private `attemptQueued<X>(row, opts)` helper both call paths share.
-- Add a 60s job file modeled on `src/jobs/retryQueuedReservationPushes.ts`. Import it from `src/app.ts` next to the other job imports.
-- Fire `triggerXRetryAfterStatusChange` from `monitoringService.recordProbeResult` only on the up edge. Count-gate inside the helper, don't try to filter at the call site.
-- Add a TOUCHES.md cross-cutting section covering the writers (create-time queue branch, retry tick, operator retry, edit/release no-op branches, discovery adopt/collide) and the readers (list/count endpoints, UI badges, success-toast suffix, sidebar dot).
-- Surface the queue under the existing Reservations alerts UI pattern — new filter option on the same panel rather than a separate page; combine the count into the existing sidebar dot rather than minting a second indicator.
-
----
-
-## Outbound multi-channel delivery (config + recipient routing + drain job)
-
-**What it is:** Fan one internal event out to external recipients over several channels, where an operator-managed **registry** of channel integrations carries the (masked) secrets, recipients are resolved from tags, and sends retry without blocking the producer. The notification delivery layer is the reference — modeled on the Integrations page rather than singleton config rows.
-
-**Canonical implementation:**
-- **Channel registry + secrets**: [src/services/notificationChannelService.ts](src/services/notificationChannelService.ts) — CRUD over the `NotificationChannel` table; secrets (per the type's `secret:true` field defs in `notificationTypes.CHANNEL_TYPE_META`) masked on read / preserved on write; `getChannelRaw` (secrets intact) for senders. CRUD route: [src/api/routes/notificationChannels.ts](src/api/routes/notificationChannels.ts).
-- **Channel senders** (one file per transport, config passed in explicitly, each throws on failure): [src/services/notificationChannels/](src/services/notificationChannels/) — `emailChannel` (`sendSmtpEmail` nodemailer + `sendM365Email` Graph), `webhookChannel` (slack/teams/generic body + `netGuard.assertOutboundHostAllowed` SSRF guard), `pushbulletChannel`, `webPushChannel` (`web-push` VAPID; throws `gone=true` on 410/404).
-- **Recipient routing + queue rows**: [src/services/notificationRecipientService.ts](src/services/notificationRecipientService.ts) — `expandDeliveries(notificationId, targets, opts {scopeRegionTags?, assetRegionTags?, composedEmail?, escalation?})` resolves each target's channel and snapshots recipients at fire time into `NotificationDelivery` rows (referencing the channel by id). Two email row shapes: legacy one-row-per-address, or (when the rule has `emailComposition`) one composed row per target whose `meta` snapshots the pre-rendered `{ composed, to[], cc[], bcc[], subject, text, html? }` — content rendered by the producer (engine / escalation sweep via the shared `src/utils/notificationTemplate.ts` renderer), recipients resolved here, secrets still only on the channel. The escalation sweep ([src/services/notificationEscalationService.ts](src/services/notificationEscalationService.ts)) inserts the same composed shape, so the drain needs no escalation-specific path.
-- **Drain job**: [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts) `drainPendingDeliveries()` (reads each row's channel config at send time) + [src/jobs/deliverNotifications.ts](src/jobs/deliverNotifications.ts) (15s tick).
-- **Registry UI**: the Delivery tab list + add/edit/test modal in [public/js/automations.js](public/js/automations.js) (`loadChannelsTab` / `openChannelModal`) — driven by `CHANNEL_TYPE_META` field defs so a new type needs no bespoke UI.
-- **Web push client**: service worker [public/sw.js](public/sw.js) + enrollment helper [public/js/push.js](public/js/push.js) (`window.polarisPush`). The web app manifest is no longer a static file — it is generated per-install from branding by [src/api/routes/pwa.ts](src/api/routes/pwa.ts) at `/manifest.webmanifest`, with icons rasterized by [src/services/appIconService.ts](src/services/appIconService.ts).
-
-**Key conventions:**
-- **Registry, not singletons:** operators add as many channels as they want; a rule's `targets[]` reference channels by id. Secrets live ONLY on the channel row — delivery rows never copy them.
-- **Secrets:** masked on read, preserved-on-write when the client echoes the mask / sends blank. Never return an unmasked secret. (No env-override — multi-instance registry; secrets live in the DB like Integration/Credential.)
-- **Queue, don't block:** the producer only writes `NotificationDelivery` rows (best-effort, wrapped so an expansion error never breaks the producer); a separate ≤3-retry drain job does the network I/O with bounded concurrency. A missing channel = permanent fail; a web-push 410/404 prunes the dead subscription.
-- **SSRF:** any operator-supplied outbound URL goes through `netGuard.assertOutboundHostAllowed(host)` before the request.
-- **Tag routing:** recipient matching strips the `region:` prefix and lower-cases both sides so a target tag and a user's region scope compare the same way `scopeMatchesAsset` does.
-
-**When adding a new channel type:** extend `CHANNEL_TYPES` + `CHANNEL_TYPE_META` (field defs, mark secrets) + `CHANNEL_TRANSPORT` in `notificationTypes`, add a sender file under `notificationChannels/`, add a dispatch arm in `notificationDeliveryService` (and a fan-out arm in `notificationRecipientService` if it routes to recipients vs a fixed destination), and a `:id/test` arm. The Delivery-tab modal renders the new type's fields automatically from `CHANNEL_TYPE_META`.
-
----
-
-## Deferred alert-email content (a body token filled at delivery, not at fire)
-
-**What it is:** Something the alert email should carry that cannot be a plain `{token}` — because it needs a DB read, or because its HTML and plain-text forms are different markup rather than the same string. Three exist: the inline **charts**, the **interface LLDP block**, and the **letterhead** (logo + application name + subtitle). They share one contract, and getting any part of it wrong fails silently (the token blanks at compose time and the delivery pass finds nothing to fill), so copy the shape rather than re-deriving it.
-
-**Canonical implementation:**
-- **Charts** (several tokens, one shared attachment set): [src/services/alertChartService.ts](src/services/alertChartService.ts) — `chartTokensIn(...)` → `buildAlertCharts(...)` → `substituteChartTokens(body, charts, {html})` → `attachmentsFor(charts, body)`.
-- **Interface facts** (one token, no attachments — the simpler one to copy): [src/services/alertInterfaceService.ts](src/services/alertInterfaceService.ts) — `interfaceTokensIn(...)` → `buildInterfaceLldpBlocks(assetId, metric, dimension)` → `substituteInterfaceTokens(body, block)`.
-- **Letterhead** (one token, one attachment, and the only one that is per-INSTALL rather than per-alert — so it takes no arguments and is memoized for the whole drain): [src/services/alertBrandService.ts](src/services/alertBrandService.ts) — `brandTokensIn(...)` → `buildAlertBrandBlock()` → `substituteBrandTokens(body, block)`, appending `block.attachment` when the substituted HTML cites its cid.
-- **Deferral**: `isDeferredToken` in [src/utils/notificationTemplate.ts](src/utils/notificationTemplate.ts) — matched by PREFIX (`chart.`, `interface.`, `brand.`), plus a catalog entry in `TEMPLATE_VARIABLES` so the wizard offers it.
-- **Wiring**: `emailMessageFor` in [src/services/notificationDeliveryService.ts](src/services/notificationDeliveryService.ts), on composed rows only.
-- **Default body**: the token in BOTH `DEFAULT_ALERT_HTML` and `DEFAULT_ALERT_TEXT` in [src/utils/alertEmailTemplate.ts](src/utils/alertEmailTemplate.ts).
-
-**Key conventions:**
-- **Deferred means deferred:** no key in `buildTemplateContext`, nothing on `Notification.templateCtx`, and `isDeferredToken` must return true — otherwise `renderNotificationTemplate` (which Polaris's own default body calls with `unknown:"blank"`) erases the token before delivery ever sees it. Use a prefix, not an enumerated name: `{chart.trigger}` shipped in the default body, was left out of the enumerated list, and silently never rendered.
-- **Read at delivery, not at fire.** The engine's fire path is transition-guarded and hot; the drain is a queue. It also means an escalation at T+90min re-reads instead of replaying a snapshot.
-- **Gate before querying.** Decide from `Notification.metric` / `dimension` whether the content applies at all and return empty without touching the DB — most alerts are not the kind this token is for.
-- **Expand to a complete block or to nothing.** Emit your own `<tr>` and your own heading so the empty case leaves nothing standing; that is what lets the charts, which cannot (they share one section heading), be the only thing needing a `pruneEmptyChartSection`-style pass.
-- **One read, both bodies.** Build the data once and render HTML and text from a shared field list, or the two bodies drift and an operator editing one wonders why the other differs.
-- **Escape in the HTML form only,** at render — the values are device/network-supplied and the renderer's own `html:true` escaping never sees them.
-- **Text form: no colons.** `pruneEmptyTextLines` deletes any `"Label:"` line with nothing after it, so a heading like `"LLDP neighbor on port2:"` deletes itself. Padded label columns read the same.
-- **A token in a LAYOUT cell must not let the layout be pruned.** `{brand.header}` sits in the second cell of the header's two-column row, which is exactly the label/value shape `pruneEmptyRows` deletes, and it renders empty on an install with no letterhead — so the template wraps it in a one-cell `<table>`, which fails that pass's pattern at the row. A token that expands to a whole `<tr>` of its own (the charts, the LLDP block) never has this problem; one that fills a cell inside an existing row does.
-- **Never fail the alert.** Every load is try/caught to an empty result: an email that sends without a chart beats an email that does not send.
-
----
-
-## Integration type (config + discovery + sync + frontend modal)
-
-**What it is:** A new external system that Polaris talks to: a firewall family (FortiGate, Palo Alto), a manager (FortiManager, Panorama), an identity provider (Entra ID, Active Directory), or a DHCP server (Windows Server). Adding a new integration type touches a ~30-callsite catalogue across backend dispatch, frontend modal tabs, polling-method compatibility, asset projection, and source-default polling. Without a single reference shape, each new type drifts on tab layout, config-blob keys, transport dispatch, and projection priority — operators see five different UIs for what should feel like the same thing.
-
-**Canonical implementations (parallel):**
-- **Directly-talked-to device** (no manager in front): standalone FortiGate. Service [src/services/fortigateService.ts](src/services/fortigateService.ts). Config schema `FortiGateConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts). Frontend form helpers `fortiGateGeneralHTML` / `fortiGateFiltersHTML` / `fortiGateFormHTML` / `getFgtFormConfig` in [public/js/integrations.js](public/js/integrations.js). **Use this when** the new type is a single device with its own REST/SSH API (Palo Alto firewall, Cisco ASA, future on-prem appliances).
-- **Manager that fronts many devices**: FortiManager. Service [src/services/fortimanagerService.ts](src/services/fortimanagerService.ts) + per-integration [src/services/fmgWorker.ts](src/services/fmgWorker.ts). Config schema `FortiManagerConfigSchema` in [src/api/routes/integrations.ts](src/api/routes/integrations.ts). **Use this when** the new type aggregates / proxies multiple devices (Panorama, Meraki Dashboard, future SDN controllers). The multi-lane worker pattern applies — see the [Per-instance multi-lane worker](#per-instance-multi-lane-worker-constrained--unconstrained-endpoints) entry.
-- **Asset-only discovery (no subnets/reservations)**: Entra ID / Active Directory / Windows Server / vCenter / Azure Arc. Services [src/services/entraIdService.ts](src/services/entraIdService.ts), [src/services/activeDirectoryService.ts](src/services/activeDirectoryService.ts), [src/services/windowsServerService.ts](src/services/windowsServerService.ts), [src/services/vcenterService.ts](src/services/vcenterService.ts), [src/services/azureArcService.ts](src/services/azureArcService.ts). Use a dedicated `syncXxxDevices` path in `integrations.ts` rather than the shared `syncDhcpSubnets`. **Use this when** the new type produces assets only — no DHCP scopes, no reservations, no NAT/VIP. vCenter additionally demonstrates three extensions of the pattern: **non-workstation per-class blocks** (`vmMonitor` = the full workstation-style block, `hostMonitor` = a reduced addAsMonitored+streams block for a class that can't run the agent), a **foreign dependency-edge source** (`AssetDependencyParent.source="vcenter"` rows delete-replaced per run, coexisting with the Fortinet `"computed"` recompute — scope your deleteMany to your own source value), and a **warm-cache telemetry polling method** (`"vcenter"` on cpuMemory: one batched upstream call per integration per tick behind a TTL + promise-singleton cache in `monitoringService`, per-asset collectors are Map lookups; the collector resolves its integration via the asset's own AssetSource row, not `discoveredByIntegration`, so merged assets work). **Azure Arc** demonstrates three more: **credential-helper reuse at a different OAuth scope** (`src/utils/entraClientCredentials.ts` with `https://management.azure.com/.default` instead of the Graph scope — reuse the helper, don't fork it), a **multi-axis filter pair** (resource-group name AND `key=value` tags — see the DOM-id convention below), and **class-block-name reuse** (it keeps `workstationMonitor` / `serverMonitor` verbatim, which is why `monitorOverrideService`'s three raw-SQL CASE expressions, `classToBlockKey`, `ClassQuerySchema` and `StorageClassQuerySchema` all needed zero change — most downstream registries key on the BLOCK NAME, not the integration type, so reusing the names is by far the cheapest option for any type whose classes are workstation/server-shaped).
-
-**Key conventions:**
-- **Single `DiscoveryResult` shape across all device-and-network integrations.** Defined as the `DiscoveryResult` type in `fortimanagerService.ts` and re-exported / re-used by `fortigateService.ts`. New device-and-network types must produce this exact shape so `syncDhcpSubnets` in `integrations.ts` consumes them identically. Fields the discovery service doesn't populate stay as empty arrays — never as undefined, never as null. Per-query success flags (`switchInventoriedDevices`, `vipInventoriedDevices`, `dhcpReservationsInventoriedDevices`, `dhcpLeasesInventoriedDevices`, etc.) are required because Phase 5b sweeps consult them to scope stale-row deprecation. If the new type genuinely doesn't have a concept (Palo Alto has no FortiSwitch/FortiAP analog), return `[]` for those arrays AND leave the success flag empty — `syncDhcpSubnets` then skips the corresponding sweep.
-- **Config JSON shape.** Top-level fields callers and the frontend modal share verbatim across types: `host`, `port`, `verifySsl`, `verboseLogging`, `monitorSettings`, `deviceInclude`, `deviceExclude`, `interfaceInclude`, `interfaceExclude`. Type-specific credentials (`apiUser` + `apiToken` for Fortinet REST, `bindDn` + `bindPassword` for AD, `clientId` + `clientSecret` + `tenantId` for Entra) live alongside. Push toggles (`pushReservations`, `pushQuarantine`, `useProxy`) only exist on types that genuinely support them; the frontend tab visibility flips on `isFmg || isFgt || isPalo` (extend the predicate).
-- **Per-class monitor block (asset-only types).** AD/Entra carry `workstationMonitor` / `serverMonitor` (`WorkstationServerClassMonitorSchema` in `integrations.ts`): `addAsMonitored` (monitored-sweep, honored by `monitorOverrideService`), `autoMonitorInterfaces` + `autoMonitorStorage` (post-sync auto-monitor pins — canonical resolvers `autoMonitorInterfacesService.ts` / `autoMonitorStorageService.ts`, applied by `applyWorkstationServerAutoMonitor` in `runDiscovery`), `agentDeploy` (opt-in agent auto-deploy — `agentAutoDeployService.ts`). When adding a per-stream auto-monitor for a new dimension, **mirror `autoMonitorStorageService.ts`** (pure resolver + 72h-bounded latest-sample loader + chunked additive apply); it's the smallest canonical. Agent auto-deploy reuses the manual `/agent/install` row-creation + `startInstall` contract — don't fork it.
-- **Discriminated Zod union.** `CreateIntegrationSchema` in `integrations.ts` uses `z.discriminatedUnion("type", [...])`. Add one branch per new type with a `z.literal("<type>")` and the type-specific config schema. The type string in `Integration.type` (Postgres column) is the same literal.
-- **Three route dispatchers in `integrations.ts`.** All three switch on `integration.type` and need a parallel branch: (1) **testConnection** route — call `xService.testConnection(config)`. (2) **discover** route — call `xService.discoverDhcpSubnets(...)` (or `xService.syncXxxDevices(...)` for asset-only) and pass to `syncDhcpSubnets(input.type, result, ...)`. (3) **manual /query proxy** route — call `xService.proxyQuery(...)`. The `integrationLabel` ternary inside `syncDhcpSubnets` also needs the new label.
-- **Discovery scheduler.** `discoveryScheduler.ts` is entirely type-agnostic — it filters on `enabled` + `autoDiscover` + `lastTestOk` and calls `triggerDiscovery`, so a new type needs NO change there. What it does need is the `runPreflightTest` arm in `discoveryEngine.ts`: without it `integrationConnectionTester` writes `lastTestOk: false` every 10 minutes and the scheduler never picks the integration up.
-- **Polling compatibility + source-default.** `src/utils/pollingCompatibility.ts` carries `AssetSourceKind` union + `COMPATIBILITY` matrix + `assetSourceKindFromIntegrationType`. Add `"<type>-firewall"` (or appropriate source kind) and an entry mapping which of the five polling methods (`rest_api`, `snmp`, `winrm`, `ssh`, `icmp`) the new source can drive. `defaultPollingForSource` in `monitoringService.ts` needs the per-stream source defaults — REST-capable appliances default to `rest_api` on probe/telemetry/interfaces and `disabled` on LLDP (mirrors FortiGate); identity sources default to `icmp` on probe and `not_delivered` on the heavy streams.
-- **AssetSource projection.** New firewall types get a new `AssetSource.sourceKind` literal. `src/utils/assetProjection.ts` carries per-field priority arrays (`HOSTNAME_RULES`, `SERIAL_RULES`, `MANUFACTURER_RULES`, `MODEL_RULES`, `OS_VERSION_RULES`, `IP_ADDRESS_RULES`, `LATITUDE_RULES` / `LONGITUDE_RULES`). Add the new source kind to every list at the position that matches its trustworthiness (firewalls usually slot in next to `fortigate-firewall`). Manufacturer entries that pick from a constant (`"Palo Alto Networks"`, `"Fortinet"`) deliberately ignore the observed blob — keeps drift from a misreported field from polluting the asset.
-- **Frontend modal — parallel form helpers.** Every type has the same trio: `<type>GeneralHTML(d)`, `<type>FiltersHTML(d)` (when applicable), `<type>FormHTML(d)` combining them, plus a `get<Type>FormConfig()` reader. Tab visibility logic (`isFmg || isFgt`, `isAd || isEntra || isWin`) flips on a per-type boolean stamped at modal open. Pickup buttons (`pick-fmg`, `pick-fgt`, `pick-palo`) live in the type-list grid; their listeners call `openCreateModal("<type>")`. Type-label ternaries (`type === "fortigate" ? "FortiGate" : ...`) appear in **at least two places** — the integrations list display and the modal title; add the new label to both (and in `public/js/assets.js` + `public/js/app.js`, which both fall through to the RAW type string). **Multi-axis filters need their own DOM ids:** the single-axis types all share the `f-deviceMode` / `f-deviceNames` pair, but a type that filters on more than one dimension (Azure Arc: resource group AND tags AND machine name) must give each axis distinct ids — `f-rgMode`/`f-rgNames`, `f-tagMode`/`f-tagFilters` — or the axes clobber each other when the reader runs.
-- **Verbose debug logging is uniform.** Every type carries `verboseLogging` in its config schema (defaults to `false`), every form helper appends `verboseLoggingFormHTML(d)` at the bottom of its General tab, every reader includes `verboseLogging: readVerboseLoggingFromForm()`. See the [Per-integration verbose debug logging](#per-integration-verbose-debug-logging) section for the full pattern.
-- **Search hits the asset inventory, not the integration.** The new type doesn't need a `searchService.ts` branch unless it owns a UI surface the global search should pivot into. Firewall asset entries surface naturally through `searchAssets` once they have `assetType="firewall"` + an `AssetSource` row.
-- **Monitor settings hierarchy applies uniformly.** Tier-3 integration settings live at `Integration.config.monitorSettings` (eight fields: intervalSeconds, failureThreshold, probeTimeoutMs + telemetry/systemInfo timeouts, three cadences, three retentions). The resolver in `monitoringService.ts` walks per-asset → class-override → integration → manual without branching on type. New types inherit the four-tier resolver for free; what they need is the Zod schema accepting the `monitorSettings` object on the new type's `config` schema (already present in `FortiGateConfigSchema` / `FortiManagerConfigSchema` — copy the field).
-
-**When adding a new integration type:**
-1. **Pick the canonical to mirror** (standalone-device vs manager-fronted vs asset-only) and copy its service file verbatim as your starting point. Rename functions; replace the FortiOS REST endpoints with the new system's; keep the `DiscoveryResult` return shape exact.
-2. **Add the Zod config schema** to `integrations.ts` and a discriminated-union branch in `CreateIntegrationSchema`. Include `verboseLogging`, `monitorSettings`, and (when applicable) `deviceInclude` / `deviceExclude` / `interfaceInclude` / `interfaceExclude` so the four uniform top-level fields stay parallel.
-3. **Wire the three route dispatchers** (testConnection, discover, /query) and the `integrationLabel` ternary in `syncDhcpSubnets`. Wire the discovery scheduler dispatch alongside.
-4. **Add the source kind** to `pollingCompatibility.ts` and the per-field rules in `assetProjection.ts`. Add the per-stream source defaults to `defaultPollingForSource` in `monitoringService.ts`.
-5. **Build the frontend modal** — `<type>GeneralHTML`, `<type>FiltersHTML`, `<type>FormHTML`, `get<Type>FormConfig`, picker button + listener, type-label ternaries (at least two), tab-visibility predicate updates (`isFmg || isFgt || isPalo` style). Append `verboseLoggingFormHTML(d)` to the General tab.
-6. **Run the cross-cutting checklist** in [TOUCHES.md](TOUCHES.md)'s `cross-cutting/integration-type-onboarding` section — that's the authoritative list of every callsite. If you discover a callsite this TEMPLATES.md entry didn't mention, add it to TOUCHES.md in the same commit.
-7. **Test discovery → sync → asset write** end-to-end with the new type: create the integration via UI, hit Test Connection, hit Discover, verify `DiscoveryResult` round-trips through `syncDhcpSubnets`, verify projected Asset fields look right, verify the integration shows up on the assets list filter. Cover the asset-only path if applicable.
-8. **Write a one-shot startup migration job** if the new type retroactively claims assets that existed before (e.g. `backfillPaloAltoFirewallAssetSources`) — mirrors `backfillFortigateEndpointSources.ts`. Idempotent, marker-keyed, fires once at boot.
-
----
-
 ## Polling methods section (per-stream subtab strip)
 
 **What it is:** A configuration surface that exposes per-stream monitoring settings — polling method (dropdown), credential picker, MIB picker (when polling resolves to SNMP), interval, timeout, and failure threshold (Response Time only). Used inside the integration edit modal (per-class × per-stream), the Assets-page Monitoring Settings modal (Manual Monitoring section), and the asset edit modal's Monitoring tab. Without one canonical layout, three near-identical surfaces drift on label text, sub-row visibility rules, "Inherit" labelling, and DOM id conventions — making the resolver hierarchy harder to read at the UI.
@@ -1008,13 +1222,13 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 - `_polarisSourceDefaultPolling(source, stream)` — mirrors `defaultPollingForSource()` in `monitoringService.ts`; returns the per-source-kind per-stream default Polaris would resolve to. Used to label the "Inherit" option.
 - `_polarisSourceLabel(source, opts)` — the per-source-kind name table: FortiGate Direct / FortiManager Proxy / Active Directory / Entra ID / Windows Server / vCenter / Azure Arc / Manual. A missing entry silently falls through to "Manual", mislabelling every `Inherit (Source …)` option for that type.
 - `_streamsForClass(klass)` — returns the per-class stream list. FortiAP omits Storage (APs have no mountable storage); every other class gets all six streams.
-- `_intRenderTabbedBody(prefix, tabs)` + `_intWireModalTabs(prefix)` — the tab-strip + body-swap helpers reused for stream subtabs.
+- `tabbedBodyHTML(prefix, tabs)` + `wireModalTabs(prefix)` — the tab-strip + body-swap helpers reused for stream subtabs. **Shared globals in `app.js`**: `assets.js` and `integrations.js` each grew a byte-identical private copy (`_renderTabbedBody`/`_wireModalTabs` and `_intRenderTabbedBody`/`_intWireModalTabs`), which is exactly the drift the one pair exists to prevent — both are gone.
 
 **Consumers (parallel surfaces):**
 - **Integration edit modal** — class-subtab strip (FortiGates / FortiSwitches / FortiAPs for FMG+FGT; Workstations / Servers for AD/Entra/WinSrv) → stream-subtab strip per class. Uses `_classStreamSubtabHTML(..., isPrimary=true)` for the primary class (FortiGate / Workstations — legacy DOM ids `f-mon-tier-<pollField>`) and `isPrimary=false` with namespaced `f-mon-classecho-<klass>-` prefix for the other class subtabs. **Phase 2 save handler**: each class subtab's stream values serialize independently into `Integration.config.<klass>Monitor.streams.<stream>` via `_readClassStreamSubtabs(klass, isPrimary, includeStorage)` — secondary subtabs no longer echo the primary; each class's own input values are persisted. **Phase 2 load handler**: `_classStreamsBlockFor(klass, opts)` picks the matching `<klass>Monitor.streams` block; `_classSettingsOverlay(flatSettings, classStreams)` overlays the per-stream values onto the flat baseline before passing to each stream subtab so each class renders its own saved settings. `showInherit: true`, `showMib: true` (defaults).
 - **Assets page → Monitoring Settings modal → Manual Monitoring section** — no class strip (Manual is class-agnostic). DOM id prefix `f-manual-mon-`. Passes `showInherit: false` (bottom of resolver — nothing to inherit) and `showMib: false` (Manual tier doesn't expose per-stream MIB in this iteration). Renderer at `_monsetManualSectionHTML()` in [public/js/assets.js](public/js/assets.js).
 - **Assets page → Monitoring Settings modal → Class Overrides editor (Add / Edit)** — no class strip (manual-scope only, per the Phase 1 narrowing). DOM id prefix `monset-ov-`. Passes `showInherit: true` (class overrides legitimately defer to the integration / manual tier below) and `showMib: true` (per-stream MIB pickers are meaningful here). Renderer at `_monsetOpenOverrideEditor()` in [public/js/assets.js](public/js/assets.js). Sub-row visibility is wired locally — `_refreshOvStreamSubRows()` toggles the per-credtype credential rows (`<pollId>-credrow-snmp` / `-ssh` / `-winrm` / `-http`) and the MIB row (`<prefix>tier-<mibStreamKey>-mib-wrap`) based on each stream's polling-method pick. Per-stream credential save: the helper renders one select per (stream × credtype); the override save handler picks the select matching the chosen polling method and stores it in the per-stream column (`responseTimeCredentialId` / `cpuMemoryCredentialId` / …) the backend expects. Source kind is hardcoded to `"manual"` for the Inherit-option label.
-- **Asset edit modal → Monitoring tab** — no class strip (single asset's overrides). DOES NOT use `_classStreamSubtabHTML` because its DOM id conventions diverge from the asset modal's legacy `f-responseTimePolling` / `f-cpuMemoryPolling` / `f-monitorInterval` / etc. ids that `extractAssetEditData()` reads on save. Instead the renderer in `assetMonitoringFormHTML()` ([public/js/assets.js](public/js/assets.js)) builds per-stream subtab bodies inline using the same visual shape (polling-method `<select>` → cred sub-row → MIB sub-row → cadence + timeout → failure threshold on Response Time only) and wraps them with `_intRenderTabbedBody("asset-mon-streams", streamTabs)`. `showInherit: true` (the Inherit option here legitimately defers to the class / integration / manual tier above the asset). MIB pickers visible per stream. LLDP + Storage subtabs share the system-info cadence with Interfaces (Asset row carries only 4 cadence columns: `monitorIntervalSec`, `cpuMemoryIntervalSec`, `temperatureIntervalSec`, `systemInfoIntervalSec`) — those two subtabs render a "shared with Interfaces" hint instead of duplicating the inputs.
+- **Asset edit modal → Monitoring tab** — no class strip (single asset's overrides). DOES NOT use `_classStreamSubtabHTML` because its DOM id conventions diverge from the asset modal's legacy `f-responseTimePolling` / `f-cpuMemoryPolling` / `f-monitorInterval` / etc. ids that `extractAssetEditData()` reads on save. Instead the renderer in `assetMonitoringFormHTML()` ([public/js/assets.js](public/js/assets.js)) builds per-stream subtab bodies inline using the same visual shape (polling-method `<select>` → cred sub-row → MIB sub-row → cadence + timeout → failure threshold on Response Time only) and wraps them with `tabbedBodyHTML("asset-mon-streams", streamTabs)`. `showInherit: true` (the Inherit option here legitimately defers to the class / integration / manual tier above the asset). MIB pickers visible per stream. LLDP + Storage subtabs share the system-info cadence with Interfaces (Asset row carries only 4 cadence columns: `monitorIntervalSec`, `cpuMemoryIntervalSec`, `temperatureIntervalSec`, `systemInfoIntervalSec`) — those two subtabs render a "shared with Interfaces" hint instead of duplicating the inputs.
 
 **Key conventions:**
 - **Stream list and order:** Response Time → CPU/Memory → Temperature → Interfaces → LLDP → Storage. FortiAP omits Storage (handled by `_streamsForClass("fortiap")`).
@@ -1034,7 +1248,7 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 - **Pick the right `showMib` flag:** default `true` works for every tier above Manual today; pass `false` only when the tier deliberately doesn't expose per-stream MIB picking.
 - **Pass the correct `source`** so the Inherit label names the actual source ("FortiGate Direct", "FortiManager Proxy", "Active Directory", "Entra ID", "Windows Server", "Manual"). FMG additionally needs `opts.fmgDirectMode` flipped to match the integration's current Direct Polling toggle state.
 - **Use `_streamsForClass(klass)`** to enumerate the streams — never hardcode the six names. FortiAP-specific surfaces will automatically drop Storage.
-- **Wrap with `_intRenderTabbedBody(prefix, streamTabs)`** and call `_intWireModalTabs(prefix)` after mounting so the tab strip actually swaps bodies on click. Pick a prefix that doesn't collide with other tab strips on the same page.
+- **Wrap with `tabbedBodyHTML(prefix, streamTabs)`** and call `wireModalTabs(prefix)` after mounting so the tab strip actually swaps bodies on click. Pick a prefix that doesn't collide with other tab strips on the same page.
 - **If your surface diverges in DOM id conventions** (the asset edit modal does), build the per-stream body HTML inline using the same visual shape — polling dropdown + cred sub-row + MIB sub-row + interval + timeout — and reuse `_polarisPollingDropdownHTML` for the dropdown itself so the Inherit-label semantics stay consistent.
 
 ---
@@ -1112,9 +1326,11 @@ Docs a new table owes: an ARCHITECTURE.md "Core Entities" entry and file-tree li
 **What it is:** An image (not CSS) that has to change with the theme — artwork whose ink is near-black on light and near-white on dark, so the wrong variant doesn't look off, it disappears. Ship one file per (variant, theme), and put the choice in ONE module that every surface calls.
 
 **Key conventions:**
-- **Name files by the BACKGROUND they're for, not their ink** (`-dark` = for the dark theme = light-colored artwork). Every consumer then indexes with the theme string it already has, and nobody has to remember the inversion.
+- **Name files by the BACKGROUND they're for, not their ink** (`-dark` = for the dark FAMILY = light-colored artwork). Every consumer then indexes with the family string it already has, and nobody has to remember the inversion.
+- **Index by theme FAMILY, never by theme id.** There are three themes and two sets of art; `morning` and `noon` both take the light files with no third asset, and an id comparison silently misses every daylight theme but the one it names. `PolarisBrandLogo.currentTheme()` answers the family (and defers to app.js's `isLightTheme` where that exists — brand-logo.js loads before app.js and also runs on login, mobile and dash, which never load it at all).
 - One `ASSETS` map, one `resolve(payload, surface)` returning everything the surface needs (`{src, custom, showName, …}`). Surfaces set `src` and toggle visibility; they never branch on the payload themselves. A fifth surface is then a call, not a fifth copy of the rule.
-- **Observe `data-theme` with a MutationObserver** instead of hooking each theme setter. The desktop toggle, the mobile toggle, and the `prefers-color-scheme` listener all end at that one attribute, so one observer covers paths that don't know about each other. Evaluate the file in a Node `vm` with a stub `document.documentElement.getAttribute` to unit-test it (see `appmapFilter.test.ts` for the harness).
+- **Listen for `themechange` on `document` AND observe `data-theme` with a MutationObserver**, instead of hooking each theme setter. `_setTheme` fires the event with `{theme, family}`; the observer additionally covers a theme set by other means (theme-init.js's pre-CSS boot, the OS-preference listener, another tab syncing), so together they cover paths that don't know about each other. Compare FAMILIES, not ids, so a morning → noon flip doesn't force a pointless re-fetch. Evaluate the file in a Node `vm` with a stub `document.documentElement.getAttribute` to unit-test it (see `appmapFilter.test.ts` for the harness).
 - **Tag the element with a class for the shipped variant** (`.brand-mark`) so CSS can size fixed-aspect artwork differently from an arbitrary operator upload sharing the same `<img>`.
 - A **server-rendered** derivative (here: the logo with a symbol composited on) beats a per-surface CSS overlay the moment more than two surfaces show it — one URL, one geometry, and it works in contexts with no stylesheet of yours (a preview box, an email, an icon). Give it `no-cache` + a strong ETag if its path is fixed, and have it **redirect to the plain asset** rather than 404 when the derivative doesn't apply.
 - Follow the OS only while the user has **no** stored preference, and don't persist that resolution — unsaved *is* the "follow my system" state. Match on `light` so a browser stating no preference keeps the product's existing default.
+

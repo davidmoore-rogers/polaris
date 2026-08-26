@@ -1,7 +1,7 @@
 name: Check docs
 
 # Structural doc-drift guard for the project-memory files (CLAUDE.md,
-# ARCHITECTURE.md, TOUCHES.md, TEMPLATES.md). Enforces coverage + reference
+# ARCHITECTURE.md, TOUCHES.md, design/POLARIS-UI-GUIDE.md). Enforces coverage + reference
 # hygiene even when a local clone hasn't activated the pre-commit hook.
 # Pure file reads — no DB, no npm install, no prisma generate needed.
 

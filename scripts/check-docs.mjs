@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Doc-drift guard for the project-memory files (CLAUDE.md, ARCHITECTURE.md,
-// BUSINESS-RULES.md, TOUCHES.md, TEMPLATES.md). Catches the *mechanically-checkable* drift that
+// BUSINESS-RULES.md, TOUCHES.md, design/POLARIS-UI-GUIDE.md). Catches the *mechanically-checkable* drift that
 // accumulated badly before the 2026-05 docs overhaul — it CANNOT judge whether
 // prose is still accurate, only structural coverage + reference hygiene.
 //
@@ -11,15 +11,17 @@
 // Exit 0 = all checks pass; exit 1 = at least one failure (with a report).
 //
 // Checks:
-//   1. No `file.ext:NNN` line-number references in TOUCHES.md / TEMPLATES.md
-//      (line numbers drift on every edit; the convention is `file -> symbol`).
+//   1. No `file.ext:NNN` line-number references in TOUCHES.md / the design
+//      guide (line numbers drift on every edit; the convention is `file -> symbol`).
 //   2. Every Prisma model in schema.prisma is named in ARCHITECTURE.md.
 //   3. Every src/ service, job, route, util (and route/middleware) file is
 //      named somewhere in ARCHITECTURE.md. (Skips `_`-prefixed helpers + .d.ts.)
 //   4. Every concrete src/ or public/ file path referenced in the five docs
 //      exists on disk. (Templated paths like `<type>Service.ts` are ignored.)
-//   5. No lowercase `touches.md` / `primaries.md` references survive in the
-//      five docs (the files are TOUCHES.md / TEMPLATES.md).
+//   5. No lowercase `touches.md` / `primaries.md` references — and no
+//      references to the retired TEMPLATES.md at all — survive in the five
+//      docs (its UI half lives in design/POLARIS-UI-GUIDE.md Part II, its
+//      backend half in TOUCHES.md's Canonical backend patterns).
 
 import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -30,7 +32,7 @@ const r = (p) => join(ROOT, p);
 const read = (p) => readFileSync(r(p), "utf8");
 const exists = (p) => existsSync(r(p));
 
-const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "BUSINESS-RULES.md", "TOUCHES.md", "TEMPLATES.md"];
+const DOCS = ["CLAUDE.md", "ARCHITECTURE.md", "BUSINESS-RULES.md", "TOUCHES.md", "design/POLARIS-UI-GUIDE.md"];
 const failures = [];
 const fail = (check, msg) => failures.push({ check, msg });
 
@@ -56,7 +58,7 @@ function tsFiles(dir) {
 
 // === Check 1: no file:line refs in the index files ===
 const LINE_REF = /\.(ts|js|tsx|jsx|mjs|prisma|sql|sh|ps1):\d+/g;
-for (const d of ["TOUCHES.md", "TEMPLATES.md"]) {
+for (const d of ["TOUCHES.md", "design/POLARIS-UI-GUIDE.md"]) {
   const hits = [...docText[d].matchAll(LINE_REF)].map((m) => m[0]);
   if (hits.length) {
     fail(
@@ -71,7 +73,7 @@ for (const d of ["TOUCHES.md", "TEMPLATES.md"]) {
 // `(line 85)`, `(lines ~834-900)`, `(around line 5381)` drift just as badly as
 // file.ts:NNN but slip past Check 1. Use `path -> symbolName()` instead.
 const PROSE_LINE_REF = /\((?:around\s+)?lines?\s+~?\d+/gi;
-for (const d of ["TOUCHES.md", "TEMPLATES.md"]) {
+for (const d of ["TOUCHES.md", "design/POLARIS-UI-GUIDE.md"]) {
   const hits = [...docText[d].matchAll(PROSE_LINE_REF)].map((m) => m[0]);
   if (hits.length) {
     fail(
@@ -184,14 +186,26 @@ if (utilTestWarnings.length) {
   );
 }
 
-// === Check 5: no lowercase touches.md / primaries.md in the docs ===
+// === Check 5: no lowercase touches.md / primaries.md — and no references to
+// the retired TEMPLATES.md — in the docs ===
 for (const d of DOCS) {
   const bad = [...docText[d].matchAll(/\b(touches|primaries)\.md\b/g)].map((m) => m[0]);
   if (bad.length) {
     fail(
       "index-casing",
       `${d} references the old lowercase name(s): ${[...new Set(bad)].join(", ")}. ` +
-        `The files are TOUCHES.md / TEMPLATES.md.`,
+        `The file is TOUCHES.md.`,
+    );
+  }
+  // TEMPLATES.md was sunset 2026-08: UI patterns moved to
+  // design/POLARIS-UI-GUIDE.md Part II, backend patterns to TOUCHES.md's
+  // "Canonical backend patterns" part. A reference to it is a dead pointer.
+  const retired = [...docText[d].matchAll(/\bTEMPLATES\.md\b/g)].length;
+  if (retired) {
+    fail(
+      "retired-doc",
+      `${d} has ${retired} reference(s) to the retired TEMPLATES.md. ` +
+        `Point UI patterns at design/POLARIS-UI-GUIDE.md Part II and backend patterns at TOUCHES.md -> Canonical backend patterns.`,
     );
   }
 }
