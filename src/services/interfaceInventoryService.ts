@@ -32,6 +32,13 @@
  */
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
+import { logEvent } from "./eventLogService.js";
+import {
+  buildInterfaceIdentity,
+  canonicalizeInterfacePins,
+  EMPTY_INTERFACE_IDENTITY,
+  type InterfaceIdentity,
+} from "../utils/interfaceIdentity.js";
 import type { InterfaceSample } from "./monitoringService.js";
 
 /**
@@ -186,4 +193,114 @@ export async function persistInterfaceRows(
         })]
       : []),
   ]);
+  // The identity map is derived from exactly these rows.
+  invalidateInterfaceIdentity(assetId);
+}
+
+// ─── Interface identity (name-vs-label reconciliation) ──────────────────────
+// See utils/interfaceIdentity.ts for WHY this exists: a scrape that answered
+// `ifDescr`-only renames a port to its DESCRIPTION, and that name then becomes
+// an identity in the pin list, the sample table and every alert dimension.
+// This table is the identity of record, so it is what the reconciliation reads.
+
+/**
+ * TTL for the per-asset identity cache. The map only changes when the FULL
+ * system-info pass rewrites the inventory (`pollInterval`-linked, minutes to
+ * 24h) and that write invalidates the entry directly — so this bound exists
+ * only to age out assets nothing is scraping any more. Sized so the 60s fast
+ * cadence costs one read per asset per five minutes instead of one per tick,
+ * which at 2000 monitored assets is the difference between ~33/s and ~7/min.
+ */
+const IDENTITY_TTL_MS = 5 * 60 * 1000;
+
+/** Entries before the cache is cleared wholesale (the poeAbsentCache pattern). */
+const IDENTITY_CACHE_MAX = 5000;
+
+const identityCache = new Map<string, { at: number; identity: InterfaceIdentity }>();
+
+/** Drop an asset's cached identity — call after any write to its inventory. */
+export function invalidateInterfaceIdentity(assetId: string): void {
+  identityCache.delete(assetId);
+}
+
+/** Test seam: forget every cached identity. */
+export function clearInterfaceIdentityCache(): void {
+  identityCache.clear();
+}
+
+/**
+ * The asset's interface identity, from the current-state inventory.
+ *
+ * An asset with no inventory rows yields the EMPTY identity, which makes every
+ * canonicalization a no-op — the right answer for a device that hasn't
+ * completed a full scrape yet, since we have nothing to reconcile against and
+ * must not drop or rename what it reports.
+ */
+export async function loadInterfaceIdentity(assetId: string): Promise<InterfaceIdentity> {
+  const hit = identityCache.get(assetId);
+  if (hit && Date.now() - hit.at < IDENTITY_TTL_MS) return hit.identity;
+  try {
+    const rows = await prisma.assetInterface.findMany({
+      where: { assetId },
+      select: { ifName: true, alias: true, description: true },
+    });
+    const identity = buildInterfaceIdentity(rows);
+    if (identityCache.size >= IDENTITY_CACHE_MAX) identityCache.clear();
+    identityCache.set(assetId, { at: Date.now(), identity });
+    return identity;
+  } catch (err) {
+    // Best-effort: a failed read must never fail the scrape it was enriching.
+    logger.warn({ err, assetId }, "interface identity read failed — collecting names as reported");
+    return EMPTY_INTERFACE_IDENTITY;
+  }
+}
+
+/**
+ * Rewrite an asset's interface pins that name a port DESCRIPTION rather than a
+ * port, collapsing them onto the port they describe.
+ *
+ * Runs on the full pass, where the inventory it reconciles against was just
+ * written. Edge-triggered — a steady-state asset issues no write at all — and
+ * audited, because a pin is an operator-visible statement about what is
+ * monitored and this silently changes one.
+ */
+export async function repairInterfacePins(
+  assetId: string,
+  identity: InterfaceIdentity,
+  pins: readonly string[] | null | undefined,
+  hostname?: string | null,
+): Promise<void> {
+  if (!pins || pins.length === 0) return;
+  const fixed = canonicalizeInterfacePins(pins, identity);
+  if (!fixed || fixed.renamed.length === 0) return;
+  try {
+    await prisma.asset.update({
+      where: { id: assetId },
+      data: { monitoredInterfaces: fixed.pins },
+    });
+  } catch (err) {
+    logger.warn({ err, assetId }, "interface pin repair failed");
+    return;
+  }
+  // The audit names the PORTS, never the labels the pins used to carry. A port
+  // description is operator-authored free text and in the field it is often a
+  // person ("Tim Smith" on a desk port) — Events are readable by anyone with
+  // events access AND shipped off-host by the syslog / SFTP archivers, which
+  // is the same reasoning business rule 35(e) applies to directory PII. The
+  // label adds nothing actionable anyway: it is on the port's own row in-app.
+  const ports = fixed.renamed.map((r) => r.to).join(", ");
+  // Awaited, unlike the fire-and-forget logEvent calls on the scrape hot path:
+  // this only runs when a pin actually moved (a handful of assets, once), and
+  // a silent pin change with no audit row is the failure worth avoiding.
+  await logEvent({
+    action: "asset.interface_pin.canonicalized",
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: hostname || undefined,
+    level: "info",
+    message:
+      `Monitored interface pin${fixed.renamed.length === 1 ? "" : "s"} named a port description rather than ` +
+      `the port on ${hostname || assetId} — rewritten onto ${ports}`,
+    details: { ports: fixed.renamed.map((r) => r.to), renamed: fixed.renamed.length, pins: fixed.pins },
+  });
 }

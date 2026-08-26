@@ -235,6 +235,91 @@ d("recordSystemInfoResult", () => {
     expect(rows).toHaveLength(0);
   });
 
+  it("LLDP: a local port label that is really a port DESCRIPTION is keyed to the port", async () => {
+    // The prod shape (MORGAN-148E-1, 2026-08-25): LLDP-MIB's local port label
+    // on a FortiSwitch is the operator's port description, so neighbour rows
+    // arrived keyed by the attached AP's own name — the join key every
+    // interface lookup uses (Neighbor column, alert LLDP block, By-LLDP
+    // auto-monitor).
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [{ ifName: "port9", alias: "port9", description: "MORGAN-221E-1" }],
+    }));
+    await recordSystemInfoResult(assetId, ok({
+      lldpNeighbors: [{ localIfName: "MORGAN-221E-1", systemName: "MORGAN-221E-1" }],
+      lldpSource: "snmp",
+    }));
+
+    let rows = await prisma.assetLldpNeighbor.findMany({ where: { assetId } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.localIfName).toBe("port9");
+
+    // The same neighbour reported under both names collapses to one row
+    // rather than two INSERTs against one business key.
+    await recordSystemInfoResult(assetId, ok({
+      lldpNeighbors: [
+        { localIfName: "port9", systemName: "MORGAN-221E-1" },
+        { localIfName: "MORGAN-221E-1", systemName: "MORGAN-221E-1" },
+      ],
+      lldpSource: "snmp",
+    }));
+    rows = await prisma.assetLldpNeighbor.findMany({ where: { assetId } });
+    expect(rows.map((r) => r.localIfName)).toEqual(["port9"]);
+  });
+
+  it("LLDP: a mislabeled stored row is dropped now, not after the 48h grace", async () => {
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [{ ifName: "port9", alias: "port9", description: "MORGAN-221E-1" }],
+    }));
+    // A row left behind by the pre-fix collector, seen minutes ago — the
+    // stickiness window would otherwise keep it answering lookups for two
+    // days under a name that is not a port.
+    await prisma.assetLldpNeighbor.create({
+      data: { assetId, localIfName: "MORGAN-221E-1", systemName: "MORGAN-221E-1", source: "snmp", lastSeen: new Date() },
+    });
+    await recordSystemInfoResult(assetId, ok({
+      lldpNeighbors: [{ localIfName: "port12", systemName: "some-phone" }],
+      lldpSource: "snmp",
+    }));
+    const rows = await prisma.assetLldpNeighbor.findMany({ where: { assetId } });
+    expect(rows.map((r) => r.localIfName)).toEqual(["port12"]);
+  });
+
+  it("interfaces: a scrape that named ports by description is mapped back before anything keys on it", async () => {
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [
+        { ifName: "port9",  alias: "port9",  description: "MORGAN-221E-1", poeStatus: "fault" },
+        { ifName: "port12", alias: "port12", description: "Tim Smith" },
+      ],
+    }));
+    // The degraded tick: ifName walk failed, so every name is an ifDescr.
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [
+        { ifName: "MORGAN-221E-1", poeStatus: "fault" },
+        { ifName: "Tim Smith" },
+      ],
+    }));
+    const rows = await prisma.assetInterface.findMany({ where: { assetId }, orderBy: { ifName: "asc" } });
+    expect(rows.map((r) => r.ifName)).toEqual(["port12", "port9"]);
+    // firstSeen survives, which is the proof the rename landed on the SAME
+    // row rather than replacing the port with a differently-named twin.
+    expect(rows.every((r) => r.firstSeen <= r.lastSeen)).toBe(true);
+  });
+
+  it("interface pins naming a description are rewritten onto the port they describe", async () => {
+    await prisma.asset.update({
+      where: { id: assetId },
+      data: { monitoredInterfaces: ["port33", "MORGAN-221E-1"] },
+    });
+    await recordSystemInfoResult(assetId, ok({
+      interfaces: [
+        { ifName: "port9",  alias: "port9",  description: "MORGAN-221E-1" },
+        { ifName: "port33", alias: "port33" },
+      ],
+    }));
+    const fresh = await prisma.asset.findUnique({ where: { id: assetId }, select: { monitoredInterfaces: true } });
+    expect(fresh?.monitoredInterfaces).toEqual(["port33", "port9"]);
+  });
+
   it("detected model adopts over empty/generic values only, never over an operator-typed model", async () => {
     // Generic discovery literal → overwritable.
     await prisma.asset.update({ where: { id: assetId }, data: { model: "FortiSwitch" } });

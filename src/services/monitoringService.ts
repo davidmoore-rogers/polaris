@@ -63,7 +63,12 @@ import { applyTransform } from "../utils/symbolTransforms.js";
 import { createTtlCache } from "../utils/ttlCache.js";
 import { expandMacRange } from "../utils/macAddresses.js";
 import { reconcileInterfaceMacs } from "./macAddressService.js";
-import { persistInterfaces } from "./interfaceInventoryService.js";
+import { persistInterfaces, loadInterfaceIdentity, repairInterfacePins } from "./interfaceInventoryService.js";
+import {
+  buildInterfaceIdentity,
+  canonicalInterfaceName,
+  canonicalizeInterfaceRows,
+} from "../utils/interfaceIdentity.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
@@ -4090,6 +4095,24 @@ export async function recordFastFilteredResult(assetId: string, result: Collecti
   if (!result.supported || !result.data) return;
   const d = result.data;
   const now = new Date();
+  // Same reconciliation as the full pass, and this is the path that actually
+  // produced the bad alert: the fast pass resolves PINNED names against the
+  // device, so a pin left behind by a description-named scrape keeps drawing
+  // samples under that description — which then becomes the alert's dimension
+  // ("Interface PoE status on MORGAN-221E-1 is fault"). It does NOT repair
+  // pins: this pass never writes the inventory it would have to reconcile
+  // against (see interfaceInventoryService's single-writer note).
+  if (d.interfaces.length > 0) {
+    const identity = await loadInterfaceIdentity(assetId);
+    const canon = canonicalizeInterfaceRows(d.interfaces, identity);
+    if (canon.renamed.length > 0 || canon.dropped > 0) {
+      logger.warn(
+        { assetId, ports: canon.renamed.slice(0, 5).map((r) => r.to), renamedCount: canon.renamed.length, dropped: canon.dropped },
+        "fast interface scrape named ports by their description — mapped back to the port name",
+      );
+      d.interfaces = canon.rows;
+    }
+  }
   if (d.interfaces.length > 0) {
     enqueueInterfaceSamples(
       d.interfaces.map((i) => ({
@@ -8309,6 +8332,24 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true },
   });
 
+  // Reconcile the collected names against the identity of record BEFORE
+  // anything keys on them. A scrape whose `ifName` walk failed names every
+  // port by its `ifDescr` — the operator's DESCRIPTION on a FortiSwitch — and
+  // that name would otherwise land in the inventory, the pin list and every
+  // alert dimension as if it were a port (prod 2026-08-25; see
+  // utils/interfaceIdentity.ts).
+  if (d.interfaces.length > 0) {
+    const identity = await loadInterfaceIdentity(assetId);
+    const canon = canonicalizeInterfaceRows(d.interfaces, identity);
+    if (canon.renamed.length > 0 || canon.dropped > 0) {
+      logger.warn(
+        { assetId, ports: canon.renamed.slice(0, 5).map((r) => r.to), renamedCount: canon.renamed.length, dropped: canon.dropped },
+        "interface scrape named ports by their description — mapped back to the port name",
+      );
+      d.interfaces = canon.rows;
+    }
+  }
+
   await persistInterfaceSampleStream(assetId, d.interfaces, pinned, now);
   // CURRENT-STATE interface inventory. Written from the FULL pass only — never
   // from recordFastFilteredResult, which sees just the pinned subset and would
@@ -8325,6 +8366,17 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     await persistInterfaces(assetId, d.interfaces, now);
     endIfaces({ interfaces: d.interfaces.length });
     stopIfWrite();
+    // Pins are reconciled against the inventory just written, not the one the
+    // canonicalization above read: a pin created while a scrape was naming
+    // ports by description ("MORGAN-221E-1") names a port that does not
+    // exist, and only the fresh rows can say which port it described. Cheap
+    // and edge-triggered — no write unless a pin actually moves.
+    await repairInterfacePins(
+      assetId,
+      buildInterfaceIdentity(d.interfaces),
+      pinned?.monitoredInterfaces,
+      pinned?.hostname,
+    );
   }
   persistStorageSampleStream(assetId, d.storage, pinned, now);
   persistIpsecTunnelSampleStream(assetId, d.ipsecTunnels, pinned, now);
@@ -8804,6 +8856,39 @@ async function persistLldpNeighbors(
   now: Date,
   defaultSource: "fortios" | "snmp" | string,
 ): Promise<void> {
+  // `localIfName` is a JOIN KEY, not a caption: the System tab's Neighbor
+  // column, the alert email's LLDP block and auto-monitor's By-LLDP rule all
+  // look up interfaces by it. LLDP-MIB hands us whatever `lldpLocPortId` /
+  // `lldpLocPortDesc` say, which on a FortiSwitch is the operator's port
+  // DESCRIPTION — so rows arrived keyed "MORGAN-221E-1" and "Tim Smith"
+  // instead of port9 and port12, duplicating the same neighbour under two
+  // names and teaching By-LLDP to pin a port that doesn't exist (prod
+  // 2026-08-25). Map every label back onto the port that carries it.
+  const identity = await loadInterfaceIdentity(assetId);
+  let lldpRelabeled = 0;
+  if (identity.labelToName.size > 0 && neighbors.length > 0) {
+    const deduped: LldpNeighborSample[] = [];
+    const byKey = new Set<string>();
+    for (const n of neighbors) {
+      const canon = canonicalInterfaceName(n.localIfName, identity);
+      const row = canon && canon !== n.localIfName ? { ...n, localIfName: canon } : n;
+      if (canon && canon !== n.localIfName) lldpRelabeled++;
+      // Renaming can collide with the same neighbour already reported under
+      // the real port name — the bulk upsert targets the business key, so a
+      // duplicate would be two INSERTs for one row.
+      const k = `${row.localIfName}${row.chassisId ?? ""}${row.portId ?? ""}`;
+      if (byKey.has(k)) continue;
+      byKey.add(k);
+      deduped.push(row);
+    }
+    if (lldpRelabeled > 0) {
+      logger.warn(
+        { assetId, relabeled: lldpRelabeled, collapsed: neighbors.length - deduped.length },
+        "LLDP local port labels were port descriptions — keyed to the ports they describe",
+      );
+    }
+    neighbors = deduped;
+  }
   const endMatch = startPhase("systeminfo.persist.lldp_match_index");
   const matchIndex = await getLldpAssetMatchIndex();
   endMatch();
@@ -8917,6 +9002,16 @@ async function persistLldpNeighbors(
     if (seen.has(k)) continue; // refreshed by this scrape — keep
     // Same port saw a different neighbor → real change, drop the old.
     if (portsWithFreshNeighbor.has(e.localIfName)) {
+      toDelete.push(e.id);
+      continue;
+    }
+    // A row keyed by a port DESCRIPTION is the same port under a label (see
+    // the canonicalization at the top) — it is a duplicate by construction,
+    // not a missed advertisement, so the 48h grace period doesn't apply to
+    // it. Without this, every mislabeled row lingers for two days and keeps
+    // answering interface lookups under the wrong name.
+    const canon = canonicalInterfaceName(e.localIfName, identity);
+    if (canon && canon !== e.localIfName) {
       toDelete.push(e.id);
       continue;
     }
