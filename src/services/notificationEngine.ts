@@ -383,6 +383,27 @@ export function tunnelIsPinned(asset: { monitoredIpsecTunnels?: string[] } | und
   return asset?.monitoredIpsecTunnels?.includes(tunnelName) ?? false;
 }
 
+/**
+ * The pin test for a trigger whose dimensions are PIN-gated (interfaces /
+ * IPsec tunnels), or null when they aren't. The vanished-state sweep uses it
+ * to tell a configuration edge from a collection gap: an unpinned dimension
+ * produces no readings BY THE OPERATOR'S OWN HAND, so its firing row may
+ * clear even on a tick where the asset reported nothing at all — without
+ * this, unpinning a device's only alerting interface stranded the alert
+ * forever, because the no-readings freeze (which exists for genuine scrape
+ * gaps) also swallowed the unpin.
+ */
+function pinTestForTrigger(trigger: Trigger): ((asset: ScopeAssetRow, dimKey: string) => boolean) | null {
+  if (trigger.type === "asset_metric") {
+    if (trigger.metric === "ifInBps" || trigger.metric === "ifOutBps" || trigger.metric === "ifInErrorRate" || trigger.metric === "ifOutErrorRate") return interfaceIsPinned;
+    if (trigger.metric === "ipsecThroughputBps") return tunnelIsPinned;
+  } else if (trigger.type === "asset_state") {
+    if (trigger.field === "ifOperStatus" || trigger.field === "ifAdminStatus" || trigger.field === "poeStatus") return interfaceIsPinned;
+    if (trigger.field === "ipsecStatus") return tunnelIsPinned;
+  }
+  return null;
+}
+
 function regionSnapshot(tags: string[]): string[] {
   return tags
     .filter((t) => t.toLowerCase().startsWith(REGION_TAG_PREFIX))
@@ -1013,8 +1034,14 @@ interface SweepStateRow {
  * dependency — business rule 16; re-checked here for assets whose scope
  * condition drops them WHILE suppressed, e.g. a `status = active` condition)
  * and in-scope assets that produced no readings at all this tick (a
- * collection gap is not evidence of recovery). Zero extra queries on the
- * steady-state tick — the scope re-check only runs when orphans exist.
+ * collection gap is not evidence of recovery). The no-readings freeze has one
+ * carve-out: a PIN-gated dimension (interface / IPsec tunnel) whose pin is
+ * gone clears anyway — the operator unpinning it is a configuration edge,
+ * not a collection gap, and without the carve-out unpinning a device's ONLY
+ * alerting interface left its alert firing forever (the asset then produces
+ * zero readings for the rule, so the freeze swallowed the unpin). Zero extra
+ * queries on the steady-state tick — the scope re-check only runs when
+ * orphans exist.
  */
 async function clearVanishedStates(
   rule: DbRule,
@@ -1023,7 +1050,9 @@ async function clearVanishedStates(
   scopeIds: Set<string>,
   handledIds: Set<string>,
   assetsWithReadings: Set<string>,
+  assetIndex: Map<string, ScopeAssetRow>,
 ): Promise<void> {
+  const pinTest = pinTestForTrigger(rule.trigger);
   const vanished: Array<{ st: SweepStateRow; reason: "scope" | "dimension" }> = [];
   const scopeChecks: SweepStateRow[] = [];
   for (const st of states) {
@@ -1032,7 +1061,12 @@ async function clearVanishedStates(
     if (seenKeys.has(`${st.assetId}|${st.dimensionKey}`)) continue;
     if (handledIds.has(st.assetId)) continue; // suppressed freeze / carve-out handoff own these
     if (scopeIds.has(st.assetId)) {
-      if (assetsWithReadings.has(st.assetId)) vanished.push({ st, reason: "dimension" });
+      const a = assetIndex.get(st.assetId);
+      if (pinTest && st.dimensionKey && a && !pinTest(a, st.dimensionKey)) {
+        vanished.push({ st, reason: "dimension" }); // unpinned — config edge, clear even with no readings
+      } else if (assetsWithReadings.has(st.assetId)) {
+        vanished.push({ st, reason: "dimension" });
+      }
       // else: the asset reported nothing this tick — stay frozen
     } else {
       scopeChecks.push(st);
@@ -1323,7 +1357,9 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   if (scopeIds) {
     const handled = new Set([...suppressedIds, ...shadowedIds, ...notAnsweringIds]);
     const assetsWithReadings = new Set(readings.map((r) => r.assetId).filter(Boolean));
-    await clearVanishedStates(rule, states, seen, scopeIds, handled, assetsWithReadings);
+    // activeAssets suffices as the pin-test index: any state row that passes
+    // the handled/scope checks belongs to an active asset by construction.
+    await clearVanishedStates(rule, states, seen, scopeIds, handled, assetsWithReadings, new Map(activeAssets.map((a) => [a.id, a])));
   }
 
   // ── Custom reset conditions ──────────────────────────────────────────────
@@ -1758,6 +1794,9 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
       new Set(scopeAssets.map((a) => a.id)),
       suppressedIds,
       evaluatedIds,
+      // Composite state has no dimensionKey, so the pin-test carve-out never
+      // applies here (pinTestForTrigger is null for composite triggers anyway).
+      new Map(scopeAssets.map((a) => [a.id, a])),
     );
   }
 

@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
     asset: { findMany: vi.fn(), findUnique: vi.fn() },
     assetTelemetrySample: { findMany: vi.fn() },
     assetInterfaceSample: { findMany: vi.fn() },
+    assetIpsecTunnelSample: { findMany: vi.fn() },
     event: { findMany: vi.fn() },
     setting: { findUnique: vi.fn(), upsert: vi.fn() },
     hostMetricsSample: { findMany: vi.fn() },
@@ -125,6 +126,7 @@ beforeEach(() => {
   h.prisma.asset.findMany.mockResolvedValue([]);
   h.prisma.assetTelemetrySample.findMany.mockResolvedValue([]);
   h.prisma.assetInterfaceSample.findMany.mockResolvedValue([]);
+  h.prisma.assetIpsecTunnelSample.findMany.mockResolvedValue([]);
 });
 
 /** notification.updateMany calls that soft-clear (data.cleared === true). */
@@ -245,6 +247,61 @@ describe("vanished-state sweep", () => {
 
     expect(clearCalls()).toHaveLength(0);
     expect(h.prisma.notificationRuleState.update).not.toHaveBeenCalled();
+  });
+
+  it("clears a firing row whose interface was UNPINNED even when the asset produced no readings (config edge, not a collection gap)", async () => {
+    h.prisma.notificationRule.findMany.mockResolvedValue([IFACE_RULE]);
+    // port1 left the pin set — the device's only alerting interface. No pinned
+    // interfaces remain, so the rule resolves zero readings for this asset;
+    // before the pin-test carve-out the no-readings freeze stranded the alert.
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("a1", { monitoredInterfaces: [] })]);
+    h.prisma.assetInterfaceSample.findMany.mockResolvedValue([]);
+    h.prisma.notificationRuleState.findMany.mockResolvedValue([
+      firingState({ id: "s1", dimensionKey: "port1", notificationId: "n1" }),
+    ]);
+
+    await evaluateAllNotificationRules();
+
+    const cleared = clearCalls();
+    expect(cleared).toHaveLength(1);
+    expect(cleared[0][0].where).toMatchObject({ id: "n1" });
+    const stUpdate = h.prisma.notificationRuleState.update.mock.calls.find(
+      ([args]: any[]) => args?.where?.id === "s1" && args?.data?.state === "clear",
+    );
+    expect(stUpdate).toBeTruthy();
+  });
+
+  it("clears an unpinned-interface COUNTER-metric alert the same way (ifInBps)", async () => {
+    h.prisma.notificationRule.findMany.mockResolvedValue([{
+      ...IFACE_RULE,
+      name: "Uplink saturated",
+      trigger: { type: "asset_metric", metric: "ifInBps", aggregation: "latest", windowSec: 300, operator: ">=", threshold: 1, forDurationSec: 0 },
+    }]);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("a1", { monitoredInterfaces: [] })]);
+    h.prisma.assetInterfaceSample.findMany.mockResolvedValue([]);
+    h.prisma.notificationRuleState.findMany.mockResolvedValue([
+      firingState({ id: "s1", dimensionKey: "port1", notificationId: "n1" }),
+    ]);
+
+    await evaluateAllNotificationRules();
+
+    expect(clearCalls()).toHaveLength(1);
+  });
+
+  it("clears an unpinned-tunnel alert the same way (ipsecStatus)", async () => {
+    h.prisma.notificationRule.findMany.mockResolvedValue([{
+      ...IFACE_RULE,
+      name: "Tunnel down",
+      trigger: { type: "asset_state", field: "ipsecStatus", operator: "==", value: "down", forDurationSec: 0 },
+    }]);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("a1", { monitoredIpsecTunnels: [] })]);
+    h.prisma.notificationRuleState.findMany.mockResolvedValue([
+      firingState({ id: "s1", dimensionKey: "tun-branch", notificationId: "n1" }),
+    ]);
+
+    await evaluateAllNotificationRules();
+
+    expect(clearCalls()).toHaveLength(1);
   });
 });
 
