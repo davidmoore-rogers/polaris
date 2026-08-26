@@ -723,13 +723,13 @@ code {
 }
 .capacity-pill-sm { font-size: 0.68rem; padding: 1px 6px; }
 .capacity-pill-ok    { background: rgba(46,204,113,0.15); color: #2ecc71; }
-.capacity-pill-watch { background: rgba(79,195,247,0.18); color: var(--color-info, #4fc3f7); }
+.capacity-pill-watch { background: rgba(79,195,247,0.18); color: var(--color-accent); }
 .capacity-pill-amber { background: rgba(255,214,0,0.18);  color: var(--color-warning); }
 .capacity-pill-red   { background: rgba(239,83,80,0.18);  color: var(--color-danger); }
-[data-theme="light"] .capacity-pill-ok    { background: rgba(39,174,96,0.15);  color: #27ae60; }
-[data-theme="light"] .capacity-pill-watch { background: rgba(2,136,209,0.13);  color: #0288d1; }
-[data-theme="light"] .capacity-pill-amber { background: rgba(245,127,23,0.15); color: var(--color-warning); }
-[data-theme="light"] .capacity-pill-red   { background: rgba(198,40,40,0.13);  color: var(--color-danger); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-pill-ok    { background: rgba(39,174,96,0.15);  color: #27ae60; }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-pill-watch { background: rgba(2,136,209,0.13);  color: #0288d1; }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-pill-amber { background: rgba(245,127,23,0.15); color: var(--color-warning); }
+:is([data-theme="morning"],[data-theme="noon"]) .capacity-pill-red   { background: rgba(198,40,40,0.13);  color: var(--color-danger); }
 
 /* Volume free/used bars inside Application host card */
 .capacity-bar { background: rgba(46,204,113,0.55); transition: width 0.2s; }
@@ -821,10 +821,10 @@ code {
 }
 
 /* ─── Capacity Advisor card ───────────────────────────────────────────────── */
-.capacity-advisor-card { border-left: 3px solid var(--color-info, #4fc3f7); }
+.capacity-advisor-card { border-left: 3px solid var(--color-accent); }
 .advisor-header-amber { font-size: 0.78rem; color: var(--color-warning); font-weight: 600; }
 .advisor-header-ok    { font-size: 0.78rem; color: #2ecc71; font-weight: 600; }
-[data-theme="light"] .advisor-header-ok { color: #27ae60; }
+:is([data-theme="morning"],[data-theme="noon"]) .advisor-header-ok { color: #27ae60; }
 
 .advisor-table tbody tr.advisor-divider td {
   padding-top: 0.85rem;
@@ -835,7 +835,7 @@ code {
 .advisor-table tbody tr.advisor-row-change td {
   background: rgba(255,214,0,0.04);
 }
-[data-theme="light"] .advisor-table tbody tr.advisor-row-change td {
+:is([data-theme="morning"],[data-theme="noon"]) .advisor-table tbody tr.advisor-row-change td {
   background: rgba(245,127,23,0.04);
 }
 .advisor-pill {
@@ -847,7 +847,7 @@ code {
 }
 .advisor-pill-change { background: rgba(255,214,0,0.18); color: var(--color-warning); }
 .advisor-pill-ok     { background: rgba(46,204,113,0.15); color: #2ecc71; }
-[data-theme="light"] .advisor-pill-ok { background: rgba(39,174,96,0.15); color: #27ae60; }
+:is([data-theme="morning"],[data-theme="noon"]) .advisor-pill-ok { background: rgba(39,174,96,0.15); color: #27ae60; }
 .advisor-cold-badge {
   display: inline-block;
   padding: 1px 6px;
@@ -1155,7 +1155,10 @@ code {
   font-size: 1.75rem;
   font-weight: 700;
   line-height: 1;
-  color: #fff;
+  /* Was a hardcoded #fff — invisible on every daylight theme, the retired
+     `light` one included. The headings that still hardcode white are undone by
+     the daylight override block at the top of this file; this one was missed. */
+  color: var(--color-text-primary);
 }
 
 /* ─── Buttons ──────────────────────────────────────────────────────────────── */
@@ -2327,7 +2330,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-available  { background: rgba(0,200,83,0.12); color: var(--color-success); border: 1px solid rgba(0,200,83,0.25); }
 .badge-reserved   { background: rgba(79,195,247,0.12); color: var(--color-accent); border: 1px solid rgba(79,195,247,0.25); }
 .badge-deprecated { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
-.badge-conflict   { background: rgba(239,83,80,0.12); color: #ef5350; border: 1px solid rgba(239,83,80,0.25); }
+/* Same red as .badge-admin and .btn-danger: a conflict is a problem to act on,
+   and the softer red read as merely informational. */
+.badge-conflict   { background: rgba(255,23,68,0.12); color: var(--color-danger); border: 1px solid rgba(255,23,68,0.25); }
 .badge-active     { background: rgba(0,200,83,0.12); color: var(--color-success); border: 1px solid rgba(0,200,83,0.25); }
 .badge-expired    { background: rgba(255,214,0,0.12); color: var(--color-warning); border: 1px solid rgba(255,214,0,0.25); }
 .badge-released   { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
@@ -2519,7 +2524,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-bottom: 1px solid var(--color-border);
   background: var(--color-bg-tertiary);
 }
-.modal-header h3 { font-size: 1rem; font-weight: 600; color: #fff; }
+.modal-header h3 { font-size: 1rem; font-weight: 600; color: var(--color-text-primary); }
 .modal-body { padding: 1.25rem; overflow-y: auto; overscroll-behavior: contain; flex: 1 1 auto; min-height: 0; }
 .modal-footer {
   display: flex;
@@ -2529,6 +2534,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-top: 1px solid var(--color-border);
 }
 .modal-close { color: var(--color-text-tertiary); transition: color 0.15s, background 0.15s, transform 0.15s; font-size: 1.25rem; line-height: 1; }
+/* The slide-over close is the same glyph doing the same job, so it carries the
+   modal X's size verbatim rather than inheriting .btn-icon's smaller default.
+   :not(.panel-lock-btn) keeps the injected lock at icon size. */
+.slideover-header-top .btn-icon:not(.panel-lock-btn) { font-size: 1.25rem; line-height: 1; }
 .modal-close:hover,
 .slideover-header-top .btn-icon:hover {
   color: #ff4d6d;
@@ -2699,7 +2708,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   gap: 10px;
   flex-wrap: wrap;
 }
-.integration-card-title strong { color: #fff; font-size: 1rem; }
+.integration-card-title strong { color: var(--color-text-primary); font-size: 1rem; }
 .integration-card-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .integration-type-badge {
   display: inline-block;
@@ -2902,8 +2911,17 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   color: var(--color-accent);
   border: 1px solid rgba(79,195,247,0.2);
 }
-.badge-maintenance    { background: rgba(255,214,0,0.12); color: var(--color-warning); border: 1px solid rgba(255,214,0,0.25); }
+/* NOTE: .badge-maintenance is defined once, in the monitor-state block below
+   (muted purple). An amber definition used to sit HERE and lost on source
+   order, so it was dead code that misled anyone reading this block — to change
+   the color, change it THERE rather than adding a second rule. Purple is what
+   has always rendered; this removal is not a behavior change. */
 .badge-decommissioned { background: rgba(117,117,117,0.12); color: var(--color-deprecated); border: 1px solid rgba(117,117,117,0.25); }
+/* Passive: present and intentional, but not actively polled — blue-grey, the
+   one slot left after green (ok), amber (attention), red (problem), blue
+   (reserved), purple (maintenance) and grey (retired). Reads as calm rather
+   than as failure, which grey would not. */
+.badge-passive        { background: rgba(96,125,139,0.16); color: #90a4ae; border: 1px solid rgba(96,125,139,0.35); }
 .badge-disabled       { background: rgba(211,47,47,0.12); color: #ef9a9a; border: 1px solid rgba(211,47,47,0.25); }
 .badge-storage        { background: rgba(156,39,176,0.12); color: #ce93d8; border: 1px solid rgba(156,39,176,0.25); }
 .badge-quarantined    { background: rgba(183,28,28,0.18); color: #ff8a80; border: 1px solid rgba(183,28,28,0.40); }
@@ -3044,7 +3062,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   opacity: 0.6;
 }
 .dep-tree-self {
-  color: var(--color-text);
+  /* --color-text has never existed; with no fallback this inherited instead of
+     painting, so the "this device" row was indistinguishable from its parents. */
+  color: var(--color-text-primary);
 }
 .dep-tree-self-meta {
   color: var(--color-text-secondary);
@@ -3211,7 +3231,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   margin-bottom: 3px;
   flex-wrap: wrap;
 }
-.recent-item-title span { font-weight: 500; font-size: 0.9rem; color: #fff; }
+.recent-item-title span { font-weight: 500; font-size: 0.9rem; color: var(--color-text-primary); }
 .recent-item-meta {
   display: flex;
   gap: 12px;
@@ -3617,7 +3637,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .slideover-header-top h3 {
   font-size: 1rem;
   font-weight: 600;
-  color: #fff;
+  color: var(--color-text-primary);
   display: flex;
   align-items: center;
   gap: 10px;
@@ -4849,8 +4869,9 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .widget-pill-neutral { background: rgba(148,163,184,0.18); color: var(--color-sev-notice); }
 .widget-pill-red   { background: rgba(255,23,68,0.20);  color: #ef5350; }
 /* Severity pills keep their own text color even inside .recent-item-title,
-   whose generic `span { color:#fff }` would otherwise whiten them (making the
-   _topnBar / Active Alerts pills read differently from the dash-alert ones). */
+   whose generic `span { color: var(--color-text-primary) }` would otherwise
+   flatten them (making the _topnBar / Active Alerts pills read differently
+   from the dash-alert ones). */
 .recent-item-title .widget-pill-ok    { color: #81c784; }
 .recent-item-title .widget-pill-watch { color: #4fc3f7; }
 .recent-item-title .widget-pill-amber { color: #ffd54f; }
@@ -5260,7 +5281,7 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   flex: 0 0 auto;
 }
 .aw-collapse:hover,
-.aw-collapse:focus-visible { color: var(--color-text); }
+.aw-collapse:focus-visible { color: var(--color-text-primary); }
 .aw-drop-before { box-shadow: inset 0 3px 0 0 var(--color-accent); }
 .aw-drop-after { box-shadow: inset 0 -3px 0 0 var(--color-accent); }
 .aw-drop-into { box-shadow: inset 0 0 0 2px var(--color-accent); border-radius: 6px; }

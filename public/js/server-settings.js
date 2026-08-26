@@ -810,7 +810,7 @@ function renderCertsTab(container) {
       '<div style="margin-top:1rem">' +
         '<button class="btn btn-sm btn-primary" id="proxy-apply-btn"' + disabled + '>Save &amp; Apply</button>' +
         '<div id="proxy-apply-status" style="font-size:0.85rem;margin-top:0.6rem;display:none"></div>' +
-        '<div id="proxy-apply-output" style="font-size:0.78rem;margin-top:0.4rem;display:none;background:var(--color-surface-alt);padding:0.6rem;border-radius:4px;white-space:pre-wrap;font-family:monospace;max-height:14rem;overflow:auto"></div>' +
+        '<div id="proxy-apply-output" style="font-size:0.78rem;margin-top:0.4rem;display:none;background:var(--color-surface);padding:0.6rem;border-radius:4px;white-space:pre-wrap;font-family:monospace;max-height:14rem;overflow:auto"></div>' +
       '</div>' +
     '</div>';
 
@@ -1121,7 +1121,7 @@ function openRotateCertModal() {
     '<div class="form-group"><label for="rotate-key-file">Private key (.pem / .key)</label>' +
       '<input type="file" id="rotate-key-file" accept=".pem,.key">' +
     '</div>' +
-    '<div id="rotate-preflight" style="display:none;background:var(--color-surface-alt);padding:0.8rem;border-radius:4px;margin-bottom:1rem;font-size:0.82rem"></div>' +
+    '<div id="rotate-preflight" style="display:none;background:var(--color-surface);padding:0.8rem;border-radius:4px;margin-bottom:1rem;font-size:0.82rem"></div>' +
     '<div id="rotate-error" style="display:none;color:var(--color-danger);font-size:0.85rem;margin-bottom:1rem"></div>';
   var footer =
     '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
@@ -7191,7 +7191,7 @@ function credHttpForm(cfg) {
 function _httpAuthAlert(mode, bodyHTML) {
   return '<div class="alert alert-warning" data-http-auth="' + mode + '" ' +
     'style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);' +
-    'border:1px solid var(--color-warning,#d68910);color:var(--color-text);' +
+    'border:1px solid var(--color-warning,#d68910);color:var(--color-text-primary);' +
     'font-size:0.82rem;margin:0.5rem 0 0.75rem">' +
       bodyHTML +
       ' HTTPS is set per check — tick <strong>Use HTTPS</strong> on the HTTP-check widget under Manufacturer Profiles → Custom Widgets.' +
@@ -7408,7 +7408,7 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
   var integrationPickerHtml;
   if (!quarantineIntegrations || quarantineIntegrations.length === 0) {
     integrationPickerHtml =
-      '<div class="alert alert-warning" style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);border:1px solid var(--color-warning,#d68910);color:var(--color-text)">' +
+      '<div class="alert alert-warning" style="padding:0.6rem 0.75rem;border-radius:6px;background:rgba(214,137,16,0.12);border:1px solid var(--color-warning,#d68910);color:var(--color-text-primary)">' +
         'No FortiManager or FortiGate integrations exist yet. Add one (with Quarantine Push enabled) before minting a token whose role can push quarantine.' +
       '</div>';
   } else {
@@ -7439,7 +7439,7 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
           '<label class="form-label" for="f-token-role">Acts as role <span style="color:var(--color-danger,#c0392b)">*</span></label>' +
           '<select id="f-token-role" class="form-input">' + roleOpts + '</select>' +
           '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-top:0.3rem">The token can do exactly what this role can. For least privilege, create a purpose-built role under Users → Manage Roles (e.g. assets read-only).</div>' +
-          '<div id="f-token-role-warning" class="alert alert-warning" style="display:none;margin-top:0.4rem;padding:0.6rem 0.75rem;border-radius:6px;background:rgba(192,57,43,0.12);border:1px solid var(--color-danger,#c0392b);color:var(--color-text)">' +
+          '<div id="f-token-role-warning" class="alert alert-warning" style="display:none;margin-top:0.4rem;padding:0.6rem 0.75rem;border-radius:6px;background:rgba(192,57,43,0.12);border:1px solid var(--color-danger,#c0392b);color:var(--color-text-primary)">' +
             'This role is <strong>admin-equivalent</strong> — anyone holding this token has full control of Polaris. Prefer a minimal role.' +
           '</div>' +
         '</div>' +
@@ -7511,7 +7511,7 @@ async function createApiToken() {
 function _showRawTokenModal(name, rawToken) {
   var body =
     '<p style="margin:0 0 0.75rem">Token <strong>' + escapeHtml(name) + '</strong> created. Copy the token below — it will <strong>never be shown again</strong>.</p>' +
-    '<div style="background:var(--color-surface-alt,#1a1a1a);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;font-family:monospace;font-size:0.9rem;word-break:break-all;user-select:all" id="raw-token-display">' +
+    '<div style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:6px;padding:0.75rem;font-family:monospace;font-size:0.9rem;word-break:break-all;user-select:all" id="raw-token-display">' +
       escapeHtml(rawToken) +
     '</div>' +
     '<div style="margin-top:0.75rem">' +

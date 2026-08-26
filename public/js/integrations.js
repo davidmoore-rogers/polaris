@@ -2723,7 +2723,7 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
       if (asof) asof.textContent = (resp && resp.computedAt) ? ("As of last discovery: " + new Date(resp.computedAt).toLocaleString()) : "";
       renderNamesList((resp && resp.rows) || []);
     }).catch(function (err) {
-      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-danger)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
     });
   }
 
@@ -2754,7 +2754,7 @@ function _wireAutoMonitorStorageCard(idPrefix, klass, integrationId) {
       var sample = (r.sampleDevices || []).map(function (d) { return escapeHtml(d.hostname || "(unnamed)") + " (" + d.pinNames.length + ")"; }).join(", ");
       preview.innerHTML = '<strong>' + r.mountCount + '</strong> mount(s) across <strong>' + r.deviceCount + '</strong> device(s)' + (sample ? ' — e.g. ' + sample : '');
     }).catch(function (err) {
-      preview.innerHTML = '<span style="color:var(--color-error)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
+      preview.innerHTML = '<span style="color:var(--color-danger)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
     });
   }
 
@@ -2901,8 +2901,8 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       renderNamesList(rows);
       renderTypesList();
     }).catch(function (err) {
-      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
-      if (typesEl) typesEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-error)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+      if (listEl) listEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-danger)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
+      if (typesEl) typesEl.innerHTML = '<p class="hint" style="margin:0;color:var(--color-danger)">Failed to load: ' + escapeHtml(err.message || "unknown error") + '</p>';
     });
   }
 
@@ -3158,7 +3158,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
       // Cache the latest interface count on the card for the Save handler to read.
       preview.dataset.interfaceCount = String(r.interfaceCount);
     }).catch(function (err) {
-      preview.innerHTML = '<span style="color:var(--color-error)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
+      preview.innerHTML = '<span style="color:var(--color-danger)">Preview failed: ' + escapeHtml(err.message || "unknown error") + '</span>';
     });
   }
 
@@ -3220,7 +3220,7 @@ function _wireAutoMonitorCard(idPrefix, klass, integrationId) {
           (r.deviceCount > 0 ? ' (max ' + r.perDeviceMax + '/device)' : '') + '</div>' +
           (sample ? '<div style="margin-top:0.3rem">' + sample + '</div>' : '');
       }).catch(function (err) {
-        testOut.innerHTML = '<span style="color:var(--color-error)">' + escapeHtml(err.message || "Test failed") + '</span>';
+        testOut.innerHTML = '<span style="color:var(--color-danger)">' + escapeHtml(err.message || "Test failed") + '</span>';
       }).finally(function () {
         testBtn.disabled = false;
         testBtn.textContent = prevLabel;
@@ -6738,7 +6738,7 @@ function openApiQueryModal(id, adom, useProxy) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="fmg-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="fmg-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="fmg-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer =
@@ -7076,7 +7076,7 @@ function openFgtApiQueryModal(id, vdom) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="fgt-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="fgt-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="fgt-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
@@ -7240,7 +7240,7 @@ function openEntraApiQueryModal(id) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="entra-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="entra-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="entra-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
@@ -7362,7 +7362,7 @@ function openArcApiQueryModal(id) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="arc-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="arc-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="arc-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
@@ -7529,7 +7529,7 @@ function openAdApiQueryModal(id) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="ad-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="ad-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="ad-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';
@@ -7677,7 +7677,7 @@ function openVcenterApiQueryModal(id) {
         '<p style="font-size:0.75rem;text-transform:uppercase;letter-spacing:1px;color:var(--color-text-tertiary);margin:0">Response</p>' +
         '<button class="btn btn-sm btn-secondary" id="vc-copy-btn" style="padding:2px 10px;font-size:0.75rem">Copy</button>' +
       '</div>' +
-      '<pre id="vc-response" style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
+      '<pre id="vc-response" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:0.75rem;font-size:0.78rem;overflow:auto;max-height:300px;white-space:pre-wrap;word-break:break-all;margin:0"></pre>' +
     '</div>';
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Close</button>';

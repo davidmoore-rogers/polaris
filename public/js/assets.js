@@ -3869,7 +3869,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
   var agentBlockHtml = "";
   if (agentActive) {
     agentBlockHtml =
-      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
+      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface)">' +
         '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">' +
           '<strong>Polaris Agent</strong>' +
           '<span style="font-size:0.75rem;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,0.06);color:var(--color-success)">Active</span>' +
@@ -3885,7 +3885,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
       '</div>';
   } else if (agentInFlight) {
     agentBlockHtml =
-      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
+      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface)">' +
         '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">' +
           '<strong>Polaris Agent</strong>' +
           '<span style="font-size:0.75rem;padding:2px 8px;border-radius:999px;background:rgba(255,255,255,0.06);color:var(--color-text-secondary)">' +
@@ -3901,7 +3901,7 @@ function assetMonitoringFormHTML(asset, managedAgent) {
     // the button there because the install service needs the row to
     // exist first.
     agentBlockHtml =
-      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px dashed var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
+      '<div class="form-group" style="margin-top:1rem;padding:1rem;border:1px dashed var(--color-border);border-radius:6px;background:var(--color-surface)">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:0">' +
             '<strong>Polaris Agent</strong>' +
@@ -6015,7 +6015,7 @@ function assetAgentSubpanelHTML(a, agent) {
       '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem">' + actions + '</div>';
   }
 
-  return '<div id="asset-agent-panel" data-asset-id="' + escapeHtml(a.id) + '" style="margin:0 0 1.5rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface-1)">' +
+  return '<div id="asset-agent-panel" data-asset-id="' + escapeHtml(a.id) + '" style="margin:0 0 1.5rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface)">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:0.75rem;margin-bottom:0.5rem">' +
       '<h4 style="margin:0;display:flex;align-items:baseline;gap:0.5rem">Polaris Agent ' + headerBadge + '</h4>' +
     '</div>' +
@@ -9055,7 +9055,7 @@ function _vcUsageBar(usedBytes, totalBytes) {
   if (usedBytes == null || totalBytes == null || !(totalBytes > 0)) return "";
   var pct = Math.min(100, Math.max(0, (usedBytes / totalBytes) * 100));
   var color = pct >= 90 ? "var(--color-danger,#ef5350)" : pct >= 75 ? "var(--color-warning,#ffb74d)" : "var(--color-primary,#4fc3f7)";
-  return '<div style="background:var(--color-surface-raised);border:1px solid var(--color-border);border-radius:4px;height:6px;overflow:hidden;min-width:70px">' +
+  return '<div style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:4px;height:6px;overflow:hidden;min-width:70px">' +
     '<div style="width:' + pct.toFixed(1) + '%;height:100%;background:' + color + '"></div></div>' +
     '<span style="font-size:0.75rem;color:var(--color-text-tertiary)">' + pct.toFixed(0) + '%</span>';
 }
@@ -9241,7 +9241,7 @@ function _wireChartTooltip(container, formatHTML) {
   svgEl.addEventListener("mouseleave", function () { tip.style.display = "none"; });
 }
 var CHART_TOOLTIP_HTML =
-  '<div class="chart-tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:4px;padding:6px 8px;font-size:0.75rem;line-height:1.35;color:var(--color-text);box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:nowrap;z-index:5"></div>';
+  '<div class="chart-tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:4px;padding:6px 8px;font-size:0.75rem;line-height:1.35;color:var(--color-text-primary);box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:nowrap;z-index:5"></div>';
 
 // Re-runs `rerender(container)` whenever the container's width changes by more
 // than a pixel — needed because the chart SVGs use a fixed viewBox computed
@@ -11056,7 +11056,7 @@ function _renderMonitorChart(container, data, transitions) {
         hitTargets +
       '</g>' +
     '</svg>' +
-    '<div class="monitor-tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:4px;padding:6px 8px;font-size:0.75rem;line-height:1.35;color:var(--color-text);box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:nowrap;z-index:5"></div>';
+    '<div class="monitor-tooltip" style="position:absolute;pointer-events:none;display:none;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:4px;padding:6px 8px;font-size:0.75rem;line-height:1.35;color:var(--color-text-primary);box-shadow:0 4px 12px rgba(0,0,0,0.25);white-space:nowrap;z-index:5"></div>';
   container.innerHTML = svg;
   container.style.alignItems = "stretch";
   container.style.justifyContent = "flex-start";
@@ -11264,7 +11264,7 @@ async function openInterfaceDetailPanel(asset, ifName, ifaceRow) {
         '</div>' +
         '<textarea id="iface-comment-input" rows="2" maxlength="255" placeholder="' +
           (canEditComment ? 'Add a comment for this interface (max 255 chars). Polaris-local — not pushed to the device.' : 'Read-only — requires Assets Admin to edit.') +
-          '" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;font-size:0.85rem;font-family:inherit;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;color:var(--color-text);resize:vertical"' +
+          '" style="width:100%;box-sizing:border-box;padding:0.4rem 0.5rem;font-size:0.85rem;font-family:inherit;background:var(--color-bg-primary);border:1px solid var(--color-border);border-radius:6px;color:var(--color-text-primary);resize:vertical"' +
           (canEditComment ? '' : ' disabled') +
           '></textarea>' +
         '<div id="iface-comment-source" style="margin-top:0.25rem;font-size:0.75rem;color:var(--color-text-secondary)"></div>' +

@@ -399,7 +399,7 @@
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--color-text-muted, #6a7388);
+  color: var(--color-text-tertiary);
   margin: 0 0 4px;
 }
 .topology-legend-row {
@@ -420,7 +420,7 @@
   flex: 0 0 100%;
   margin-left: 36px;
   font-size: 0.74rem;
-  color: var(--color-text-muted, #6a7388);
+  color: var(--color-text-tertiary);
   padding-bottom: 2px;
 }
 .topology-info {
@@ -460,7 +460,7 @@
 }
 .topology-info .detail-row .value.copyable:hover,
 .topology-info .detail-row .value.copyable:focus {
-  background-color: var(--color-surface-elevated, rgba(255, 255, 255, 0.08));
+  background-color: var(--color-bg-elevated);
   outline: none;
 }
 .topology-info .detail-row .value.copy-flash-ok {
@@ -644,7 +644,7 @@
   height: 8px;
   border-radius: 2px;
   flex: 0 0 auto;
-  background: var(--color-text-muted, #6b7280);
+  background: var(--color-text-tertiary);
 }
 .rtree-level-badge {
   font-size: 0.68rem;
@@ -656,7 +656,7 @@
 .rtree-more,
 .rtree-empty {
   font-size: 0.7rem;
-  color: var(--color-text-muted, #6b7280);
+  color: var(--color-text-tertiary);
 }
 .rtree-warn {
   margin-top: 6px;

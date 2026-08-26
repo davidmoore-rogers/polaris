@@ -207,7 +207,7 @@
       : '';
 
     return ''
-      + '<div class="reservation-expand" style="background:var(--md-surface-container-low);padding:12px 16px 16px;border-radius:0 0 var(--shape-md) var(--shape-md);">'
+      + '<div class="reservation-expand" style="background:var(--md-surface-cont-low);padding:12px 16px 16px;border-radius:0 0 var(--shape-md) var(--shape-md);">'
       +   detailRows.join('')
       +   emptyHint
       +   btnBar
