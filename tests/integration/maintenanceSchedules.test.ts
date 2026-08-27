@@ -176,9 +176,18 @@ d("GET /maintenance-schedules/server-time", () => {
 });
 
 d("maintenance-schedule lifecycle", () => {
+  // Parked FROM `active`, and it can no longer be anything else: business
+  // rule 10's unmonitorable set grew to cover `storage` and `quarantined` in
+  // 2026-08, `decommissioned`/`disabled` were always there, and `maintenance`
+  // is the window itself — so `active` is the only status left that a
+  // maintenance target can hold on the way in. This fixture read `storage`
+  // until then, which the widening turned into monitored=false at create time
+  // and therefore out of `∩ monitored` targeting: the asset silently stopped
+  // being entered and this test went red on main for three pushes. Don't
+  // "improve" it back to a more interesting status.
   it("create with a now-active window enters maintenance immediately and parks the prior status", async () => {
     const { agent, csrf } = await authedAgent(app);
-    const asset = await seedAsset("enter-now", { status: "storage" });
+    const asset = await seedAsset("enter-now");
 
     const res = await agent
       .post("/api/v1/maintenance-schedules")
@@ -188,7 +197,7 @@ d("maintenance-schedule lifecycle", () => {
 
     const after = await prisma.asset.findUnique({ where: { id: asset.id } });
     expect(after!.status).toBe("maintenance");
-    expect(after!.maintenanceReturnStatus).toBe("storage");
+    expect(after!.maintenanceReturnStatus).toBe("active");
     expect(after!.statusChangedBy).toBe("system:maintenance");
 
     const windows = await prisma.assetMaintenanceWindow.findMany({ where: { assetId: asset.id } });
@@ -208,6 +217,36 @@ d("maintenance-schedule lifecycle", () => {
     const after = await prisma.asset.findUnique({ where: { id: asset.id } });
     expect(after!.status).toBe("active");
     expect(await prisma.assetMaintenanceWindow.count({ where: { assetId: asset.id } })).toBe(0);
+  });
+
+  // The status-driven half of the test above it. `monitored:false` gets there
+  // by operator intent; this gets there through business rule 10 — a status in
+  // the unmonitorable set is clamped to monitored=false on write, so it can
+  // never be a maintenance target no matter what the schedule names. Pins the
+  // rule 10 ↔ rule 16 interaction that broke the two fixtures in this file,
+  // and states the product answer: a window on a shelved or quarantined device
+  // would be a no-op, because nothing is polling it to silence.
+  it("assets in an unmonitorable status are not entered", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const shelved = await seedAsset("shelved", { status: "storage" });
+    const isolated = await seedAsset("isolated", { status: "quarantined" });
+    // The clamp is what makes them untargetable — assert it, so a failure here
+    // reads as "rule 10 changed" rather than "maintenance broke".
+    expect((await prisma.asset.findUnique({ where: { id: shelved.id } }))!.monitored).toBe(false);
+    expect((await prisma.asset.findUnique({ where: { id: isolated.id } }))!.monitored).toBe(false);
+
+    const res = await agent
+      .post("/api/v1/maintenance-schedules")
+      .set("X-CSRF-Token", csrf)
+      .send({ name: "Shelf", assetIds: [shelved.id, isolated.id], schedule: activeOneshot() });
+    expect(res.status).toBe(201);
+
+    for (const a of [shelved, isolated]) {
+      const after = await prisma.asset.findUnique({ where: { id: a.id } });
+      expect(after!.status).toBe(a.status);
+      expect(after!.maintenanceReturnStatus).toBeNull();
+      expect(await prisma.assetMaintenanceWindow.count({ where: { assetId: a.id } })).toBe(0);
+    }
   });
 
   it("rejects status criteria, empty targets, and malformed schedules", async () => {
@@ -302,7 +341,9 @@ d("maintenance-schedule lifecycle", () => {
 
   it("delete closes the window (deleted) and restores the parked status", async () => {
     const { agent, csrf } = await authedAgent(app);
-    const asset = await seedAsset("del-restore", { status: "quarantined" });
+    // `active` for the same reason as the enter-now fixture above: a
+    // quarantined asset is clamped unmonitorable and never enters at all.
+    const asset = await seedAsset("del-restore");
     const created = await agent
       .post("/api/v1/maintenance-schedules")
       .set("X-CSRF-Token", csrf)
@@ -315,7 +356,7 @@ d("maintenance-schedule lifecycle", () => {
     expect(del.status).toBe(204);
 
     const after = await prisma.asset.findUnique({ where: { id: asset.id } });
-    expect(after!.status).toBe("quarantined");
+    expect(after!.status).toBe("active");
     expect(after!.maintenanceReturnStatus).toBeNull();
     const windows = await prisma.assetMaintenanceWindow.findMany({ where: { assetId: asset.id } });
     expect(windows).toHaveLength(1);
