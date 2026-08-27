@@ -220,18 +220,44 @@ const SCOPE_SELECT = {
   monitoredInterfaces: true,
   // Every IPsec tunnel reading is restricted to PINNED tunnels (tunnelIsPinned).
   monitoredIpsecTunnels: true,
-  // Read by the BUILDER's device preview only, which reports monitored devices
-  // separately from the unmonitored remainder. The engine never FILTERS on it:
-  // event and change triggers fire on unmonitored devices by design, and a
-  // contact still owns a device nobody polls.
+  // The gate every trigger path applies (assetCanTrigger): an automation only
+  // ever fires about a device Polaris is actually polling. Kept in the select
+  // as well as the WHERE because the event tail and the builder's device
+  // preview read the flag per row rather than through scopeWhere.
   monitored: true,
 } as const;
+
+/**
+ * Can this asset trigger an automation right now? ONE definition, applied by
+ * every trigger path (threshold, composite, and the event/change tail), so a
+ * device can't be alertable through one trigger type and not another.
+ *
+ * Two halves:
+ *  - `monitored` — Polaris is polling it. An unmonitored device has no live
+ *    readings, only whatever its columns froze at when polling stopped:
+ *    `monitorStatus` is NOT cleared when monitoring is turned off, so before
+ *    this gate a `monitorStatus == down` automation kept an alert firing
+ *    forever about a device nobody had polled since the day it was shelved.
+ *    The four lifecycle statuses that cannot be monitor-enabled at all
+ *    (decommissioned / disabled / storage / quarantined —
+ *    UNMONITORABLE_STATUSES) fold into this half rather than being retested.
+ *  - not suppressed — in a maintenance window or dependency-suppressed behind
+ *    a dark parent (business rule 16).
+ *
+ * A `monitored` that is absent (the host pseudo-asset) passes: a host_metric
+ * or host-composite trigger has no device to poll.
+ */
+export function assetCanTrigger(a: { monitored?: boolean; status: string; dependencySuppressed: boolean }): boolean {
+  if (a.monitored === false) return false;
+  return !isSuppressedForNotifications(a);
+}
 
 /** Build a Prisma where from a scope, or null if the scope matches nothing.
  *  subnetCidrs can't be expressed in SQL (CIDR math over a string column) —
  *  it narrows to ipAddress-present here and match happens in loadScopeAssets. */
-function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
-  if (scope.allAssets) return {};
+function scopeWhere(scope: RuleScope, monitoredOnly = false): Prisma.AssetWhereInput | null {
+  const gate: Prisma.AssetWhereInput = monitoredOnly ? { monitored: true } : {};
+  if (scope.allAssets) return gate;
   const and: Prisma.AssetWhereInput[] = [];
   if (scope.assetTypes?.length) and.push({ assetType: { in: scope.assetTypes } });
   if (scope.tags?.length) and.push({ tags: { hasSome: scope.tags } });
@@ -249,11 +275,22 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
   // (so a condition-only scope loads all assets) and filters in memory below.
   if (scope.condition) and.push({});
   if (and.length === 0) return null; // no dimensions + not allAssets ⇒ nothing
+  // Pushed in AFTER the dimension count so the gate can never make an
+  // otherwise-empty scope look like it selected something.
+  if (monitoredOnly) and.push(gate);
   return { AND: and };
 }
 
-async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
-  const where = scopeWhere(scope);
+/**
+ * `monitoredOnly` is what every EVALUATION path passes — the engine tick and
+ * the builder's metric/state dry-runs, which must agree with it. The raw
+ * (unfiltered) form stays for the surfaces that are asking a different
+ * question: the device-list preview (which reports the unmonitored remainder
+ * rather than hiding it) and loadScopeAssetIds' callers — the dimension-value
+ * picker and mass pinning, neither of which is about firing.
+ */
+async function loadScopeAssets(scope: RuleScope, opts?: { monitoredOnly?: boolean }): Promise<ScopeAssetRow[]> {
+  const where = scopeWhere(scope, opts?.monitoredOnly === true);
   if (!where) return [];
   let rows: ScopeAssetRow[] = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
   if (scope.subnetCidrs?.length) {
@@ -278,9 +315,16 @@ async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
  *  DEVICE SET without the reading machinery around it (the builder's
  *  dimension-value picker asks "what do these devices actually report?").
  *  Shares loadScopeAssets so the picker can't disagree with what the engine
- *  would evaluate. */
-export async function loadScopeAssetIds(scope: RuleScope): Promise<string[]> {
-  return (await loadScopeAssets(scope)).map((a) => a.id);
+ *  would evaluate.
+ *
+ *  `monitoredOnly` is the picker's answer to "can this value ever fire?" —
+ *  since business rule 37 an unmonitored device triggers nothing, so offering
+ *  a sensor / interface / mount that only unmonitored inventory reports is how
+ *  an operator builds a filter, watches it match nothing, and stops trusting
+ *  the picker. Mass pinning passes it OFF deliberately: pinning ports on a
+ *  device before anyone monitors it is legitimate prep work. */
+export async function loadScopeAssetIds(scope: RuleScope, opts?: { monitoredOnly?: boolean }): Promise<string[]> {
+  return (await loadScopeAssets(scope, opts)).map((a) => a.id);
 }
 
 /**
@@ -1134,7 +1178,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     readings = r ? [r] : [];
     activeAssets = [HOST_PSEUDO_ASSET];
   } else if (trigger.type === "asset_metric" || trigger.type === "asset_state") {
-    const assets = await loadScopeAssets(rule.scope);
+    const assets = await loadScopeAssets(rule.scope, { monitoredOnly: true });
     scopeIds = new Set(assets.map((a) => a.id));
     // Precedence: only worth checking when this rule isn't already the most
     // specific in its signature group (and the group has a higher-rank peer).
@@ -1700,7 +1744,7 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
   if (trigger.kind === "host") {
     activeAssets = [HOST_PSEUDO_ASSET];
   } else {
-    scopeAssets = await loadScopeAssets(rule.scope);
+    scopeAssets = await loadScopeAssets(rule.scope, { monitoredOnly: true });
     activeAssets = [];
     for (const a of scopeAssets) {
       if (isSuppressedForNotifications(a)) suppressedIds.add(a.id);
@@ -2389,11 +2433,21 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       // assetHostname, and the cooldown key below.
       const subjectLabel = eventSubjectLabel(ev.resourceType, ev.resourceName);
       const detail = assetId ? await assetDetail(assetId) : null;
-      // Event/change rules honor the same silence as threshold rules: no
-      // notifications for assets in a maintenance window or dependency-
-      // suppressed behind one/an outage. (The event cursor still advances —
-      // suppressed events are skipped, not deferred.)
-      if (detail && isSuppressedForNotifications(detail)) continue;
+      // Event/change rules honor the SAME trigger gate as threshold rules
+      // (assetCanTrigger): no notifications about an asset Polaris isn't
+      // polling — unmonitored, or one of the four statuses that can't be
+      // monitor-enabled — nor about one in a maintenance window or
+      // dependency-suppressed behind a dark parent. Event and change triggers
+      // used to be the deliberate exception to the monitored half; they no
+      // longer are, so "an automation fires about it" and "Polaris watches it"
+      // are one answer. (The event cursor still advances — skipped events are
+      // skipped, not deferred.)
+      //
+      // A null detail is NOT a skip: the asset row is gone (an `asset.deleted`
+      // event is the case that matters), and swallowing those would silence
+      // the deletion audit trail. System-scoped events carry no assetId at
+      // all and are unaffected.
+      if (detail && !assetCanTrigger(detail)) continue;
       // Cooldown: skip when this (rule, asset/resource) fired within
       // cooldownSec — and stamp the map so later events in this batch dedupe.
       if (c.rule.cooldownSec) {
@@ -2510,9 +2564,12 @@ const ASSET_DETAIL_SELECT = {
   location: true, learnedLocation: true, description: true, manufacturer: true, model: true,
   serialNumber: true, os: true, osVersion: true, department: true, assignedTo: true,
   tags: true, dependencySuppressed: true, lastSeenSwitch: true, lastSeenAp: true,
+  // The event/change tail's trigger gate (assetCanTrigger) reads it off this
+  // same row rather than paying a second point read per matched event.
+  monitored: true,
 } as const;
 
-type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[]; dependencySuppressed: boolean };
+type AssetDetailRow = AssetTemplateDetail & { hostname: string | null; status: string; tags: string[]; dependencySuppressed: boolean; monitored: boolean };
 
 const _assetDetailCache = new Map<string, AssetDetailRow | null>();
 export function clearAssetDetailCache(): void {
@@ -2640,8 +2697,11 @@ export interface PreviewResult {
    *  wizard must not report that as "48 devices". Absent for host-only drafts
    *  (no asset scope) and for the unsupported event/change note. */
   totalAssets?: number;
-  /** Scope matches that are NOT monitored — counted, never listed. Only the
-   *  device-list preview sets it; a metric preview has no readings for them. */
+  /** Scope matches that are NOT monitored — counted, never listed. The filter
+   *  still SELECTS those devices (a scope is a device filter, not a monitoring
+   *  decision), but no trigger fires about them, so the count is stated rather
+   *  than hidden. Only the device-list preview sets it; a metric preview has
+   *  no readings for them either way. */
   unmonitoredCount?: number;
   matches: PreviewMatch[];
   /** Rendered sample of the composed email (first match), when the draft has emailComposition. */
@@ -2804,7 +2864,8 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     // Device-list preview: MONITORED devices are what the operator is choosing
     // between, so they're what the list and the count report. The unmonitored
     // remainder is stated rather than hidden — the filter still selects those
-    // devices, and an event or change automation does fire on them.
+    // devices, they just can't trigger anything (assetCanTrigger). Loaded
+    // UNFILTERED for exactly that reason: the count is the point.
     const all = await loadScopeAssets(input.scope);
     const assets = all.filter((a) => a.monitored);
     return {
@@ -2831,10 +2892,10 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
     const r = await resolveHostMetricReading(trigger);
     readings = r ? [r] : [];
   } else if (trigger.type === "asset_metric") {
-    scopeAssets = await loadScopeAssets(input.scope);
+    scopeAssets = await loadScopeAssets(input.scope, { monitoredOnly: true });
     readings = await resolveAssetMetricReadings(trigger, scopeAssets);
   } else if (trigger.type === "asset_state") {
-    scopeAssets = await loadScopeAssets(input.scope);
+    scopeAssets = await loadScopeAssets(input.scope, { monitoredOnly: true });
     readings = await resolveAssetStateReadings(trigger, scopeAssets);
   } else {
     return { supported: false, note: "Event and change rules fire on new audit events; there's nothing to preview against current data.", totalEvaluated: 0, matches: [] };
@@ -2902,7 +2963,7 @@ export async function previewRule(input: PreviewRuleInput): Promise<PreviewResul
  *  (met / measured-false / noData) in tree order. Suppression is NOT applied —
  *  preview answers "would this fire on current data", not "is it silenced". */
 async function previewCompositeRule(trigger: CompositeTrigger, input: PreviewRuleInput): Promise<PreviewResult> {
-  const assets = trigger.kind === "host" ? [HOST_PSEUDO_ASSET] : await loadScopeAssets(input.scope);
+  const assets = trigger.kind === "host" ? [HOST_PSEUDO_ASSET] : await loadScopeAssets(input.scope, { monitoredOnly: true });
   const leaves = collectLeafRefs(trigger);
   const truths = await resolveLeafTruths(leaves, assets);
 

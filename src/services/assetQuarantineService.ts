@@ -539,6 +539,13 @@ export async function quarantineAsset(
   // (this can happen on auto-quarantine extending an existing quarantine).
   const newStatusBefore =
     asset.status === "quarantined" ? asset.statusBeforeQuarantine : asset.status;
+  // Park `monitored` alongside the status. Quarantined is one of the statuses
+  // that cannot be monitor-enabled (the clamp in db.ts turns polling off on
+  // this very write, since every probe against an isolated device fails BY
+  // DESIGN), so without the park a release would hand the device back to the
+  // network unwatched. Same re-quarantine guard as the status above.
+  const newMonitoredBefore =
+    asset.status === "quarantined" ? asset.monitoredBeforeQuarantine : asset.monitored;
   const now = new Date();
 
   await prisma.asset.update({
@@ -548,6 +555,7 @@ export async function quarantineAsset(
       statusChangedAt: now,
       statusChangedBy: params.actor,
       statusBeforeQuarantine: newStatusBefore,
+      monitoredBeforeQuarantine: newMonitoredBefore ?? null,
       quarantineReason: params.reason || asset.quarantineReason || null,
       quarantinedAt: asset.quarantinedAt ?? now,
       quarantinedBy: params.actor,
@@ -679,15 +687,23 @@ export async function releaseQuarantine(
   // asset was somehow quarantined without a prior-status snapshot, e.g.
   // hand-imported data; "active" is a safe default).
   const restoredStatus = asset.statusBeforeQuarantine ?? "active";
+  // Pop `monitored` back with the status. null (never parked, or the asset
+  // wasn't monitored when it was quarantined) restores to not-monitored, which
+  // is also the pre-column behaviour. Staged in the SAME write as the status
+  // so the db.ts clamp sees the restored status rather than "quarantined" and
+  // lets the flag through.
+  const restoredMonitored = asset.monitoredBeforeQuarantine === true;
   const now = new Date();
 
   await prisma.asset.update({
     where: { id: asset.id },
     data: {
       status: restoredStatus,
+      monitored: restoredMonitored,
       statusChangedAt: now,
       statusChangedBy: params.actor,
       statusBeforeQuarantine: null,
+      monitoredBeforeQuarantine: null,
       quarantineReason: null,
       quarantinedAt: null,
       quarantinedBy: null,

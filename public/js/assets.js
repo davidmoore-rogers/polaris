@@ -3111,8 +3111,20 @@ function assetMonitoredViaCell(asset) {
   return '<span class="badge badge-neutral" title="' + escapeHtml(labels.join(", ")) + '">Multiple</span>';
 }
 
+// The four lifecycle statuses that cannot carry monitoring (business rule 10 —
+// UNMONITORABLE_STATUSES server-side). Mirrored here so the pill and the edit
+// form don't offer a toggle the API refuses: decommissioned/disabled are out of
+// service, a storage asset is on a shelf, and a quarantined one is isolated at
+// the FortiGate, where every probe fails by design.
+var UNMONITORABLE_STATUSES = ["decommissioned", "disabled", "storage", "quarantined"];
+
+function statusAllowsMonitoring(status) {
+  return UNMONITORABLE_STATUSES.indexOf(String(status || "")) === -1;
+}
+
 function assetMonitorBadge(asset) {
-  var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id;
+  var monitorable = statusAllowsMonitoring(asset && asset.status);
+  var canToggle = typeof canManageAssets === "function" && canManageAssets() && asset && asset.id && monitorable;
   var toggleAttrs = canToggle
     ? ' data-monitor-toggle="' + escapeHtml(asset.id) + '" data-monitored="' + (asset.monitored ? "true" : "false") + '"' +
       (asset.hostname ? ' data-hostname="' + escapeHtml(asset.hostname) + '"' : "") + ' role="button" tabindex="0"'
@@ -3140,7 +3152,11 @@ function assetMonitorBadge(asset) {
       return '<span class="badge badge-monitor-standby' + (canToggle ? " badge-clickable" : "") + '" title="' +
         escapeHtml(sbBits.join("\n")) + '"' + toggleAttrs + '>Standby</span>';
     }
-    var unmonTitle = canToggle ? ' title="Click to enable monitoring"' : "";
+    var unmonTitle = canToggle
+      ? ' title="Click to enable monitoring"'
+      : (!monitorable && asset && asset.status
+          ? ' title="' + escapeHtml("A " + asset.status + " asset is not polled — change the status to enable monitoring") + '"'
+          : "");
     return '<span class="badge badge-unmonitored' + (canToggle ? " badge-clickable" : "") + '"' + unmonTitle + toggleAttrs + '>Unmonitored</span>';
   }
   var s = asset.monitorStatus || "unknown";
@@ -3959,6 +3975,12 @@ function assetMonitoringFormHTML(asset, managedAgent) {
         '<span>Enable monitoring for this asset</span>' +
       '</label>' +
       '<p class="hint">A successful probe means the credential authenticated. Probes write a sample row each cycle; failed probes count as packet loss.</p>' +
+      // Shown (and the checkbox disabled) while the General tab's Status is one
+      // of the four that cannot be monitored. Driven live off #f-status by
+      // _wireMonitorEditTab, because the operator can fix the status in this
+      // same modal — a static disable would strand them on a tab that never
+      // re-enables.
+      '<p class="hint" id="f-monitored-blocked" style="display:none;color:var(--color-warning)"></p>' +
     '</div>' +
     agentBlockHtml +
     (transportBlockShown ? transportBlockHtml : '') +
@@ -4169,6 +4191,31 @@ async function _wireMonitorEditTab(asset) {
   _wireMaintenanceEditSection(asset);
   await _ensureCredentials();
   var monChk = document.getElementById("f-monitored");
+  // Status gate (business rule 10): decommissioned / disabled / storage /
+  // quarantined assets are not polled, so the checkbox is disabled — and
+  // cleared, so a save can't post a value the API would refuse — while the
+  // Status select sits on one of them. Re-evaluated on every status change
+  // rather than once at paint: Status lives on the General tab of this same
+  // modal, so the operator can make monitoring legal without leaving the form.
+  var statusEl = document.getElementById("f-status");
+  var monBlockedEl = document.getElementById("f-monitored-blocked");
+  function refreshMonitorableGate() {
+    if (!monChk) return;
+    var st = statusEl ? statusEl.value : (asset && asset.status);
+    var ok = statusAllowsMonitoring(st);
+    monChk.disabled = !ok;
+    if (!ok) monChk.checked = false;
+    if (monBlockedEl) {
+      monBlockedEl.style.display = ok ? "none" : "";
+      monBlockedEl.textContent = ok
+        ? ""
+        : "A " + st + " asset is not polled. Set Status to something else on the General tab to enable monitoring.";
+    }
+    // Let the rest of the tab (interval / timeout / transport block) react to
+    // a checkbox this gate just cleared.
+    monChk.dispatchEvent(new Event("change"));
+  }
+  if (statusEl) statusEl.addEventListener("change", refreshMonitorableGate);
   var intervalEl = document.getElementById("f-monitorInterval");
   var probeTimeoutEl = document.getElementById("f-probeTimeoutMs");
   var probeTimeoutWarn = document.getElementById("f-probeTimeoutMs-warn");
@@ -4245,6 +4292,9 @@ async function _wireMonitorEditTab(asset) {
   });
 
   refresh();
+  // After refresh() so the gate's dispatched change event lands on a wired
+  // listener rather than being swallowed.
+  refreshMonitorableGate();
 
   // Soft warning when probe timeout drops below 500 ms — Zod still allows
   // 100, but at that range probes false-fail under healthy network conditions.
@@ -20150,7 +20200,11 @@ async function bulkSetMonitoring(monitored) {
     var verb = monitored ? "Enabled" : "Disabled";
     var msg = verb + " monitoring on " + result.updated + " asset" + (result.updated !== 1 ? "s" : "");
     if (result.errors && result.errors.length) {
-      showToast(msg + " — " + result.errors.length + " skipped", "error");
+      // Name the reason, not just the count: the usual cause is a status that
+      // can't be monitored (decommissioned / disabled / storage / quarantined),
+      // and "3 skipped" on its own reads as a bug.
+      var why = result.errors[0] && result.errors[0].error;
+      showToast(msg + " — " + result.errors.length + " skipped" + (why ? " (" + why + ")" : ""), "error");
     } else {
       showToast(msg);
     }

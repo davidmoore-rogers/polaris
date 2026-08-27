@@ -827,6 +827,10 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/backfillInterfaceInventory.js",
       "./jobs/rasterizeStoredSvgIcons.js",
       "./jobs/clampAssetAcquiredAt.js",
+      // Deliberately not marker-guarded — one indexed UPDATE that keeps
+      // "an unmonitorable status cannot be monitored" true across upgrades
+      // and raw-SQL writers. See its header.
+      "./jobs/clampMonitoredForStatus.js",
       "./jobs/bootstrapProxyConfig.js",
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/migrateContactFilterShape.js",

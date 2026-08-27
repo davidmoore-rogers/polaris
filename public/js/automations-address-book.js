@@ -340,10 +340,11 @@
             var n = r.matchCount || 0;
             var un = r.unmonitoredCount || 0;
             // The unmonitored remainder is stated, not hidden: the filter does
-            // cover those devices, and an event or change automation fires on
-            // them — they're just not what the operator is choosing between.
+            // cover those devices, so the contact is on the hook for them —
+            // but no automation fires about a device Polaris isn't polling, so
+            // the note says which half can actually reach this recipient.
             var extra = un
-              ? ' <span class="hint">(+' + un + " unmonitored device" + (un === 1 ? "" : "s") + " also covered)</span>"
+              ? ' <span class="hint">(+' + un + " unmonitored device" + (un === 1 ? "" : "s") + " covered, but automations never fire on those)</span>"
               : "";
             if (!n) {
               el.innerHTML = un

@@ -14,8 +14,9 @@
  * present on the selected devices; an empty result is itself the answer ("these
  * devices report no hardware sensors").
  *
- * Scope resolution is `loadScopeAssetIds` from the engine — the same
- * loadScopeAssets the evaluation tick uses, so the picker can't offer a value
+ * Scope resolution is `loadScopeAssetIds(scope, { monitoredOnly: true })` from
+ * the engine — the same monitored-gated loadScopeAssets the evaluation tick
+ * uses (business rule 37), so the picker can't offer a value
  * from a device the automation wouldn't evaluate.
  *
  * Scale (100 vs 2000 assets): this is an INTERACTIVE call on a hypertable, so
@@ -428,7 +429,11 @@ export async function listDimensionValues(
   const source = DIMENSION_SOURCES[dimension];
   if (!source) throw new AppError(400, `No value source for dimension "${dimension}"`);
 
-  const scopedIds = await loadScopeAssetIds(scope);
+  // Monitored-only: a value only an unmonitored device reports is a filter that
+  // can never produce an alert (business rule 37). candidateWhere below is an
+  // optimization that only kicks in above the sample cap, so it can't be the
+  // gate — this is.
+  const scopedIds = await loadScopeAssetIds(scope, { monitoredOnly: true });
   // Deterministic subset so repeated opens of the picker agree with each other.
   let sorted = [...scopedIds].sort();
   const base = {

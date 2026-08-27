@@ -17,7 +17,12 @@ import { buildFirmwareChangedEvent, logEventsBatch, type LogEventInput } from ".
 import { assetMatchesIntegrationFilter } from "../../utils/integrationFilter.js";
 import { getConfiguredResolver } from "../../services/dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../../services/ouiService.js";
-import { clampAcquiredToLastSeen, EXCLUDED_LIFECYCLE_STATUSES } from "../../utils/assetInvariants.js";
+import {
+  clampAcquiredToLastSeen,
+  EXCLUDED_LIFECYCLE_STATUSES,
+  statusAllowsMonitoring,
+  UNMONITORABLE_STATUSES,
+} from "../../utils/assetInvariants.js";
 import { getIpHistory, getHistorySettings, updateHistorySettings, pruneOldHistory } from "../../services/assetIpHistoryService.js";
 import { getSightingsForAsset, getSightingSettings, updateSightingSettings } from "../../services/assetSightingService.js";
 import {
@@ -320,6 +325,24 @@ function clampMonitoredState(data: Record<string, unknown>): void {
     data.consecutiveFailures = 0;
     data.consecutiveSuccesses = 0;
   }
+}
+
+/**
+ * Refuse a write that would leave monitoring ON in a status that can't carry
+ * it (business rule 10). The clamp in db.ts would silently rewrite
+ * `monitored` to false, which is the right BACKSTOP but the wrong answer to an
+ * operator who just ticked the box: the form would save "successfully" and
+ * come back with the box clear and no explanation. So the two operator-facing
+ * write paths (this one and POST /bulk-monitor) say why instead.
+ */
+function assertMonitorableStatus(monitored: unknown, status: unknown): void {
+  if (monitored !== true) return;
+  if (statusAllowsMonitoring(status)) return;
+  throw new AppError(
+    409,
+    `A ${String(status)} asset cannot be monitored — ${UNMONITORABLE_STATUSES.join(" / ")} assets are not polled. ` +
+      "Change the status first, then enable monitoring.",
+  );
 }
 
 // ─── ipContext helpers ──────────────────────────────────────────────────────
@@ -964,12 +987,26 @@ router.post("/bulk-monitor", requirePermission("assets", "write"), async (req, r
     // can flag missing rows. One round-trip vs the previous N-asset loop.
     const found = await prisma.asset.findMany({
       where: { id: { in: body.ids } },
-      select: { id: true },
+      select: { id: true, status: true },
     });
     const foundSet = new Set(found.map((a) => a.id));
     const errors: Array<{ id: string; error: string }> = body.ids
       .filter((id) => !foundSet.has(id))
       .map((id) => ({ id, error: "Asset not found" }));
+
+    // Enabling monitoring on a status that can't carry it (business rule 10):
+    // named per id rather than left to the db.ts clamp. A mixed selection is
+    // the normal case here — the operator multi-selected a page of assets —
+    // so the skipped rows are REPORTED and the rest still go through, instead
+    // of failing the whole batch or silently updating rows whose box stays
+    // clear.
+    if (body.monitored) {
+      for (const a of found) {
+        if (statusAllowsMonitoring(a.status)) continue;
+        foundSet.delete(a.id);
+        errors.push({ id: a.id, error: `A ${String(a.status)} asset cannot be monitored` });
+      }
+    }
 
     // Single bulk update — Postgres' `WHERE id = ANY(...)` planner walks
     // the (newly-added) primary key once and applies the uniform data
@@ -3344,6 +3381,9 @@ async function buildAssetUpdatePatch(
   ) {
     await operatorReleaseAsset(id, actor);
   }
+  // Effective status after this write — the edit form can flip status and
+  // monitoring in the same save, and it's the RESULT that has to be legal.
+  assertMonitorableStatus(data.monitored, input.status ?? existing.status);
   clampMonitoredState(data);
   clampAcquiredToLastSeen(data, existing);
   return { data, ipOverrideTouched, coordChanged };

@@ -47,7 +47,13 @@ import { randomUUID } from "node:crypto";
 import { PrismaClient } from "./generated/prisma/client.js";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { normalizeManufacturer } from "./utils/manufacturerNormalize.js";
-import { applyHostnameOverride, applyIpOverride, type IpOverrideOutcome } from "./utils/assetInvariants.js";
+import {
+  applyHostnameOverride,
+  applyIpOverride,
+  statusAllowsMonitoring,
+  UNMONITORABLE_STATUSES,
+  type IpOverrideOutcome,
+} from "./utils/assetInvariants.js";
 import { normalizeOsInData } from "./utils/osNormalize.js";
 import { deriveAssetSources, type AssetSnapshot } from "./utils/assetSourceDerivation.js";
 import { sealValue, openValue, isSealed } from "./utils/secretBox.js";
@@ -269,13 +275,70 @@ function normalizeManufacturerInData(data: any): void {
 function clampMonitoredForStatus(data: any): void {
   if (!data || typeof data !== "object") return;
   if (!("status" in data)) return;
-  const v = data.status;
-  let status: unknown = null;
-  if (typeof v === "string") status = v;
-  else if (v && typeof v === "object" && "set" in v) status = (v as any).set;
-  if (status !== "decommissioned" && status !== "disabled") return;
+  if (statusAllowsMonitoring(unwrapSet(data.status))) return;
   data.monitored = false;
   data.consecutiveFailures = 0;
+}
+
+/** Read the plain value out of either data shape Prisma accepts —
+ *  `field: v` or the nested `field: { set: v }`. */
+function unwrapSet(v: unknown): unknown {
+  if (v && typeof v === "object" && "set" in (v as Record<string, unknown>)) {
+    return (v as Record<string, unknown>).set;
+  }
+  return v;
+}
+
+/** Is this write turning monitoring ON? */
+function stagesMonitoredOn(data: unknown): boolean {
+  if (!data || typeof data !== "object") return false;
+  const d = data as Record<string, unknown>;
+  if (!("monitored" in d)) return false;
+  return unwrapSet(d.monitored) === true;
+}
+
+/**
+ * The OTHER direction of business rule 10: a write that turns monitoring ON
+ * without saying anything about `status` has to be checked against the status
+ * the row already carries, or every unmonitorable state (decommissioned /
+ * disabled / storage / quarantined) is one `monitored: true` away from being
+ * polled again — which is exactly the shape of the operator toggle, the
+ * discovery monitored-sweep and the bulk-monitor endpoint.
+ *
+ * The read only fires when the write stages `monitored: true` WITHOUT a
+ * `status`, so the monitor hot paths (probe results, lastSeen bumps, telemetry
+ * anchors) never pay it — none of them touch `monitored`. A write that stages
+ * BOTH is already covered by clampMonitoredForStatus above.
+ *
+ * Best-effort: a failed read leaves the write alone rather than failing it.
+ * The boot sweep (jobs/clampMonitoredForStatus.ts) mops up any drift.
+ */
+async function enforceMonitorableStatus(base: PrismaClient, where: unknown, data: unknown): Promise<void> {
+  if (!stagesMonitoredOn(data)) return;
+  const d = data as Record<string, unknown>;
+  if ("status" in d) return;
+  try {
+    const row = await base.asset.findFirst({ where: where as any, select: { status: true } });
+    if (!row || statusAllowsMonitoring(row.status)) return;
+    d.monitored = false;
+    d.consecutiveFailures = 0;
+  } catch {
+    // Best-effort — see doc comment.
+  }
+}
+
+/**
+ * updateMany can't be resolved to one row, so the guard narrows the WHERE
+ * instead: an unmonitorable row is excluded from the statement entirely rather
+ * than updated with `monitored` quietly rewritten. Callers that need to tell
+ * an operator WHICH rows were skipped filter the ids themselves first (see
+ * POST /assets/bulk-monitor) — this is the backstop, not the message.
+ */
+function narrowUpdateManyForMonitorable(args: any): void {
+  if (!stagesMonitoredOn(args?.data)) return;
+  if (args.data && typeof args.data === "object" && "status" in args.data) return;
+  const guard = { status: { notIn: UNMONITORABLE_STATUSES } };
+  args.where = args.where ? { AND: [args.where, guard] } : guard;
 }
 
 /**
@@ -542,6 +605,7 @@ function _buildClient(base: PrismaClient) {
           normalizeManufacturerInData(args?.data);
           normalizeOsInData(args?.data);
           clampMonitoredForStatus(args?.data);
+          await enforceMonitorableStatus(base, args?.where, args?.data);
           const overrideOutcome = await enforceOperatorOverrides(base, args?.where, args?.data);
           const result = await query(args);
           if (overrideOutcome) fireIpOverrideFollowUp(overrideOutcome, (result as any)?.id);
@@ -572,6 +636,7 @@ function _buildClient(base: PrismaClient) {
           normalizeManufacturerInData(args?.data);
           normalizeOsInData(args?.data);
           clampMonitoredForStatus(args?.data);
+          narrowUpdateManyForMonitorable(args);
           // updateMany: skip shadow-write. Rare on identity fields, and the
           // backfill job sweeps any drift on next startup. Same logic for the
           // dns_resolved reconcile — the periodic job catches drift.
@@ -584,6 +649,7 @@ function _buildClient(base: PrismaClient) {
           normalizeOsInData(args?.update);
           clampMonitoredForStatus(args?.create);
           clampMonitoredForStatus(args?.update);
+          await enforceMonitorableStatus(base, args?.where, args?.update);
           // Create branch needs no guard — a brand-new row can't carry an
           // override; the read is a no-op miss when the row doesn't exist.
           const overrideOutcome = await enforceOperatorOverrides(base, args?.where, args?.update);

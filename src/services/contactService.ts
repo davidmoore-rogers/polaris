@@ -738,10 +738,11 @@ export interface ContactAssetPreview {
   matchCount: number;
   /**
    * Covered devices that are NOT monitored. Counted, never listed: the filter
-   * genuinely selects them and an event/change automation does fire on them, so
-   * hiding them would understate the contact's reach — but they're not what an
-   * operator is choosing between, and they'd swamp the list on a fleet with a
-   * large unmonitored inventory.
+   * genuinely selects them, so hiding them would understate who the contact is
+   * on the hook for — but no automation fires about an unmonitored device
+   * (assetCanTrigger), so they aren't what an operator picking a recipient is
+   * choosing between, and they'd swamp the list on a fleet with a large
+   * unmonitored inventory.
    */
   unmonitoredCount: number;
   sample: Array<{ id: string; hostname: string | null; ipAddress: string | null; assetType: string }>;
@@ -750,8 +751,10 @@ export interface ContactAssetPreview {
 /**
  * Dry-run for the editor: which devices a (criteria, pins) pair covers right
  * now. Union of criteria matches and explicit pins — unlike MaintenanceSchedule
- * this is NOT intersected with monitored=true, because an unmonitored device
- * still has an owner worth emailing (an event/change automation can fire on it).
+ * this is NOT intersected with monitored=true: an unmonitored device still has
+ * an owner worth recording, and ownership is an address-book fact rather than
+ * an alerting one. No automation currently fires about such a device, so the
+ * two halves are reported separately and the caller decides what to say.
  */
 export async function previewContactAssets(
   input: ContactFilterInput,

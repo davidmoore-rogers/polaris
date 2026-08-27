@@ -226,3 +226,36 @@ export function bumpLastSeen(
   data.lastSeenSource = source;
   return true;
 }
+
+/**
+ * The asset statuses that CANNOT carry `monitored: true` — the lifecycle
+ * states where polling the device is either impossible or a lie:
+ *
+ *   decommissioned / disabled — the asset is out of service (business rule 10).
+ *   storage                   — on a shelf, not on the network.
+ *   quarantined               — deliberately isolated at the FortiGate, so
+ *                               every probe fails BY DESIGN. Polling it once
+ *                               meant a security action produced an outage
+ *                               alert storm about the isolation working.
+ *
+ * `maintenance` is deliberately NOT here: a window pauses polling
+ * (MONITOR_CANDIDATE_WHERE) while `monitored` keeps the operator's intent so
+ * it survives the window (business rule 16).
+ *
+ * Enforced centrally by clampMonitoredForStatus in src/db.ts (both write
+ * directions) and swept on boot by jobs/clampMonitoredForStatus.ts.
+ */
+export const UNMONITORABLE_STATUSES: ("decommissioned" | "disabled" | "storage" | "quarantined")[] = [
+  "decommissioned",
+  "disabled",
+  "storage",
+  "quarantined",
+];
+
+/** Can an asset in this status be monitor-enabled? Unknown/absent statuses
+ *  are permissive — the enum is the authority on what a status may be, and a
+ *  value this list has never heard of must not silently stop polling. */
+export function statusAllowsMonitoring(status: unknown): boolean {
+  if (typeof status !== "string") return true;
+  return !(UNMONITORABLE_STATUSES as string[]).includes(status);
+}

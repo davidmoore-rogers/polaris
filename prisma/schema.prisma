@@ -1004,6 +1004,15 @@ model Asset {
   // nothing). Release best-efforts an unpush from each target before flipping
   // status back; per-target failure does not block the release.
   statusBeforeQuarantine AssetStatus?
+  // Parks `monitored` across the quarantine the same way
+  // statusBeforeQuarantine parks the status. Quarantine is one of the statuses
+  // that cannot be monitor-enabled (every probe fails by design — see
+  // UNMONITORABLE_STATUSES), so the clamp in db.ts turns polling off on the
+  // way in; without this column, releasing a quarantine would hand the device
+  // back to the network with nobody watching it. null = the asset was not
+  // monitored when it was quarantined (or predates this column), which pops
+  // back to not-monitored either way.
+  monitoredBeforeQuarantine Boolean?
   quarantineReason       String?      @db.Text
   quarantinedAt          DateTime?
   quarantinedBy          String?
