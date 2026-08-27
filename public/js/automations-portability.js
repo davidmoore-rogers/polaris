@@ -663,12 +663,20 @@
    *   - a diff is confirmed before saving, and the changes that are dangerous
    *     rather than merely different (taking a disabled automation live, emptying
    *     the device filter or the action list) are called out.
+   *
+   * `onExport(body)` is optional and adds an Export button. What it receives is
+   * the textarea's CURRENT contents, so an edit can be exported without being
+   * saved first. The caller owns what "export" means, because it already holds
+   * the catalogs the dependency block is named from - and both callers hand the
+   * body to buildExportFile, so this button writes the PORTABLE file, not the
+   * full-fidelity JSON on screen. Copy is what gives you that.
    */
   function openCodeModal(opts) {
     var o = opts || {};
     var original = forCodeView(o.body);
     var text = JSON.stringify(original, null, 2);
     var canSave = o.canSave !== false && typeof o.onSave === "function";
+    var canExport = typeof o.onExport === "function";
 
     var note =
       '<p style="font-size:0.85rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">' +
@@ -681,6 +689,10 @@
       '</p>' +
       '<p style="font-size:0.8rem;color:var(--color-text-tertiary);margin:0 0 0.75rem">' +
       'Unlike an exported file, this includes delivery channel and recipient ids \u2014 and any api_call headers \u2014 so treat it as sensitive.' +
+      (canExport
+        ? ' <strong>Copy</strong> gives you exactly what is shown here; <strong>Export</strong> writes the portable file instead, ' +
+          'with those references removed and listed as named dependencies.'
+        : '') +
       '</p>';
 
     var body =
@@ -693,6 +705,10 @@
       '<div id="aw-code-err" class="form-error" style="display:none;margin-top:0.5rem"></div>';
 
     var footer =
+      (canExport
+        ? '<button class="btn btn-secondary" id="aw-code-export" type="button" ' +
+          'title="Download this automation as a portable file">Export</button>'
+        : "") +
       '<button class="btn btn-secondary" id="aw-code-copy" type="button">Copy</button>' +
       '<button class="btn btn-secondary" id="aw-code-cancel" type="button">' + (canSave ? "Cancel" : "Close") + '</button>' +
       (canSave ? '<button class="btn btn-primary" id="aw-code-save" type="button">Save changes</button>' : "");
@@ -707,6 +723,42 @@
     }
 
     ov.overlay.querySelector("#aw-code-cancel").addEventListener("click", function () { ov.close(); });
+
+    /** The textarea as an automation body, or null with the error already shown.
+     *  Export and Save share it: exporting an unparseable edit would write a
+     *  file off the LAST good body, which is worse than refusing, because the
+     *  operator would have no way to tell which one they got. */
+    function readEdited() {
+      errBox.style.display = "none";
+      var parsed;
+      try {
+        parsed = JSON.parse(ta.value);
+      } catch (err) {
+        showErr("Invalid JSON: " + ((err && err.message) || "could not be parsed"));
+        return null;
+      }
+      try {
+        assertSafeKeys(parsed, 0);
+      } catch (err2) {
+        showErr(err2.message);
+        return null;
+      }
+      if (!isPlainObject(parsed)) { showErr("The automation must be a JSON object."); return null; }
+      if (!parsed.name || typeof parsed.name !== "string") { showErr("The automation needs a name."); return null; }
+      return parsed;
+    }
+
+    if (canExport) {
+      ov.overlay.querySelector("#aw-code-export").addEventListener("click", function () {
+        var parsed = readEdited();
+        if (!parsed) return;
+        try {
+          o.onExport(parsed);
+        } catch (err) {
+          showErr((err && err.message) || "Export failed");
+        }
+      });
+    }
 
     ov.overlay.querySelector("#aw-code-copy").addEventListener("click", function () {
       var btn = this;
@@ -725,23 +777,9 @@
     if (canSave) {
       ov.overlay.querySelector("#aw-code-save").addEventListener("click", async function () {
         var btn = this;
-        errBox.style.display = "none";
 
-        var parsed;
-        try {
-          parsed = JSON.parse(ta.value);
-        } catch (err) {
-          showErr("Invalid JSON: " + ((err && err.message) || "could not be parsed"));
-          return;
-        }
-        try {
-          assertSafeKeys(parsed, 0);
-        } catch (err) {
-          showErr(err.message);
-          return;
-        }
-        if (!isPlainObject(parsed)) { showErr("The automation must be a JSON object."); return; }
-        if (!parsed.name || typeof parsed.name !== "string") { showErr("The automation needs a name."); return; }
+        var parsed = readEdited();
+        if (!parsed) return;
 
         // "Did anything change?" is a question about the WHOLE body — the diff
         // below only tracks the fields whose removal is destructive, so relying

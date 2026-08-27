@@ -4585,6 +4585,21 @@ async function openAutomationWizard(existing, opts) {
       '<button class="btn btn-secondary" id="aw-export" type="button" style="padding:2px 10px;font-size:0.8rem">Export</button>';
   }
 
+  /** The one export path, shared by the Summary button and the code modal's
+   *  Export button, so both write the same portable file with the same toast. */
+  function exportBody(body) {
+    var P = portability();
+    if (!P) return;
+    var file = P.buildExportFile(body, portabilityCatalogs(), {
+      polarisVersion: (window.polarisVersion || undefined),
+    });
+    var missing = (file.dependencies || []).length;
+    window.downloadJson(file, P.filenameForExport(body.name));
+    showToast(missing
+      ? 'Exported. The file lists ' + missing + ' thing' + (missing === 1 ? '' : 's') + ' it needs — delivery wiring is not included.'
+      : 'Exported.', 'success');
+  }
+
   function wireCodeButtons() {
     var P = portability();
     if (!P) return;
@@ -4594,15 +4609,7 @@ async function openAutomationWizard(existing, opts) {
       exportBtn.addEventListener('click', function () {
         // No collect needed: goToStep already collected every step passed
         // through, and buildPayload is a pure function of the draft.
-        var body = buildPayload({ nameFallback: 'Untitled automation' });
-        var file = P.buildExportFile(body, portabilityCatalogs(), {
-          polarisVersion: (window.polarisVersion || undefined),
-        });
-        var missing = (file.dependencies || []).length;
-        window.downloadJson(file, P.filenameForExport(body.name));
-        showToast(missing
-          ? 'Exported. The file lists ' + missing + ' thing' + (missing === 1 ? '' : 's') + ' it needs — delivery wiring is not included.'
-          : 'Exported.', 'success');
+        exportBody(buildPayload({ nameFallback: 'Untitled automation' }));
       });
     }
 
@@ -4614,6 +4621,10 @@ async function openAutomationWizard(existing, opts) {
           title: 'Automation code',
           body: buildPayload({ nameFallback: 'Untitled automation' }),
           canSave: canSave,
+          // Read-level, like the code view itself, and it exports the textarea
+          // rather than the draft: an edit can leave as a portable file without
+          // first being applied to the draft or saved.
+          onExport: function (edited) { exportBody(edited); },
           onSave: canSave ? async function (edited) {
             // Apply to the draft, then save through the ONE save path so
             // validation, the POST-vs-PUT choice and the toast stay shared.

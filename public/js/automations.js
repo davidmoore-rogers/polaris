@@ -633,19 +633,27 @@ var _rulesPage = 1;
     ];
   }
 
-  function exportRule(r) {
+  /** The one export path, shared by the row menu and the code modal's Export
+   *  button \u2014 so a file downloaded from either place is the same portable file,
+   *  and the toast that explains the dependency block is written once. */
+  function exportBody(body) {
     var P = window.PolarisAutomationPortability;
     if (!P) return;
-    // _ruleToInput is the tested row -> ruleInput converter; the strip then
-    // removes every install-specific reference and names it as a dependency.
-    var file = P.buildExportFile(_ruleToInput(r), portabilityCatalogs(), {
+    var file = P.buildExportFile(body, portabilityCatalogs(), {
       polarisVersion: (window.polarisVersion || undefined),
     });
     var deps = (file.dependencies || []).length;
-    window.downloadJson(file, P.filenameForExport(r.name));
+    window.downloadJson(file, P.filenameForExport(body.name));
     showToast(deps
       ? "Exported. The file lists " + deps + " thing" + (deps === 1 ? "" : "s") + " it needs \u2014 delivery wiring is not included."
       : "Exported.", "success");
+  }
+
+  function exportRule(r) {
+    // _ruleToInput is the tested row -> ruleInput converter; the strip inside
+    // exportBody then removes every install-specific reference and names it as
+    // a dependency.
+    exportBody(_ruleToInput(r));
   }
 
   function openCodeFor(r) {
@@ -655,6 +663,10 @@ var _rulesPage = 1;
       title: "Code for \u201c" + r.name + "\u201d",
       body: _ruleToInput(r),
       canSave: canEditRules,
+      // Exporting is read-level, like the code view itself, and it exports what
+      // is in the textarea: an edit can be carried out of here without being
+      // saved onto the running automation.
+      onExport: function (edited) { exportBody(_ruleToInput(edited)); },
       onSave: canEditRules ? async function (edited) {
         // Route the edit through _ruleToInput as well: it normalises every
         // field explicitly, which is what keeps a PUT (a full replace) from

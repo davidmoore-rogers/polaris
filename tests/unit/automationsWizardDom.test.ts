@@ -2261,6 +2261,57 @@ describe("automation export / import / view code", () => {
     expect(JSON.stringify(savedPayloads[0]!.actions)).toContain("c1");
   });
 
+  it("View code offers Export, and it writes the PORTABLE file, not what is on screen", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const ta = inCode("#aw-code-text") as unknown as { value: string };
+    // The code view is full fidelity, so the channel id IS on screen ...
+    expect(ta.value).toContain("c1");
+
+    (inCode("#aw-code-export") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(downloads.length).toBe(1);
+    expect(downloads[0]!.filename).toBe("Exportable.automation.json");
+    const file = downloads[0]!.obj as Record<string, unknown>;
+    expect(file.polarisAutomation).toBe(1);
+    // ... and the file it wrote is stripped anyway, or an export taken from here
+    // would carry delivery wiring into a ticket.
+    expect(JSON.stringify(file)).not.toContain('"c1"');
+    // Saving is a separate button: exporting must not touch the automation.
+    expect(savedPayloads.length).toBe(0);
+    expect(toastErrors).toEqual([]);
+  });
+
+  it("Export carries the operator's unsaved edit, and refuses invalid JSON in place", async () => {
+    await openToSummary();
+    (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const ta = inCode("#aw-code-text") as unknown as { value: string };
+    const shown = JSON.parse(ta.value) as Record<string, unknown>;
+    ta.value = JSON.stringify({ ...shown, name: "Renamed in the editor" });
+    (inCode("#aw-code-export") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(downloads.length).toBe(1);
+    expect(downloads[0]!.filename).toBe("Renamed in the editor.automation.json");
+    expect(((downloads[0]!.obj as Record<string, unknown>).rule as Record<string, unknown>).name)
+      .toBe("Renamed in the editor");
+
+    // An unparseable edit exports nothing: a file built off the last good body
+    // would be indistinguishable from one built off the edit.
+    ta.value = "{ not json";
+    (inCode("#aw-code-export") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(downloads.length).toBe(1);
+    const err = inCode("#aw-code-err") as unknown as { textContent: string; style: { display: string } };
+    expect(err.style.display).toBe("");
+    expect(err.textContent).toMatch(/Invalid JSON/);
+  });
+
   it("saving an unchanged body just closes, and a destructive edit needs a confirm", async () => {
     await openToSummary();
     (doc.querySelector("#aw-view-code") as unknown as { click: () => void }).click();
