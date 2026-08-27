@@ -1078,6 +1078,7 @@ The canonical to mirror for a standalone-device-with-its-own-API type (most comm
 - Discovery breadcrumb tags — `src/services/discovery/discoveryEngine.ts` legacy paths still write `entra-disabled`, `ad-disabled`, `prev-*` markers. Some of these (sid:, ad-guid:) are being retired by the multi-source asset model.
 
 **Tag registry mirror (`prisma.tag` rows):**
+- `public/js/users.js`'s tag picker (per-user tag scope, role slide-over, Group Mappings) reads the registry via `GET /server-settings/tags` and is the one **client-side creator** of `Tag` rows outside Server Settings → Identification: a typed name absent from the catalogue POSTs a plain tag (no criteria, server-assigned color, category General) when the caller holds `serverSettingsSystem:fullwrite`, else it attaches to that principal's `otherTags` alone and the hint says so. The catalogue GET carries the same `serverSettingsSystem` read floor, so a user administrator without it degrades to the free-text chip input rather than being shown an empty registry — `regionPickerHtml`'s unreadable-catalogue posture. Deleting a registry tag never strips it from `User`/`Role`/`GroupMapping.otherTags` (no FK).
 - Manual tag pickers (assets edit modal) read from the registry to populate dropdowns. System-managed tags should also appear here so operators can search/filter for them — `mapRegionService` is the canonical example (upserts on create, rotates on rename, deletes on delete).
 
 **Invariants:**

@@ -70,6 +70,7 @@ document.addEventListener("DOMContentLoaded", async function () {
   loadRoles();          // also drives the role dropdowns in the user modals
   loadGroupMappings();  // IdP group → role + tags
   loadRegionList();     // best-effort; used by the region pickers
+  loadTagList();        // best-effort; used by the tag pickers
   initAuthSettingsButton();
   document.getElementById("btn-add-user").addEventListener("click", openCreateModal);
   var btnAddRole = document.getElementById("btn-add-role");
@@ -240,14 +241,14 @@ function renderUsersBody() {
  * account has no local password to reset, and 2FA is self-service for your own
  * account, an admin reset for someone else's (only when they actually have it
  * enabled), and absent entirely for Azure accounts where the IdP owns it.
- * Returning [] is impossible — Role, Regions and Delete are unconditional — so
+ * Returning [] is impossible — Role, Tags and Delete are unconditional — so
  * the trigger never opens an empty menu.
  */
 function _userMenuItems(u) {
   var isSelf = currentUsername === u.username;
   var items = [
     { label: "Change role…", onSelect: function () { openChangeRoleModal(u.id, u.username, u.role ? u.role.id : ""); } },
-    { label: "Regions…", title: "Per-user region scope", onSelect: function () { openUserRegionsModal(u.id, u.username); } },
+    { label: "Tags…", title: "Per-user region + tag scope", onSelect: function () { openUserTagScopeModal(u.id, u.username); } },
   ];
   if (!isIdpManaged(u)) {
     items.push({ label: "Reset password…", onSelect: function () { openResetPasswordModal(u.id, u.username); } });
@@ -355,7 +356,7 @@ function openChangeRoleModal(id, username, currentRoleId) {
   });
 }
 
-function openUserRegionsModal(id, username) {
+function openUserTagScopeModal(id, username) {
   var user = _usersRaw.filter(function (u) { return u.id === id; })[0];
   var current = (user && Array.isArray(user.regionTags)) ? user.regionTags.slice() : [];
   var currentOther = (user && Array.isArray(user.otherTags)) ? user.otherTags.slice() : [];
@@ -367,7 +368,7 @@ function openUserRegionsModal(id, username) {
     '</p>';
   var body = help +
     '<div class="form-group"><label>Region Scope</label>' + regionPickerHtml("f-user-regions", current) + '</div>' +
-    '<div class="form-group"><label>Other Tags</label>' + otherTagsPickerHtml("f-user-other", currentOther) + '</div>';
+    '<div class="form-group"><label>Tags</label>' + otherTagsPickerHtml("f-user-other", currentOther) + '</div>';
   var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Save</button>';
   openModal("User Tag Scope", body, footer);
   document.getElementById("btn-cancel").addEventListener("click", closeModal);
@@ -1282,7 +1283,7 @@ async function openGroupMappingSlideover(id) {
       regionPickerHtml("f-gm-regions", m ? (m.regionTags || []) : []) +
     '</div>' +
     '<div class="form-group">' +
-      '<label>Other Tags</label>' +
+      '<label>Tags</label>' +
       otherTagsPickerHtml("f-gm-other", m ? (m.otherTags || []) : []) +
     '</div>' +
     '<div class="form-group">' +
@@ -1524,8 +1525,8 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
     regionPickerHtml("f-role-regions", role ? (role.regionTags || []) : []) +
   '</div>' +
   '<div class="form-group">' +
-    '<label>Other Tags</label>' +
-    '<p class="hint" style="margin-top:0">Free-form tag scope, a second dimension alongside region tags. Empty = unrestricted.</p>' +
+    '<label>Tags</label>' +
+    '<p class="hint" style="margin-top:0">Tag scope, a second dimension alongside region tags. Empty = unrestricted.</p>' +
     otherTagsPickerHtml("f-role-other", role ? (role.otherTags || []) : []) +
   '</div>';
 
@@ -1703,10 +1704,58 @@ function collectRegionPicker(idPrefix) {
   return out;
 }
 
-// ─── Free-form "other" tag picker (chip input; no registry) ──────────────
-// Parallel dimension to region tags. Operator types a tag; Enter or comma
-// commits a chip; × removes it. Used in the role slide-over, the per-user
-// tag modal, and the Group Mappings slide-over.
+// ─── Tag picker (registry catalogue + free-form additions) ───────────────
+// Parallel dimension to region tags, and the same interaction: every tag in
+// the registry renders as a toggleable pill in its own color, click selects.
+// Typing a name that isn't in the registry creates it there when the caller
+// may (serverSettingsSystem fullwrite) and otherwise attaches it to this
+// assignment alone. Used in the role slide-over, the per-user tag modal, and
+// the Group Mappings slide-over.
+
+// Catalogue state. Loaded once per page load by loadTagList().
+var _tagList = [];              // registry tag names, category-then-name order
+var _tagByName = {};            // lower(name) → the registry row
+var _tagCatalogLoaded = false;  // false also means "we never read it"
+
+// GET /server-settings/tags sits behind the serverSettingsSystem read floor,
+// which a user administrator may not hold. Same posture as loadRegionList: a
+// failed read leaves the catalogue empty and the picker degrades to the
+// free-text chip input it was before it had a catalogue — never to a claim
+// that the install has no tags.
+async function loadTagList() {
+  if (typeof permAtLeast === "function" && !permAtLeast("serverSettingsSystem", "read")) return;
+  try {
+    var tags = await api.serverSettings.listTags();
+    _tagList = [];
+    _tagByName = {};
+    (Array.isArray(tags) ? tags : []).forEach(function (t) {
+      if (!t || !t.name) return;
+      _tagByName[String(t.name).toLowerCase()] = t;
+      _tagList.push(t.name);
+    });
+    _tagCatalogLoaded = true;
+  } catch (_) {
+    _tagCatalogLoaded = false;
+  }
+}
+
+function tagColorFor(name) {
+  var t = _tagByName[String(name || "").toLowerCase()];
+  return (t && t.color) || "#9e9e9e";
+}
+
+function tagCategoryFor(name) {
+  var t = _tagByName[String(name || "").toLowerCase()];
+  return (t && t.category) || "General";
+}
+
+// Creating a registry row is a server-settings mutation, so the picker only
+// offers it to a caller who holds that grant — otherwise a typed tag attaches
+// to this assignment alone and the hint says so, instead of the click landing
+// on a 403.
+function canCreateRegistryTags() {
+  return _tagCatalogLoaded && typeof permAtLeast === "function" && permAtLeast("serverSettingsSystem", "fullwrite");
+}
 
 function otherTagChipHtml(t) {
   return '<span class="badge other-tag-chip" data-tag="' + escapeHtml(t) + '" style="display:inline-flex;align-items:center;gap:0.35rem;background:rgba(74,158,255,0.16);color:var(--color-primary,#4a9eff);border:1px solid rgba(74,158,255,0.4);padding:0.2rem 0.5rem;margin:0.1rem 0">' +
@@ -1715,31 +1764,173 @@ function otherTagChipHtml(t) {
   '</span>';
 }
 
+function _otherTagPillStyle(hex, rgb, isSel) {
+  return "cursor:pointer;padding:0.3rem 0.7rem;font-size:0.78rem;font-weight:600;" + (isSel
+    ? "background:rgba(" + rgb + ",0.22);color:" + hex + ";border:1px solid rgba(" + rgb + ",0.55)"
+    : "background:transparent;color:" + hex + ";border:1px solid rgba(" + rgb + ",0.45);opacity:0.75");
+}
+
+function otherTagPillHtml(name, isSel) {
+  var hex = tagColorFor(name);
+  var rgb = hexToRgbTriplet(hex);
+  return '<button type="button" class="badge other-tag-pill" data-tag="' + escapeHtml(name) + '" data-selected="' + (isSel ? "1" : "0") + '" data-color="' + escapeHtml(hex) + '" data-rgb="' + escapeHtml(rgb) + '" style="' + _otherTagPillStyle(hex, rgb, isSel) + '">' +
+    escapeHtml(name) +
+  '</button>';
+}
+
 function otherTagsPickerHtml(idPrefix, selected) {
   var sel = Array.isArray(selected) ? selected.slice() : [];
-  var chips = sel.map(otherTagChipHtml).join("");
+  var selSet = {};
+  sel.forEach(function (n) { selSet[String(n).toLowerCase()] = true; });
+
+  // Assignments the registry doesn't carry stay as removable chips above the
+  // grid — the assignment is real whether or not a Tag row backs it. With no
+  // catalogue nothing can be judged unregistered, so every assignment lands
+  // in that row and the note says why: the same distinction regionPickerHtml
+  // draws between "not in the map" and "could not read the map".
+  var unregistered = _tagCatalogLoaded
+    ? sel.filter(function (n) { return !_tagByName[String(n).toLowerCase()]; })
+    : sel.slice();
+  var chipNote = _tagCatalogLoaded
+    ? "Tags outside the tag registry. Click × to remove."
+    : "Assigned tags. The tag registry could not be read (requires Server Settings read), so these cannot be matched against it here.";
+  var chipsHtml = '<div class="other-tags-chip-row" style="margin-bottom:0.5rem">' +
+    '<div class="other-tags-chip-note" style="font-size:0.78rem;color:var(--color-text-tertiary);margin-bottom:0.25rem;' + (unregistered.length ? "" : "display:none") + '">' + escapeHtml(chipNote) + '</div>' +
+    '<div class="other-tags-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem">' + unregistered.map(otherTagChipHtml).join("") + '</div>' +
+  '</div>';
+
+  // The catalogue itself, grouped by the registry's own categories (the list
+  // arrives category-then-name ordered) so a few dozen tags stay scannable.
+  var gridHtml = "";
+  if (_tagCatalogLoaded) {
+    if (_tagList.length === 0) {
+      gridHtml = '<div style="font-size:0.85rem;color:var(--color-text-tertiary);padding:0.5rem;border:1px dashed var(--color-border);border-radius:6px">No tags defined yet. Add one below, or manage the full registry on Server Settings → Identification.</div>';
+    } else {
+      var groups = [];
+      var byCat = {};
+      _tagList.forEach(function (n) {
+        var cat = tagCategoryFor(n);
+        if (!byCat[cat]) { byCat[cat] = []; groups.push(cat); }
+        byCat[cat].push(n);
+      });
+      gridHtml = groups.map(function (cat) {
+        var pills = byCat[cat].map(function (n) {
+          return otherTagPillHtml(n, !!selSet[n.toLowerCase()]);
+        }).join("");
+        return '<div class="other-tags-cat" data-category="' + escapeHtml(cat) + '" style="margin-bottom:0.5rem">' +
+          (groups.length > 1
+            ? '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary);margin-bottom:0.25rem">' + escapeHtml(cat) + '</div>'
+            : "") +
+          '<div class="other-tag-pill-grid" style="display:flex;flex-wrap:wrap;gap:0.4rem">' + pills + '</div>' +
+        '</div>';
+      }).join("");
+    }
+  }
+
+  var addHint = !_tagCatalogLoaded
+    ? "Tags are stored on this assignment as typed."
+    : (canCreateRegistryTags()
+        ? "A name that isn't in the list above is created as a new tag."
+        : "A name that isn't in the list above applies to this assignment only — creating registry tags requires Server Settings full write.");
+  var addRow = '<div class="other-tags-add" style="display:flex;gap:0.4rem;margin-top:0.25rem">' +
+      '<input type="text" class="other-tags-input" placeholder="Type a tag, press Enter" autocomplete="off" style="flex:1;min-width:0">' +
+      '<button type="button" class="btn btn-sm btn-secondary other-tags-add-btn">Add</button>' +
+    '</div>' +
+    '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:0.25rem">' + escapeHtml(addHint) + '</div>';
+
   return '<div id="' + escapeHtml(idPrefix) + '" class="other-tags-picker">' +
-    '<div class="other-tags-chips" style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-bottom:0.4rem">' + chips + '</div>' +
-    '<input type="text" class="other-tags-input" placeholder="Type a tag, press Enter" autocomplete="off" style="width:100%">' +
+    chipsHtml +
+    gridHtml +
+    addRow +
   '</div>';
 }
 
-function addOtherTagChips(input) {
+function _setOtherTagPillSelected(pill, isSel) {
+  pill.setAttribute("data-selected", isSel ? "1" : "0");
+  pill.style.cssText = _otherTagPillStyle(pill.getAttribute("data-color"), pill.getAttribute("data-rgb"), isSel);
+}
+
+// Select an existing pill by name (case-insensitive), reporting whether one
+// was found. Selecting the pill rather than adding a chip is what keeps a
+// typed name and its catalogue entry from both landing in the array.
+function _selectOtherTagPill(picker, name) {
+  var want = String(name).toLowerCase();
+  var hit = null;
+  picker.querySelectorAll(".other-tag-pill").forEach(function (p) {
+    if ((p.getAttribute("data-tag") || "").toLowerCase() === want) hit = p;
+  });
+  if (!hit) return false;
+  _setOtherTagPillSelected(hit, true);
+  return true;
+}
+
+function _syncOtherTagChipNote(picker) {
+  var note = picker.querySelector(".other-tags-chip-note");
+  if (note) note.style.display = picker.querySelector(".other-tag-chip") ? "" : "none";
+}
+
+// Promote a chip to a registry pill once the Tag row exists, so the open form
+// reads the way it will after a reload instead of showing the tag twice.
+function _promoteOtherTagChip(picker, name) {
+  var want = String(name).toLowerCase();
+  picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
+    if ((c.getAttribute("data-tag") || "").toLowerCase() === want) c.remove();
+  });
+  _syncOtherTagChipNote(picker);
+  var cat = tagCategoryFor(name);
+  var grid = null;
+  picker.querySelectorAll(".other-tags-cat").forEach(function (g) {
+    if (g.getAttribute("data-category") === cat) grid = g.querySelector(".other-tag-pill-grid");
+  });
+  if (!grid) grid = picker.querySelector(".other-tag-pill-grid");
+  if (grid) grid.insertAdjacentHTML("beforeend", otherTagPillHtml(name, true));
+}
+
+// Commit whatever is typed in the input. Chips are inserted SYNCHRONOUSLY —
+// blur fires before the Save click, and collectOtherTags has to see the tag
+// whether or not a registry write has come back yet (it also reads the raw
+// input as a last resort). The registry create is a best-effort upgrade on
+// top of that, never a gate on the assignment.
+async function addOtherTagChips(input) {
   var picker = input.closest(".other-tags-picker");
   if (!picker) return;
+  var raw = input.value;
+  input.value = "";
   var chipWrap = picker.querySelector(".other-tags-chips");
   var existing = {};
   picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
     existing[(c.getAttribute("data-tag") || "").toLowerCase()] = true;
   });
-  input.value.split(",").forEach(function (raw) {
-    var t = raw.trim();
+
+  var fresh = [];
+  raw.split(",").forEach(function (part) {
+    var t = part.trim();
     if (!t || t.length > 64) return;
-    if (existing[t.toLowerCase()]) return;
-    existing[t.toLowerCase()] = true;
-    chipWrap.insertAdjacentHTML("beforeend", otherTagChipHtml(t));
+    var key = t.toLowerCase();
+    if (existing[key]) return;
+    existing[key] = true;
+    if (_selectOtherTagPill(picker, t)) return;
+    if (chipWrap) chipWrap.insertAdjacentHTML("beforeend", otherTagChipHtml(t));
+    fresh.push(t);
   });
-  input.value = "";
+  _syncOtherTagChipNote(picker);
+
+  if (!fresh.length || !canCreateRegistryTags()) return;
+  for (var i = 0; i < fresh.length; i++) {
+    var name = fresh[i];
+    try {
+      var created = await api.serverSettings.createTag({ name: name });
+      if (created && created.name) {
+        _tagByName[String(created.name).toLowerCase()] = created;
+        if (_tagList.indexOf(created.name) === -1) _tagList.push(created.name);
+        _promoteOtherTagChip(picker, created.name);
+      }
+    } catch (err) {
+      // The tag still applies to this assignment; only the registry row is
+      // missing, so name which half failed rather than implying nothing saved.
+      showToast('Tag "' + name + '" applied here, but could not be added to the registry: ' + err.message, "warning");
+    }
+  }
 }
 
 function collectOtherTags(idPrefix) {
@@ -1747,17 +1938,16 @@ function collectOtherTags(idPrefix) {
   if (!picker) return [];
   var out = [];
   var seen = {};
-  picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
-    var t = (c.getAttribute("data-tag") || "").trim();
-    if (t && !seen[t.toLowerCase()]) { seen[t.toLowerCase()] = true; out.push(t); }
-  });
-  var input = picker.querySelector(".other-tags-input");
-  if (input && input.value.trim()) {
-    input.value.split(",").forEach(function (raw) {
-      var t = raw.trim();
-      if (t && !seen[t.toLowerCase()]) { seen[t.toLowerCase()] = true; out.push(t); }
-    });
+  function push(t) {
+    var v = String(t || "").trim();
+    if (!v || seen[v.toLowerCase()]) return;
+    seen[v.toLowerCase()] = true;
+    out.push(v);
   }
+  picker.querySelectorAll(".other-tag-chip").forEach(function (c) { push(c.getAttribute("data-tag")); });
+  picker.querySelectorAll(".other-tag-pill[data-selected='1']").forEach(function (p) { push(p.getAttribute("data-tag")); });
+  var input = picker.querySelector(".other-tags-input");
+  if (input && input.value.trim()) input.value.split(",").forEach(push);
   return out;
 }
 
@@ -1768,8 +1958,12 @@ document.addEventListener("keydown", function (e) {
     e.preventDefault();
     addOtherTagChips(input);
   } else if (e.key === "Backspace" && !input.value) {
-    var chips = input.parentElement.parentElement.querySelectorAll(".other-tag-chip");
-    if (chips.length) chips[chips.length - 1].remove();
+    var picker = input.closest(".other-tags-picker");
+    var chips = picker ? picker.querySelectorAll(".other-tag-chip") : [];
+    if (chips.length) {
+      chips[chips.length - 1].remove();
+      _syncOtherTagChipNote(picker);
+    }
   }
 });
 document.addEventListener("blur", function (e) {
@@ -1777,11 +1971,27 @@ document.addEventListener("blur", function (e) {
   if (input && input.value.trim()) addOtherTagChips(input);
 }, true);
 document.addEventListener("click", function (e) {
-  var rm = e.target.closest && e.target.closest(".other-tag-remove");
+  if (!e.target.closest) return;
+  var rm = e.target.closest(".other-tag-remove");
   if (rm) {
     var chip = rm.closest(".other-tag-chip");
+    var chipPicker = rm.closest(".other-tags-picker");
     if (chip) chip.remove();
+    if (chipPicker) _syncOtherTagChipNote(chipPicker);
+    e.preventDefault();
+    return;
+  }
+  var addBtn = e.target.closest(".other-tags-add-btn");
+  if (addBtn) {
+    var addPicker = addBtn.closest(".other-tags-picker");
+    var addInput = addPicker ? addPicker.querySelector(".other-tags-input") : null;
+    if (addInput) addOtherTagChips(addInput);
+    e.preventDefault();
+    return;
+  }
+  var pill = e.target.closest(".other-tags-picker .other-tag-pill");
+  if (pill) {
+    _setOtherTagPillSelected(pill, pill.getAttribute("data-selected") !== "1");
     e.preventDefault();
   }
 });
-

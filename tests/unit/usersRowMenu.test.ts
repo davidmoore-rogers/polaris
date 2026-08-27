@@ -78,12 +78,12 @@ describe("_userMenuItems", () => {
   const local = (over: Partial<UserRow> = {}): UserRow =>
     ({ id: "u1", username: "bob", authProvider: "local", totpEnabled: false, role: { id: "r1" }, ...over });
 
-  it("always offers role, regions and delete", () => {
+  it("always offers role, tags and delete", () => {
     // These three are unconditional, which is what guarantees the trigger can
     // never open an empty menu.
     const l = labels(userMenuItems(local()));
     expect(l).toContain("Change role…");
-    expect(l).toContain("Regions…");
+    expect(l).toContain("Tags…");
     expect(l).toContain("Delete");
   });
 

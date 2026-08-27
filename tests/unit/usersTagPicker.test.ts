@@ -1,0 +1,190 @@
+/**
+ * tests/unit/usersTagPicker.test.ts — the Users page tag picker
+ * (`otherTagsPickerHtml` / `collectOtherTags` in public/js/users.js).
+ *
+ * The picker used to be a bare chip input with no registry behind it; it now
+ * renders the whole `Tag` catalogue as selectable pills and only falls back to
+ * chips for names the registry doesn't carry. Three things that must hold, all
+ * of which an operator reads as "my tag scope was wiped" when they don't:
+ *
+ *  - CASE. Everything that actually matches a tag compares case-insensitively
+ *    (`selSet` here, `normalizePermissions`-adjacent tag normalization in
+ *    utils/tagNormalize.ts), so a user tagged "pci" against a registry tag
+ *    named "PCI" must come out selected — not listed as an unregistered chip
+ *    AND a deselected pill at the same time.
+ *  - AN UNREADABLE CATALOGUE. `GET /server-settings/tags` needs
+ *    serverSettingsSystem=read and a user administrator may not hold it.
+ *    Absent a catalogue there is no evidence about any tag, so every
+ *    assignment stays a chip under a note saying why — never "not in the
+ *    registry".
+ *  - COLLECTION. `collectOtherTags` is what a save writes, and it now reads
+ *    THREE places (chips, selected pills, and text still sitting in the
+ *    input). Missing any one of them silently drops a scope the admin never
+ *    touched.
+ *
+ * users.js is a classic browser script; an indirect eval puts its top-level
+ * declarations on globalThis — the usersRegionPicker.test.ts idiom.
+ */
+
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { Window } from "happy-dom";
+
+vi.mock("../../src/db.js", () => ({ prisma: {} }));
+
+const g = globalThis as Record<string, any>;
+let otherTagsPickerHtml: (idPrefix: string, selected: string[]) => string;
+let collectOtherTags: (idPrefix: string) => string[];
+
+interface TagRow { name: string; color: string; category: string }
+
+const CATALOG: TagRow[] = [
+  { name: "PCI", color: "#ef5350", category: "Compliance" },
+  { name: "Critical", color: "#4fc3f7", category: "General" },
+];
+
+/** Point users.js at a catalogue, or at the unreadable-catalogue state. */
+function setCatalog(loaded: boolean, rows: TagRow[] = []) {
+  g._tagCatalogLoaded = loaded;
+  g._tagList = rows.map((r) => r.name);
+  g._tagByName = {};
+  rows.forEach((r) => { g._tagByName[r.name.toLowerCase()] = r; });
+}
+
+/** Render into a live document so collectOtherTags can query it by id. */
+function mount(selected: string[]): void {
+  g.document.body.innerHTML = otherTagsPickerHtml("f-tags", selected);
+}
+
+/** The chip row above the grid: names the picker is NOT backing with a pill. */
+function chips(): string[] {
+  return Array.from(g.document.querySelectorAll(".other-tag-chip")).map((el: any) =>
+    (el.getAttribute("data-tag") || "").trim(),
+  );
+}
+
+/** Pills, with their selected state — what an operator sees pre-ticked. */
+function pills(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  Array.from(g.document.querySelectorAll(".other-tag-pill")).forEach((el: any) => {
+    out[el.getAttribute("data-tag")] = el.getAttribute("data-selected") === "1";
+  });
+  return out;
+}
+
+function chipNote(): string {
+  const n = g.document.querySelector(".other-tags-chip-note") as any;
+  if (!n) return "";
+  // Hidden note = "nothing unregistered", which is not a claim about anything.
+  if ((n.getAttribute("style") || "").includes("display:none")) return "";
+  return (n.textContent || "").trim();
+}
+
+beforeAll(() => {
+  const win = new Window();
+  g.window = win;
+  g.document = win.document;
+  g.PolarisPrefs = { save: () => {}, load: () => null };
+  g.escapeHtml = (s: unknown) => String(s ?? "");
+  g.showToast = () => {};
+  g.showConfirm = async () => false;
+  g.permAtLeast = () => true;
+  g.api = { serverSettings: { listTags: async () => CATALOG, createTag: async (b: any) => ({ ...b, color: "#9e9e9e", category: "General" }) } };
+  g.currentUsername = "alice";
+  g.formatDate = () => "";
+  g.regionPillsHtml = () => "";
+  g.TableSF = function () {};
+  g.setupColumnLayout = () => null;
+  g.userReady = Promise.resolve();
+  g.window.PolarisRegionPills = {
+    isLoaded: () => false,
+    load: async () => ({}),
+    names: () => [],
+    colorFor: () => "#9e9e9e",
+    rgbTriplet: () => "158, 158, 158",
+    html: (names: string[]) => names.join(""),
+  };
+
+  (0, eval)(readFileSync(resolve(__dirname, "../../public/js/users.js"), "utf8"));
+  otherTagsPickerHtml = g.otherTagsPickerHtml as typeof otherTagsPickerHtml;
+  collectOtherTags = g.collectOtherTags as typeof collectOtherTags;
+  expect(typeof otherTagsPickerHtml, "users.js no longer declares otherTagsPickerHtml").toBe("function");
+  expect(typeof collectOtherTags, "users.js no longer declares collectOtherTags").toBe("function");
+});
+
+beforeEach(() => {
+  setCatalog(true, CATALOG);
+  g.document.body.innerHTML = "";
+});
+
+describe("otherTagsPickerHtml", () => {
+  it("renders every registry tag as a pill, selecting the assigned ones", () => {
+    mount(["PCI"]);
+    expect(pills()).toEqual({ PCI: true, Critical: false });
+    expect(chips()).toEqual([]);
+    expect(chipNote()).toBe("");
+  });
+
+  it("selects a pill on a CASE difference instead of calling it unregistered", () => {
+    mount(["pci"]);
+    expect(pills().PCI).toBe(true);
+    expect(chips()).toEqual([]);
+  });
+
+  it("keeps a tag the registry doesn't carry as a removable chip", () => {
+    mount(["PCI", "legacy-tag"]);
+    expect(chips()).toEqual(["legacy-tag"]);
+    expect(pills().PCI).toBe(true);
+    expect(chipNote()).toContain("outside the tag registry");
+  });
+
+  it("makes no unregistered claim when the catalogue could not be read", () => {
+    // serverSettingsSystem=read is not universal; an empty catalogue we never
+    // fetched is not evidence that a tag is gone.
+    setCatalog(false);
+    mount(["PCI", "legacy-tag"]);
+    expect(chips().sort()).toEqual(["PCI", "legacy-tag"]);
+    expect(pills()).toEqual({});
+    expect(chipNote()).toContain("could not be read");
+  });
+
+  it("groups pills by the registry's categories", () => {
+    mount([]);
+    const cats = Array.from(g.document.querySelectorAll(".other-tags-cat")).map((el: any) =>
+      el.getAttribute("data-category"),
+    );
+    expect(cats.sort()).toEqual(["Compliance", "General"]);
+  });
+});
+
+describe("collectOtherTags", () => {
+  it("collects selected pills and chips, and nothing deselected", () => {
+    mount(["PCI", "legacy-tag"]);
+    expect(collectOtherTags("f-tags").sort()).toEqual(["PCI", "legacy-tag"]);
+  });
+
+  it("collects an assignment the catalogue could not confirm", () => {
+    setCatalog(false);
+    mount(["PCI", "legacy-tag"]);
+    expect(collectOtherTags("f-tags").sort()).toEqual(["PCI", "legacy-tag"]);
+  });
+
+  it("collects text still sitting uncommitted in the input", () => {
+    // Save can be clicked while a typed tag has not been committed to a chip;
+    // dropping it would look like the click was ignored.
+    mount([]);
+    (g.document.querySelector(".other-tags-input") as any).value = "fresh, another";
+    expect(collectOtherTags("f-tags").sort()).toEqual(["another", "fresh"]);
+  });
+
+  it("de-duplicates case-insensitively across pill, chip and input", () => {
+    mount(["PCI"]);
+    (g.document.querySelector(".other-tags-input") as any).value = "pci";
+    expect(collectOtherTags("f-tags")).toEqual(["PCI"]);
+  });
+
+  it("returns [] for a picker that isn't on the page", () => {
+    expect(collectOtherTags("f-nope")).toEqual([]);
+  });
+});
