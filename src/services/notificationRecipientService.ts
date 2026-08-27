@@ -356,9 +356,12 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * decides the transport + how the target fans out:
  *   - email (smtp/oauth_m365), no composedEmail: one row per resolved
  *     recipient address (tag-matched users' emails + explicit addresses).
- *   - email WITH composedEmail: ONE row per target — `target` is the joined To
- *     list, and meta snapshots { composed, to, cc, bcc, subject, text, html? }
- *     for the drain (never channel secrets). Empty To skips the target.
+ *   - email WITH composedEmail: one row per MESSAGE, and planComposedEmails
+ *     decides how many that is — one per To address (each with its own
+ *     acknowledge token) when anyone may acknowledge, otherwise a single row
+ *     whose `target` is the joined To list. meta snapshots
+ *     { composed, to, cc, bcc, subject, text, html? } for the drain (never
+ *     channel secrets). Empty To skips the target.
  *   - web_push: one row per recipient user's push subscription (keys snapshotted).
  *   - webhook (slack/teams) / pushbullet: one row; the destination (URL/token)
  *     lives on the channel and is read at send time, NOT duplicated here.
@@ -405,23 +408,60 @@ export function buildAddressOwnerMap(
 }
 
 /**
- * Who — if anyone — may carry the acknowledge link in a COMPOSED email (one
- * message, one shared body, a joined To list).
- *
- * A shared body can only carry a link when exactly one person will read it:
- * the token records who acknowledged, and a cc'd contact clicking a link
- * addressed to someone else would file the acknowledgement under that user's
- * name. Hence: exactly one To address, owned by a user, with no Cc and no Bcc.
- * Anything else gets the message with `{ack}` rendered empty.
+ * One composed email, as it will actually be sent.
  */
-export function composedAckRecipient(
+export interface ComposedEmailPlan {
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  /** The user whose acknowledge token this message carries; null = no link. */
+  ackUser: RecipientUser | null;
+}
+
+/**
+ * Split a composed email's recipients into the messages to actually send.
+ *
+ * A composed notify action renders ONE body, and the token in it records WHO
+ * acknowledged — so a single shared message can only carry a link when exactly
+ * one person will read it, or a cc'd contact clicking a link addressed to
+ * someone else files the acknowledgement under that user's name. That used to
+ * mean the whole group went unlinked: any automation notifying two people, or
+ * cc'ing anyone at all, mailed a button-less alert to everybody — which is the
+ * common case, not the exception.
+ *
+ * So the BODY is shared and the MESSAGE is not. When at least one To address
+ * belongs to a user who may acknowledge, every To address gets its own message
+ * carrying its own token — blank for a contact or a typed address, which is
+ * what substituteAckToken renders away (see buildAddressOwnerMap). When NOBODY
+ * in To could acknowledge, the group message is kept exactly as it was:
+ * splitting it would multiply the send and rewrite the To line every recipient
+ * reads while earning no one a button.
+ *
+ * Cc/Bcc ride the FIRST message only. They stay Cc/Bcc rather than becoming
+ * messages of their own — an operator cc'ing a manager is saying "for
+ * information", not "you own this" — and repeating them on every message would
+ * mail them one copy per To recipient.
+ *
+ * Pure — exported for the tests.
+ */
+export function planComposedEmails(
   to: string[],
   cc: string[],
   bcc: string[],
   owners: Map<string, RecipientUser | null>,
-): RecipientUser | null {
-  if (to.length !== 1 || cc.length > 0 || bcc.length > 0) return null;
-  return owners.get(to[0]!) ?? null;
+  canAck: (u: RecipientUser) => boolean,
+): ComposedEmailPlan[] {
+  const ackUserFor = (addr: string): RecipientUser | null => {
+    const u = owners.get(addr) ?? null;
+    return u && canAck(u) ? u : null;
+  };
+  if (!to.some((addr) => ackUserFor(addr))) return [{ to, cc, bcc, ackUser: null }];
+  return to.map((addr, i) => ({
+    to: [addr],
+    cc: i === 0 ? cc : [],
+    bcc: i === 0 ? bcc : [],
+    ackUser: ackUserFor(addr),
+  }));
 }
 
 export interface ExpandDeliveriesOptions {
@@ -568,22 +608,25 @@ export async function expandDeliveries(
         const to = Array.from(owners.keys());
         if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
         const { cc, bcc } = dedupeEmailRecipients(to, ccResolved, bccResolved);
-        const soleUserId = ackUserFor(composedAckRecipient(to, cc, bcc, owners));
-        add(
-          channel.id,
-          "email",
-          to.join(", "),
-          {
-            composed: true,
-            to,
-            cc,
-            bcc,
-            subject: composedEmail.subject,
-            text: composedEmail.text,
-            ...(composedEmail.html ? { html: composedEmail.html } : {}),
-          },
-          soleUserId ? { userId: soleUserId, channel: "email" } : null,
-        );
+        // One row per MESSAGE, not per target: the To list fans out so each
+        // recipient who may acknowledge carries their own token.
+        for (const plan of planComposedEmails(to, cc, bcc, owners, (u) => emailLinksOn && ackable.has(u.id))) {
+          add(
+            channel.id,
+            "email",
+            plan.to.join(", "),
+            {
+              composed: true,
+              to: plan.to,
+              cc: plan.cc,
+              bcc: plan.bcc,
+              subject: composedEmail.subject,
+              text: composedEmail.text,
+              ...(composedEmail.html ? { html: composedEmail.html } : {}),
+            },
+            plan.ackUser ? { userId: plan.ackUser.id, channel: "email" } : null,
+          );
+        }
       } else {
         for (const [addr, owner] of owners) {
           const userId = ackUserFor(owner);

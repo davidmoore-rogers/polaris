@@ -22,7 +22,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
 import { ackUrlFromMeta } from "./notificationRecipientService.js";
-import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor } from "./alertChartService.js";
+import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor, type ChartToken, type RenderedChart } from "./alertChartService.js";
 import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens } from "./alertInterfaceService.js";
 import { buildAlertBrandBlock, brandTokensIn, substituteBrandTokens, BRAND_LOGO_CID } from "./alertBrandService.js";
 import { pruneEmptyChartSection, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
@@ -70,6 +70,39 @@ interface DeliveryRow {
 }
 
 /**
+ * Per-drain-pass render memo.
+ *
+ * A composed email now fans out one delivery row per recipient
+ * (notificationRecipientService.planComposedEmails), so one alert routed to a
+ * region can be a dozen rows rendering the SAME body — and the charts are built
+ * here, at delivery time, not at fire time. Without this, that alert would
+ * query and rasterize the identical last-hour graphs once per recipient.
+ *
+ * Scoped to ONE drain pass and deliberately never module-level: an escalation
+ * email at T+90min must re-render against the current hour rather than replay
+ * an hours-old snapshot, which is the whole reason charts are built in the
+ * drain. PROMISES are cached, not results, so rows dispatched concurrently in
+ * the same chunk share a single build instead of racing into N of them.
+ */
+interface RenderMemo {
+  charts: Map<string, Promise<Map<ChartToken, RenderedChart>>>;
+  lossWindow: Map<string, Promise<number | null>>;
+}
+
+function newRenderMemo(): RenderMemo {
+  return { charts: new Map(), lossWindow: new Map() };
+}
+
+/** Memoized read-through: one build per (alert, exact chart set) per drain. */
+function memoize<T>(cache: Map<string, Promise<T>>, key: string, build: () => Promise<T>): Promise<T> {
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const p = build();
+  cache.set(key, p);
+  return p;
+}
+
+/**
  * The probe-loss History window (ms) the alert's automation measures over, for
  * the email's loss chart — so the graph spans exactly the period the ratio that
  * fired was computed on, instead of a fixed hour. Null when there is nothing to
@@ -110,7 +143,7 @@ function asStringArray(v: unknown): string[] {
  * pre-rendered snapshot; legacy rows (including pre-upgrade pending rows) get
  * the byte-identical default subject/body.
  */
-async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null): Promise<EmailMessage | { error: string }> {
+async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, url: string | null, memo: RenderMemo): Promise<EmailMessage | { error: string }> {
   if (meta.composed === true) {
     const to = asStringArray(meta.to);
     if (to.length === 0) return { error: "composed email delivery has no To recipients" };
@@ -123,17 +156,28 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
     let attachments: EmailMessage["attachments"];
     const wanted = chartTokensIn(text, html);
     if (wanted.size > 0) {
-      const charts = d.notification.assetId
-        ? await buildAlertCharts(d.notification.assetId, wanted, {
-            sensorName: d.notification.dimension,
-            metric: d.notification.metric,
-            // The loss chart follows the automation's own History window; only
-            // resolved when the body embeds one, and only meaningful there.
-            lossWindowMs: wanted.has("chart.probeLoss") || wanted.has("chart.trigger")
-              ? await lossChartWindowMs(d.notification.ruleId)
-              : null,
-          })
-        : new Map();
+      const assetId = d.notification.assetId;
+      const charts = assetId
+        // Keyed by the alert plus the exact chart set this body asks for — two
+        // notify actions on one rule can compose different bodies, so the token
+        // set is part of the identity, not just the notification.
+        ? await memoize(
+            memo.charts,
+            `${d.notification.id}|${Array.from(wanted).sort().join(",")}`,
+            async () =>
+              buildAlertCharts(assetId, wanted, {
+                sensorName: d.notification.dimension,
+                metric: d.notification.metric,
+                // The loss chart follows the automation's own History window; only
+                // resolved when the body embeds one, and only meaningful there.
+                lossWindowMs: wanted.has("chart.probeLoss") || wanted.has("chart.trigger")
+                  ? await memoize(memo.lossWindow, d.notification.ruleId ?? "", () =>
+                      lossChartWindowMs(d.notification.ruleId),
+                    )
+                  : null,
+              }),
+          )
+        : new Map<ChartToken, RenderedChart>();
       // Charts render away individually (no samples) and collectively (an alert
       // about Polaris itself has no asset to chart), so both bodies get a tidy
       // pass afterwards: the HTML drops the "Last hour" heading left standing
@@ -213,7 +257,7 @@ export function appendAckLine(text: string, ackUrl: string | null): string {
   return `${text}\n\nAcknowledge this alert: ${ackUrl}`;
 }
 
-async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
+async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined, memo: RenderMemo): Promise<{ ok: true } | { ok: false; error: string; gone?: boolean }> {
   // api_call rows carry NO channel by design (channelId NULL — the whole
   // request spec lives in meta, rendered at fire time). Dispatch before the
   // channel checks so the null channel isn't treated as deleted.
@@ -240,7 +284,7 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined): Promi
   const type = channel.type as ChannelType;
   try {
     if (type === "smtp" || type === "oauth_m365") {
-      const msg = await emailMessageFor(d, meta, url);
+      const msg = await emailMessageFor(d, meta, url, memo);
       if ("error" in msg) return { ok: false, error: msg.error };
       if (type === "smtp") {
         await sendSmtpEmail(
@@ -346,9 +390,10 @@ export async function drainPendingDeliveries(
   const failed: { id: string; error: string }[] = [];
   const deadEndpoints: string[] = [];
   const now = new Date();
+  const memo = newRenderMemo();
 
   for (const chunk of chunkArray(rows, CONCURRENCY)) {
-    const results = await Promise.all(chunk.map(async (d) => ({ d, r: await dispatch(d, d.channelId ? channels.get(d.channelId) : undefined) })));
+    const results = await Promise.all(chunk.map(async (d) => ({ d, r: await dispatch(d, d.channelId ? channels.get(d.channelId) : undefined, memo) })));
     for (const { d, r } of results) {
       if (r.ok) sentIds.push(d.id);
       else {

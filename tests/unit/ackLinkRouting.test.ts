@@ -12,7 +12,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   buildAddressOwnerMap,
-  composedAckRecipient,
+  planComposedEmails,
   applyAckToRows,
 } from "../../src/services/notificationRecipientService.js";
 import {
@@ -69,28 +69,83 @@ describe("buildAddressOwnerMap", () => {
   });
 });
 
-describe("composedAckRecipient", () => {
+describe("planComposedEmails", () => {
   const owners = buildAddressOwnerMap(
-    [user("u1", "dana@example.com")],
+    [user("u1", "dana@example.com"), user("u2", "sam@example.com")],
     ["vendor@example.net"],
     [],
   );
+  // Every user in `owners` may acknowledge unless a case says otherwise.
+  const anyone = () => true;
 
   it("gives the link to a solo user recipient", () => {
-    expect(composedAckRecipient(["dana@example.com"], [], [], owners)?.id).toBe("u1");
+    const plans = planComposedEmails(["dana@example.com"], [], [], owners, anyone);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.to).toEqual(["dana@example.com"]);
+    expect(plans[0]!.ackUser?.id).toBe("u1");
   });
 
-  it("withholds it once a second person shares the body", () => {
-    expect(composedAckRecipient(["dana@example.com", "vendor@example.net"], [], [], owners)).toBeNull();
+  it("splits a shared body so BOTH users get their own token", () => {
+    // The bug this fixes: one message to two people could carry only one
+    // person's token, so it carried nobody's and both got a button-less alert.
+    const plans = planComposedEmails(["dana@example.com", "sam@example.com"], [], [], owners, anyone);
+    expect(plans.map((p) => p.to)).toEqual([["dana@example.com"], ["sam@example.com"]]);
+    expect(plans.map((p) => p.ackUser?.id)).toEqual(["u1", "u2"]);
   });
 
-  it("withholds it when anyone is cc'd or bcc'd — they read the same message", () => {
-    expect(composedAckRecipient(["dana@example.com"], ["vendor@example.net"], [], owners)).toBeNull();
-    expect(composedAckRecipient(["dana@example.com"], [], ["vendor@example.net"], owners)).toBeNull();
+  it("keeps cc'd/bcc'd readers out of the way instead of withholding the link", () => {
+    const plans = planComposedEmails(
+      ["dana@example.com"],
+      ["vendor@example.net"],
+      ["audit@example.org"],
+      owners,
+      anyone,
+    );
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.ackUser?.id).toBe("u1");
+    expect(plans[0]!.cc).toEqual(["vendor@example.net"]);
+    expect(plans[0]!.bcc).toEqual(["audit@example.org"]);
   });
 
-  it("withholds it from a lone address nobody owns", () => {
-    expect(composedAckRecipient(["vendor@example.net"], [], [], owners)).toBeNull();
+  it("mails Cc/Bcc exactly once across a fan-out — on the first message only", () => {
+    const plans = planComposedEmails(
+      ["dana@example.com", "sam@example.com"],
+      ["vendor@example.net"],
+      ["audit@example.org"],
+      owners,
+      anyone,
+    );
+    expect(plans[0]!.cc).toEqual(["vendor@example.net"]);
+    expect(plans[0]!.bcc).toEqual(["audit@example.org"]);
+    expect(plans[1]!.cc).toEqual([]);
+    expect(plans[1]!.bcc).toEqual([]);
+  });
+
+  it("still splits a mixed group, and the contact beside the user gets no link", () => {
+    const plans = planComposedEmails(["vendor@example.net", "dana@example.com"], [], [], owners, anyone);
+    expect(plans.map((p) => p.ackUser?.id ?? null)).toEqual([null, "u1"]);
+  });
+
+  it("keeps the ONE group message when nobody in To could acknowledge", () => {
+    // Splitting would multiply the send and rewrite everyone's To line to earn
+    // no one a button — so the pre-fan-out shape is preserved exactly.
+    const plans = planComposedEmails(["vendor@example.net", "other@example.net"], ["cc@x.com"], [], owners, anyone);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.to).toEqual(["vendor@example.net", "other@example.net"]);
+    expect(plans[0]!.cc).toEqual(["cc@x.com"]);
+    expect(plans[0]!.ackUser).toBeNull();
+  });
+
+  it("treats a user whose role cannot acknowledge as unlinkable, not as a reason to split", () => {
+    const plans = planComposedEmails(["dana@example.com", "sam@example.com"], [], [], owners, (u) => u.id === "u2");
+    expect(plans.map((p) => p.to)).toEqual([["dana@example.com"], ["sam@example.com"]]);
+    expect(plans.map((p) => p.ackUser?.id ?? null)).toEqual([null, "u2"]);
+  });
+
+  it("keeps the group message when NO user's role can acknowledge", () => {
+    const plans = planComposedEmails(["dana@example.com", "sam@example.com"], [], [], owners, () => false);
+    expect(plans).toHaveLength(1);
+    expect(plans[0]!.ackUser).toBeNull();
   });
 });
 
