@@ -213,6 +213,24 @@ function _chartClipAttr(id) {
 // dots, fade-to-red line segments). Matches the danger hue the tooltips use.
 var _CHART_FAIL_COLOR = "#d32f2f";
 
+// The dependency-down grey. A probe that missed while the asset was
+// dependency-suppressed (its parent was dark) draws the SAME dive as an
+// outage — nothing was measured either way — but drained of alarm, because
+// Polaris knows exactly why it missed and the device itself is not being
+// accused of anything. Reserved for that one meaning; red stays the
+// unexplained outage. Flat hex like _CHART_FAIL_COLOR: it has to read on all
+// three themes and is duplicated in utils/sparklineSvg.ts (DEP_COLOR) so the
+// alert email and the device page draw one outage the same way.
+var _CHART_DEP_COLOR = "#9aa0a6";
+
+// The stroke/dot color for one plot point. `ok:false` points carry `dep:true`
+// when the miss was explained. Single decider so a dive can never come out
+// half grey and half red.
+function _chartPointColor(p, seriesColor) {
+  if (p.ok) return seriesColor;
+  return p.dep ? _CHART_DEP_COLOR : _CHART_FAIL_COLOR;
+}
+
 // Failure-aware line rendering. `pts` is a time-ordered list of
 // { x, y, ok } plot points where failed polls sit at the chart baseline
 // (y = padT + innerH) with ok:false. Consecutive OK points connect in the
@@ -227,17 +245,20 @@ function _failureAwareSeriesSVG(pts, seriesColor, idPrefix) {
   var segs = "";
   for (var i = 1; i < pts.length; i++) {
     var a = pts[i - 1], b = pts[i];
+    var ca = _chartPointColor(a, seriesColor), cb = _chartPointColor(b, seriesColor);
     var stroke;
-    if (a.ok && b.ok) {
-      stroke = seriesColor;
-    } else if (!a.ok && !b.ok) {
-      stroke = _CHART_FAIL_COLOR;
+    // Compare COLORS, not ok flags: a red outage running straight into a grey
+    // dependency stretch (the parent went down part-way through) is a
+    // transition too, and fading between them is what shows where the reason
+    // changed.
+    if (ca === cb) {
+      stroke = ca;
     } else {
       var gid = idPrefix + "-seg-" + i;
       defs += '<linearGradient id="' + gid + '" gradientUnits="userSpaceOnUse"' +
         ' x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '">' +
-        '<stop offset="0%" stop-color="' + (a.ok ? seriesColor : _CHART_FAIL_COLOR) + '"/>' +
-        '<stop offset="100%" stop-color="' + (b.ok ? seriesColor : _CHART_FAIL_COLOR) + '"/>' +
+        '<stop offset="0%" stop-color="' + ca + '"/>' +
+        '<stop offset="100%" stop-color="' + cb + '"/>' +
         '</linearGradient>';
       stroke = 'url(#' + gid + ')';
     }
@@ -252,7 +273,7 @@ function _failureAwareSeriesSVG(pts, seriesColor, idPrefix) {
 // series dots so a lone failure is visible at a glance.
 function _failureDotsSVG(pts) {
   return pts.filter(function (p) { return !p.ok; }).map(function (p) {
-    return '<circle cx="' + p.x + '" cy="' + p.y + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+    return '<circle cx="' + p.x + '" cy="' + p.y + '" r="2.5" fill="' + _chartPointColor(p, null) + '"/>';
   }).join("");
 }
 
@@ -295,6 +316,13 @@ function _medianCadenceMs(timestampsMs) {
 // climbs back out; an outage that lasted a single probe collapses to one
 // marker, which is what one missed poll looks like.
 //
+// Each window carries a `kind`: "dependency" means every probe in it missed
+// while the asset was dependency-suppressed — its parent was dark, so the hole
+// is explained and its markers draw grey instead of red. The shape is
+// identical, because nothing was measured either way; only the accusation
+// changes. Markers come back as { t, dep } objects rather than bare timestamps
+// for exactly that reason.
+//
 // `sampleTimesMs` is the series' OWN good timestamps, and a marker landing on
 // top of real data is dropped: the Polaris Agent pushes on its own schedule
 // and is not gated on monitorStatus, so an agent host can keep reporting CPU
@@ -308,6 +336,7 @@ function _outageMarkers(outages, sampleTimesMs) {
   outages.forEach(function (o) {
     var from = +new Date(o.from);
     var to   = +new Date(o.to);
+    var dep  = o.kind === "dependency";
     if (!isFinite(from) || !isFinite(to)) return;
     // Skip the WHOLE window when the series has data anywhere in it (padded by
     // the guard), not merely at its edges. Dropping just the end markers would
@@ -315,10 +344,45 @@ function _outageMarkers(outages, sampleTimesMs) {
     // window's start, climb back for each of them, and dive again — a zigzag
     // that claims an outage and shows readings through it at the same time.
     if (guardMs > 0 && times.some(function (t) { return t > from - guardMs && t < to + guardMs; })) return;
-    markers.push(from);
-    if (to > from) markers.push(to);
+    markers.push({ t: from, dep: dep });
+    if (to > from) markers.push({ t: to, dep: dep });
   });
-  return markers.sort(function (a, b) { return a - b; });
+  return markers.sort(function (a, b) { return a.t - b.t; });
+}
+
+// The three things every chart does with those markers, kept together so a new
+// chart can't wire up two of them and forget the third — and so the grey lives
+// in one place. `_outagePts` returns baseline plot points to merge into the
+// series; the other two return SVG.
+function _outagePts(markers, xFor, baselineY) {
+  return (markers || []).map(function (m) {
+    return { t: m.t, x: xFor(m.t), y: baselineY, ok: false, dep: m.dep };
+  });
+}
+function _outageDotsSVG(markers, xFor, baselineY) {
+  return (markers || []).map(function (m) {
+    return '<circle cx="' + xFor(m.t) + '" cy="' + baselineY + '" r="2.5" fill="' +
+      (m.dep ? _CHART_DEP_COLOR : _CHART_FAIL_COLOR) + '"/>';
+  }).join("");
+}
+// Tooltip body for a missed-poll hit target. A dependency miss names the
+// reason instead of reading as a bare failure — "no data collected" with no
+// explanation is what sends an operator hunting a device that was fine.
+function _missTooltipHTML(target) {
+  var dep = target.getAttribute("data-dep") === "1";
+  return '<div style="font-weight:600;margin-bottom:2px">' +
+    escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+    (dep
+      ? '<div style="color:' + _CHART_DEP_COLOR + '">Dependency down — upstream device was down, not polled</div>'
+      : '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>');
+}
+
+function _outageHitsSVG(markers, xFor, padT, innerH) {
+  return (markers || []).map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m.t) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m.t).toISOString()) +
+      '" data-miss="1"' + (m.dep ? ' data-dep="1"' : '') + '/>';
+  }).join("");
 }
 
 // Stash the rendered plot geometry on the chart container so the drag-select
@@ -9979,17 +10043,12 @@ function _renderSystemChart(container, data, asset, si) {
     var pts = list.map(function (e) {
       return { t: +new Date(e.s.timestamp), x: xFor(e.s.timestamp), y: yFor(e.v), ok: true };
     });
-    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    _outagePts(gapMarkers, xFor, baselineY).forEach(function (mp) { pts.push(mp); });
     pts.sort(function (a, b) { return a.t - b.t; });
     return pts;
   }
-  var failDots = gapMarkers.map(function (m) {
-    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
-  }).join("");
-  var missHits = gapMarkers.map(function (m) {
-    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
-      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
-  }).join("");
+  var failDots = _outageDotsSVG(gapMarkers, xFor, baselineY);
+  var missHits = _outageHitsSVG(gapMarkers, xFor, padT, innerH);
 
   // Build one full-height vertical lane per timestamp so the tooltip fires
   // anywhere in the sample's column — including over a flatlined CPU line at
@@ -10083,8 +10142,7 @@ function _renderSystemChart(container, data, asset, si) {
   _wireChartTooltip(container, function (target) {
     var ts = target.getAttribute("data-ts");
     if (target.getAttribute("data-miss") === "1") {
-      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(ts)) + '</div>' +
-        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      return _missTooltipHTML(target);
     }
     var cpuRaw = target.getAttribute("data-cpu");
     var memRaw = target.getAttribute("data-mem");
@@ -11128,6 +11186,16 @@ function _renderMonitorChart(container, data, transitions) {
     if (typeof s.successCount === "number") return s.sampleCount > 0 && s.successCount === 0;
     return !s.success;
   }
+  // Was the miss EXPLAINED — the asset dependency-suppressed, its parent dark?
+  // Detail rows carry the flag per sample; a rollup bucket only counts when
+  // EVERY failure in it was one, since a bucket that mixes explained and
+  // unexplained misses still contains an outage nobody accounted for.
+  function ptIsDependency(s) {
+    if (typeof s.successCount === "number") {
+      return s.failureCount > 0 && (s.dependencyFailureCount || 0) >= s.failureCount;
+    }
+    return s.dependencyDown === true;
+  }
 
   var oks = samples.filter(ptHasResponse);
   var maxRtt = oks.length ? Math.max.apply(null, oks.map(function (s) { return s.responseTimeMs; })) : 100;
@@ -11146,7 +11214,7 @@ function _renderMonitorChart(container, data, transitions) {
   var linePts = [];
   samples.forEach(function (s) {
     if (ptHasResponse(s)) linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true });
-    else if (ptIsFailure(s)) linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false });
+    else if (ptIsFailure(s)) linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false, dep: ptIsDependency(s) });
   });
 
   function fmtTooltipTs(ts) {
@@ -11158,6 +11226,7 @@ function _renderMonitorChart(container, data, transitions) {
     var attrs = ' data-ts="' + escapeHtml(String(s.timestamp)) +
       '" data-rtt="' + (typeof s.responseTimeMs === "number" ? s.responseTimeMs : "") +
       '" data-ok="' + (ptHasResponse(s) ? "1" : "0") +
+      '" data-dep="' + (ptIsFailure(s) && ptIsDependency(s) ? "1" : "0") +
       '" data-err="' + escapeHtml(s.error || "") + '"';
     // Rollup buckets carry aggregate stats — surface them in the tooltip so an
     // "Hourly avg"/"Daily avg" point reads as an average + min/max band + the
@@ -11289,14 +11358,20 @@ function _renderMonitorChart(container, data, transitions) {
     var rtt = target.getAttribute("data-rtt");
     var ok = target.getAttribute("data-ok") === "1";
     var err = target.getAttribute("data-err");
-    var danger = 'style="color:var(--color-danger,#d32f2f)"';
+    var dep = target.getAttribute("data-dep") === "1";
+    // A miss the upstream explains is stated as such and coloured grey, not
+    // red: the probe did fail, but nothing about THIS device is in question.
+    var danger = dep
+      ? 'style="color:' + _CHART_DEP_COLOR + '"'
+      : 'style="color:var(--color-danger,#d32f2f)"';
+    var missText = dep ? "dependency down" : "no response";
     if (target.getAttribute("data-rollup") === "1") {
       // Aggregated bucket: avg (+ min/max band) and the bucket's packet-loss %.
       var mn = target.getAttribute("data-min");
       var mx = target.getAttribute("data-max");
       var loss = parseFloat(target.getAttribute("data-loss") || "0");
       var band = (mn !== "" && mx !== "") ? ' <span style="color:var(--color-text-secondary)">(' + escapeHtml(mn) + '–' + escapeHtml(mx) + ' ms)</span>' : '';
-      var rRttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms avg" + band) : '<span ' + danger + '>no response</span>';
+      var rRttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms avg" + band) : '<span ' + danger + '>' + missText + '</span>';
       var rLossLine = loss > 0 ? '<span ' + danger + '>' + loss.toFixed(1) + '%</span>' : '0%';
       tip.innerHTML =
         '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(fmtTooltipTs(ts)) + '</div>' +
@@ -11306,8 +11381,8 @@ function _renderMonitorChart(container, data, transitions) {
       positionTip(evt);
       return;
     }
-    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span ' + danger + '>no response</span>';
-    var lossLine = ok ? "no" : '<span ' + danger + '>yes</span>';
+    var rttLine = ok && rtt !== "" ? (escapeHtml(rtt) + " ms") : '<span ' + danger + '>' + missText + '</span>';
+    var lossLine = ok ? "no" : '<span ' + danger + '>yes' + (dep ? " (upstream down)" : "") + '</span>';
     var errLine = !ok && err ? '<div style="color:var(--color-text-secondary);margin-top:2px">' + escapeHtml(err) + '</div>' : '';
     tip.innerHTML =
       '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(fmtTooltipTs(ts)) + '</div>' +
@@ -12053,17 +12128,12 @@ function _renderIfaceThroughputChart(container, derived, opts) {
     var pts = list.map(function (d) {
       return { t: new Date(d.timestamp).getTime(), x: xFor(d.timestamp), y: yFor(d[key]), ok: true };
     });
-    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    _outagePts(gapMarkers, xFor, baselineY).forEach(function (mp) { pts.push(mp); });
     pts.sort(function (a, b) { return a.t - b.t; });
     return pts;
   }
-  var failDots = gapMarkers.map(function (m) {
-    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
-  }).join("");
-  var missHits = gapMarkers.map(function (m) {
-    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
-      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
-  }).join("");
+  var failDots = _outageDotsSVG(gapMarkers, xFor, baselineY);
+  var missHits = _outageHitsSVG(gapMarkers, xFor, padT, innerH);
 
   // Single hit point per timestamp so the tooltip names both values together.
   var hits = derived.map(function (d) {
@@ -12130,8 +12200,7 @@ function _renderIfaceThroughputChart(container, derived, opts) {
   _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     if (target.getAttribute("data-miss") === "1") {
-      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      return _missTooltipHTML(target);
     }
     var inV  = target.getAttribute("data-in");
     var outV = target.getAttribute("data-out");
@@ -12185,17 +12254,12 @@ function _renderIfaceErrorChart(container, derived, opts) {
     var pts = list.map(function (d) {
       return { t: new Date(d.timestamp).getTime(), x: xFor(d.timestamp), y: yFor(d[key]), ok: true };
     });
-    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    _outagePts(gapMarkers, xFor, baselineY).forEach(function (mp) { pts.push(mp); });
     pts.sort(function (a, b) { return a.t - b.t; });
     return pts;
   }
-  var failDots = gapMarkers.map(function (m) {
-    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
-  }).join("");
-  var missHits = gapMarkers.map(function (m) {
-    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
-      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
-  }).join("");
+  var failDots = _outageDotsSVG(gapMarkers, xFor, baselineY);
+  var missHits = _outageHitsSVG(gapMarkers, xFor, padT, innerH);
   var hits = derived.map(function (d) {
     var y = padT + innerH;
     if (typeof d.inErr === "number") y = Math.min(y, yFor(d.inErr));
@@ -12256,8 +12320,7 @@ function _renderIfaceErrorChart(container, derived, opts) {
   _stashChartGeometry(container, t0, t1, padL, innerW, W);
   _wireChartTooltip(container, function (target) {
     if (target.getAttribute("data-miss") === "1") {
-      return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      return _missTooltipHTML(target);
     }
     var inE  = target.getAttribute("data-in");
     var outE = target.getAttribute("data-out");
@@ -13954,7 +14017,7 @@ function _renderStorageChart(container, samples, opts) {
     var pts = list.map(function (e) {
       return { t: +new Date(e.ts), x: xFor(e.ts), y: yFor(e.v), ok: true };
     });
-    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    _outagePts(gapMarkers, xFor, baselineY).forEach(function (mp) { pts.push(mp); });
     pts.sort(function (a, b) { return a.t - b.t; });
     return pts;
   }
@@ -13969,13 +14032,8 @@ function _renderStorageChart(container, samples, opts) {
     failDefs += seg.defs;
     return dash ? seg.segments.replace(/<line /g, '<line stroke-dasharray="4 3" ') : seg.segments;
   }
-  var failDots = gapMarkers.map(function (m) {
-    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
-  }).join("");
-  var missHits = gapMarkers.map(function (m) {
-    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
-      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
-  }).join("");
+  var failDots = _outageDotsSVG(gapMarkers, xFor, baselineY);
+  var missHits = _outageHitsSVG(gapMarkers, xFor, padT, innerH);
 
   // Build main series, hit-targets, and forecast overlay per view.
   var seriesSvg = "", hitSvg = "", legendSvg = "", forecastSvg = "", nowMarkerSvg = "";
@@ -14087,8 +14145,7 @@ function _renderStorageChart(container, samples, opts) {
   if (view === "bytes") {
     _wireChartTooltip(container, function (target) {
       if (target.getAttribute("data-miss") === "1") {
-        return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-          '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+        return _missTooltipHTML(target);
       }
       var u = target.getAttribute("data-used");
       var t = target.getAttribute("data-total");
@@ -14100,8 +14157,7 @@ function _renderStorageChart(container, samples, opts) {
   } else {
     _wireChartTooltip(container, function (target) {
       if (target.getAttribute("data-miss") === "1") {
-        return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
-          '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+        return _missTooltipHTML(target);
       }
       return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
         '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';

@@ -216,6 +216,8 @@ export interface AssetMonitorSnapshot {
   temperatureIntervalSec: number | null;
   systemInfoIntervalSec: number | null;
   probeTimeoutMs: number | null;
+  /** Parent dark at load time — tags a failed probe as an explained miss. */
+  dependencySuppressed?: boolean | null;
   cpuMemoryTimeoutMs?: number | null;
   temperatureTimeoutMs?: number | null;
   systemInfoTimeoutMs?: number | null;
@@ -9778,6 +9780,7 @@ export async function recordProbeResult(
       temperatureIntervalSec: true,
       systemInfoIntervalSec: true,
       probeTimeoutMs: true,
+      dependencySuppressed: true,
     },
   });
   if (!loaded) return;
@@ -9904,6 +9907,16 @@ export async function recordProbeResult(
     responseTimeMs: result.success ? result.responseTimeMs : null,
     error: result.success ? null : (result.error ?? null),
     uptimeSec,
+    // Mark the miss as EXPLAINED when the parent was dark at probe time. The
+    // probe keeps running while suppressed (half cadence — the device may still
+    // answer over a redundant path or out-of-band management), so these rows
+    // exist either way; the flag is what lets every chart draw the stretch grey
+    // instead of the red dive that claims an unexplained outage. Read off the
+    // asset row rather than re-derived here: `dependencySuppressed` is owned by
+    // the 60s reconciler + its post-status-change hook, and re-deciding it on
+    // the probe path would give two answers to one question. Only ever set on a
+    // failure — a suppressed device that ANSWERS is a plain success.
+    dependencyDown: !result.success && asset.dependencySuppressed === true ? true : null,
   });
 
   // Buffer the state write — the periodic flush in probePatchBuffer collapses

@@ -198,6 +198,35 @@ describe("failed-poll spans", () => {
     expect(svg).not.toContain('fill="#dc2626"');
   });
 
+  it("dives GREY, not red, when the miss was dependency-suppressed", () => {
+    // Same dive — nothing was measured either way — with the alarm taken out:
+    // the parent was dark, so the device itself is not being accused.
+    const svg = sparklineSvg(withHole, {
+      label: "CPU",
+      failSpans: [{ ...holeSpan[0]!, kind: "dependency" as const }],
+      ...holeWindow,
+    });
+    expect(svg).toContain('#9aa0a6');
+    expect(svg).not.toContain('#d32f2f');
+    // Still a dive, not a bridge: samples, the grey baseline run, samples.
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(3);
+  });
+
+  it("splits red from grey when a parent goes dark mid-outage", () => {
+    // Two spans back to back: unexplained first, then explained. One stroke
+    // colour for the pair would claim the whole stretch had one reason.
+    const svg = sparklineSvg(withHole, {
+      label: "CPU",
+      failSpans: [
+        { from: T0 + 180_000, to: T0 + 240_000 },
+        { from: T0 + 300_000, to: T0 + 420_000, kind: "dependency" as const },
+      ],
+      ...holeWindow,
+    });
+    expect(svg).toContain('#d32f2f');
+    expect(svg).toContain('#9aa0a6');
+  });
+
   it("plots the failure at the chart baseline, never at a value", () => {
     const svg = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
     // PAD_T (22) + plotH (120 - 22 - 18) = 102.

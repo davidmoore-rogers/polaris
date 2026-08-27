@@ -22,7 +22,7 @@
  */
 
 import { prisma } from "../db.js";
-import { foldProbeOutages } from "./probeOutageService.js";
+import { foldProbeOutages, type OutageKind } from "./probeOutageService.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
@@ -281,8 +281,13 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
 const FAIL_SPAN_TOKENS: ReadonlySet<ChartToken> = new Set(["chart.cpu", "chart.memory", "chart.responseTime"]);
 
 export interface FailSpanSeries {
-  /** Merged consecutive-failure spans, for the red bands + line breaks. */
-  spans: Array<{ from: number; to: number }>;
+  /**
+   * Merged consecutive-failure spans, for the line dives. `kind` carries the
+   * colour: "outage" dives red (unexplained), "dependency" dives grey (the
+   * parent was dark — the miss is accounted for). Same shape either way, so
+   * the reader still sees that nothing was measured there.
+   */
+  spans: Array<{ from: number; to: number; kind: OutageKind }>;
   /** How many polls failed in the window — the text fallback's number. */
   failedCount: number;
 }
@@ -295,18 +300,21 @@ export interface FailSpanSeries {
  * `windowEndMs` (the chart's "now"), because a device that is down as the
  * email sends is down up to the right edge, not up to its last poll.
  */
-export function failSpansFrom(rows: Array<{ timestamp: Date; success: boolean }>, windowEndMs: number): FailSpanSeries {
+export function failSpansFrom(
+  rows: Array<{ timestamp: Date; success: boolean; dependencyDown?: boolean | null }>,
+  windowEndMs: number,
+): FailSpanSeries {
   // ONE fold, shared with the in-app charts (probeOutageService), so an email
   // and the device page can't disagree about where an outage started and
   // ended. `openToMs` is what carries a still-failing run out to the right
   // edge: a device that is down as the email sends is down up to "now".
   const windows = foldProbeOutages(
-    rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success })),
+    rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success, dependency: r.dependencyDown === true })),
     0,
     windowEndMs,
   );
   return {
-    spans: windows.map((w) => ({ from: w.from.getTime(), to: w.to.getTime() })),
+    spans: windows.map((w) => ({ from: w.from.getTime(), to: w.to.getTime(), kind: w.kind })),
     failedCount: rows.reduce((n, r) => (r.success ? n : n + 1), 0),
   };
 }
@@ -321,7 +329,7 @@ async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<F
   const rows = await prisma.assetMonitorSample.findMany({
     where: { assetId, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
     orderBy: { timestamp: "asc" },
-    select: { timestamp: true, success: true },
+    select: { timestamp: true, success: true, dependencyDown: true },
   });
   return failSpansFrom(rows, now.getTime());
 }

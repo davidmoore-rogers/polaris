@@ -223,7 +223,7 @@ function sqlMonitorHourly(): string {
   return `
     INSERT INTO "asset_monitor_samples_hourly" (
       "id", "assetId", "bucketStart",
-      "sampleCount", "successCount", "failureCount",
+      "sampleCount", "successCount", "failureCount", "dependencyFailureCount",
       "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs"
     )
     SELECT
@@ -233,6 +233,11 @@ function sqlMonitorHourly(): string {
       COUNT(*)::int,
       COUNT(*) FILTER (WHERE success)::int,
       COUNT(*) FILTER (WHERE NOT success)::int,
+      -- Explained misses (parent dark at probe time). Carried through the
+      -- rollups so a multi-day dependency outage still reads grey once the
+      -- detail rows have aged out; a bucket only counts as a dependency outage
+      -- when EVERY failure in it was one.
+      COUNT(*) FILTER (WHERE NOT success AND "dependencyDown")::int,
       AVG("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL),
       MIN("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL),
       MAX("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL)
@@ -252,6 +257,7 @@ function sqlMonitorHourly(): string {
       "sampleCount"       = EXCLUDED."sampleCount",
       "successCount"      = EXCLUDED."successCount",
       "failureCount"      = EXCLUDED."failureCount",
+      "dependencyFailureCount" = EXCLUDED."dependencyFailureCount",
       "avgResponseTimeMs" = EXCLUDED."avgResponseTimeMs",
       "minResponseTimeMs" = EXCLUDED."minResponseTimeMs",
       "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs"
@@ -265,7 +271,7 @@ function sqlMonitorDaily(): string {
   return `
     INSERT INTO "asset_monitor_samples_daily" (
       "id", "assetId", "bucketStart",
-      "sampleCount", "successCount", "failureCount",
+      "sampleCount", "successCount", "failureCount", "dependencyFailureCount",
       "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs"
     )
     SELECT
@@ -275,6 +281,9 @@ function sqlMonitorDaily(): string {
       SUM("sampleCount")::int,
       SUM("successCount")::int,
       SUM("failureCount")::int,
+      -- COALESCE: hourly buckets rolled up before the column existed carry
+      -- NULL, and one NULL would otherwise wipe the whole day's count.
+      SUM(COALESCE("dependencyFailureCount", 0))::int,
       SUM("avgResponseTimeMs" * "successCount") / NULLIF(SUM("successCount"), 0),
       MIN("minResponseTimeMs"),
       MAX("maxResponseTimeMs")
@@ -285,6 +294,7 @@ function sqlMonitorDaily(): string {
       "sampleCount"       = EXCLUDED."sampleCount",
       "successCount"      = EXCLUDED."successCount",
       "failureCount"      = EXCLUDED."failureCount",
+      "dependencyFailureCount" = EXCLUDED."dependencyFailureCount",
       "avgResponseTimeMs" = EXCLUDED."avgResponseTimeMs",
       "minResponseTimeMs" = EXCLUDED."minResponseTimeMs",
       "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs"

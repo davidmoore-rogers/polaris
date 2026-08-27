@@ -68,6 +68,13 @@ export interface MonitorSampleRow {
    * filter to primary. Flushed straight through by createMany.
    */
   probeKind?: string | null;
+  /**
+   * TRUE on a FAILED probe taken while the asset was dependency-suppressed —
+   * the upstream was dark, so the miss is explained and the charts grey it out
+   * instead of drawing a red outage dive. Never set on a success; omitted/null
+   * reads as false. Flushed straight through by createMany.
+   */
+  dependencyDown?: boolean | null;
 }
 
 export interface TelemetrySampleRow {

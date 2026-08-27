@@ -15,7 +15,10 @@
  *      Driven by `reconcileDependencySuppression` (60s reconciler — source
  *      of truth) plus `propagateAfterStatusChange` (event-hook latency
  *      optimization). Suppression fires only on the confirmed-down edge:
- *      `warning` and `recovering` flapping does NOT propagate.
+ *      `warning` and `recovering` flapping does NOT propagate. Release is
+ *      asymmetric — see the hysteresis note on `evaluateSuppression`: a parent
+ *      that is merely `recovering` has not come back yet, so it holds its
+ *      children suppressed until it reaches `up`.
  *
  * The DAG has two halves. The Fortinet INFRA half (firewall / switch /
  * access_point) is layered by BFS from the FortiGate roots — see
@@ -582,6 +585,28 @@ export function buildEndpointDependencyEdges(
  * itself suppressed. Unmonitored parents are transparent — they're skipped
  * and the walk continues to their parents (if any).
  *
+ * HYSTERESIS — entering and leaving suppression read the parent differently:
+ *
+ *   enter   (child not currently suppressed): a parent blocks only when it is
+ *           confirmed `down`. `warning` and `recovering` are flapping states
+ *           and must not drag a healthy subtree into Dep. Down.
+ *   release (child currently suppressed):     `recovering` counts as down too.
+ *           The parent has answered once but has NOT been confirmed back — it
+ *           is still short of the covering automation's success threshold, and
+ *           on a failure it drops straight back to `down`. Releasing there
+ *           un-suppresses the whole subtree on the strength of a single packet:
+ *           every child's own probes are still failing, so they immediately
+ *           start their own down runs and the outage re-alerts device by device
+ *           as plain Down — exactly the alert storm suppression exists to
+ *           prevent. Holding until the parent is genuinely back collapses that
+ *           into one recovery.
+ *
+ * Only `down` and `recovering` are asymmetric. Every other state stays "ok" on
+ * both sides deliberately: `unknown` (never probed) and `passive` (business
+ * rule 36 — no automation renders a verdict on it) are not claims that the
+ * parent is unreachable, and gating release on them would strand a subtree in
+ * Dep. Down with nothing that could ever clear it.
+ *
  * Iteratively re-evaluates in BFS layer order until stable. Bounded — at
  * most one pass per layer.
  */
@@ -590,7 +615,11 @@ export interface SuppressionAssetState {
   layer: number | null;
   monitored: boolean;
   monitorStatus: string | null;
-  /** Computed previously — used as the starting state for the iteration. */
+  /**
+   * The asset's PERSISTED `dependencySuppressed` flag. Load-bearing, not
+   * merely a seed: it selects which side of the hysteresis this asset is
+   * evaluated on (see the release rule on `evaluateSuppression`).
+   */
   currentlySuppressed: boolean;
   /**
    * Admin-only "Dependency Test" overlay. When this timestamp is in the
@@ -708,8 +737,16 @@ export function evaluateSuppression(
         if (grand.length === 0) return true;
         return grand.some(g => isParentOk(g));
       }
-      // Monitored: ok iff up / warning / recovering / unknown AND not suppressed.
-      const okStatus = ps.monitorStatus !== "down";
+      // Monitored: ok iff not down AND not suppressed. `recovering` counts as
+      // down when the CHILD is already suppressed — a parent mid-recovery has
+      // not come back yet, and releasing on it re-alerts the whole subtree as
+      // plain Down (see the hysteresis note above). `s` is the child under
+      // evaluation; the same rule applies through the transparent walk, since
+      // an unmonitored mid-chain switch is only as recovered as its own parent.
+      const notBack = s.currentlySuppressed
+        ? (ps.monitorStatus === "down" || ps.monitorStatus === "recovering")
+        : ps.monitorStatus === "down";
+      const okStatus = !notBack;
       const suppressed = result.get(parentId) ?? false;
       return okStatus && !suppressed;
     }

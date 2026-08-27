@@ -23,6 +23,14 @@
  * maintenance, so a maintenance gap contains no failed probes and yields no
  * outage.
  *
+ * Windows are CLASSIFIED, not merely found: a stretch whose every failure was
+ * taken while the asset was dependency-suppressed comes back as
+ * kind="dependency" and is drawn grey, because Polaris knows exactly why those
+ * probes missed — the upstream was dark. Red is reserved for the outage nobody
+ * can account for. The evidence is per-sample (AssetMonitorSample
+ * .dependencyDown) rather than reconstructed from the suppression history,
+ * which no table keeps.
+ *
  * Deliberately NOT a write path. An earlier design wrote synthetic failure rows
  * into the telemetry/storage/interface tables so those streams would carry
  * their own flag. Rejected: those tables are read raw by the alert engine, the
@@ -34,16 +42,37 @@
 import { prisma } from "../db.js";
 import { pickSampleTierForAsset, type SampleTier } from "./sampleQueryRouter.js";
 
+/**
+ * Why the probes in a window failed.
+ *
+ *   "outage"     — nothing explains it. The device stopped answering and
+ *                  Polaris does not know why. Charts draw the red dive.
+ *   "dependency" — the asset was dependency-suppressed for every failure in
+ *                  the window: its parent was dark, so the miss is expected.
+ *                  Charts draw the same shape in grey, because the claim is
+ *                  "we could not reach it THROUGH the outage upstream", not
+ *                  "this device broke".
+ *
+ * A window is only "dependency" when EVERY failure in it was suppressed. A run
+ * that starts before the parent goes down splits into an "outage" window and a
+ * "dependency" one at the boundary, which is the honest reading: the first
+ * misses were unexplained at the time they happened.
+ */
+export type OutageKind = "outage" | "dependency";
+
 /** One contiguous stretch during which every response-time probe failed. */
 export interface OutageWindow {
   from: Date;
   to: Date;
+  kind: OutageKind;
 }
 
 /** A probe reading reduced to the only thing this module cares about. */
 export interface ProbeVerdict {
   timestamp: Date;
   failed: boolean;
+  /** Failure taken while the parent was dark (AssetMonitorSample.dependencyDown). */
+  dependency?: boolean;
 }
 
 /**
@@ -71,19 +100,26 @@ export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0, op
   const windows: OutageWindow[] = [];
   let from: Date | null = null;
   let to: Date | null = null;
+  let kind: OutageKind = "outage";
 
   const close = (stillOpen = false) => {
     if (!from || !to) return;
     let endMs = bucketSeconds > 0 ? to.getTime() + bucketSeconds * 1000 : to.getTime();
     if (stillOpen && openToMs != null) endMs = Math.max(endMs, openToMs);
-    windows.push({ from, to: new Date(endMs) });
+    windows.push({ from, to: new Date(endMs), kind });
     from = null;
     to = null;
   };
 
   for (const v of verdicts) {
     if (v.failed) {
-      if (!from) from = v.timestamp;
+      const vKind: OutageKind = v.dependency ? "dependency" : "outage";
+      // A change of kind mid-run ends the window and starts a new one — the
+      // parent going dark part-way through does not retroactively explain the
+      // misses that came before it, and its recovery does not leave the ones
+      // after it explained.
+      if (from && vKind !== kind) close();
+      if (!from) { from = v.timestamp; kind = vKind; }
       to = v.timestamp;
     } else {
       close();
@@ -138,10 +174,10 @@ export async function readProbeOutagesAtTier(
         OR: [{ probeKind: null }, { probeKind: "primary" }],
       },
       orderBy: { timestamp: "asc" },
-      select: { timestamp: true, success: true },
+      select: { timestamp: true, success: true, dependencyDown: true },
     });
     return foldProbeOutages(
-      rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success })),
+      rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success, dependency: r.dependencyDown === true })),
       0,
       until.getTime(),
     );
@@ -152,8 +188,10 @@ export async function readProbeOutagesAtTier(
     bucketStart: Date;
     sampleCount: number;
     successCount: number;
+    failureCount: number;
+    dependencyFailureCount: number | null;
   }>>(
-    `SELECT "bucketStart", "sampleCount", "successCount"
+    `SELECT "bucketStart", "sampleCount", "successCount", "failureCount", "dependencyFailureCount"
      FROM "${table}"
      WHERE "assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3
      ORDER BY "bucketStart" ASC`,
@@ -165,6 +203,11 @@ export async function readProbeOutagesAtTier(
       // An empty bucket is not a failed one — it is a bucket the rollup had
       // nothing to summarise, which is a gap in the probe stream itself.
       failed: r.sampleCount > 0 && r.successCount === 0,
+      // Grey only when the WHOLE bucket was explained. A bucket that mixes
+      // suppressed and unexplained misses keeps the red treatment — some of
+      // that hour is still an outage nobody accounted for. NULL is a bucket
+      // rolled up before the column existed: read as zero, i.e. red.
+      dependency: r.failureCount > 0 && (r.dependencyFailureCount ?? 0) >= r.failureCount,
     })),
     bucketSeconds,
     until.getTime(),
@@ -172,6 +215,6 @@ export async function readProbeOutagesAtTier(
 }
 
 /** Serialise for a chart endpoint payload. */
-export function serializeOutages(windows: OutageWindow[]): Array<{ from: string; to: string }> {
-  return windows.map((w) => ({ from: w.from.toISOString(), to: w.to.toISOString() }));
+export function serializeOutages(windows: OutageWindow[]): Array<{ from: string; to: string; kind: OutageKind }> {
+  return windows.map((w) => ({ from: w.from.toISOString(), to: w.to.toISOString(), kind: w.kind }));
 }

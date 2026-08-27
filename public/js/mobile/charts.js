@@ -60,6 +60,13 @@
   // (`_CHART_FAIL_COLOR` in public/js/assets.js), so a missed poll reads
   // identically on both surfaces.
   var FAIL_COLOR = "#d32f2f";
+  // Dependency-down grey: the poll missed because the asset's PARENT was dark,
+  // so the dive is drawn without the alarm — the device itself isn't accused of
+  // anything. Same value as _CHART_DEP_COLOR (desktop) and DEP_COLOR
+  // (utils/sparklineSvg.ts, the alert email); one outage looks the same on all
+  // three surfaces.
+  var DEP_COLOR = "#9aa0a6";
+  function failColorFor(p) { return p && p.dep ? DEP_COLOR : FAIL_COLOR; }
 
   // Gradient ids must be unique per rendered chart — several charts share the
   // asset sheet's DOM (response time, CPU/memory, three SD-WAN charts).
@@ -102,14 +109,15 @@
     outages.forEach(function (o) {
       var from = +new Date(o.from);
       var to   = +new Date(o.to);
+      var dep = o.kind === "dependency";
       if (!isFinite(from) || !isFinite(to)) return;
       // Skip the WHOLE window when the series has data anywhere in it, not
       // merely at its edges — see _outageMarkers in public/js/assets.js.
       if (guardMs > 0 && times.some(function (t) { return t > from - guardMs && t < to + guardMs; })) return;
-      markers.push(from);
-      if (to > from) markers.push(to);
+      markers.push({ t: from, dep: dep });
+      if (to > from) markers.push({ t: to, dep: dep });
     });
-    return markers.sort(function (a, b) { return a - b; });
+    return markers.sort(function (a, b) { return a.t - b.t; });
   }
 
   // Normalize one series' `values` into time-ordered { ts (ms), v, ok } points:
@@ -123,7 +131,7 @@
       if (p.v == null && !failed) return;
       var t = +new Date(p.ts);
       if (!isFinite(t)) return;
-      pts.push({ ts: t, v: failed ? null : p.v, ok: !failed });
+      pts.push({ ts: t, v: failed ? null : p.v, ok: !failed, dep: p.dep === true });
     });
     pts.sort(function (a, b) { return a.ts - b.ts; });
     return pts;
@@ -151,7 +159,7 @@
     if (!marks.length) return marks;
     prepared.forEach(function (e) {
       if (!e.s.gapFade || !e.pts.length) return;
-      marks.forEach(function (t) { e.pts.push({ ts: t, v: null, ok: false }); });
+      marks.forEach(function (m) { e.pts.push({ ts: m.t, v: null, ok: false, dep: m.dep }); });
       e.pts.sort(function (a, b) { return a.ts - b.ts; });
     });
     return marks;
@@ -166,24 +174,27 @@
   function failureAwareSegments(pts, seriesColor, idPrefix) {
     var defs = "";
     var out = "";
-    function strokeFor(ok) { return ok ? seriesColor : FAIL_COLOR; }
-    function polyline(slice, ok) {
+    // Colour, not ok-ness, is what breaks a run: a red outage that runs into a
+    // grey dependency stretch (the parent went down part-way through) has to
+    // split, or the whole thing takes the first point's stroke.
+    function strokeFor(p) { return p.ok ? seriesColor : failColorFor(p); }
+    function polyline(slice, p0) {
       if (slice.length < 2) return "";
       return '<polyline points="' + slice.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ") +
-        '" fill="none" stroke="' + strokeFor(ok) + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
+        '" fill="none" stroke="' + strokeFor(p0) + '" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
     }
     var runStart = 0;
     for (var i = 1; i <= pts.length; i++) {
       var atEnd = i === pts.length;
-      if (!atEnd && pts[i].ok === pts[i - 1].ok) continue;
-      out += polyline(pts.slice(runStart, i), pts[runStart].ok);
+      if (!atEnd && strokeFor(pts[i]) === strokeFor(pts[i - 1])) continue;
+      out += polyline(pts.slice(runStart, i), pts[runStart]);
       if (atEnd) break;
       var a = pts[i - 1], b = pts[i];
       var gid = idPrefix + "-g" + i;
       defs += '<linearGradient id="' + gid + '" gradientUnits="userSpaceOnUse"' +
         ' x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '">' +
-        '<stop offset="0%" stop-color="' + strokeFor(a.ok) + '"/>' +
-        '<stop offset="100%" stop-color="' + strokeFor(b.ok) + '"/>' +
+        '<stop offset="0%" stop-color="' + strokeFor(a) + '"/>' +
+        '<stop offset="100%" stop-color="' + strokeFor(b) + '"/>' +
         '</linearGradient>';
       out += '<line x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) +
         '" stroke="url(#' + gid + ')" stroke-width="1.6" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
@@ -202,7 +213,7 @@
       // Both endpoints round at the same precision so the stub always runs
       // forward by exactly 0.01 user units.
       return '<line x1="' + p.x.toFixed(2) + '" y1="' + p.y.toFixed(2) + '" x2="' + (p.x + 0.01).toFixed(2) + '" y2="' + p.y.toFixed(2) +
-        '" stroke="' + FAIL_COLOR + '" stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
+        '" stroke="' + failColorFor(p) + '" stroke-width="4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
     }).join("");
   }
 
@@ -279,7 +290,7 @@
     prepared.forEach(function (e, si) {
       var color = e.s.color || "var(--md-primary)";
       var plot = e.pts.map(function (p) {
-        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok };
+        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok, dep: p.dep };
       });
       if (!plot.length) return;
 

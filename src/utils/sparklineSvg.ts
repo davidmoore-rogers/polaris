@@ -79,8 +79,15 @@ export interface SparklineOptions {
    *
    * A span still open at the last point rides to the right edge, because a
    * device that is down as the email sends is down up to "now".
+   *
+   * `kind` picks the colour, not the shape: "outage" dives RED (nobody knows
+   * why the device stopped answering), "dependency" dives GREY (it was
+   * dependency-suppressed — its parent was dark, so the miss is accounted for
+   * and the device itself is not being accused of anything). Both still dive,
+   * because in neither case was anything measured. Omitted = "outage", which
+   * keeps every existing caller's behaviour.
    */
-  failSpans?: Array<{ from: number; to: number }>;
+  failSpans?: Array<{ from: number; to: number; kind?: "outage" | "dependency" }>;
 }
 
 /** The missed-poll red. Shared with the in-app charts' _CHART_FAIL_COLOR so
@@ -88,6 +95,11 @@ export interface SparklineOptions {
  *  #dc2626 used for alarm bands and the threshold line, which are different
  *  claims. */
 const FAIL_COLOR = "#d32f2f";
+
+/** The dependency-down grey. Same dive, drained of alarm: the upstream is what
+ *  broke, and this device is only reporting that it sits behind it. Shared with
+ *  the in-app charts' _CHART_DEP_COLOR. */
+const DEP_COLOR = "#9aa0a6";
 
 const W = 520;
 const H = 120;
@@ -265,20 +277,24 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   const hasData = (a: number, b: number) =>
     guardMs > 0 && sampleTimes.some((st) => st > a - guardMs && st < b + guardMs);
 
-  const failTimes: number[] = [];
+  const failTimes: Array<{ t: number; dep: boolean }> = [];
   for (const sp of failSpans) {
     const a = Math.max(sp.from, from);
     const b = Math.min(sp.to, to);
     if (hasData(a, b)) continue;
-    failTimes.push(a);
-    if (b > a) failTimes.push(b);
+    const dep = sp.kind === "dependency";
+    failTimes.push({ t: a, dep });
+    if (b > a) failTimes.push({ t: b, dep });
   }
 
-  type PlotPoint = { t: number; py: number; ok: boolean };
+  type PlotPoint = { t: number; py: number; ok: boolean; dep?: boolean };
   const plot: PlotPoint[] = [
     ...points.map((p) => ({ t: p.t, py: y(p.v), ok: true })),
-    ...failTimes.map((t) => ({ t, py: baseY, ok: false })),
+    ...failTimes.map((f) => ({ t: f.t, py: baseY, ok: false, dep: f.dep })),
   ].sort((a, b) => a.t - b.t);
+  // One colour rule for every stroke, dot and gradient stop below, so a
+  // dependency dive can never come out half grey and half red.
+  const colorOf = (p: PlotPoint): string => (p.ok ? color : p.dep ? DEP_COLOR : FAIL_COLOR);
 
   const defs: string[] = [];
   // Gradients are local defs, not external references — resvg resolves them
@@ -289,8 +305,8 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     const id = `polaris-fade-${defs.length}`;
     defs.push(
       `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${x1.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${b.py.toFixed(1)}">` +
-        `<stop offset="0" stop-color="${a.ok ? color : FAIL_COLOR}"/>` +
-        `<stop offset="1" stop-color="${b.ok ? color : FAIL_COLOR}"/>` +
+        `<stop offset="0" stop-color="${colorOf(a)}"/>` +
+        `<stop offset="1" stop-color="${colorOf(b)}"/>` +
       `</linearGradient>`,
     );
     return `<line x1="${x1.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${b.py.toFixed(1)}" stroke="url(#${id})" stroke-width="2" stroke-linecap="round"/>`;
@@ -300,10 +316,13 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   // per segment the way the desktop chart emits them: a FortiGate can land
   // thousands of points in an hour, and per-segment elements would balloon the
   // PNG. Same divergence, same reason, as the phone port.
+  // Grouped by COLOUR, not by ok-ness: a red outage that runs straight into a
+  // grey dependency stretch (the parent went down part-way through) has to
+  // break into two runs, or the whole thing takes the first run's stroke.
   const runs: PlotPoint[][] = [];
   for (const p of plot) {
     const cur = runs[runs.length - 1];
-    if (cur && cur[0]!.ok === p.ok) cur.push(p);
+    if (cur && colorOf(cur[0]!) === colorOf(p)) cur.push(p);
     else runs.push([p]);
   }
 
@@ -312,7 +331,7 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   const dotParts: string[] = [];
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i]!;
-    const stroke = run[0]!.ok ? color : FAIL_COLOR;
+    const stroke = colorOf(run[0]!);
     const rp = run.map((p) => `${x(p.t).toFixed(1)},${p.py.toFixed(1)}`);
     if (run.length === 1) {
       // A lone point has no line to draw — mark it so it isn't invisible.
@@ -338,11 +357,11 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
       lineParts.push(fadeSegment(prev[prev.length - 1]!, run[0]!));
     }
   }
-  // Every failure also carries a red dot — bigger than the 1.5px series dots on
+  // Every failure also carries a dot — bigger than the 1.5px series dots on
   // the in-app chart, scaled here for the smaller plot — so a lone miss is
-  // visible and not a hairline notch.
+  // visible and not a hairline notch. Grey when the miss was explained.
   for (const p of plot) {
-    if (!p.ok) dotParts.push(`<circle cx="${x(p.t).toFixed(1)}" cy="${p.py.toFixed(1)}" r="3" fill="${FAIL_COLOR}"/>`);
+    if (!p.ok) dotParts.push(`<circle cx="${x(p.t).toFixed(1)}" cy="${p.py.toFixed(1)}" r="3" fill="${colorOf(p)}"/>`);
   }
   const defsBlock = defs.length ? `<defs>${defs.join("")}</defs>` : "";
   const line = lineParts.join("");

@@ -679,10 +679,19 @@
         if (typeof s.successCount === "number") return s.sampleCount > 0 && s.successCount === 0;
         return !s.success;
       }
+      // A miss taken while the asset was dependency-suppressed dives grey: the
+      // upstream was dark, so nothing about this device is in question. A
+      // rollup bucket qualifies only when EVERY failure in it was one.
+      function isDependency(s) {
+        if (typeof s.successCount === "number") {
+          return s.failureCount > 0 && (s.dependencyFailureCount || 0) >= s.failureCount;
+        }
+        return s.dependencyDown === true;
+      }
       var samples = [];
       (resp.samples || []).forEach(function (s) {
         if (hasResponse(s)) samples.push({ ts: s.timestamp, v: s.responseTimeMs });
-        else if (isFailure(s)) samples.push({ ts: s.timestamp, v: null, ok: false });
+        else if (isFailure(s)) samples.push({ ts: s.timestamp, v: null, ok: false, dep: isDependency(s) });
       });
       if (chartHost) {
         chartHost.innerHTML = PolarisCharts.lineChart({

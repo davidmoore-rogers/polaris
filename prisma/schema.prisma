@@ -1152,6 +1152,16 @@ model AssetMonitorSample {
   // device.reboot Event emitted by recordProbeResult. Nullable column added
   // post-hoc; safe on the TimescaleDB hypertable (no row rewrite).
   uptimeSec      Int?
+  // TRUE on a FAILED probe recorded while the asset was dependency-suppressed
+  // (`Asset.dependencySuppressed` — its parent was dark at probe time). The probe
+  // still runs while suppressed, at half cadence (resolveProbeIntervalSec),
+  // because the device may answer over a redundant path — but a failure here is
+  // EXPLAINED: the upstream is down. The charts draw it grey instead of the red
+  // dive that means "this device stopped answering and we don't know why".
+  // NULL/false = an ordinary probe; never set on a success. Nullable rather than
+  // defaulted so the add is free on the hypertable (the uptimeSec precedent);
+  // readers must treat NULL as false, never as unknown.
+  dependencyDown Boolean?
 
   // Composite PK (id, timestamp) — required by TimescaleDB hypertables to
   // include the partitioning column. Works fine on plain Postgres too;
@@ -2414,6 +2424,12 @@ model AssetMonitorSampleHourly {
   sampleCount       Int
   successCount      Int
   failureCount      Int
+  // How many of `failureCount` were dependency-suppressed failures
+  // (AssetMonitorSample.dependencyDown). A bucket whose failures were ALL
+  // dependency ones is drawn grey; a mixed bucket keeps the red outage
+  // treatment, because at least one failure was unexplained. Nullable — buckets
+  // rolled up before this column existed carry NULL, read as 0.
+  dependencyFailureCount Int?
   // avgResponseTimeMs is computed over successful samples only; null when
   // the bucket had zero successes. min/max likewise restricted to successes.
   avgResponseTimeMs Float?
@@ -2433,6 +2449,12 @@ model AssetMonitorSampleDaily {
   sampleCount       Int
   successCount      Int
   failureCount      Int
+  // How many of `failureCount` were dependency-suppressed failures
+  // (AssetMonitorSample.dependencyDown). A bucket whose failures were ALL
+  // dependency ones is drawn grey; a mixed bucket keeps the red outage
+  // treatment, because at least one failure was unexplained. Nullable — buckets
+  // rolled up before this column existed carry NULL, read as 0.
+  dependencyFailureCount Int?
   avgResponseTimeMs Float?
   minResponseTimeMs Int?
   maxResponseTimeMs Int?

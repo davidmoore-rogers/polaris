@@ -630,7 +630,13 @@ async function _cmpFetchSeriesRaw(s) {
         // average.
         var rollup = typeof x.successCount === "number";
         var failed = rollup ? (x.sampleCount > 0 && x.successCount === 0) : !x.success;
-        if (failed) return { t: x.timestamp, v: null, ok: false };
+        // A failure the upstream explains (dependency-suppressed at probe
+        // time) dives grey instead of red — same shape, no accusation. On a
+        // rollup bucket that means every failure in it was one.
+        var dep = rollup
+          ? (x.failureCount > 0 && (x.dependencyFailureCount || 0) >= x.failureCount)
+          : x.dependencyDown === true;
+        if (failed) return { t: x.timestamp, v: null, ok: false, dep: dep };
         var v = rollup
           ? (x.successCount > 0 && typeof x.responseTimeMs === "number" ? x.responseTimeMs : null)
           : ((x.success && typeof x.responseTimeMs === "number") ? x.responseTimeMs : null);
@@ -698,8 +704,8 @@ function _cmpApplyOutageMarkers(series) {
     var good = s.data.points
       .filter(function (p) { return p.ok !== false; })
       .map(function (p) { return +new Date(p.t); });
-    _outageMarkers(s.data.outages, good).forEach(function (t) {
-      s.data.points.push({ t: new Date(t).toISOString(), v: null, ok: false });
+    _outageMarkers(s.data.outages, good).forEach(function (m) {
+      s.data.points.push({ t: new Date(m.t).toISOString(), v: null, ok: false, dep: m.dep });
     });
   });
 }
@@ -817,12 +823,13 @@ function _renderCompareChart(container, spec) {
     // reads as the line diving to zero rather than a straight bridge over it.
     var plot = pts.map(function (p) {
       var ok = p.ok !== false;
-      return { x: xFor(p.t), y: ok ? yFor(p.v) : baselineY, ok: ok, t: p.t, v: p.v };
+      return { x: xFor(p.t), y: ok ? yFor(p.v) : baselineY, ok: ok, dep: p.dep === true, t: p.t, v: p.v };
     });
     var seg = _failureAwareSeriesSVG(plot, s.color, clipId + "-" + si);
     failDefs += seg.defs;
     polylines += seg.segments;
-    // 2.5px red dots for the failures; OK points keep their 1.5px series dot.
+    // 2.5px dots for the failures (grey when dependency-explained); OK points
+    // keep their 1.5px series dot.
     dots += _failureDotsSVG(plot);
     plot.forEach(function (p) {
       if (p.ok) {
@@ -835,7 +842,7 @@ function _renderCompareChart(container, spec) {
         hits += '<circle class="chart-hit" cx="' + p.x + '" cy="' + p.y + '" r="5" fill="transparent" style="cursor:crosshair"' +
           ' data-ts="' + escapeHtml(String(p.t)) + '"' +
           ' data-label="' + escapeHtml(s.label) + '"' +
-          ' data-failed="1"/>';
+          ' data-failed="1"' + (p.dep ? ' data-dep="1"' : '') + '/>';
       }
     });
   });
@@ -859,8 +866,9 @@ function _renderCompareChart(container, spec) {
   _wireChartTooltip(container, function (target) {
     var head = '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>';
     if (target.getAttribute("data-failed")) {
-      return head +
-        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      return head + (target.getAttribute("data-dep") === "1"
+        ? '<div style="color:' + _CHART_DEP_COLOR + '">Dependency down — upstream device was down, not polled</div>'
+        : '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>');
     }
     return head +
       '<div>' + escapeHtml(target.getAttribute("data-label")) + ': ' + escapeHtml(target.getAttribute("data-val")) + '</div>';

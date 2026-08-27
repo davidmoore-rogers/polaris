@@ -94,6 +94,40 @@ d("rollupHourly — gauge table (asset_monitor_samples)", () => {
     expect(row.maxResponseTimeMs).toBe(30); // failure's 9999 excluded
   });
 
+  it("counts dependency-suppressed failures separately, hourly and daily", async () => {
+    // Two failures in one bucket: one taken while the parent was dark, one not.
+    // The bucket is NOT a dependency outage — a chart greys a bucket only when
+    // every failure in it was explained — but the count has to survive both
+    // rollup tiers, and the daily re-aggregate has to COALESCE the NULLs that
+    // pre-column hourly buckets carry.
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: true,  responseTimeMs: 10 },
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 2 * 60_000), success: false, dependencyDown: true },
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 3 * 60_000), success: false },
+      ],
+    });
+
+    await rollupHourly();
+    const hourly = await prisma.assetMonitorSampleHourly.findMany({ where: { assetId: ASSET } });
+    expect(hourly).toHaveLength(1);
+    expect(hourly[0].failureCount).toBe(2);
+    expect(hourly[0].dependencyFailureCount).toBe(1);
+
+    // A neighbouring bucket left at NULL (what every bucket rolled up before
+    // this column looks like) must not wipe the day's count.
+    await prisma.$executeRawUnsafe(
+      `UPDATE "asset_monitor_samples_hourly" SET "dependencyFailureCount" = NULL
+       WHERE "assetId" = $1 AND "bucketStart" <> $2`,
+      ASSET, bucket,
+    );
+    await rollupDaily();
+    const daily = await prisma.assetMonitorSampleDaily.findMany({ where: { assetId: ASSET } });
+    expect(daily.length).toBeGreaterThan(0);
+    expect(daily.reduce((n, r) => n + (r.dependencyFailureCount ?? 0), 0)).toBe(1);
+  });
+
   it("is idempotent — re-running rewrites the bucket in place, no duplicate rows", async () => {
     const bucket = recentHourBucket();
     await prisma.assetMonitorSample.createMany({

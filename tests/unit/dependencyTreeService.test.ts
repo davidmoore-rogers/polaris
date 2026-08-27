@@ -692,6 +692,88 @@ describe("evaluateSuppression", () => {
   });
 });
 
+// ─── Release hysteresis ─────────────────────────────────────────────────────
+// Entering suppression needs a CONFIRMED-down parent; leaving it needs a
+// parent that is genuinely back. `recovering` is neither: it has answered once
+// but is still short of the covering automation's success threshold and drops
+// straight back to `down` on the next miss. Releasing there un-suppresses the
+// whole subtree on the strength of one packet, and every child — whose own
+// probes are still failing — immediately starts its own down run and re-alerts
+// as plain Down, which is the storm suppression exists to prevent.
+
+describe("evaluateSuppression — release hysteresis", () => {
+  function st3(
+    id: string,
+    layer: number | null,
+    monitorStatus: string | null,
+    currentlySuppressed = false,
+  ): SuppressionAssetState {
+    return { id, layer, monitorStatus, monitored: true, currentlySuppressed };
+  }
+  const parents = new Map([["sw", ["fg"]]]);
+
+  it("holds a suppressed child while the parent is only RECOVERING", () => {
+    const out = evaluateSuppression(
+      [st3("fg", 1, "recovering"), st3("sw", 2, "down", true)],
+      parents,
+    );
+    expect(out.get("sw")).toBe(true);
+  });
+
+  it("releases as soon as the parent reaches UP", () => {
+    const out = evaluateSuppression(
+      [st3("fg", 1, "up"), st3("sw", 2, "down", true)],
+      parents,
+    );
+    expect(out.get("sw")).toBe(false);
+  });
+
+  it("still releases when a recovering parent has a second parent that is up", () => {
+    // All-down semantics are unchanged by the hysteresis: one genuinely-back
+    // parent is enough, exactly as one live parent is enough to prevent entry.
+    const out = evaluateSuppression(
+      [st3("fg1", 1, "recovering"), st3("fg2", 1, "up"), st3("sw", 2, "down", true)],
+      new Map([["sw", ["fg1", "fg2"]]]),
+    );
+    expect(out.get("sw")).toBe(false);
+  });
+
+  it("does NOT suppress an unsuppressed child when the parent is recovering", () => {
+    // The asymmetry only bites on the way out. A recovering parent must never
+    // drag a healthy subtree INTO Dep. Down — that was the pre-existing
+    // "flapping does not propagate" rule and it still holds.
+    const out = evaluateSuppression(
+      [st3("fg", 1, "recovering"), st3("sw", 2, "up", false)],
+      parents,
+    );
+    expect(out.get("sw")).toBe(false);
+  });
+
+  it("holds the whole chain until each level is genuinely back", () => {
+    // Gate up, switch still down: the AP's own parent has not recovered, so it
+    // stays suppressed even though the root did.
+    const out = evaluateSuppression(
+      [st3("fg", 1, "up"), st3("sw", 2, "down", true), st3("ap", 3, "down", true)],
+      new Map([["sw", ["fg"]], ["ap", ["sw"]]]),
+    );
+    expect(out.get("sw")).toBe(false);
+    expect(out.get("ap")).toBe(true);
+  });
+
+  it("never strands a subtree behind a parent that renders no verdict", () => {
+    // `passive` (business rule 36) and `unknown` are not claims that the
+    // parent is unreachable. Gating release on them would leave the child in
+    // Dep. Down with nothing that could ever clear it.
+    for (const status of ["passive", "unknown", "warning"]) {
+      const out = evaluateSuppression(
+        [st3("fg", 1, status), st3("sw", 2, "down", true)],
+        parents,
+      );
+      expect(out.get("sw"), status).toBe(false);
+    }
+  });
+});
+
 // ─── vCenter cluster multi-parent (vMotion-safe) ────────────────────────────
 // A clustered VM carries one edge per cluster-member host; all-down semantics
 // suppress it only when the ENTIRE cluster is dark, so an intra-cluster

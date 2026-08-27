@@ -133,7 +133,7 @@ describe("failSpansFrom", () => {
       [probe(0, true), probe(1, false), probe(2, false), probe(3, false), probe(4, true)],
       END,
     );
-    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 180_000 }]);
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 180_000, kind: "outage" }]);
     expect(failedCount).toBe(3);
   });
 
@@ -147,7 +147,15 @@ describe("failSpansFrom", () => {
     // the chart, not up to whenever its last poll happened to land — otherwise
     // the shading stops short and the line looks like it merely ended.
     const { spans } = failSpansFrom([probe(0, true), probe(8, false), probe(9, false)], END);
-    expect(spans).toEqual([{ from: T0 + 8 * 60_000, to: END }]);
+    expect(spans).toEqual([{ from: T0 + 8 * 60_000, to: END, kind: "outage" }]);
+  });
+
+  it("labels a run of dependency-suppressed misses so the email dives grey", () => {
+    // The parent was dark: the probes did fail, but nothing about THIS device
+    // is in question, and an alert email that paints it red says otherwise.
+    const dep = (min: number) => ({ ...probe(min, false), dependencyDown: true });
+    const { spans } = failSpansFrom([probe(0, true), dep(1), dep(2), probe(3, true)], END);
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 120_000, kind: "dependency" }]);
   });
 
   it("is empty when everything answered", () => {

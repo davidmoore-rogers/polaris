@@ -71,12 +71,13 @@ describe("outageMarkers", () => {
     // inside the sampling hole: last good sample ts[5], first good again ts[20].
     const start = ts[6], end = ts[19];
     const sampled = [...ts.slice(0, 6), ...ts.slice(20)];
-    expect(charts._outageMarkers([outage(start, end)], sampled)).toEqual([start, end]);
+    // Markers are { t, dep } objects — `dep` picks red vs the dependency grey.
+    expect(charts._outageMarkers([outage(start, end)], sampled).map((m) => m.t)).toEqual([start, end]);
   });
 
   it("collapses a single-probe outage to one marker", () => {
     const ts = minutes(10);
-    expect(charts._outageMarkers([outage(ts[4], ts[4])], [ts[0], ts[1], ts[8], ts[9]])).toEqual([ts[4]]);
+    expect(charts._outageMarkers([outage(ts[4], ts[4])], [ts[0], ts[1], ts[8], ts[9]]).map((m) => m.t)).toEqual([ts[4]]);
   });
 
   it("drops a marker that lands on real data — an agent keeps pushing when the probe transport fails", () => {
@@ -169,8 +170,8 @@ describe("applySharedOutageMarkers", () => {
     ]);
     const cpuMarks = prepared[0].pts.filter((p) => !p.ok).map((p) => p.ts);
     const memMarks = prepared[1].pts.filter((p) => !p.ok).map((p) => p.ts);
-    expect(cpuMarks).toEqual(marks);
-    expect(memMarks).toEqual(marks);
+    expect(cpuMarks).toEqual(marks.map((m) => m.t));
+    expect(memMarks).toEqual(marks.map((m) => m.t));
   });
 
   it("a series that simply stops reporting is not an outage without a probe failure", () => {

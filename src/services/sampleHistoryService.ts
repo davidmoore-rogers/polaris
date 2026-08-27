@@ -68,12 +68,16 @@ function rate(first: number | null, last: number | null, bucketStartMs: number, 
 export interface MonitorHistoryRow {
   timestamp:      Date;
   success?:       boolean;   // detail only
+  /** Detail only — a failure taken while the parent was dark (drawn grey). */
+  dependencyDown?: boolean | null;
   responseTimeMs: number | null;
   error?:         string | null;
   // Rollup-only:
   sampleCount?:       number;
   successCount?:      number;
   failureCount?:      number;
+  /** Rollup only — how many of `failureCount` were dependency-suppressed. */
+  dependencyFailureCount?: number | null;
   minResponseTimeMs?: number | null;
   maxResponseTimeMs?: number | null;
 }
@@ -109,7 +113,7 @@ export async function readMonitorHistory(
       // NOC Packet Loss widget and the alert-email loss chart.
       where: { assetId, timestamp: { gte: queryFrom, lte: until }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
       orderBy: { timestamp: "asc" },
-      select: { timestamp: true, success: true, responseTimeMs: true, error: true },
+      select: { timestamp: true, success: true, responseTimeMs: true, error: true, dependencyDown: true },
     });
     const visible = rows.filter((s) => s.timestamp.getTime() >= sinceMs);
     const total = visible.length;
@@ -135,11 +139,13 @@ export async function readMonitorHistory(
     sampleCount: number;
     successCount: number;
     failureCount: number;
+    dependencyFailureCount: number | null;
     avgResponseTimeMs: number | null;
     minResponseTimeMs: number | null;
     maxResponseTimeMs: number | null;
   }>>(
     `SELECT "bucketStart", "sampleCount", "successCount", "failureCount",
+            "dependencyFailureCount",
             "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs"
      FROM "${table}"
      WHERE "assetId" = $1 AND "bucketStart" >= $2 AND "bucketStart" <= $3
@@ -168,6 +174,7 @@ export async function readMonitorHistory(
       sampleCount:       r.sampleCount,
       successCount:      r.successCount,
       failureCount:      r.failureCount,
+      dependencyFailureCount: r.dependencyFailureCount,
       minResponseTimeMs: r.minResponseTimeMs,
       maxResponseTimeMs: r.maxResponseTimeMs,
     })),
