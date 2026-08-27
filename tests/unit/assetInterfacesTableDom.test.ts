@@ -337,3 +337,43 @@ describe("select-all", () => {
     expect(putCalls[0].monitoredInterfaces.sort()).toEqual(["port2", "port3"]);
   });
 });
+
+describe("a member whose parent isn't in the list", () => {
+  /** Render an arbitrary system-info payload instead of the shared fixture. */
+  function renderSi(si: Record<string, any>): void {
+    doc.body.innerHTML = '<div id="ifaces"></div>';
+    g._renderInterfacesTable(doc.getElementById("ifaces"), si, ASSET);
+  }
+
+  // A FortiLink trunk aggregate leaves the switch's ifTable while its link is
+  // down, but its member ports keep naming it — so nesting strictly under a
+  // present parent used to render them NOWHERE: not top-level (they have an
+  // ifParent) and not under a cluster (the parent row was never built). The
+  // ports disappeared from the System tab at the moment the trunk went down.
+  it("renders it at top level instead of dropping it", () => {
+    renderSi({
+      lastSystemInfoAt: new Date().toISOString(),
+      monitoredInterfaces: [], monitoredIpsecTunnels: [], lldpNeighbors: [], ipsecTunnels: [],
+      interfaces: [
+        { ifName: "port1",  ifType: "physical", adminStatus: "up", operStatus: "up" },
+        { ifName: "port23", ifType: "physical", ifParent: "8EF5920000001-0", adminStatus: "up", operStatus: "up" },
+      ],
+    });
+    expect(names().sort()).toEqual(["port1", "port23"]);
+    expect(sectionLabels()[0]).toMatch(/Interfaces \(2\)/);
+  });
+
+  it("still nests it once the trunk row is present", () => {
+    renderSi({
+      lastSystemInfoAt: new Date().toISOString(),
+      monitoredInterfaces: [], monitoredIpsecTunnels: [], lldpNeighbors: [], ipsecTunnels: [],
+      interfaces: [
+        { ifName: "8EF5920000001-0", ifType: "aggregate", adminStatus: "up", operStatus: "up" },
+        { ifName: "port23", ifType: "physical", ifParent: "8EF5920000001-0", adminStatus: "up", operStatus: "up" },
+      ],
+    });
+    const n = names();
+    expect(n.indexOf("port23")).toBe(n.indexOf("8EF5920000001-0") + 1);
+    expect(sectionLabels()[0]).toMatch(/Interfaces \(1\)/);
+  });
+});

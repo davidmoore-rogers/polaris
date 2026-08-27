@@ -7359,9 +7359,19 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
 
   // ── build tree ─────────────────────────────────────────────────────────────
   // childMap: parentIfName -> sorted [child interfaces]  (members first, VLANs after)
+  //
+  // A child is only nested when its parent is actually IN this list. An
+  // ifParent naming a row that isn't here is a real state, not corruption: a
+  // FortiLink trunk aggregate leaves the switch's ifTable while its link is
+  // down, so its member ports keep pointing at a name the scrape no longer
+  // carries. Nesting them anyway rendered them nowhere at all — neither as
+  // top-level rows nor under a parent cluster that never got built — so the
+  // ports vanished from the System tab at exactly the moment the trunk went
+  // down. Same treatment orphanTunnels already gets below.
+  var ifaceNameSet = new Set(rows.map(function (r) { return r.ifName; }));
   var childMap = {};
   rows.forEach(function (r) {
-    if (r.ifParent) {
+    if (r.ifParent && ifaceNameSet.has(r.ifParent)) {
       if (!childMap[r.ifParent]) childMap[r.ifParent] = [];
       childMap[r.ifParent].push(r);
     }
@@ -7377,7 +7387,6 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
   // tunnelMap: parentInterface -> sorted [tunnels]; orphanTunnels covers
   // tunnels with no parentInterface OR whose parent isn't in the interface
   // list (CMDB scope mismatch, filtered-out interface, etc.).
-  var ifaceNameSet = new Set(rows.map(function (r) { return r.ifName; }));
   var tunnelMap = {};
   var orphanTunnels = [];
   tunnelsAll.forEach(function (tn) {
@@ -7499,8 +7508,11 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     };
   }
 
-  // Top-level: no ifParent set
-  var topLevel = rows.filter(function (r) { return !r.ifParent; });
+  // Top-level: no ifParent set, or a parent that isn't in this list (see the
+  // childMap note — a down FortiLink trunk's members land here).
+  var topLevel = rows.filter(function (r) {
+    return !r.ifParent || !ifaceNameSet.has(r.ifParent);
+  });
   topLevel.sort(function (a, b) {
     return String(a.ifName).localeCompare(String(b.ifName), undefined, { numeric: true, sensitivity: "base" });
   });

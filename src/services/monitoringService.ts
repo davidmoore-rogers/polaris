@@ -154,7 +154,7 @@ import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity
 import { buildArpNeighbors, arpNeighborsFromFortiosRest, type ArpNeighborEntry } from "../utils/arpNeighbors.js";
 import { persistAssetArpNeighbors } from "./arpTableService.js";
 import { decodePortList, derivePortVlans, isVlanId, type PortVlanConfig, type VlanMembership } from "../utils/portVlans.js";
-import { matchTrunkPeer, parseTrunkPortMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
+import { matchTrunkPeer, parseTrunkPortMap, trunkMemberMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import { resolveDownThreshold } from "./downDetectionService.js";
@@ -2557,12 +2557,23 @@ async function fetchFortiswitchControllerPortsCmdb(
  * already does for FortiGate aggregates (the `set members "portN"` back-fill).
  *
  * SNMP IF-MIB surfaces the FortiLink uplink trunk and its physical member as
- * flat, unrelated rows — the parent/member edge lives only in the controller
- * CMDB. For each trunk we:
+ * flat, unrelated rows — the parent/member edge lives outside it, in the
+ * controller CMDB or the `fsTrunkMember` scalar. Both feed this one overlay so
+ * they cannot disagree about what a member row looks like. For each trunk we:
  *   - mark the trunk row `ifType="aggregate"` (only when SNMP left it null or
  *     guessed "physical" — never clobber a real aggregate type)
- *   - stamp `ifParent=<trunk>` + `ifType="physical"` on each member row,
- *     synthesizing the row when IF-MIB omitted the subordinate member port.
+ *   - stamp `ifParent=<trunk>` + `ifType="physical"` on each member row.
+ *
+ * `synthesizeMissing` decides what happens to a member the interface list has
+ * no row for, and the two sources genuinely differ. The CMDB describes ports
+ * IF-MIB may not have returned at all, so it synthesizes the row (the
+ * FortiGate-aggregate back-fill does the same). The scalar comes out of the
+ * SAME walk as the interface list, so a member missing from it means the walk
+ * named its ports something else — `ifName` failed and `ifDescr` (the
+ * operator's port DESCRIPTION on a FortiSwitch) stood in. Synthesizing then
+ * invents a second identity for a port already in the list under its label,
+ * in the one table that IS the identity of record for interface names, so that
+ * caller passes false and back-fills only.
  *
  * Downstream, `interfaceTopologyService.preferPhysical` and the controller-
  * edge swap in `map.ts` render a single-member trunk as its physical port
@@ -2574,6 +2585,7 @@ async function fetchFortiswitchControllerPortsCmdb(
 export function overlayFortiswitchTrunkMembers(
   interfaces: InterfaceSample[],
   trunkMembers: Map<string, string[]>,
+  opts: { synthesizeMissing?: boolean } = {},
 ): number {
   if (trunkMembers.size === 0) return 0;
   const byName = new Map<string, InterfaceSample>();
@@ -2590,7 +2602,7 @@ export function overlayFortiswitchTrunkMembers(
       if (existing) {
         if (!existing.ifParent) existing.ifParent = trunkName;
         if (!existing.ifType) existing.ifType = "physical";
-      } else {
+      } else if (opts.synthesizeMissing !== false) {
         const synthetic: InterfaceSample = {
           ifName:   memberName,
           ifType:   "physical",
@@ -2598,6 +2610,8 @@ export function overlayFortiswitchTrunkMembers(
         };
         interfaces.push(synthetic);
         byName.set(memberName, synthetic);
+      } else {
+        continue; // unknown member port — see synthesizeMissing above
       }
       links++;
     }
@@ -5721,11 +5735,12 @@ const OID = {
   // health bit. Indexed by pethMainPseGroupIndex (one group on a standalone
   // switch, several on a stack/chassis). Note the extra pethMainPseObjects
   // level in the chain: pethObjects(.1) -> .3 -> Table(.1) -> Entry(.1).
-  // FortiSwitch trunk -> physical port map. A single OctetString, NOT a table,
-  // hence the trailing .0. Undocumented vendor object; see
+  // FortiSwitch trunk -> physical port map (`fsTrunkMember`). A single
+  // OctetString, NOT a table, hence the trailing .0 — the switch publishes its
+  // whole trunk/member relationship in one string. See
   // utils/fortiswitchTrunkMap.ts for the format and why matching is a suffix
   // test rather than a reconstruction.
-  fsTrunkPortMap:              "1.3.6.1.4.1.12356.106.3.1.1.0",
+  fsTrunkMember:               "1.3.6.1.4.1.12356.106.3.1.1.0",
   pethMainPsePower:            "1.3.6.1.2.1.105.1.3.1.1.2",
   pethMainPseOperStatus:       "1.3.6.1.2.1.105.1.3.1.1.3",
   pethMainPseConsumptionPower: "1.3.6.1.2.1.105.1.3.1.1.4",
@@ -7283,6 +7298,7 @@ async function collectSystemInfoSnmp(
     let macTable: FdbEntry[] | undefined;
     let arpNeighbors: ArpNeighborEntry[] | undefined;
     let trunkMembers: TrunkPortEntry[] | undefined;
+    let trunkLinks = 0;
     const endIfaces = startPhase("systeminfo.snmp.interfaces_walk");
     try {
       const [
@@ -7416,12 +7432,29 @@ async function collectSystemInfoSnmp(
         // Trunk map: one scalar GET, so it costs nothing next to the FDB walk.
         // Undefined (not []) when the device doesn't publish the object at all,
         // so a non-Fortinet switch preserves rather than wipes.
-        const trunkRaw = await snmpGetScalar(session, OID.fsTrunkPortMap).catch(() => null);
+        const trunkRaw = await snmpGetScalar(session, OID.fsTrunkMember).catch(() => null);
         const trunkStr = snmpVbToString(trunkRaw);
         trunkMembers = trunkStr ? parseTrunkPortMap(trunkStr) : undefined;
+        // The scalar is the ONLY source of the trunk/member relationship on a
+        // directly-polled switch, so overlay it onto the interface list here as
+        // well as persisting AssetTrunkMember rows: the ifTable publishes no
+        // aggregation of its own, so without this the System tab lists a trunk
+        // and its member ports as unrelated flat rows. Same overlay the
+        // controller-CMDB path runs, so the two can't disagree about what a
+        // member row looks like, and it back-fills only — a member whose parent
+        // already came from CMDB or REST keeps that parent, and a member name
+        // the walk didn't return is skipped rather than synthesized (see
+        // `synthesizeMissing`).
+        if (trunkMembers && trunkMembers.length > 0) {
+          trunkLinks = overlayFortiswitchTrunkMembers(
+            interfaces,
+            trunkMemberMap(trunkMembers),
+            { synthesizeMissing: false },
+          );
+        }
       }
     } catch { /* fall through */ }
-    endIfaces({ interfaces: interfaces.length });
+    endIfaces({ interfaces: interfaces.length, trunkLinks });
 
     // LLDP-MIB neighbors. Best-effort — devices without LLDP-MIB return empty
     // walks (we treat that as "unsupported" so we don't wipe stored rows on

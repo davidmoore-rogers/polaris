@@ -144,3 +144,27 @@ export function matchTrunkPeer(
   }
   return hit;
 }
+
+/**
+ * Group parsed entries into the `trunk -> [member ports]` shape the interface
+ * overlay takes.
+ *
+ * The SNMP scalar states one `<trunk>: <port>` pair per member, so a trunk
+ * carrying two links appears as two entries under the same name — the overlay
+ * wants them as one list. Insertion order is preserved (the device publishes
+ * members in port order) and duplicates are already gone by parse time, so
+ * this is a pure regroup with no dedupe of its own.
+ *
+ * Exists so the SNMP path can feed `overlayFortiswitchTrunkMembers` the same
+ * map the controller-CMDB path builds, instead of a second overlay that would
+ * be free to disagree with it about what a member row looks like.
+ */
+export function trunkMemberMap(entries: readonly TrunkPortEntry[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const e of entries) {
+    const members = map.get(e.trunkName);
+    if (members) members.push(e.localPort);
+    else map.set(e.trunkName, [e.localPort]);
+  }
+  return map;
+}

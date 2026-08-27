@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   matchTrunkPeer,
   parseTrunkPortMap,
+  trunkMemberMap,
   trunkPeerNameTail,
 } from "../../src/utils/fortiswitchTrunkMap.js";
 
@@ -125,5 +126,35 @@ describe("trunkPeerNameTail", () => {
   // A short tail would suffix-match too easily; the floor refuses it.
   it("rejects a tail below the minimum length even with a member suffix", () => {
     expect(trunkPeerNameTail("ABC123-0")).toBeNull();
+  });
+});
+
+describe("trunkMemberMap", () => {
+  it("groups the real device string into one entry per trunk", () => {
+    expect([...trunkMemberMap(parseTrunkPortMap(REAL))]).toEqual([
+      ["8EF5920000001-0", ["port23"]],
+      ["8EPTQ21000003-0", ["port27"]],
+      ["GT61FTK21000002", ["port24"]],
+    ]);
+  });
+
+  // A two-link trunk arrives as two pairs sharing a name; the overlay wants
+  // one trunk with two members, not two trunks with one each.
+  it("collects every member of a multi-link trunk under one name", () => {
+    const entries = parseTrunkPortMap("8EF5920000001-0: port23 ::8EF5920000001-0: port24 ::");
+    expect(entries).toHaveLength(2);
+    expect([...trunkMemberMap(entries)]).toEqual([
+      ["8EF5920000001-0", ["port23", "port24"]],
+    ]);
+  });
+
+  it("preserves the order the device published members in", () => {
+    const entries = parseTrunkPortMap("t1: port9 ::t1: port2 ::t1: port5 ::");
+    expect(trunkMemberMap(entries).get("t1")).toEqual(["port9", "port2", "port5"]);
+  });
+
+  it("is empty for an empty read", () => {
+    expect(trunkMemberMap([]).size).toBe(0);
+    expect(trunkMemberMap(parseTrunkPortMap("")).size).toBe(0);
   });
 });

@@ -3,11 +3,14 @@
  *
  * Pure-function coverage for the FortiSwitch trunk → physical-member overlay.
  * SNMP IF-MIB surfaces a managed switch's FortiLink uplink trunk and its
- * member ports as flat, unrelated rows; the controller's managed-switch CMDB
- * is the only source of the parent/member edge. `parseFortiosMemberList`
- * normalizes the CMDB member shapes, and `overlayFortiswitchTrunkMembers`
- * back-fills `ifParent` so the topology layer can swap a single-member trunk
- * (e.g. the serial-named uplink → port52) for its physical port.
+ * member ports as flat, unrelated rows, so the parent/member edge comes from
+ * outside it: the controller's managed-switch CMDB (covered here) or the
+ * `fsTrunkMember` scalar (covered in fortiswitchTrunkMap.test.ts, which owns
+ * `trunkMemberMap`). `parseFortiosMemberList` normalizes the CMDB member
+ * shapes, and `overlayFortiswitchTrunkMembers` — shared by both sources so
+ * they can't disagree — back-fills `ifParent` so the topology layer can swap a
+ * single-member trunk (e.g. the serial-named uplink → port52) for its physical
+ * port, and the System tab can nest the member under it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -306,6 +309,35 @@ describe("overlayFortiswitchTrunkMembers", () => {
     expect(synth!.ifParent).toBe("trunkA");
     expect(synth!.ifType).toBe("physical");
     expect(synth!.operStatus ?? null).toBeNull();
+  });
+
+  // The `fsTrunkMember` caller passes synthesizeMissing:false. That scalar rides
+  // the same walk as the interface list, so a member the list doesn't carry means
+  // the walk named its ports by description — inventing a row would mint a second
+  // identity for a port already listed under its label.
+  it("skips an unknown member instead of synthesizing when told not to", () => {
+    const ifaces: InterfaceSample[] = [mk("trunkA", { ifType: "aggregate" })];
+    const links = overlayFortiswitchTrunkMembers(
+      ifaces,
+      new Map([["trunkA", ["port9"]]]),
+      { synthesizeMissing: false },
+    );
+    expect(links).toBe(0);
+    expect(ifaces).toHaveLength(1);
+    expect(ifaces.find((i) => i.ifName === "port9")).toBeUndefined();
+  });
+
+  it("still stamps the members it CAN resolve when synthesis is off", () => {
+    const ifaces: InterfaceSample[] = [mk("trunkA", { ifType: null }), mk("port9")];
+    const links = overlayFortiswitchTrunkMembers(
+      ifaces,
+      new Map([["trunkA", ["port9", "port10"]]]),
+      { synthesizeMissing: false },
+    );
+    expect(links).toBe(1);
+    expect(ifaces).toHaveLength(2);
+    expect(ifaces.find((i) => i.ifName === "port9")!.ifParent).toBe("trunkA");
+    expect(ifaces.find((i) => i.ifName === "trunkA")!.ifType).toBe("aggregate");
   });
 
   it("never clobbers an existing ifParent or a real aggregate type", () => {
