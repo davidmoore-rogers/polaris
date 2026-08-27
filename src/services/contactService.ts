@@ -52,6 +52,7 @@ import {
 import {
   deviceFilterConditionSchema,
   conditionFields,
+  conditionNeedsInterfaces,
   evaluateScopeCondition,
   scopeConditionStats,
   SCOPE_CONDITION_MAX_DEPTH,
@@ -59,6 +60,7 @@ import {
   type ScopeConditionAsset,
   type ScopeConditionGroup,
 } from "./notificationTypes.js";
+import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
 import { criteriaToCondition } from "../utils/criteriaToCondition.js";
 import { listRecipientUsers } from "./notificationRecipientService.js";
 import { logEvent } from "./eventLogService.js";
@@ -812,6 +814,10 @@ async function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<S
         : {}),
     },
   });
+  // `interfaceName` is the other relation-backed field, and the expensive one —
+  // the interface inventory dwarfs the fleet. Resolved in SQL to per-asset
+  // verdicts rather than joined; no interface leaf means no query at all.
+  await decorateInterfaceLeafHits(rows, [cond]);
   const out = new Set<string>();
   for (const row of rows) {
     if (evaluateScopeCondition(cond, row as ScopeConditionAsset)) out.add(row.id);
@@ -841,11 +847,20 @@ export async function resolveContactsForAsset(assetId: string): Promise<ContactR
     .filter((f) => f.condition != null || f.criteria != null);
   if (filtered.length === 0) return byPin;
 
+  // ONE asset, so the interface relation is joined here rather than resolved
+  // through scopeInterfaceIndex — a second round trip would cost more than the
+  // rows do. Conditional all the same: most fleets have no contact filtering by
+  // interface, and this is the alert fan-out path.
+  const needsInterfaces = filtered.some((f) => conditionNeedsInterfaces(f.condition));
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
     // `tags` on top of the flat-criteria select: the condition tree has a `tag`
     // field, which that vocabulary never had.
-    select: { ...SINGLE_ASSET_CANDIDATE_SELECT, tags: true },
+    select: {
+      ...SINGLE_ASSET_CANDIDATE_SELECT,
+      tags: true,
+      ...(needsInterfaces ? { interfaces: { select: { ifName: true } } } : {}),
+    },
   });
   if (!asset) return byPin;
 

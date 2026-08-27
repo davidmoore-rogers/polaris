@@ -191,14 +191,23 @@ function collectCompositeMetricLeaves(trigger: Extract<Trigger, { type: "composi
   return out;
 }
 
+/** How many distinct interface names the "Device interface" picker offers. A
+ *  fleet reuses port names, so this is generous; the field accepts free text
+ *  either way, so the cap bounds the payload and never the filter. */
+const INTERFACE_NAME_OPTION_CAP = 500;
+
 /**
  * Option lists for the wizard's device-filtering pickers: distinct
- * manufacturers/models present in the inventory + the defined (non-deprecated)
- * IPAM subnets. Distinct queries only — cheap at 2000 assets.
+ * manufacturers/models present in the inventory, the interface names the
+ * monitored fleet reports + the defined (non-deprecated) IPAM subnets. Distinct
+ * queries only — cheap at 2000 assets.
  */
 export async function listScopeOptions(): Promise<{
   manufacturers: string[];
   models: string[];
+  /** Distinct interface names the MONITORED fleet currently reports, for the
+   *  condition builder's "Device interface" picker. Capped — see the query. */
+  interfaceNames: string[];
   subnets: { id: string; name: string; cidr: string }[];
   regions: string[];
   /** How deep region NESTING goes right now (1 = nothing is nested), plus the
@@ -221,7 +230,7 @@ export async function listScopeOptions(): Promise<{
   // event and change triggers fire on them. The subnet list is IPAM, not
   // inventory, so it is unfiltered by the same reasoning.
   const monitoredOnly = { monitored: true } as const;
-  const [mfrRows, modelRows, subnets, regions, regionLevelsOut, roles] = await Promise.all([
+  const [mfrRows, modelRows, ifNameRows, subnets, regions, regionLevelsOut, roles] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -234,6 +243,19 @@ export async function listScopeOptions(): Promise<{
       where: { ...monitoredOnly, model: { not: null } },
       orderBy: { model: "asc" },
     }),
+    // Interface names for the "Device interface" condition field. A real GROUP
+    // BY (not a client-side dedupe) because AssetInterface is the largest
+    // current-state table in the schema — tens of thousands of rows at 2000
+    // devices, collapsing to a couple of hundred distinct names, since a fleet
+    // of switches names its ports the same way. Capped: past a few hundred the
+    // combobox is a scroll rather than a picker, and free text still matches
+    // whatever the cap left out.
+    prisma.assetInterface.groupBy({
+      by: ["ifName"],
+      where: { asset: monitoredOnly },
+      orderBy: { ifName: "asc" },
+      take: INTERFACE_NAME_OPTION_CAP,
+    }).catch(() => [] as { ifName: string }[]),
     prisma.subnet.findMany({
       select: { id: true, name: true, cidr: true },
       where: { status: { not: "deprecated" } },
@@ -267,6 +289,7 @@ export async function listScopeOptions(): Promise<{
   return {
     manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
     models: modelRows.map((r) => r.model).filter((m): m is string => !!m && m.trim() !== ""),
+    interfaceNames: ifNameRows.map((r) => r.ifName).filter((n) => !!n && n.trim() !== ""),
     subnets,
     // Bare names — how User/Role/GroupMapping.regionTags store them. The
     // `region:` prefix exists only on ASSET tags.

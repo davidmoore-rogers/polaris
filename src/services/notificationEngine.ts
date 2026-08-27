@@ -74,6 +74,7 @@ import {
   type DeviceFilterAsset,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
+import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
@@ -254,7 +255,7 @@ function scopeWhere(scope: RuleScope): Prisma.AssetWhereInput | null {
 async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
   const where = scopeWhere(scope);
   if (!where) return [];
-  let rows = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
+  let rows: ScopeAssetRow[] = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
   if (scope.subnetCidrs?.length) {
     const cidrs = scope.subnetCidrs.map(scopeCidrOf);
     rows = rows.filter((a) => a.ipAddress && cidrs.some((c) => {
@@ -262,6 +263,12 @@ async function loadScopeAssets(scope: RuleScope): Promise<ScopeAssetRow[]> {
     }));
   }
   if (scope.condition) {
+    // The one condition field backed by a relation. Resolved in SQL to per-asset
+    // verdicts AFTER the cidr narrowing (so the leaf queries carry the smallest
+    // id list) and never joined onto SCOPE_SELECT — at 2000 assets the interface
+    // inventory is an order of magnitude larger than the fleet, and this runs
+    // per rule per 60s tick. No interface leaf ⇒ no query.
+    await decorateInterfaceLeafHits(rows, [scope.condition]);
     rows = rows.filter((a) => evaluateScopeCondition(scope.condition!, a));
   }
   return rows;
@@ -1134,6 +1141,17 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     const sig = shadowIndex ? triggerSignature(rule.trigger) : null;
     const rank = sig ? scopeRank(rule.scope) : 0;
     const shadowable = !!(sig && shadowIndex && (shadowIndex.maxRankBySig.get(sig) ?? 0) > rank);
+    // A PEER's scope may ask about interfaces this rule's scope never mentions,
+    // and peerCoversAsset reads the same decorated row. Resolve those leaves too
+    // before the coverage test, or a peer scoped by interface would read as
+    // covering nothing (positive operator) or everything (negative one) — and a
+    // wrong answer here either duplicates an alert or silences one.
+    if (shadowable) {
+      await decorateInterfaceLeafHits(
+        assets,
+        (shadowIndex!.bySig.get(sig!) ?? []).map((m) => m.rule.scope?.condition),
+      );
+    }
     const needsAnswering = triggerNeedsAnsweringDevice(trigger);
     const active: ScopeAssetRow[] = [];
     for (const a of assets) {
@@ -2730,6 +2748,12 @@ async function computeCarveOut(
       dimensionFilter: (o.trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] } | null)?.dimensionFilter,
     }));
   if (peers.length === 0) return { excludedBy: new Map(), summary: {} };
+
+  // Same reason as the engine tick: a peer may filter by interface even when the
+  // draft does not, and carveOutPeerCovers reads the verdict off the row. The
+  // rows arrive already decorated for the DRAFT's own leaves; this merges the
+  // peers' on top.
+  await decorateInterfaceLeafHits(scopeAssets, peers.map((p) => p.scope?.condition));
 
   return carveOutAggregate(scopeRank(input.scope), scopeAssets, peers);
 }

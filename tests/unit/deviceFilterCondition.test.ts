@@ -7,6 +7,7 @@ import {
   evaluateScopeCondition,
   scopeConditionMeta,
   scopeConditionSchema,
+  scopeRank,
   type ScopeConditionAsset,
   type ScopeConditionGroup,
 } from "../../src/services/notificationTypes.js";
@@ -18,6 +19,7 @@ const one = (field: string, operator: string, value: string) => and({ field, ope
 const ASSET: ScopeConditionAsset = {
   id: "a1",
   assetType: "switch",
+  interfaces: [{ ifName: "port1" }, { ifName: "port9" }, { ifName: "fortilink" }],
   hostname: "PLV-61F-SW1",
   os: "FortiSwitch",
   osVersion: "7.4.2",
@@ -119,6 +121,61 @@ describe("evaluateScopeCondition — device-filter fields", () => {
     it("ignores a sighting row with no device name", () => {
       const asset: ScopeConditionAsset = { id: "a4", fortigateSightings: [{ fortigateDevice: null }] };
       expect(evaluateScopeCondition(one("fortigate", "contains", "x"), asset)).toBe(false);
+    });
+  });
+
+  describe("interfaceName — one rule against the interface inventory", () => {
+    it("is satisfied by ANY interface the device reports", () => {
+      expect(evaluateScopeCondition(one("interfaceName", "equals", "port9"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("interfaceName", "contains", "link"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("interfaceName", "startsWith", "port"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("interfaceName", "equals", "port42"), ASSET)).toBe(false);
+    });
+
+    it("requires a negative operator to hold for EVERY interface", () => {
+      // Has port9, so "no interface named port9" is false even though two other
+      // ports differ from it.
+      expect(evaluateScopeCondition(one("interfaceName", "notEquals", "port9"), ASSET)).toBe(false);
+      expect(evaluateScopeCondition(one("interfaceName", "notEquals", "port42"), ASSET)).toBe(true);
+      expect(evaluateScopeCondition(one("interfaceName", "notContains", "link"), ASSET)).toBe(false);
+    });
+
+    it("reads an uncollected inventory as absence, not as a match", () => {
+      const bare: ScopeConditionAsset = { id: "a5" };
+      expect(evaluateScopeCondition(one("interfaceName", "equals", "port9"), bare)).toBe(false);
+      expect(evaluateScopeCondition(one("interfaceName", "notEquals", "port9"), bare)).toBe(true);
+    });
+
+    // The pairing the field exists for: "switches that have a fortilink port".
+    it("ANDs with a device-type rule", () => {
+      const tree = and(
+        { field: "assetType", operator: "equals", value: "switch" },
+        { field: "interfaceName", operator: "contains", value: "fortilink" },
+      );
+      expect(evaluateScopeCondition(tree, ASSET)).toBe(true);
+      expect(evaluateScopeCondition(tree, { ...ASSET, assetType: "firewall" })).toBe(false);
+      expect(evaluateScopeCondition(tree, { ...ASSET, interfaces: [{ ifName: "port1" }] })).toBe(false);
+    });
+
+    it("is offered to BOTH vocabularies, with the wildcard only on the wider one", () => {
+      expect(SCOPE_FIELD_OPS.interfaceName).toContain("equals");
+      expect(SCOPE_FIELD_OPS.interfaceName).not.toContain("matches");
+      expect(DEVICE_FILTER_FIELD_OPS.interfaceName).toContain("matches");
+      expect(scopeConditionMeta(SCOPE_FIELD_OPS).fields.map((f) => f.field)).toContain("interfaceName");
+    });
+
+    // An interface is a COMPONENT, not a way of naming which devices a rule is
+    // about, so it must not move the rule 18 carve-out ladder.
+    it("does not raise scope specificity", () => {
+      const byType = scopeRank({ condition: one("assetType", "equals", "switch") } as never);
+      const byTypeAndIf = scopeRank({
+        condition: and(
+          { field: "assetType", operator: "equals", value: "switch" },
+          { field: "interfaceName", operator: "contains", value: "fortilink" },
+        ),
+      } as never);
+      expect(byTypeAndIf).toBe(byType);
+      expect(scopeRank({ condition: one("interfaceName", "equals", "port9") } as never)).toBe(0);
     });
   });
 

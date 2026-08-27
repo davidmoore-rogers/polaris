@@ -102,6 +102,7 @@
           return (opts.assetTypes || []).map(function (t) { return { value: t.name, label: t.label || t.name }; });
         case "manufacturers": return plain(opts.manufacturers);
         case "models": return plain(opts.models);
+        case "interfaceNames": return plain(opts.interfaceNames);
         case "tags": return plain(opts.tags);
         case "subnets":
           return (opts.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });

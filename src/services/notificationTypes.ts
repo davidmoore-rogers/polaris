@@ -585,6 +585,18 @@ export const SCOPE_FIELD_OPS: Record<string, readonly string[]> = {
   os: STRING_OPS,
   tag: ["has", "notHas"],
   subnet: ["inCidr", "notInCidr"],
+  // "Device interface" — matched against the device's CURRENT-STATE interface
+  // inventory (AssetInterface.ifName), so a rule pairs naturally with a device
+  // type ("switches that have a fortilink port"). Multi-valued like
+  // `fortigate`: a positive operator is satisfied by ANY interface, a negative
+  // one has to hold for every one of them.
+  //
+  // Deliberately NOT restricted to PINNED interfaces the way every interface
+  // TRIGGER is: a trigger reads a metric, which only exists for a pinned
+  // interface, whereas this asks what the device HAS. Note the consequence —
+  // a device whose interface stream is never collected reports no interfaces
+  // at all, so a positive rule never selects it.
+  interfaceName: STRING_OPS,
   status: ["equals", "notEquals"],
   assetId: ["equals", "notEquals"],
 };
@@ -746,6 +758,13 @@ export function conditionFields(cond: ScopeConditionGroup): Set<string> {
   return out;
 }
 
+/** Does this tree ask about the interface inventory? The one condition field
+ *  backed by a RELATION rather than a column, so every loader decides the join
+ *  (or the prefetch) in one place instead of each spelling the field name. */
+export function conditionNeedsInterfaces(cond: ScopeConditionGroup | null | undefined): boolean {
+  return !!cond && conditionFields(cond).has("interfaceName");
+}
+
 /**
  * The asset fields the condition evaluator reads (matcher + engine select).
  *
@@ -769,6 +788,18 @@ export interface ScopeConditionAsset {
   location?: string | null;
   learnedLocation?: string | null;
   fortigateSightings?: { fortigateDevice: string | null }[];
+  /** Current-state interface inventory, for the `interfaceName` field. Joined
+   *  ONLY when a tree actually references it (conditionNeedsInterfaces) — at
+   *  2000 assets this relation is an order of magnitude larger than the row it
+   *  hangs off, which is why only the SINGLE-asset paths read it this way. */
+  interfaces?: { ifName: string }[];
+  /** The fleet-scale alternative: `interfaceLeafKey(leaf)` -> did this asset
+   *  satisfy that leaf, resolved in SQL by decorateInterfaceLeafHits rather
+   *  than by shipping the relation. Stamped onto the row so every existing
+   *  call site (scopeMatchesAsset, the carve-out peer predicates, the contact
+   *  preview) keeps working with no extra parameter to thread. A key that is
+   *  ABSENT was never prefetched and means unknown, not false. */
+  interfaceLeafHits?: ReadonlyMap<string, boolean>;
 }
 
 /** The asset value a string-op rule compares against, lower-cased. */
@@ -825,6 +856,55 @@ function isNegativeStringOp(operator: string): boolean {
   return operator === "notEquals" || operator === "notContains";
 }
 
+/**
+ * The POSITIVE form of a string operator. `notEquals` / `notContains` assert the
+ * absence of a match, so both halves of a pair are answered by the same test —
+ * which is what lets a prefetching loader ask the database once for "assets with
+ * an interface equal to port9" and serve both.
+ */
+export function positiveStringOp(operator: string): string {
+  return operator === "notEquals" ? "equals" : operator === "notContains" ? "contains" : operator;
+}
+
+/**
+ * Prefetch/lookup key for one `interfaceName` leaf — the positive operator plus
+ * the value, so `equals port9` and `notEquals port9` share one entry.
+ * `scopeInterfaceIndex.ts` builds the map; `matchScopeRule` reads it.
+ */
+export function interfaceLeafKey(rule: ScopeConditionRule): string {
+  return positiveStringOp(rule.operator) + "\u0000" + rule.value.toLowerCase();
+}
+
+/**
+ * One rule against SEVERAL values on the same asset — the shape both
+ * multi-valued fields need (`fortigate`'s gate names, `interfaceName`'s
+ * interface inventory).
+ *
+ * A positive operator is satisfied by ANY value; a negative one has to hold for
+ * ALL of them, or "not behind CENTRALFMG1" would be true for a device sighted
+ * behind it as soon as it was also sighted somewhere else, and "has no interface
+ * named port9" would be true for a switch carrying both port9 and port10.
+ *
+ * With nothing known at all — no sightings, no interface inventory — a positive
+ * claim fails and an absence claim holds, the same reading `notHas` gives an
+ * untagged asset.
+ */
+function matchMultiValue(rule: ScopeConditionRule, values: string[], needle: string): boolean {
+  if (values.length === 0) return isNegativeStringOp(rule.operator);
+  return isNegativeStringOp(rule.operator)
+    ? values.every((n) => compareString(rule.operator, n, needle))
+    : values.some((n) => compareString(rule.operator, n, needle));
+}
+
+/** Every interface name the asset currently reports, lower-cased. */
+function interfaceNames(asset: ScopeConditionAsset): string[] {
+  const out: string[] = [];
+  for (const i of asset.interfaces ?? []) {
+    if (i.ifName) out.push(i.ifName.toLowerCase());
+  }
+  return out;
+}
+
 function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): boolean {
   const v = rule.value.toLowerCase();
   const str = (raw: string | null | undefined): string => (raw ?? "").toLowerCase();
@@ -853,21 +933,25 @@ function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): b
       }
       return rule.operator === "notInCidr" ? !inside : inside;
     }
-    case "fortigate": {
-      // One rule against SEVERAL candidate names. A positive operator is
-      // satisfied by any of them; a negative one has to hold for all, or
-      // "not behind CENTRALFMG1" would be true for a device sighted behind it
-      // as soon as it was also sighted somewhere else.
-      const names = fortigateNames(asset);
-      if (names.length === 0) {
-        // Nothing known about where it sits: a positive claim fails, and an
-        // absence claim holds — the same reading `notHas` gives an untagged
-        // asset.
-        return isNegativeStringOp(rule.operator);
+    case "fortigate": return matchMultiValue(rule, fortigateNames(asset), v);
+    case "interfaceName": {
+      // Two ways in, one predicate. A fleet-scale loader resolves each leaf in
+      // SQL and stamps the verdict onto the row (decorateInterfaceLeafHits), so
+      // 2000 devices worth of port names never reach this process; the
+      // single-asset paths join the relation and compare it here. Both answer
+      // "does ANY interface satisfy the positive form", inverted for a negative
+      // operator, and both read an empty inventory the same way.
+      //
+      // has() rather than get() is the load-bearing part: a leaf the decoration
+      // did not prefetch is UNKNOWN, not false, and falls through to the
+      // relation instead of silently answering no.
+      const pre = asset.interfaceLeafHits;
+      const key = interfaceLeafKey(rule);
+      if (pre && pre.has(key)) {
+        const hit = pre.get(key) === true;
+        return isNegativeStringOp(rule.operator) ? !hit : hit;
       }
-      return isNegativeStringOp(rule.operator)
-        ? names.every((n) => compareString(rule.operator, n, v))
-        : names.some((n) => compareString(rule.operator, n, v));
+      return matchMultiValue(rule, interfaceNames(asset), v);
     }
     default: { // manufacturer / model / hostname / os (+ the device-filter
       // extras: osVersion / department / location) — string ops
@@ -1468,7 +1552,11 @@ function conditionRuleRank(rule: ScopeConditionRule): number {
     case "tag": return isRegionTagValue(rule.value) ? SCOPE_RANK.region : SCOPE_RANK.tag;
     case "subnet": return SCOPE_RANK.subnet;
     case "hostname": return SCOPE_RANK.hostname;
-    default: return 0; // status, assetId — not on the ladder
+    // status / assetId / interfaceName — not on the ladder. An interface is a
+    // COMPONENT of a device, not a way of saying WHICH devices an automation is
+    // about, so "switches with a fortilink port" is exactly as specific as
+    // "switches" and the two tie rather than carving each other up.
+    default: return 0;
   }
 }
 
@@ -2976,6 +3064,7 @@ const SCOPE_FIELD_META: Record<string, { label: string; optionsFrom: string | nu
   os: { label: "Operating system", optionsFrom: null },
   tag: { label: "Tag", optionsFrom: "tags" },
   subnet: { label: "Subnet / IP", optionsFrom: "subnets" },
+  interfaceName: { label: "Device interface", optionsFrom: "interfaceNames" },
   status: {
     label: "Lifecycle status",
     optionsFrom: null,
