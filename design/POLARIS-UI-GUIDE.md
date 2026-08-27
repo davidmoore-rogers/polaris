@@ -935,3 +935,141 @@ the colon, then collapse the blank-line runs.
 time, not compose time — they carry attachments or need a live query. Attach a
 CID image only when the substituted HTML actually references it, or every
 message drags a logo nobody displays.
+
+---
+
+## 14. Dashboard widgets
+
+A widget is a **self-registering module**, not a page section. One file per
+widget under `js/widgets/`, each ending in a single
+`PolarisWidgets.register({...})` call. The registry (`js/widgets/index.js`)
+holds the catalog and the shared helpers; the orchestrator reads `getAll()` for
+the picker and `getByType()` to mount an instance. Nothing else knows a
+widget exists — adding one is adding a file and a `<script>` tag.
+
+### The contract
+
+```js
+PolarisWidgets.register({
+  type:               "downNodes",        // stable id — saved layouts key on it
+  category:           "Monitoring",       // picker Group-By bucket
+  label:              "Down Assets",      // display name
+  description:        "…",                // one line, for the library card
+  defaultSize:        { width: 6, height: 1 },
+  minSize:            { width: 4, height: 1 },
+  defaultConfig:      { rowLimit: 10, regionScope: "mine" },
+  requiredPermission: { key: "assets", level: "read" },
+  fetchData:          (config) => Promise,
+  renderInstance:     (el, config, data, ctx) => {},
+  renderPreview:      (el) => {},          // mock data, no network
+  renderConfig:       (el, config, onChange) => {},
+  onMount / onUnmount: (el, ctx) => {},
+});
+```
+
+Rules that hold for every widget:
+
+- **`type` is forever.** It is the key in saved layouts. Rename the `label`
+  freely; never the `type`. (`downNodes` still ships as "Down Assets".)
+- **`defaultSize.width` ∈ 3 | 4 | 6 | 12**, `height` ∈ 1 | 2. Always declare a
+  `minSize` — a list widget squeezed to 3 columns wraps into mush.
+- **Every widget declares a `requiredPermission`** unless its data is genuinely
+  public to all roles. It gates the library card *and* the instance render, so
+  it can't be bypassed by a saved layout.
+- **`renderPreview` never touches the network.** It takes hardcoded mock rows
+  through the same `render()` the instance uses, so the library card can't
+  drift from the real thing and opening the picker costs nothing.
+- **`fetchData` fetches only that widget's feed** (`?feeds=topCpu`), so a widget
+  paints as soon as *its* data lands rather than waiting on the slowest feed
+  in a monolithic payload. Shared accessors memoize per (feed, filter, limit)
+  with in-flight dedupe, so two widgets on one feed still make one request.
+- **Anything a widget starts, it stops.** Timers, listeners and map instances
+  register teardown through `ctx.onUnmount`. A widget that leaks a timer takes
+  a kiosk wall down overnight.
+
+### Chrome the widget does not own
+
+The shell draws the card, title, grip, gear, height toggle and remove button.
+A widget only ever writes into its **body element**. It reaches the header
+through helpers, never by walking the DOM:
+
+| Want | Call |
+|---|---|
+| A count on the title | `setHeaderCount(el, n, severity?)` |
+| A severity breakdown | `setHeaderSeverityCounts(el, rows, opts)` |
+| A non-alert tier breakdown | `setHeaderTierCounts(el, rows, opts)` |
+| CSV export (⤓) | `setHeaderExport(el, { filename, columns, rows })` |
+| Arbitrary pills | `setHeaderPills(el, [{ text, className, title }])` |
+
+Header pills count **the rows about to render** — post-filter, post-row-limit.
+The CSV export provider is the opposite: it takes the **full fetched set**, and
+its menu states the per-tier counts. Those two disagreeing is intentional and
+should stay documented wherever it surprises someone.
+
+### Shared config controls
+
+A gear popover is assembled from shared parts, in this order — widget-specific
+controls, then severity, then scope:
+
+```js
+renderConfig(el, config, onChange) {
+  el.innerHTML = /* this widget's own <label> + <select data-k="…"> */;
+  PolarisWidgets.renderMinSeverityConfig(el, config, onChange, hint);
+  PolarisWidgets.renderNocFilterConfig(el, config, onChange, includeAssetTypes);
+}
+```
+
+Never hand-roll a row-limit dropdown: `rowLimitOptionsHTML()` /
+`parseRowLimit()` / `clip()` are the one set of options (5/10/20/50/100/1000)
+and the one clipping rule. Same for the severity ladder — `SEVERITY_TIERS`
+feeds both the export menu and the minimum-severity filter, so the two can
+never disagree about what "Serious and up" means.
+
+Widgets with nothing to configure ship **no gear at all** rather than an empty
+popover.
+
+### Two severity vocabularies, kept apart
+
+The automation-alert ladder (`notice < informational < warning < serious <
+critical`) has a rank map and drives filtering, export tiers and pill color.
+A widget whose rows carry their *own* tiers (capacity `ok/watch/amber/red`)
+uses `setHeaderTierCounts` with its own order and class mapping. **Do not merge
+them** — a capacity "red" must never rank against an automation "critical" in
+the minimum-severity filter.
+
+Pill classes: `.widget-pill-ok | -watch | -amber | -orange | -neutral | -red`.
+
+### Refresh cadence
+
+Pick from a fixed set, by how fast the underlying thing actually moves:
+
+| Tier | Interval | For |
+|---|---|---|
+| fast | 10s | in-flight progress (a running discovery) |
+| normal | 30s | outage state — down assets, down interfaces, active alerts |
+| slow | 60s | ranked metrics, forecasts, maps, reboot history |
+
+Two constraints that are easy to miss: the shared accessors memoize for **15s**,
+so a 10s widget gets cached data two ticks out of three; and a widget with **no
+timer at all** is frozen forever on a kiosk wall, which is where these live.
+Everything with a live feed gets a timer.
+
+### Empty and failure states
+
+One shape: `el.innerHTML = '<p class="empty-state">…</p>'`. The text says what
+is *actually* empty. When a severity filter did the emptying, say so
+(`minSeverityEmptyText`) — otherwise "No assets down" reads as good news when
+it really means "nothing at this severity". A failed fetch resolves to an empty
+shape rather than rejecting; a widget must not take the dashboard with it.
+
+### Checklist for a new widget
+
+1. One file, one `register()` call, script tag added.
+2. `type` you can live with forever; `category` from the existing set.
+3. `defaultSize` + `minSize`; `requiredPermission` unless truly public.
+4. `fetchData` requests only its own feed, and catches into an empty shape.
+5. `renderInstance` and `renderPreview` call the **same** `render()`.
+6. Header count/export via helpers; nothing reaches outside the body element.
+7. Row limit, minimum severity and scope from the shared controls.
+8. Every timer and listener torn down in `ctx.onUnmount`.
+9. Check it at 3 columns wide and at height 1.

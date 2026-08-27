@@ -26,6 +26,12 @@
   --color-danger: #ff1744;
   --color-danger-hover: #d50000;
   --color-deprecated: #757575;
+  /* Notification-severity accents — the two the ladder needs that no other
+     token covers (informational reads as --color-accent, warning as
+     --color-warning, critical as --color-danger). Deliberately identical in
+     every theme: a severity is a fixed meaning, not a surface color. */
+  --color-sev-serious: #ff8a00;
+  --color-sev-notice: #94a3b8;
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "Roboto Mono", "Consolas", "Fira Code", monospace;
   --radius-sm: 4px;
@@ -61,6 +67,12 @@
   --color-danger: #c62828;
   --color-danger-hover: #b71c1c;
   --color-deprecated: #757575;
+  /* Notification-severity accents — the two the ladder needs that no other
+     token covers (informational reads as --color-accent, warning as
+     --color-warning, critical as --color-danger). Deliberately identical in
+     every theme: a severity is a fixed meaning, not a surface color. */
+  --color-sev-serious: #ff8a00;
+  --color-sev-notice: #94a3b8;
   --shadow-sm: 0 1px 4px rgba(0,0,0,.08);
   --shadow-md: 0 8px 32px rgba(0,0,0,.12);
 }
@@ -4372,7 +4384,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   line-height: 1;
 }
 .dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
-.dashboard-widget-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
+.dashboard-widget-remove:hover { color: var(--color-danger); background: rgba(255,255,255,0.06); }
 
 /* Widget-specific body wrappers reuse the rolled-up styles from the old
    dashboard surface — kept under .dashboard-widget-body so layout still
@@ -4542,9 +4554,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .widget-picker-group:hover { background: rgba(255,255,255,0.04); color: var(--color-text-primary); }
 .widget-picker-group.active {
-  color: #4fc3f7;
-  box-shadow: inset 3px 0 0 #4fc3f7;
-  background: rgba(79,195,247,0.08);
+  color: var(--color-accent);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 .widget-picker-group-count {
   font-size: 0.72rem;
@@ -4574,7 +4586,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-radius: 6px;
   cursor: grab;
 }
-.widget-library-card:hover { border-color: rgba(79,195,247,0.40); }
+.widget-library-card:hover { border-color: color-mix(in srgb, var(--color-accent) 40%, transparent); }
 .widget-library-card[draggable="true"]:active { cursor: grabbing; }
 .widget-fav-star {
   background: transparent;
@@ -4621,8 +4633,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-pill-ok    { background: rgba(76,175,80,0.18);  color: #81c784; }
 .widget-pill-watch { background: rgba(79,195,247,0.18); color: #4fc3f7; }
 .widget-pill-amber { background: rgba(255,193,7,0.18);  color: #ffd54f; }
-.widget-pill-orange  { background: rgba(255,138,0,0.18);  color: #ff8a00; }
-.widget-pill-neutral { background: rgba(148,163,184,0.18); color: #94a3b8; }
+.widget-pill-orange  { background: rgba(255,138,0,0.18);  color: var(--color-sev-serious); }
+.widget-pill-neutral { background: rgba(148,163,184,0.18); color: var(--color-sev-notice); }
 .widget-pill-red   { background: rgba(255,23,68,0.20);  color: #ef5350; }
 /* Severity pills keep their own text color even inside .recent-item-title,
    whose generic `span { color:#fff }` would otherwise whiten them (making the
@@ -4630,8 +4642,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .recent-item-title .widget-pill-ok    { color: #81c784; }
 .recent-item-title .widget-pill-watch { color: #4fc3f7; }
 .recent-item-title .widget-pill-amber { color: #ffd54f; }
-.recent-item-title .widget-pill-orange  { color: #ff8a00; }
-.recent-item-title .widget-pill-neutral { color: #94a3b8; }
+.recent-item-title .widget-pill-orange  { color: var(--color-sev-serious); }
+.recent-item-title .widget-pill-neutral { color: var(--color-sev-notice); }
 .recent-item-title .widget-pill-red   { color: #ef5350; }
 
 /* ─── Site Map widget markers ─────────────────────────────────────────────
@@ -4853,10 +4865,10 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
    badge-level-* palette so severity reads identically everywhere).
    Option styling works in desktop Chrome/Firefox; browsers that ignore it
    still get the tinted select text via the sev-* class on the element. */
-.sev-select.sev-notice,        .sev-select option.sev-notice        { color: #94a3b8; }
+.sev-select.sev-notice,        .sev-select option.sev-notice        { color: var(--color-sev-notice); }
 .sev-select.sev-informational, .sev-select option.sev-informational { color: var(--color-accent); }
 .sev-select.sev-warning,       .sev-select option.sev-warning       { color: var(--color-warning); }
-.sev-select.sev-serious,       .sev-select option.sev-serious       { color: #ff8a00; }
+.sev-select.sev-serious,       .sev-select option.sev-serious       { color: var(--color-sev-serious); }
 .sev-select.sev-critical,      .sev-select option.sev-critical      { color: var(--color-danger); }
 
 /* Condition-builder value combobox: focus/click opens the existing-values
