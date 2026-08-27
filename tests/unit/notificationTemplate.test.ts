@@ -76,9 +76,9 @@ const FULL_PARTS: TemplateContextParts = {
  * Tokens with NO context key, by design — they are filled later, and both rely
  * on unknown tokens surviving the render:
  *
- *  - `{ack}` is per-RECIPIENT (a single-use token bound to one user) while the
- *    context is built once per fire and snapshotted onto
- *    Notification.templateCtx for every recipient to share. Filled by
+ *  - `{ack}` is built from the Notification's own id, and the context is
+ *    finished BEFORE that row exists (prisma.notification.create is handed the
+ *    completed ctx to snapshot onto templateCtx). Filled by
  *    substituteAckToken() at delivery expansion.
  *  - `{chart.*}` are inline images built at DELIVERY time from the last hour of
  *    samples (alertChartService), so an escalation email at T+90min charts the

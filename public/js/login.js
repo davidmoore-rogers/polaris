@@ -220,7 +220,7 @@ document.getElementById("login-form").addEventListener("submit", async function 
     showMfaStep();
     return;
   }
-  window.location.href = "/";
+  window.location.href = takeLoginTarget();
 });
 
 // Toggle between TOTP code and backup code
@@ -268,5 +268,35 @@ document.getElementById("mfa-form").addEventListener("submit", async function (e
     if (!r.network) input.select();
     return;
   }
-  window.location.href = "/";
+  window.location.href = takeLoginTarget();
 });
+
+/* Where to land after a successful local / LDAP / TOTP login.
+ *
+ * The server drops a short-lived `polaris_next` cookie when it bounces an
+ * unauthenticated request off a protected page (utils/loginRedirect.ts) — an
+ * emailed Acknowledge link is the case that matters. The SSO callbacks consume
+ * it server-side; this is the same read for the flows that finish in the
+ * browser.
+ *
+ * Same-origin PATHS only, and never back to the login page: an operator who
+ * just signed in must not land on a login form again, which reads as a failure.
+ */
+function takeLoginTarget() {
+  var raw = null;
+  var parts = (document.cookie || "").split(";");
+  for (var i = 0; i < parts.length; i++) {
+    var eq = parts[i].indexOf("=");
+    if (eq < 0) continue;
+    if (parts[i].slice(0, eq).trim() !== "polaris_next") continue;
+    try { raw = decodeURIComponent(parts[i].slice(eq + 1).trim()); } catch (_) { raw = null; }
+    break;
+  }
+  document.cookie = "polaris_next=; Max-Age=0; Path=/";
+  // Reject anything that isn't an unambiguous local path. "//evil.example" is
+  // protocol-relative and would leave the origin; "/\evil" is the same trick
+  // with the byte browsers also treat as a separator.
+  if (!raw || raw.charAt(0) !== "/" || raw.charAt(1) === "/" || raw.charAt(1) === "\\") return "/";
+  if (raw === "/login.html" || raw.indexOf("/login.html?") === 0) return "/";
+  return raw;
+}

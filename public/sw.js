@@ -15,12 +15,14 @@
  * or relative (relative when POLARIS_PUBLIC_URL is unset), and both
  * client.navigate() and clients.openWindow() resolve either.
  *
- * ACKNOWLEDGE BUTTON. When the payload carries `ackUrl` (a single-use token
- * link minted for this recipient — only recipients who may actually
- * acknowledge get one), the notification grows an "Acknowledge" action that
- * POSTs it and replaces the alert in the tray with a silent confirmation,
- * without opening the app. Action buttons are unsupported on iOS/Safari, where
- * the option is simply ignored and the body tap behaves as it always has.
+ * ACKNOWLEDGE BUTTON. When the payload carries `ackUrl` — the alert's
+ * acknowledge page, the same URL the alert email links to — the notification
+ * grows an "Acknowledge" action that OPENS it. It does not acknowledge from
+ * the tray: the page is an ordinary logged-in Polaris page (business rule 25),
+ * so the reader's own session is what records who acknowledged, and the page
+ * is also where the note is typed. Action buttons are unsupported on
+ * iOS/Safari, where the option is simply ignored and the body tap behaves as
+ * it always has.
  *
  * NO FETCH HANDLER, deliberately. Polaris is an online-only tool: there is no
  * offline caching, no precache, no cache versioning to keep in step with
@@ -58,11 +60,10 @@ self.addEventListener("push", function (event) {
     body: data.body || "",
     tag: data.notificationId || undefined,
     data: {
+      // This alert's acknowledge page. The same URL for every recipient — the
+      // page decides who may act, so the button below is safe to show to
+      // anyone who received the push.
       url: data.url || DEFAULT_URL,
-      // Single-use acknowledge link for THIS recipient. Absent when they
-      // can't acknowledge (see notificationRecipientService) — the button
-      // below is added only when it's here, so an unentitled recipient never
-      // sees a control that would fail.
       ackUrl: data.ackUrl || null,
       notificationId: data.notificationId || null,
     },
@@ -77,10 +78,10 @@ self.addEventListener("push", function (event) {
     icon: NOTIFICATION_ICON,
     requireInteraction: LOUD_SEVERITIES.indexOf(data.severity) !== -1,
   };
-  // Acknowledge straight from the tray. No feature detection: an unsupported
-  // NotificationOptions member is dropped, not an error, so iOS/Safari (which
-  // renders no action buttons at all) simply shows the plain notification and
-  // the body tap keeps working.
+  // Jump straight to the acknowledge page. No feature detection: an
+  // unsupported NotificationOptions member is dropped, not an error, so
+  // iOS/Safari (which renders no action buttons at all) simply shows the plain
+  // notification and the body tap keeps working.
   if (data.ackUrl) options.actions = [{ action: "ack", title: "Acknowledge" }];
   event.waitUntil(self.registration.showNotification(title, options));
 });
@@ -92,7 +93,16 @@ self.addEventListener("notificationclick", function (event) {
   // Exactly one waitUntil per invocation, taken before the first await, so the
   // worker stays alive for the whole chain.
   if (event.action === "ack" && d.ackUrl) {
-    event.waitUntil(acknowledgeAndConfirm(d, url));
+    // Same-origin only. The push is VAPID-signed, but resolving the URL costs
+    // nothing and keeps this worker from ever navigating a window to a foreign
+    // host. `src=push` is audit provenance the page forwards on acknowledge.
+    var ack = new URL(d.ackUrl, self.location.origin);
+    if (ack.origin !== self.location.origin) {
+      event.waitUntil(focusOrOpen(url));
+      return;
+    }
+    ack.searchParams.set("src", "push");
+    event.waitUntil(focusOrOpen(ack.href));
     return;
   }
   event.waitUntil(focusOrOpen(url));
@@ -113,63 +123,6 @@ function focusOrOpen(url) {
     }
     if (self.clients.openWindow) return self.clients.openWindow(url);
   });
-}
-
-/* Acknowledge from the notification's own button, without opening the app.
- *
- * The token in ackUrl IS the credential, so this posts with credentials
- * omitted: no session cookie rides along, and therefore none of the CSRF
- * dance pushsubscriptionchange needs below (/ack is mounted above the CSRF
- * middleware precisely because there is no cookie to protect).
- *
- * This is a fetch INSIDE notificationclick, not a `fetch` event handler — the
- * worker's no-offline-caching posture is unchanged.
- */
-async function acknowledgeAndConfirm(d, url) {
-  try {
-    // Same-origin only. The push is VAPID-signed, but resolving the URL costs
-    // nothing and keeps this worker from ever being a request forwarder to a
-    // foreign host (CSP connect-src is 'self' anyway).
-    var target = new URL(d.ackUrl, self.location.origin);
-    if (target.origin !== self.location.origin) return focusOrOpen(url);
-
-    var res = await fetch(target.href, {
-      method: "POST",
-      credentials: "omit",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: "{}",
-    });
-    // The alert's automation demands a note, and a tray button has no field to
-    // type one into. Open the ack PAGE (not the app) — the token is still
-    // unspent, the page has the textarea, and it needs no session, which
-    // matters on the phone that just buzzed. Read before the generic !res.ok
-    // branch below, which would otherwise send them to a login wall.
-    if (res.status === 400) {
-      var body = null;
-      try { body = await res.json(); } catch (e) { body = null; }
-      if (body && body.state === "note_required") return focusOrOpen(target.href);
-    }
-    // Expired, spent, or forbidden: hand it to the app rather than swallowing.
-    if (!res.ok) return focusOrOpen(url);
-
-    await self.registration.showNotification("Acknowledged", {
-      body: "This alert is acknowledged.",
-      // Same tag replaces the alert in the tray instead of stacking beside it.
-      tag: d.notificationId || undefined,
-      data: { url: url },
-      icon: NOTIFICATION_ICON,
-      requireInteraction: false,
-      // A confirmation must not buzz the phone a second time. `renotify` is
-      // deliberately omitted (defaults false) for the same reason.
-      silent: true,
-    });
-  } catch (e) {
-    // Offline or blocked — fall back to today's behaviour so the operator can
-    // still act. Deliberately no auto-dismiss timer: holding the worker alive
-    // on a timer invites the browser to kill it mid-flight, and a swipeable
-    // confirmation beats one that vanishes before it's read.
-    return focusOrOpen(url);
-  }
 }
 
 /* Endpoint rotation.

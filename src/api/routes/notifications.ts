@@ -5,6 +5,7 @@
  *   GET  /            notifications:read   (view; region-scoped to the caller)
  *   POST /acknowledge notifications:write  (user and up; readonly cannot)
  *   POST /clear       alerts:fullwrite (admin + assetsadmin)
+ *   GET  /:id         alerts:read          (one alert, for the acknowledge page)
  *
  * Rule CRUD lives in notificationRules.ts. Business logic in
  * notificationService; region scope via regionScopeService.
@@ -17,6 +18,7 @@ import {
   listNotifications,
   acknowledgeNotifications,
   clearNotifications,
+  getNotificationForViewer,
 } from "../../services/notificationService.js";
 import { getEffectiveRegionTags } from "../../services/regionScopeService.js";
 
@@ -56,12 +58,16 @@ notificationsRouter.get("/", requirePermission("alerts", "read"), async (req, re
 const AckSchema = z.object({
   ids: z.array(z.string().min(1)).min(1).max(2000),
   note: z.string().max(2000).optional(),
+  // Provenance for the audit Event only — never a gate, and deliberately a
+  // closed set so a caller can't write arbitrary text into the log. Absent =
+  // the in-app surfaces.
+  source: z.enum(["ack_page", "web_push_action"]).optional(),
 });
 
 notificationsRouter.post("/acknowledge", requirePermission("alerts", "write"), async (req, res, next) => {
   try {
-    const { ids, note } = AckSchema.parse(req.body);
-    const count = await acknowledgeNotifications(ids, req.session?.username ?? "unknown", note);
+    const { ids, note, source } = AckSchema.parse(req.body);
+    const count = await acknowledgeNotifications(ids, req.session?.username ?? "unknown", note, { source: source ?? "ui" });
     res.json({ acknowledged: count });
   } catch (err) { next(err); }
 });
@@ -75,6 +81,29 @@ notificationsRouter.post("/clear", requirePermission("alerts", "fullwrite"), asy
     const { ids } = ClearSchema.parse(req.body);
     const count = await clearNotifications(ids, req.session?.username ?? "unknown");
     res.json({ cleared: count });
+  } catch (err) { next(err); }
+});
+
+/**
+ * One alert. Backs public/alert-ack.html, the page an emailed Acknowledge
+ * button lands on — declared LAST so it can never capture /acknowledge or
+ * /clear (both POST, but keeping the order right costs nothing and survives
+ * someone adding a GET sibling).
+ *
+ * 404 rather than 403 when the caller's region scope excludes it: which alerts
+ * exist outside your regions is not something this route should confirm.
+ */
+notificationsRouter.get("/:id", requirePermission("alerts", "read"), async (req, res, next) => {
+  try {
+    const viewerRegionTags = req.session?.userId
+      ? await getEffectiveRegionTags(req.session.userId)
+      : [];
+    const alert = await getNotificationForViewer(String(req.params.id), viewerRegionTags);
+    if (!alert) {
+      res.status(404).json({ error: "Alert not found" });
+      return;
+    }
+    res.json(alert);
   } catch (err) { next(err); }
 });
 

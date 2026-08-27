@@ -36,11 +36,8 @@ import {
   renderNotificationTemplate,
   substituteAckToken,
   ackUrlForEmail,
-  ackUrlForPush,
 } from "../utils/notificationTemplate.js";
 import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyDivs, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
-import { mintAckTokens, type AckChannel } from "./notificationAckService.js";
-import { permissionOf, rankMeets, type AccessLevel } from "../api/middleware/permissions.js";
 import {
   type DeliveryTarget,
   type ChannelType,
@@ -134,14 +131,6 @@ interface IndexedUser extends RecipientUser {
   regionSet: Set<string>;
   /** The user's Role id — recipientRoles routes by it. */
   roleId: string;
-  /**
-   * Does this user's role grant alerts:write? Decides whether they get a
-   * one-click acknowledge link. Resolved inside this 30s-cached index — one
-   * extra role read per cache window rather than one per notification —
-   * because the alternative is mailing an Acknowledge button to someone the
-   * API can only 403.
-   */
-  canAckAlerts: boolean;
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -172,7 +161,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       ssoGroups: true,
       authProvider: true,
       roleId: true,
-      role: { select: { regionTags: true, otherTags: true, permissions: true } },
+      role: { select: { regionTags: true, otherTags: true } },
     },
   });
 
@@ -187,7 +176,6 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       regionSet.add(n);
     }
     for (const t of scopes.otherTags.effective) matchSet.add(normalizeNeedle(t));
-    const perms = (u.role?.permissions ?? {}) as Record<string, AccessLevel | undefined>;
     index.push({
       id: u.id,
       email: u.email,
@@ -195,23 +183,10 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       matchSet,
       regionSet,
       roleId: u.roleId,
-      canAckAlerts: rankMeets(permissionOf(perms, "alerts"), "write"),
     });
   }
   return index;
   });
-}
-
-/**
- * Which of these user ids may acknowledge an alert right now. Reads the same
- * cached index the recipient resolvers use, so asking costs nothing extra on
- * the fan-out path.
- */
-export async function ackCapableUserIds(ids: Iterable<string>): Promise<Set<string>> {
-  const want = new Set(ids);
-  if (want.size === 0) return new Set();
-  const index = await loadUserIndex();
-  return new Set(index.filter((u) => want.has(u.id) && u.canAckAlerts).map((u) => u.id));
 }
 
 /**
@@ -356,12 +331,9 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * decides the transport + how the target fans out:
  *   - email (smtp/oauth_m365), no composedEmail: one row per resolved
  *     recipient address (tag-matched users' emails + explicit addresses).
- *   - email WITH composedEmail: one row per MESSAGE, and planComposedEmails
- *     decides how many that is — one per To address (each with its own
- *     acknowledge token) when anyone may acknowledge, otherwise a single row
- *     whose `target` is the joined To list. meta snapshots
- *     { composed, to, cc, bcc, subject, text, html? } for the drain (never
- *     channel secrets). Empty To skips the target.
+ *   - email WITH composedEmail: ONE row whose `target` is the joined To list.
+ *     meta snapshots { composed, to, cc, bcc, subject, text, html? } for the
+ *     drain (never channel secrets). Empty To skips the target.
  *   - web_push: one row per recipient user's push subscription (keys snapshotted).
  *   - webhook (slack/teams) / pushbullet: one row; the destination (URL/token)
  *     lives on the channel and is read at send time, NOT duplicated here.
@@ -372,13 +344,13 @@ export function dedupeEmailRecipients(to: string[], cc: string[], bcc: string[])
  * Merge the three address sources into ONE ordered map of address → the
  * Polaris user who owns it (null for an address nobody signs in with).
  *
- * Ownership decides who gets a one-click acknowledge link: only a configured
- * user can be recorded as the acknowledger, so an address-book contact or a
- * typed address gets the mail without one. A user-sourced entry WINS over a
- * typed/contact entry for the same address — typing your colleague's own
- * address should not strip their link — and two users sharing an address
- * (User.email is nullable and NOT unique) tie-break on the lowest id so the
- * choice is stable across sends.
+ * The map is what dedupes the To line across the three sources; the ownership
+ * VALUES are informational since the acknowledge link stopped being
+ * per-recipient (business rule 25) — the same URL now goes to everyone and the
+ * page behind it decides who may act. They are kept because a user-sourced
+ * entry WINS over a typed/contact entry for the same address, and two users
+ * sharing an address (User.email is nullable and NOT unique) tie-break on the
+ * lowest id, so the resolved To line is stable across sends.
  *
  * Insertion order reproduces the pre-feature Set: typed addresses, then users,
  * then contacts. Re-setting an existing key keeps its original position, so a
@@ -408,60 +380,31 @@ export function buildAddressOwnerMap(
 }
 
 /**
- * One composed email, as it will actually be sent.
+ * Resolve the deferred `{ack}` token in an already-rendered composed body.
+ *
+ * ONE substitution per notification, not per recipient. The acknowledge URL
+ * names the alert and nothing else, so every reader of a shared body gets the
+ * same working link — which is why a composed email is a single message again
+ * (business rule 25). This used to be `applyAckToRows`, fanning the To line out
+ * into one delivery row per person so each could carry a token of their own.
+ *
+ * Re-prunes after filling: substituting a URL OR blanking it (no
+ * POLARIS_PUBLIC_URL) can leave an "Acknowledge:" line, or an href="" button,
+ * with nothing behind it.
+ *
+ * Pure — exported for the tests, because the blank half is the half that breaks
+ * quietly: it only runs on installs with no public URL, which are exactly the
+ * installs least likely to notice a literal "{ack}" in their mail.
  */
-export interface ComposedEmailPlan {
-  to: string[];
-  cc: string[];
-  bcc: string[];
-  /** The user whose acknowledge token this message carries; null = no link. */
-  ackUser: RecipientUser | null;
-}
-
-/**
- * Split a composed email's recipients into the messages to actually send.
- *
- * A composed notify action renders ONE body, and the token in it records WHO
- * acknowledged — so a single shared message can only carry a link when exactly
- * one person will read it, or a cc'd contact clicking a link addressed to
- * someone else files the acknowledgement under that user's name. That used to
- * mean the whole group went unlinked: any automation notifying two people, or
- * cc'ing anyone at all, mailed a button-less alert to everybody — which is the
- * common case, not the exception.
- *
- * So the BODY is shared and the MESSAGE is not. When at least one To address
- * belongs to a user who may acknowledge, every To address gets its own message
- * carrying its own token — blank for a contact or a typed address, which is
- * what substituteAckToken renders away (see buildAddressOwnerMap). When NOBODY
- * in To could acknowledge, the group message is kept exactly as it was:
- * splitting it would multiply the send and rewrite the To line every recipient
- * reads while earning no one a button.
- *
- * Cc/Bcc ride the FIRST message only. They stay Cc/Bcc rather than becoming
- * messages of their own — an operator cc'ing a manager is saying "for
- * information", not "you own this" — and repeating them on every message would
- * mail them one copy per To recipient.
- *
- * Pure — exported for the tests.
- */
-export function planComposedEmails(
-  to: string[],
-  cc: string[],
-  bcc: string[],
-  owners: Map<string, RecipientUser | null>,
-  canAck: (u: RecipientUser) => boolean,
-): ComposedEmailPlan[] {
-  const ackUserFor = (addr: string): RecipientUser | null => {
-    const u = owners.get(addr) ?? null;
-    return u && canAck(u) ? u : null;
+export function fillComposedAckUrl(composed: ComposedEmail, url: string | null): ComposedEmail {
+  return {
+    ...composed,
+    subject: substituteAckToken(composed.subject, url),
+    text: pruneEmptyTextLines(substituteAckToken(composed.text, url)),
+    ...(composed.html
+      ? { html: pruneDeadLinks(pruneEmptyRows(substituteAckToken(composed.html, url, { html: true }))) }
+      : {}),
   };
-  if (!to.some((addr) => ackUserFor(addr))) return [{ to, cc, bcc, ackUser: null }];
-  return to.map((addr, i) => ({
-    to: [addr],
-    cc: i === 0 ? cc : [],
-    bcc: i === 0 ? bcc : [],
-    ackUser: ackUserFor(addr),
-  }));
 }
 
 export interface ExpandDeliveriesOptions {
@@ -506,18 +449,12 @@ export async function expandDeliveries(
 
   const rows: Prisma.NotificationDeliveryCreateManyInput[] = [];
   const seen = new Set<string>(); // dedupe channelId|transport|target within one notification
-  // Parallel to `rows`: which recipient (if any) this row's acknowledge link
-  // belongs to. Tokens are minted in ONE batch after the walk, then stamped
-  // in — a create per recipient would put dozens of round trips on the
-  // alerting fan-out path.
-  const rowAck: Array<{ userId: string; channel: AckChannel } | null> = [];
 
   const add = (
     channelId: string,
     transport: string,
     target: string,
     meta?: Prisma.InputJsonValue,
-    ackFor?: { userId: string; channel: AckChannel } | null,
   ) => {
     const key = `${channelId}|${transport}|${target}`;
     if (seen.has(key)) return;
@@ -533,7 +470,6 @@ export async function expandDeliveries(
         } as Prisma.InputJsonValue)
       : meta;
     rows.push({ notificationId, channelId, transport, target, meta: provenance ?? undefined });
-    rowAck.push(ackFor ?? null);
   };
 
   // Recipient users for a target = union of: specific user ids + (if opted in)
@@ -582,6 +518,15 @@ export async function expandDeliveries(
   const ccResolved = composedEmail ? await resolveEmailRecipients(composedEmail.cc) : [];
   const bccResolved = composedEmail ? await resolveEmailRecipients(composedEmail.bcc) : [];
 
+  // The acknowledge link is one URL per ALERT, so `{ack}` resolves ONCE here
+  // rather than per recipient — the body was rendered before the Notification
+  // row existed, so the token is still sitting in it literally. Null on an
+  // install with no POLARIS_PUBLIC_URL, where the substitution blanks the
+  // button away instead of mailing a link that resolves against nothing.
+  const composedBody = composedEmail
+    ? fillComposedAckUrl(composedEmail, ackUrlForEmail(notificationId))
+    : null;
+
   for (const t of targets) {
     const channel = byId.get(t.channelId);
     if (!channel || !channel.enabled || !isChannelType(channel.type)) continue;
@@ -594,44 +539,24 @@ export async function expandDeliveries(
       const contactAddrs = t.recipientAssetContacts ? assetContactEmails ?? [] : [];
       const targetUsers = await usersForTarget(t);
       const owners = buildAddressOwnerMap(targetUsers, t.addresses, contactAddrs);
-      // An acknowledge link is only useful to someone whose role can actually
-      // acknowledge; emailLinksOn is false on installs with no public URL,
-      // where an /ack link would be unreachable anyway.
-      const ackable = await ackCapableUserIds(
-        Array.from(owners.values(), (u) => u?.id).filter((id): id is string => !!id),
-      );
-      const emailLinksOn = ackUrlForEmail("probe") !== null;
-      const ackUserFor = (u: RecipientUser | null | undefined): string | null =>
-        emailLinksOn && u && ackable.has(u.id) ? u.id : null;
 
-      if (composedEmail) {
+      if (composedBody) {
         const to = Array.from(owners.keys());
         if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
         const { cc, bcc } = dedupeEmailRecipients(to, ccResolved, bccResolved);
-        // One row per MESSAGE, not per target: the To list fans out so each
-        // recipient who may acknowledge carries their own token.
-        for (const plan of planComposedEmails(to, cc, bcc, owners, (u) => emailLinksOn && ackable.has(u.id))) {
-          add(
-            channel.id,
-            "email",
-            plan.to.join(", "),
-            {
-              composed: true,
-              to: plan.to,
-              cc: plan.cc,
-              bcc: plan.bcc,
-              subject: composedEmail.subject,
-              text: composedEmail.text,
-              ...(composedEmail.html ? { html: composedEmail.html } : {}),
-            },
-            plan.ackUser ? { userId: plan.ackUser.id, channel: "email" } : null,
-          );
-        }
+        // ONE row for the whole To list. The body carries an acknowledge link
+        // that works for whoever reads it, so there is nothing left to fan out.
+        add(channel.id, "email", to.join(", "), {
+          composed: true,
+          to,
+          cc,
+          bcc,
+          subject: composedBody.subject,
+          text: composedBody.text,
+          ...(composedBody.html ? { html: composedBody.html } : {}),
+        });
       } else {
-        for (const [addr, owner] of owners) {
-          const userId = ackUserFor(owner);
-          add(channel.id, "email", addr, undefined, userId ? { userId, channel: "email" } : null);
-        }
+        for (const addr of owners.keys()) add(channel.id, "email", addr);
       }
     } else if (transport === "web_push") {
       const users = await usersForTarget(t);
@@ -640,20 +565,11 @@ export async function expandDeliveries(
             where: { userId: { in: users.map((u) => u.id) } },
             // `surface` rides along so the drain can pick the right deep link
             // (mobile SPA vs desktop Automations page) without a second query.
-            // userId comes along for the acknowledge token — a push always
-            // belongs to a signed-in account, so every row can carry one.
-            select: { endpoint: true, p256dh: true, auth: true, surface: true, userId: true },
+            select: { endpoint: true, p256dh: true, auth: true, surface: true },
           })
         : [];
-      const pushAckable = await ackCapableUserIds(subs.map((s) => s.userId));
       for (const s of subs) {
-        add(
-          channel.id,
-          "web_push",
-          s.endpoint,
-          { p256dh: s.p256dh, auth: s.auth, surface: s.surface },
-          pushAckable.has(s.userId) ? { userId: s.userId, channel: "web_push" } : null,
-        );
+        add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
       }
       if (subs.length === 0) {
         // Push is opt-in per browser, so a perfectly valid-looking automation
@@ -674,82 +590,8 @@ export async function expandDeliveries(
   }
 
   if (rows.length === 0) return 0;
-  await stampAckTokens(notificationId, rows, rowAck);
   await prisma.notificationDelivery.createMany({ data: rows });
   return rows.length;
-}
-
-/**
- * Mint one acknowledge token per (user, channel) that asked for one and write
- * it into the matching delivery rows' meta — plus, for composed emails,
- * substitute the deferred `{ack}` token inside the already-rendered
- * subject/text/html.
- *
- * One token per (user, channel), not per row: a user with three enrolled
- * devices should be able to acknowledge from whichever one buzzes, and the
- * first click spending the token for the rest is exactly right — the alert is
- * acknowledged. Tokens are NOT reused across notifications or escalation
- * tiers, since only the digest is stored and each send mints fresh.
- */
-async function stampAckTokens(
-  notificationId: string,
-  rows: Prisma.NotificationDeliveryCreateManyInput[],
-  rowAck: Array<{ userId: string; channel: AckChannel } | null>,
-): Promise<void> {
-  const wanted = new Map<string, { userId: string; channel: AckChannel }>();
-  for (const a of rowAck) if (a) wanted.set(`${a.userId}|${a.channel}`, a);
-
-  // Deliberately NOT an early return when nothing is minted: an automation
-  // whose only recipients are raw addresses or address-book contacts earns no
-  // token at all, and returning here would mail them the literal "{ack}". The
-  // strip pass below is what has to run in that case.
-  const reqs = Array.from(wanted.values()).map((w) => ({ notificationId, ...w }));
-  const minted = wanted.size > 0 ? await mintAckTokens(reqs) : [];
-  const tokenFor = new Map(minted.map((m) => [`${m.userId}|${m.channel}`, m.raw]));
-
-  applyAckToRows(rows, rowAck, tokenFor);
-}
-
-/**
- * Write each row's minted token into its meta and resolve the deferred `{ack}`
- * in composed bodies — filling it for a row that earned a token, blanking it
- * for one that didn't.
- *
- * Pure and exported for the tests because the blank half is the half that
- * breaks quietly: it only runs for recipients who can't acknowledge (raw
- * addresses, address-book contacts), so a mistake there mails a literal
- * "{ack}" to exactly the people least equipped to report it.
- */
-export function applyAckToRows(
-  rows: Prisma.NotificationDeliveryCreateManyInput[],
-  rowAck: Array<{ userId: string; channel: AckChannel } | null>,
-  tokenFor: Map<string, string>,
-): void {
-  rows.forEach((row, i) => {
-    const want = rowAck[i];
-    const token = want ? tokenFor.get(`${want.userId}|${want.channel}`) ?? null : null;
-    const meta = (row.meta && typeof row.meta === "object" ? { ...(row.meta as Record<string, unknown>) } : {}) as Record<string, unknown>;
-    if (want && token) meta.ack = { token, userId: want.userId };
-
-    if (meta.composed) {
-      // The body was rendered before recipients were known, so {ack} is still
-      // sitting in it literally. Resolve it now for this one recipient, then
-      // re-prune: filling OR blanking can leave an "Acknowledge:" line (or an
-      // href="" button) with nothing behind it.
-      const url = token ? ackUrlForEmail(token) : null;
-      if (typeof meta.subject === "string") meta.subject = substituteAckToken(meta.subject, url);
-      if (typeof meta.text === "string") meta.text = pruneEmptyTextLines(substituteAckToken(meta.text, url));
-      if (typeof meta.html === "string") meta.html = pruneDeadLinks(pruneEmptyRows(substituteAckToken(meta.html, url, { html: true })));
-    }
-    row.meta = meta as Prisma.InputJsonValue;
-  });
-}
-
-/** Web-push payload URL for a delivery row's acknowledge token, if it has one. */
-export function ackUrlFromMeta(meta: unknown): string | null {
-  const m = meta && typeof meta === "object" ? (meta as Record<string, unknown>) : null;
-  const ack = m?.ack && typeof m.ack === "object" ? (m.ack as Record<string, unknown>) : null;
-  return typeof ack?.token === "string" ? ackUrlForPush(ack.token) : null;
 }
 
 /** Extract the `region:`-prefixed tags from a rule's scope (for

@@ -657,6 +657,28 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 ---
 
 ## Theme-paired image asset with one resolver
+## Standalone task page (one card, no app shell)
+
+**Reference:** `public/alert-ack.html` + `public/js/alert-ack.js` (acknowledge one alert, reached from an alert email or a web push) — built on the shell `public/login.html` established. Tests: `tests/unit/alertAckPage.test.ts`.
+
+**What it is:** A page that exists to do ONE thing for someone who arrived from outside the app — a link in an email, a notification action, a bookmark — and who may be on a phone, in a mail client's embedded browser, or not signed in yet. It is a Polaris page with Polaris tokens and the operator's own branding, but it deliberately has no sidebar, no nav and nothing else to tap by mistake.
+
+**Key conventions:**
+- **One centred card on `--color-bg-secondary`**, `max-width` around 460px, `min-height: 100dvh` beside `100vh` (older Safari ignores the `dvh` line and takes the `vh` one). Card gets `--color-bg-primary`, `var(--radius-lg)`, `var(--shadow-md)` and a 4px accent top border driven by a CSS custom property the script sets — never a hardcoded colour, so severity/state can tint the card without touching the stylesheet.
+- **Load `/js/theme-init.js` FIRST**, before the stylesheet, exactly as login.html does: it stamps `data-theme` before first paint, and without it the page flashes the wrong theme.
+- **Gate it server-side, not in the page.** Add it to `protectedPages` in `src/app.ts` (and to `pageRequiredPermission` when it needs a function key), so an unauthenticated arrival is bounced to login and returned by the `polaris_next` cookie (`src/utils/loginRedirect.ts`). A page that renders and then discovers it is logged out has already shown a shell it cannot fill.
+- **Gate the PAGE at `read` and the ACTION at `write`.** A reader whose role can see the thing but not act on it must land here and be told so; bouncing them to `/` leaves them wondering where their link went.
+- **Requires script, and that is fine** — it is reached through the login page, which requires script too. Render the states from JS rather than shipping a no-JS fallback that will drift.
+- **Every state is a state, including the bad ones.** Loading, the action, the already-done case (naming who got there first), the not-permitted case, the gone case, and a failure that offers **Try again** rather than a dead page. Fold "not found" and "forbidden" into ONE sentence where the distinction would leak whether the record exists.
+- **Touch targets:** action buttons `min-height: 44px` and `flex: 1 1 auto`, since this page is opened from a phone more often than not.
+- **Brand through `PolarisBrandLogo`** with the unauthenticated `/api/v1/server-settings/branding` read (the `serverSettings` API wrapper needs a permission this reader may not hold), and re-paint on `onThemeChange`.
+- **Escape everything.** The card renders server data as HTML; use a local `esc()` and pass every value through it.
+- Set `window.__polarisOn401` before the first API call so a session that dies mid-page re-stamps the return cookie instead of losing the destination.
+
+**When adding a new one:** copy the shell from `alert-ack.html`, then work through the state list above before writing the happy path — on a page reached by a link, the unhappy states are most of the traffic.
+
+---
+
 
 **Reference:** `public/js/brand-logo.js` (`window.PolarisBrandLogo`) + `public/img/brand/` — consumed by `public/js/login.js`, `public/js/mobile/auth.js`, `applyBranding` in `public/js/app.js`, and the Customization tab in `public/js/server-settings.js`. Tests: `tests/unit/brandLogoResolver.test.ts`.
 

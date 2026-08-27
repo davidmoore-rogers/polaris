@@ -1,14 +1,18 @@
 /**
  * tests/unit/alertChartRenderMemo.test.ts — one alert renders its charts once
- * per drain pass, however many recipients it fanned out to.
+ * per drain pass, however many delivery rows it produced.
  *
- * Composed alert emails now fan out one delivery row per recipient, so each of
- * them can carry its own acknowledge token (notificationRecipientService
- * .planComposedEmails). The charts are built in the DRAIN rather than at fire
- * time — deliberately, so an escalation at T+90min shows the current hour — so
- * without a memo, an alert routed to a dozen people would run the same sample
- * queries and rasterize the same graphs a dozen times, on a job that ticks
- * every 15s.
+ * One alert routinely drains as several rows: an automation with more than one
+ * notify action, several channels, or a web-push target with a row per
+ * enrolled device. The charts are built in the DRAIN rather than at fire time —
+ * deliberately, so an escalation at T+90min shows the current hour — so without
+ * a memo each of those rows would run the same sample queries and rasterize the
+ * same graphs again, on a job that ticks every 15s.
+ *
+ * (Composed emails used to fan out one row per RECIPIENT so each could carry
+ * its own acknowledge token, which made this memo urgent rather than merely
+ * right. Acknowledgement is a logged-in page now — business rule 25 — so a
+ * composed email is one row again, and the memo covers the cases above.)
  *
  * The memo is scoped to one drain pass, which is the half that can't be
  * asserted here: a module-level cache would pass this test and quietly serve a

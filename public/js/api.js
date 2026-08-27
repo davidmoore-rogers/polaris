@@ -852,7 +852,12 @@ const api = {
   },
   alerts: {
     list:        (params) => request("GET", "/alerts" + toQuery(params)),
-    acknowledge: (ids, note) => request("POST", "/alerts/acknowledge", { ids, note }),
+    // One alert, for the acknowledge page an emailed / pushed Acknowledge
+    // button lands on. 404 when the caller's region scope excludes it.
+    get:         (id)     => request("GET", `/alerts/${encodeURIComponent(id)}`),
+    // `source` is audit provenance only (the closed set the route accepts:
+    // "ack_page" | "web_push_action"); omitted means the in-app surfaces.
+    acknowledge: (ids, note, source) => request("POST", "/alerts/acknowledge", { ids, note, ...(source ? { source } : {}) }),
     clear:       (ids)    => request("POST", "/alerts/clear", { ids }),
   },
   push: {

@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="/js/theme-init.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Polaris — Acknowledge alert</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-light.png">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-dark.png" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/css/styles.css">
+  <style>
+    /* A single-purpose page reached from a phone, from a mail client's own
+       browser, or from a desktop tab — so it is one centred card with no
+       sidebar, no nav and nothing else to tap by mistake. Modelled on the
+       login page's shell (UI-CANON: standalone pages), which is the other
+       surface an operator meets before the app shell exists. */
+    .ack-wrapper {
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      background: var(--color-bg-secondary);
+    }
+    .ack-card {
+      background: var(--color-bg-primary);
+      border: 1px solid var(--color-border);
+      border-top: 4px solid var(--ack-accent, var(--color-border));
+      border-radius: var(--radius-lg);
+      padding: 1.5rem;
+      width: 100%;
+      max-width: 460px;
+      box-shadow: var(--shadow-md);
+    }
+    .ack-brand {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+    .ack-brand img { max-height: 40px; max-width: 190px; }
+    .ack-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin: 0 0 0.35rem;
+      color: var(--color-text-primary);
+    }
+    .ack-lead {
+      margin: 0 0 1rem;
+      color: var(--color-text-secondary);
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+    .ack-message {
+      margin: 0 0 1rem;
+      color: var(--color-text-primary);
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+    .ack-facts { width: 100%; border-collapse: collapse; margin: 0 0 1.15rem; font-size: 0.8125rem; }
+    .ack-facts th {
+      text-align: left;
+      font-weight: 500;
+      color: var(--color-text-tertiary);
+      padding: 0.25rem 0.85rem 0.25rem 0;
+      white-space: nowrap;
+      vertical-align: top;
+    }
+    .ack-facts td { padding: 0.25rem 0; color: var(--color-text-primary); word-break: break-word; }
+    .ack-note-label {
+      display: block;
+      font-size: 0.8125rem;
+      color: var(--color-text-secondary);
+      margin: 0 0 0.35rem;
+    }
+    #ack-note {
+      width: 100%;
+      box-sizing: border-box;
+      font: inherit;
+      font-size: 0.875rem;
+      min-height: 4.5rem;
+      resize: vertical;
+    }
+    .ack-actions { display: flex; gap: 0.5rem; margin-top: 1rem; flex-wrap: wrap; }
+    /* Touch targets: this page is opened from a phone more often than not. */
+    .ack-actions .btn { min-height: 44px; flex: 1 1 auto; justify-content: center; }
+    .ack-error {
+      margin: 0.6rem 0 0;
+      font-size: 0.8125rem;
+      color: var(--color-danger);
+    }
+    .ack-testflag {
+      display: inline-block;
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      color: var(--color-accent);
+      background: rgba(79,195,247,0.12);
+      border: 1px solid rgba(79,195,247,0.25);
+      border-radius: var(--radius-sm);
+      padding: 0.1rem 0.4rem;
+      margin: 0 0 0.6rem;
+    }
+    .ack-foot {
+      margin: 1rem 0 0;
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--color-text-tertiary);
+    }
+    .ack-foot a { color: var(--color-accent); }
+  </style>
+</head>
+<body>
+  <div class="ack-wrapper">
+    <div class="ack-card" id="ack-card">
+      <div class="ack-brand" id="ack-brand" style="display:none"></div>
+      <!-- Everything below is rendered by alert-ack.js; the static copy is the
+           pre-fetch state, not a fallback (this page needs script, exactly like
+           the login page it is reached through). -->
+      <h1 class="ack-title" id="ack-title">Loading alert…</h1>
+      <p class="ack-lead" id="ack-lead"></p>
+      <div id="ack-body"></div>
+    </div>
+  </div>
+  <script src="/js/api.js"></script>
+  <script src="/js/brand-logo.js"></script>
+  <script src="/js/alert-ack.js"></script>
+</body>
+</html>

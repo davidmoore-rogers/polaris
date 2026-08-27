@@ -18601,8 +18601,8 @@ function _alertCountLabel(n) {
  *
  * The question is a PLACEHOLDER, never a value: it greys out, disappears on
  * the first keystroke, and an untouched box submits as no note at all. The
- * emailed ack page's textarea asks the same thing (api/routes/ack.ts), so the
- * two surfaces prompt for one thing — keep them in step.
+ * emailed ack page's textarea asks the same thing (public/js/alert-ack.js), so
+ * the two surfaces prompt for one thing — keep them in step.
  */
 function _ackPromptOpts(count, required) {
   return {

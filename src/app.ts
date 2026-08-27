@@ -15,8 +15,6 @@ import compression from "compression";
 import rateLimit from "express-rate-limit";
 import { router } from "./api/router.js";
 import { pwaRouter } from "./api/routes/pwa.js";
-import { ackRouter } from "./api/routes/ack.js";
-import { ackLinkLimiter } from "./api/middleware/rateLimits.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { errorHandler } from "./api/middleware/errorHandler.js";
@@ -58,6 +56,7 @@ import { getDbConnectionMode } from "./utils/dbConnections.js";
 import { startMetricsOnlyServer } from "./utils/metricsServer.js";
 import { recordDbConnectionMode, setDbPoolRoleCapacity } from "./metrics.js";
 import { startFmgActivityHeartbeat } from "./services/fmgActivityService.js";
+import { rememberLoginTarget } from "./utils/loginRedirect.js";
 
 // Fail-fast environment validation runs BEFORE any listener binds, before
 // pg-boss init, before sample buffers start. Throws on misconfiguration
@@ -336,16 +335,6 @@ app.use(compression());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "1mb" })); // SAML callback posts form-encoded
 
-// ─── One-click acknowledge links ─────────────────────────────────────────────
-// Mounted deliberately HERE — after body parsing, before session/CSRF. The
-// token in the URL is the whole credential, so there is no cookie to protect;
-// more importantly csrfMiddleware stamps req.session.csrfToken on every
-// request carrying a session, which dirties an uninitialized session and makes
-// connect-pg-simple persist a row. Below the session mount, every Outlook Safe
-// Links / Proofpoint scan of an emailed ack link would mint a session row
-// without bound. Up here it cannot. See api/routes/ack.ts.
-app.use("/ack", ackLinkLimiter, ackRouter);
-
 // ─── Session ─────────────────────────────────────────────────────────────────
 const PgStore = pgSession(session);
 const sessionPool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
@@ -522,7 +511,7 @@ app.use((req, res, next) => {
 });
 
 // Protect dashboard pages — redirect unauthenticated users to login
-const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/automations.html", "/server-settings.html", "/map.html", "/appmap.html"];
+const protectedPages = ["/", "/index.html", "/ipam.html", "/blocks.html", "/subnets.html", "/reservations.html", "/users.html", "/integrations.html", "/assets.html", "/events.html", "/notifications.html", "/automations.html", "/server-settings.html", "/map.html", "/appmap.html", "/alert-ack.html"];
 
 // Page-level gating — each protected page requires at least `read` on the
 // matching function key. Maps to the same matrix the API guards use, so
@@ -566,11 +555,22 @@ const pageRequiredPermission: Record<string, PagePermission> = {
   "/ipam.html":            { anyOf: [{ key: "ipBlocks", level: "read" }, { key: "subnets", level: "read" }] },
   "/assets.html":          { key: "assets",               level: "read" },
   "/events.html":          { key: "events",               level: "read" },
+  // The page an emailed / pushed Acknowledge button lands on. `read`, not
+  // `write`: someone who may see alerts but not acknowledge them should reach
+  // the page and be told so, rather than being bounced to "/" with no
+  // explanation of where the link they followed went (business rule 25).
+  "/alert-ack.html":       { key: "alerts",               level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
 app.use(async (req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();
   if (!req.session?.userId) {
+    // Remember where they were going BEFORE choosing how to bounce them —
+    // every branch below (App Proxy, skip-login SSO, the login page) comes
+    // back through a route that consumes this. Without it an emailed
+    // Acknowledge link lands the reader on the dashboard after they sign in,
+    // with nothing left of the alert they were asked to look at.
+    rememberLoginTarget(req, res, req.originalUrl);
     // Entra App Proxy silent auto-login — highest precedence: identity
     // headers surviving the strip middleware mean this request definitively
     // came through an allowlisted connector, and the user already passed

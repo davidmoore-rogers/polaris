@@ -20,8 +20,7 @@
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail } from "../utils/notificationTemplate.js";
-import { ackUrlFromMeta } from "./notificationRecipientService.js";
+import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail, ackUrlForPush } from "../utils/notificationTemplate.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor, type ChartToken, type RenderedChart } from "./alertChartService.js";
 import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens } from "./alertInterfaceService.js";
 import { buildAlertBrandBlock, brandTokensIn, substituteBrandTokens, BRAND_LOGO_CID } from "./alertBrandService.js";
@@ -237,21 +236,11 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
   return {
     to: d.target,
     subject: titleFor(d.notification),
-    text: appendAckLine(d.notification.message + (url ? `\n\nView: ${url}` : ""), ackUrlFromEmailMeta(meta)),
+    text: appendAckLine(d.notification.message + (url ? `\n\nView: ${url}` : ""), ackUrlForEmail(d.notification.id)),
   };
 }
 
-/**
- * The acknowledge URL for an email row, or null when this recipient didn't
- * earn one (an address-book contact, a typed address, or an install with no
- * POLARIS_PUBLIC_URL — see notificationRecipientService.buildAddressOwnerMap).
- */
-export function ackUrlFromEmailMeta(meta: Record<string, unknown>): string | null {
-  const ack = meta.ack && typeof meta.ack === "object" ? (meta.ack as Record<string, unknown>) : null;
-  return typeof ack?.token === "string" ? ackUrlForEmail(ack.token) : null;
-}
-
-/** Append the one-click acknowledge line to a plain-text body. Pure. */
+/** Append the acknowledge line to a plain-text body. Pure. */
 export function appendAckLine(text: string, ackUrl: string | null): string {
   if (!ackUrl) return text;
   return `${text}\n\nAcknowledge this alert: ${ackUrl}`;
@@ -325,9 +314,11 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined, memo: 
           severity: d.notification.severity,
           url: pushDeepLinkUrl(meta.surface),
           notificationId: d.notification.id,
-          // Present only for a recipient who may acknowledge; sw.js renders
-          // the Acknowledge action button iff it arrives.
-          ackUrl: ackUrlFromMeta(meta),
+          // The alert's acknowledge page. Always present: it is the same URL
+          // the email carries, and the page itself decides whether the person
+          // who taps it may acknowledge. sw.js renders the Acknowledge action
+          // button when it arrives and opens this URL.
+          ackUrl: ackUrlForPush(d.notification.id),
         },
       );
     } else {

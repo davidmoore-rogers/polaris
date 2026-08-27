@@ -59,6 +59,7 @@ import { resolveTagScopesForUser } from "../../services/regionScopeService.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import { totpCodeLimiter, ssoEntryLimiter, entraProxyLoginLimiter, ssoCallbackLimiter } from "../middleware/rateLimits.js";
 import { safeNextPath } from "../../utils/safeRedirect.js";
+import { takeLoginTarget } from "../../utils/loginRedirect.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
@@ -511,7 +512,11 @@ router.post("/azure/callback", ssoCallbackLimiter, async (req, res) => {
       message: `SAML SSO login: ${user.username} (${user.email || "no email"})`,
     });
 
-    res.redirect("/");
+    // Back to whatever protected page bounced them here (an emailed
+    // Acknowledge link, most often), else the dashboard. Read from a cookie
+    // rather than the session: regenerateSession() above deliberately drops
+    // everything the pre-login session held.
+    res.redirect(takeLoginTarget(req, res));
   } catch (err: any) {
     logEvent({
       action: "auth.login.azure.failed",
@@ -740,7 +745,7 @@ router.get("/oidc/callback", ssoCallbackLimiter, async (req, res) => {
       message: `OIDC SSO login: ${user.username} → role "${user.role.name}"`,
       details: { groups: claims.groups.length, role: user.role.name },
     });
-    res.redirect("/");
+    res.redirect(takeLoginTarget(req, res));
   } catch (err: any) {
     logEvent({
       action: "auth.login.oidc.failed",
@@ -827,7 +832,11 @@ router.get("/entra-proxy/config", ssoCallbackLimiter, async (req, res) => {
 // request, validate trust, provision, stamp the session. Both the login-page
 // button and the app.ts silent auto-login land here.
 router.get("/entra-proxy/login", entraProxyLoginLimiter, async (req, res) => {
-  const next = safeNextPath(req.query.next);
+  // The explicit ?next= wins (app.ts's silent auto-login sets it), but the
+  // cookie is consumed either way — a target left behind here would otherwise
+  // ambush the operator's next sign-in.
+  const remembered = takeLoginTarget(req, res);
+  const next = req.query.next ? safeNextPath(req.query.next) : remembered;
   try {
     if (!(await isEntraProxyEnabled())) {
       return res.redirect("/login.html?error=entra_proxy_not_configured");

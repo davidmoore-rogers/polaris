@@ -1483,6 +1483,31 @@ See ["Permission-gated route + dynamic-role function key"](#permission-gated-rou
 
 ---
 
+## cross-cutting/alert-acknowledgement
+
+**What it is:** Every path from "an alert reached a human" to `Notification.acknowledged`. Three read surfaces, ONE write path, and — since business rule 25 — no credential anywhere in the link.
+
+**The chain, in order:**
+1. `utils/notificationTemplate.ackUrlForEmail(notificationId)` / `ackUrlForPush(notificationId)` build `/alert-ack.html?id=<id>`. Email is NULL without `POLARIS_PUBLIC_URL` (a relative link in an inbox resolves against nothing); push falls back to the relative path, which the service worker resolves against its own origin.
+2. `notificationRecipientService.expandDeliveries` resolves the deferred `{ack}` **once per alert** through `fillComposedAckUrl` — the context was built before `prisma.notification.create` returned, so the id did not exist at compose time. A composed email is ONE delivery row.
+3. `notificationDeliveryService` puts the same URL in the plain-text tail (`appendAckLine`) and in the web-push payload's `ackUrl`.
+4. `public/sw.js` renders an Acknowledge action that **opens** that URL (same-origin checked, `src=push` appended). It acknowledges nothing itself.
+5. `public/alert-ack.html` + `public/js/alert-ack.js` render the card. The page is in `app.ts`'s `protectedPages` and `pageRequiredPermission` (`alerts:read`).
+6. `utils/loginRedirect.ts` carries the reader back after a login — `polaris_next`, consumed by `public/js/login.js` (local/TOTP) and by auth.ts's SAML / OIDC / entra-proxy callbacks.
+7. `GET /alerts/:id` → `notificationService.getNotificationForViewer`, then `POST /alerts/acknowledge` → `acknowledgeNotifications`.
+
+**Invariants:**
+- **The URL names the ALERT and nothing else.** No recipient, no user id, no token. The moment it names a person, the composed body stops being shareable and the per-recipient fan-out has to come back.
+- **`acknowledgeNotifications` is the only write path**, and the only place `requireAckNote` is enforced. Every surface's required field is a local courtesy.
+- **Loading is a GET, acknowledging is a POST.** Mail gateways prefetch every link; a state-changing GET would acknowledge Polaris's whole outbound alert volume at scan time.
+- **The PAGE gate is `alerts:read`, the ACTION gate is `alerts:write`.** A reader who cannot acknowledge must land on the page and be told so, not be bounced to "/".
+- **`GET /alerts/:id` answers 404, not 403**, for an alert outside the caller's region scope.
+- `source` on the acknowledge POST is a CLOSED set (`ack_page` | `web_push_action`) and audit provenance only — it lands in an Event's `details`, so it must never accept free text.
+- `polaris_next` is NOT HttpOnly (login.js reads it) and is therefore only ever safe because `safeNextPath` reduces it to a same-origin path and refuses `/login.html`.
+
+**When changing this:** a new acknowledge surface calls `POST /alerts/acknowledge` with its own `source` — never a private write. A change to the URL shape has to move `ackPath` in `notificationTemplate.ts` (both helpers read it), the `protectedPages` entry, and `tests/unit/alertAckPage.test.ts`, which pins that the URL carries no recipient. Anything that would make the link per-recipient again needs business rule 25 rewritten first: the fan-out it forces is what the rule exists to prevent.
+---
+
 # Per-service touches
 
 Listed alphabetically.
@@ -1611,7 +1636,7 @@ Listed alphabetically.
 **Invariants:**
 - Region scope: empty viewer tags = unrestricted; else show rows whose snapshotted `regionTags` intersect the viewer's tags PLUS unscoped (empty regionTags) rows.
 - Acknowledge/clear are batch (`updateMany`, no per-row await) and always write an audit Event.
-- **`acknowledgeNotifications` is where the acknowledge-note policy is ENFORCED**, and it has to stay here: it is the single write path behind all four acknowledge surfaces (Alerts tab, mobile list, `/ack/:token` link, web-push action), and three of them can acknowledge without rendering a form. A note-less batch containing any alert whose rule sets `requireAckNote` throws 400 — refused WHOLE, because the route takes one shared note for every id and a partial success would leave the alerts that mattered open under a success toast. One indexed count, and only when no note was given, so the common path pays nothing.
+- **`acknowledgeNotifications` is where the acknowledge-note policy is ENFORCED**, and it has to stay here: it is the single write path behind every acknowledge surface (Alerts tab, mobile list, and the `/alert-ack.html` page an emailed or pushed Acknowledge button opens), each of which asks for the note in its own markup, so every required field is a courtesy and this refusal is the control. A note-less batch containing any alert whose rule sets `requireAckNote` throws 400 — refused WHOLE, because the route takes one shared note for every id and a partial success would leave the alerts that mattered open under a success toast. One indexed count, and only when no note was given, so the common path pays nothing.
 - Both list surfaces join that flag through `ACK_POLICY_INCLUDE` and flatten it with `withAckPolicy` — a rule-less row (test fire, or an automation since deleted: `Notification.ruleId` is SetNull) reads false, since there is no policy left to enforce.
 - **The note has exactly ONE reader**, and both list surfaces keep it reachable by returning whole rows: `acknowledgeNote` rides `listNotifications` / `getAssetNotifications` only because neither narrows with a `select` and `withAckPolicy` spreads the rest through — adding a `select` to either would drop it silently. The reader is the **asset-details Alerts tab's Acknowledge column** (`_loadAssetNotificationsTab` in `public/js/assets.js`). The dashboard Active Alerts widget and the mobile alerts list render `acknowledgedBy` only, so an operator answering a `requireAckNote` prompt is writing for that one column; a second surface that wants the note needs no backend change.
 
@@ -1975,7 +2000,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - With a `composedEmail` (rule has emailComposition), each email target gets ONE row (`target` = joined To list, `meta` = {composed, to, cc, bcc, subject, text, html?}); empty To skips the target. Cc/Bcc dedupe: To wins over Cc, Bcc drops anything visible in To/Cc. Without it, the legacy one-row-per-address fan-out is byte-identical.
 - `meta` carries rendered content + recipient addresses only — never channel secrets.
 - In-app delivery is never a `NotificationDelivery` row — it's the `Notification` itself.
-- ACK LINKS: an email row earns `meta.ack` only when its address maps to a Polaris USER who holds `alerts:write` (`buildAddressOwnerMap` — user beats a typed/contact entry for the same address, ties break on lowest id since `User.email` is nullable and not unique). A COMPOSED email shares one body, so it is **fanned out per recipient** by `planComposedEmails`: one delivery row per To address, each with its own token, whenever at least one To address is ackable. Nobody ackable (including every install with no `POLARIS_PUBLIC_URL`) keeps the ONE group row with the joined To line — the pre-fan-out shape, byte for byte. **Cc/Bcc ride the first row only**, so they're mailed once per fan-out rather than once per recipient, and they stay Cc/Bcc: a cc is "for information", not a message of its own. `target` is therefore the single address on a fanned row and the joined list on a group row.
+- ACK LINKS: the acknowledge URL is **one per ALERT, not per recipient** (`ackUrlForEmail(notificationId)` — business rule 25), so `expandDeliveries` resolves the deferred `{ack}` ONCE via `fillComposedAckUrl` before the target loop and every message carries the same working link. A COMPOSED email is therefore **one delivery row** whose `target` is the joined To line, with Cc/Bcc as plain Cc/Bcc. `buildAddressOwnerMap` survives as the thing that DEDUPES that To line across users / typed addresses / contacts (user beats a typed or contact entry for the same address; ties break on lowest id since `User.email` is nullable and not unique) — its owner VALUES are now informational. On an install with no `POLARIS_PUBLIC_URL` the substitution blanks the button away and re-prunes, rather than mailing a literal `{ack}`. **Do not reintroduce a per-recipient split**: it multiplied the send, rewrote the To line every reader sees, and only ever existed to carry a token that no longer exists.
 - The `{ack}` token is filled HERE, per recipient, not by `buildTemplateContext` — the context is built once per fire and snapshotted onto `Notification.templateCtx` for everyone to share, so a context key would render it empty before recipients were even known. A composed row that earns no token has `{ack}` stripped rather than mailed literally.
 - `applyAckToRows` (pure, exported for tests) resolves `{ack}` for EVERY composed row — filling it for a row that earned a token and blanking it for one that didn't — and must run even when the whole fan-out minted nothing. An automation whose only recipients are typed addresses or address-book contacts is exactly that case, and short-circuiting on "nothing to mint" mailed them the literal `{ack}`.
 
@@ -2083,28 +2108,6 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **When changing this:** the block is rendered per body, so any new field has to be added to `neighborFacts` (shared by both forms) rather than to one of them — the HTML and text bodies drifting is exactly what the shared helper prevents. Adding a second `{interface.*}` token means widening `INTERFACE_TOKENS` + `substituteInterfaceTokens`; the deferred-token prefix already covers it. If you add a field whose value can be empty, filter it in `neighborFacts` — `pruneEmptyRows` runs at COMPOSE time and never sees this block, so an empty row here mails an empty cell.
 
 ---
-## services/notificationAckService.ts
-
-**What it owns:** Every read and write of `NotificationAckToken` — the single-use one-click acknowledge links carried in alert emails and behind the web-push Acknowledge button.
-
-**Public API:** `mintAckTokens(reqs[])` (batched createMany at delivery fan-out), `inspectAckToken(raw)` (non-mutating — backs the inert GET), `redeemAckToken(raw, note?)`, `userCanAcknowledge(userId)`, the pure `classifyAckToken(token, notif, canAck, now)`, `pruneAckTokens(now?)`. `AckOutcome` carries `requireNote` (the alert's automation demands a note) and the extra `note_required` kind.
-
-**Cross-service deps:** `notificationService.acknowledgeNotifications` (the acknowledgement itself — never a private write path), `eventLogService.logEvent`, `api/middleware/permissions.permissionOf` + `rankMeets`, `utils/ackToken` (pure format/digest).
-
-**Used by:** `src/services/notificationRecipientService.ts` (mints during `expandDeliveries`), `src/api/routes/ack.ts` (inspect/redeem), `src/jobs/deliverNotifications.ts` (hourly prune).
-
-**Invariants:**
-- A token is minted ONLY for a recipient who is a configured Polaris user holding `alerts:write`, and redemption RE-CHECKS that live — a role downgrade must invalidate links already sitting in mailboxes. Address-book contacts and typed addresses never get one: there would be no account to record as the acknowledger. A shared body can't carry one person's token, so the expander splits the MESSAGE instead of withholding the link (`notificationRecipientService.planComposedEmails`) — this filter is what makes that split safe, not a reason to skip it.
-- Only the digest is stored. The raw token exists in the delivered message and in `NotificationDelivery.meta.ack` (which no API echoes) — so a token can never be re-derived or re-sent, which is why each send mints fresh rather than reusing.
-- `classifyAckToken` reports `already` ahead of `used` / `expired` / `forbidden`: if the alert is acknowledged, the clicker's intent is satisfied and reporting a failure would be a lie.
-- Redemption is single-use but never errors on a second click — it reports who acknowledged and when.
-- `note_required` (the rule's `requireAckNote` with an empty note) is checked AFTER `classifyAckToken` and BEFORE the token is spent, and writes NO Event: it is form validation, so the link has to survive it — spending the token on a rejected submit would leave a recipient permanently unable to acknowledge from their mail client, and an Event per empty submit is noise about someone who is about to retype and click again.
-- An UNKNOWN token writes no Event (scanner- and attacker-reachable, and Events have 7-day retention); a token Polaris really issued that then fails writes `notification.ack_link.rejected` at warning.
-- Minting is batched. It runs on the alert fan-out path, so a per-recipient create — or an argon2 hash per recipient — would put seconds of latency into every large alert.
-
-**When changing this:** the acknowledgement must keep going through `acknowledgeNotifications` (it owns the Event + the already-acknowledged skip). If you add a new mint site, mint through `mintAckTokens` so the batching and the alerts:write filter stay in one place.
-
----
 ## services/notificationDeliveryService.ts
 
 **What it owns:** Draining pending `NotificationDelivery` rows and dispatching each to its channel.
@@ -2118,10 +2121,10 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **Invariants:**
 - Each delivery's destination secrets (SMTP password, webhook URL, VAPID key, …) are read from its `NotificationChannel` at send time, NOT stored on the delivery row.
 - A missing/deleted channel (NULL channelId) is a PERMANENT fail (not retried); otherwise ≤3 attempts before flipping to `failed`.
-- Email rows branch on `meta.composed`: composed rows send ONE to/cc/bcc message from the meta snapshot (to/cc/bcc coerced through a string-array guard — meta is untyped Json; a fanned-out row's To is its single recipient, see `planComposedEmails`); rows without it (incl. pre-upgrade pending rows) take the legacy `titleFor + message + View link` per-address path, byte-identical.
+- Email rows branch on `meta.composed`: composed rows send ONE to/cc/bcc message from the meta snapshot (to/cc/bcc coerced through a string-array guard — meta is untyped Json); rows without it (incl. pre-upgrade pending rows) take the legacy `titleFor + message + View link` per-address path, byte-identical.
 - Charts are substituted HERE, not at fire time, and the bodies get a tidy pass immediately after: `pruneEmptyChartSection` (HTML) drops the "LAST HOUR" heading when every chart token rendered away — which is the NORMAL case for an alert with no asset to chart, e.g. Polaris's own capacity — and `pruneEmptyTextLines` collapses the blank lines those removals leave in the text alternative. Both are pure and live in `utils/alertEmailTemplate.ts`; run them AFTER `substituteChartTokens`, since that pass is what decides a chart had no data.
 - A web_push 410/404 prunes the dead `PushSubscription` (by endpoint).
-- One alert's charts (and its loss-chart window) are built ONCE PER DRAIN PASS, not once per row — `RenderMemo` + `memoize`, keyed by `notificationId` + the exact chart-token set the body asks for (two notify actions on one rule can compose different bodies). This exists because composed emails now fan out one row per recipient (`notificationRecipientService.planComposedEmails`), so an alert routed to a dozen people would otherwise re-run the same sample queries and rasterize the same graphs a dozen times on a 15s tick. **Keep it per-pass** — a module-level cache would serve a stale snapshot to the escalation email whose whole point is showing the CURRENT hour. Promises are cached, not results, so rows in one concurrency chunk share a build. Pinned by `tests/unit/alertChartRenderMemo.test.ts`.
+- One alert's charts (and its loss-chart window) are built ONCE PER DRAIN PASS, not once per row — `RenderMemo` + `memoize`, keyed by `notificationId` + the exact chart-token set the body asks for (two notify actions on one rule can compose different bodies). It was introduced when composed emails fanned out one delivery row per recipient so each could carry its own acknowledge token; that fan-out is gone (business rule 25), but one alert still drains as several rows — a rule with more than one notify action, several channels, or a web-push target with a row per enrolled device — and each would otherwise re-run the same sample queries and rasterize the same graphs on a 15s tick. **Keep it per-pass** — a module-level cache would serve a stale snapshot to the escalation email whose whole point is showing the CURRENT hour. Promises are cached, not results, so rows in one concurrency chunk share a build. Pinned by `tests/unit/alertChartRenderMemo.test.ts`.
 - Bounded concurrency on sends; one summary audit Event per non-empty drain (no per-delivery Event spam).
 
 **When changing this:** scale-check at 2000 assets — the batch (`BATCH_SIZE`) + concurrency cap keep a delivery spike from stampeding SMTP/webhook endpoints. Never row-scan the full table; always filter `status=pending, attempts<MAX`.

@@ -131,6 +131,50 @@ export async function listNotifications(params: ListParams) {
 }
 
 /**
+ * One alert, for the acknowledge page (public/alert-ack.html).
+ *
+ * Region-scoped through the SAME predicate the list uses — an operator scoped
+ * to a region must not reach an alert by typing its id — and returns null
+ * rather than throwing when it misses, so the page can say "this alert isn't
+ * here any more" instead of rendering an error. `rule.name` rides along because
+ * the page shows what fired, and `requireAckNote` because it decides whether
+ * the note field is optional (business rule 25 keeps the ENFORCEMENT in
+ * acknowledgeNotifications; this is only what the form asks for).
+ */
+export async function getNotificationForViewer(
+  id: string,
+  viewerRegionTags: string[],
+): Promise<(Record<string, unknown> & { requireAckNote: boolean }) | null> {
+  const region = regionScopeWhere(viewerRegionTags);
+  const row = await prisma.notification.findFirst({
+    where: region ? { AND: [{ id }, region] } : { id },
+    select: {
+      id: true,
+      message: true,
+      severity: true,
+      assetId: true,
+      assetHostname: true,
+      dimension: true,
+      metric: true,
+      triggeredAt: true,
+      testRun: true,
+      acknowledged: true,
+      acknowledgedBy: true,
+      acknowledgedAt: true,
+      acknowledgeNote: true,
+      cleared: true,
+      clearedAt: true,
+      // A rule-less alert (a test fire, or one whose automation was deleted —
+      // ruleId is SetNull) has no note policy left to enforce.
+      rule: { select: { name: true, requireAckNote: true } },
+    },
+  });
+  if (!row) return null;
+  const { rule, ...rest } = row;
+  return { ...rest, ruleName: rule?.name ?? null, requireAckNote: rule?.requireAckNote === true };
+}
+
+/**
  * Run each alert's automation reset actions before an OPERATOR clear.
  *
  * Lives here rather than in the engine because the engine owns the paths where
@@ -182,7 +226,7 @@ async function runResetActionsForCleared(ids: string[], actor: string): Promise<
 }
 
 /** How an acknowledgement reached us — audit detail only, never a gate. */
-export type AckSource = "ui" | "ack_link" | "web_push_action";
+export type AckSource = "ui" | "ack_page" | "web_push_action";
 
 /**
  * Acknowledge a batch of notifications, stamping a shared optional note.

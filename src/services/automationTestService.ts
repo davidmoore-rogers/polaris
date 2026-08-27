@@ -57,7 +57,11 @@ export interface TestDeliveryResult {
   message: string;
   deliveries: Array<{ transport: string; target: string; status: string; error: string | null }>;
   skipped: SkippedAction[];
-  ackLinks: { minted: number; disabled: boolean; reason?: string };
+  /** Whether the delivered message could carry a working Acknowledge button.
+   *  No longer a COUNT: the link is one URL per alert rather than a token per
+   *  recipient (business rule 25), so the only question left is whether this
+   *  install has a public URL to build it from. */
+  ackLinks: { enabled: boolean; reason?: string };
   timedOut?: boolean;
 }
 
@@ -246,7 +250,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
       message: "Test Event written — look for notification.triggered in the Events tab.",
       deliveries: [],
       skipped: [],
-      ackLinks: { minted: 0, disabled: true, reason: "an Event carries no acknowledge link" },
+      ackLinks: { enabled: false, reason: "an Event carries no acknowledge link" },
     };
   }
 
@@ -258,7 +262,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
       message: skipped[0]?.reason ?? "Nothing to deliver for that action",
       deliveries: [],
       skipped,
-      ackLinks: { minted: 0, disabled: true },
+      ackLinks: { enabled: false },
     };
   }
 
@@ -310,14 +314,12 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     where: { notificationId: notif.id },
     select: { transport: true, target: true, status: true, error: true, meta: true },
   });
-  const minted = rows.filter((r) => {
-    const m = r.meta && typeof r.meta === "object" ? (r.meta as Record<string, unknown>) : null;
-    return !!m?.ack;
-  }).length;
-
   const sent = rows.filter((r) => r.status === "sent").length;
   const failed = rows.filter((r) => r.status === "failed");
   const ok = sent > 0 && failed.length === 0;
+  // The acknowledge link resolves against POLARIS_PUBLIC_URL; without one a
+  // relative path in an inbox points at nothing, so the button renders away.
+  const ackLinksEnabled = Boolean(process.env.POLARIS_PUBLIC_URL);
 
   await logEvent({
     action: "automation.test_delivery",
@@ -328,7 +330,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     // "recipients" mode reached real people — that belongs above info.
     level: mode === "recipients" ? "warning" : "info",
     message: `Delivery test for "${rule.name}": ${sent} sent, ${failed.length} failed (${mode === "self" ? "sender only" : "configured recipients"})`,
-    details: { mode, rows: rows.length, sent, failed: failed.length, skipped, ackLinksMinted: minted },
+    details: { mode, rows: rows.length, sent, failed: failed.length, skipped, ackLinks: ackLinksEnabled },
   });
 
   const detail = failed.length ? ` — ${failed[0]!.error ?? "delivery failed"}` : "";
@@ -344,9 +346,8 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     deliveries: rows.map((r) => ({ transport: r.transport, target: r.target, status: r.status, error: r.error })),
     skipped,
     ackLinks: {
-      minted,
-      disabled: minted === 0,
-      ...(minted === 0 && !process.env.POLARIS_PUBLIC_URL ? { reason: "POLARIS_PUBLIC_URL is not set, so no acknowledge links can be built" } : {}),
+      enabled: ackLinksEnabled,
+      ...(ackLinksEnabled ? {} : { reason: "POLARIS_PUBLIC_URL is not set, so no acknowledge link can be built" }),
     },
     ...(timedOut ? { timedOut } : {}),
   };

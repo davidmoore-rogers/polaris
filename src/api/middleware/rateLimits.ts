@@ -129,17 +129,3 @@ export const contactSearchLimiter = makeRateLimiter({
   max: 600,
   message: "Too many recipient searches — please slow down.",
 });
-
-/**
- * One-click acknowledge links (/ack/:token) — the only unauthenticated
- * state-changing surface in Polaris. Deliberately generous, for the same
- * reason entraProxyLoginLimiter is: the credential is a 192-bit single-use
- * token, so this is not a guessable surface worth throttling hard, and a
- * whole office shares one egress IP. What it does bound is a mail-security
- * gateway that rewrites and re-fetches every link in every alert email.
- */
-export const ackLinkLimiter = makeRateLimiter({
-  windowMs: 5 * 60 * 1000,
-  max: 300,
-  message: "Too many requests — please retry shortly.",
-});

@@ -3,9 +3,9 @@
  * needs a note" policy (NotificationRule.requireAckNote).
  *
  * The flag is only worth anything if it is enforced where the WRITE happens:
- * four surfaces acknowledge (the Alerts tab, the mobile list, the emailed
- * one-click link, the web-push action button) and three of them can do it
- * without ever rendering a form. So the modal's required field is a courtesy
+ * three surfaces acknowledge (the Alerts tab, the mobile list, and the
+ * acknowledge page an emailed or pushed Acknowledge button opens), and each
+ * asks for the note in its own markup. So every required field is a courtesy
  * and acknowledgeNotifications' refusal is the control — which is what these
  * two pure helpers behind it pin down.
  */

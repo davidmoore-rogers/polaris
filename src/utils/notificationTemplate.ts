@@ -31,12 +31,13 @@ export interface TemplateVariable {
  * asset-detail select in notificationEngine).
  *
  * ONE DELIBERATE EXCEPTION: `{ack}` has NO key in buildTemplateContext. Its
- * value is per-RECIPIENT (a single-use token bound to one user), while the
- * context is built once per fire and snapshotted onto Notification.templateCtx
- * — shared by every recipient and persisted. Giving it a context key would
- * render it to "" at compose time and leave nothing for the later pass to
- * substitute. It is filled instead by substituteAckToken() during delivery
- * expansion, which works precisely because unknown tokens are left literal.
+ * value is built from the Notification's own id, and the context is finished
+ * BEFORE that row exists — `prisma.notification.create` is handed the completed
+ * ctx to snapshot onto templateCtx. Giving it a context key would render it to
+ * "" at compose time and leave nothing for the later pass to substitute. It is
+ * filled instead by substituteAckToken() during delivery expansion, which works
+ * precisely because unknown tokens are left literal. (It is one URL per ALERT,
+ * not per recipient — see business rule 25.)
  */
 export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{asset}", label: "Asset", description: "Asset hostname (or id / \"host\")", group: "notification" },
@@ -58,7 +59,7 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{time}", label: "Time", description: "Trigger time (ISO-8601)", group: "notification" },
   { token: "{time.local}", label: "Time (readable)", description: "Trigger time in the Polaris server's own timezone, e.g. \"Aug 12, 2026, 1:46 PM CDT\" — what the default email prints", group: "notification" },
   { token: "{link}", label: "Link", description: "Notifications page URL (empty if POLARIS_PUBLIC_URL unset)", group: "notification" },
-  { token: "{ack}", label: "Acknowledge link", description: "One-click acknowledge URL — resolved per recipient at send time. Empty for address-book/typed recipients (only Polaris users can acknowledge) and when POLARIS_PUBLIC_URL is unset", group: "notification" },
+  { token: "{ack}", label: "Acknowledge link", description: "URL of this alert's acknowledge page in Polaris — the reader signs in (unless they already are), adds a note and acknowledges. The same link for every recipient; empty when POLARIS_PUBLIC_URL is unset", group: "notification" },
   { token: "{asset.link}", label: "Open asset", description: "URL that opens this device in Polaris (empty if POLARIS_PUBLIC_URL unset)", group: "asset" },
   { token: "{asset.connectedSwitch}", label: "Connected switch", description: "Switch/port the device was last seen on, e.g. FS-248E-01/port15", group: "asset" },
   { token: "{asset.connectedAp}", label: "Connected AP", description: "Access point the device was last seen on", group: "asset" },
@@ -395,15 +396,26 @@ export function assetPageUrl(assetId: string | null | undefined): string | null 
   return `${base.replace(/\/$/, "")}/assets.html#view=asset:${encodeURIComponent(assetId)}`;
 }
 
+/** The acknowledge page's path for ONE alert. Shared by both callers below. */
+function ackPath(notificationId: string): string {
+  return `/alert-ack.html?id=${encodeURIComponent(notificationId)}`;
+}
+
 /**
- * One-click acknowledge URL for an EMAIL recipient. Null without a public URL,
- * mirroring notificationsPageUrl: a relative link in a mail client resolves
- * against nothing.
+ * Acknowledge URL for an EMAIL body. Null without a public URL, mirroring
+ * notificationsPageUrl: a relative link in a mail client resolves against
+ * nothing.
+ *
+ * The URL names the ALERT, never the recipient — the page behind it is an
+ * ordinary logged-in Polaris page, so WHO acknowledged comes from the session
+ * the reader signs into rather than from the link. That is what lets one
+ * composed body carry a working button for every recipient at once, instead of
+ * fanning the send out one message per person (business rule 25).
  */
-export function ackUrlForEmail(token: string): string | null {
+export function ackUrlForEmail(notificationId: string): string | null {
   const base = process.env.POLARIS_PUBLIC_URL;
   if (!base) return null;
-  return `${base.replace(/\/$/, "")}/ack/${encodeURIComponent(token)}`;
+  return `${base.replace(/\/$/, "")}${ackPath(notificationId)}`;
 }
 
 /**
@@ -412,20 +424,20 @@ export function ackUrlForEmail(token: string): string | null {
  * origin, so push acknowledgement keeps working on installs that never set a
  * public URL.
  */
-export function ackUrlForPush(token: string): string {
+export function ackUrlForPush(notificationId: string): string {
   const base = process.env.POLARIS_PUBLIC_URL;
-  const path = `/ack/${encodeURIComponent(token)}`;
+  const path = ackPath(notificationId);
   return base ? `${base.replace(/\/$/, "")}${path}` : path;
 }
 
 const ACK_TOKEN_RE = /\{ack\}/g;
 
 /**
- * Fill the deferred `{ack}` token once the recipient is known. Called at
- * delivery expansion, not at compose time — see the TEMPLATE_VARIABLES note.
- * A null url (recipient can't acknowledge, or no public URL) renders empty, so
- * a template that mentions {ack} degrades to a body without a link rather than
- * showing the literal token to a contact who could never use it.
+ * Fill the deferred `{ack}` token once the alert has an id. Called at delivery
+ * expansion, not at compose time — see the TEMPLATE_VARIABLES note.
+ * A null url (no POLARIS_PUBLIC_URL, so nothing in the mail could resolve)
+ * renders empty, so a template that mentions {ack} degrades to a body without a
+ * link rather than mailing the literal token.
  */
 export function substituteAckToken(
   text: string,

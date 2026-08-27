@@ -162,60 +162,53 @@ describe("notificationclick", () => {
 });
 
 describe("acknowledge action", () => {
-  const ACK = ORIGIN + "/ack/polaris_ack_tok";
+  // The alert's acknowledge PAGE, not a token link — business rule 25. The
+  // same URL reaches every recipient, and the page behind it decides who may
+  // act, which is why the button below is unconditional.
+  const ACK = ORIGIN + "/alert-ack.html?id=n1";
   const ackNotification = (over?: any) => ({
     close: vi.fn(),
     data: { url: ORIGIN + "/automations.html", ackUrl: ACK, notificationId: "n1", ...over },
   });
 
-  it("offers the button only when the recipient got a link", async () => {
+  it("offers the button whenever the payload carries the page URL", async () => {
     const withLink = makeSelf();
     await fire(withLink.handlers, "push", { data: { json: () => ({ title: "t", ackUrl: ACK, notificationId: "n1" }) } });
     expect(withLink.shown[0].options.actions).toEqual([{ action: "ack", title: "Acknowledge" }]);
     expect(withLink.shown[0].options.data.ackUrl).toBe(ACK);
 
-    // A contact / typed address / unentitled user gets no token, so no button.
+    // A pre-cutover payload (or an install with no public URL) sends none, and
+    // the worker must not render a button that goes nowhere.
     const without = makeSelf();
     await fire(without.handlers, "push", { data: { json: () => ({ title: "t", notificationId: "n1" }) } });
     expect(without.shown[0].options.actions).toBeUndefined();
     expect(without.shown[0].options.data.ackUrl).toBeNull();
   });
 
-  it("POSTs the token with no cookie and no CSRF header, then confirms in place", async () => {
-    const h = makeSelf({ clients: [ORIGIN + "/index.html"] });
+  it("OPENS the acknowledge page and acknowledges nothing itself", async () => {
+    const h = makeSelf({ clients: [] });
     await fire(h.handlers, "notificationclick", { action: "ack", notification: ackNotification() });
 
-    const post = h.fetches.find((f) => f.init && f.init.method === "POST");
-    expect(post!.url).toBe(ACK);
-    // The token IS the credential — sending the session cookie would drag the
-    // request under CSRF for no benefit.
-    expect(post!.init.credentials).toBe("omit");
-    expect(post!.init.headers["X-CSRF-Token"]).toBeUndefined();
-    expect(post!.init.headers.Accept).toBe("application/json");
+    // The whole point of the cutover: no request leaves the worker. Who
+    // acknowledged is the session on the page, and the note is typed there.
+    expect(h.fetches.filter((f) => f.init && f.init.method === "POST")).toHaveLength(0);
+    expect(h.shown).toHaveLength(0);
+    // `src=push` is audit provenance the page forwards on acknowledge.
+    expect(h.opened).toEqual([ACK + "&src=push"]);
+  });
 
-    // Replaces the alert in the tray (same tag) instead of opening the app.
-    expect(h.shown).toHaveLength(1);
-    expect(h.shown[0].title).toBe("Acknowledged");
-    expect(h.shown[0].options.tag).toBe("n1");
-    expect(h.shown[0].options.silent).toBe(true);
-    expect(h.navigated).toHaveLength(0);
+  it("navigates an already-open tab to the page rather than opening a second one", async () => {
+    const h = makeSelf({ clients: [ORIGIN + "/index.html"] });
+    await fire(h.handlers, "notificationclick", { action: "ack", notification: ackNotification() });
     expect(h.opened).toHaveLength(0);
+    expect(h.navigated).toEqual([{ from: ORIGIN + "/index.html", to: ACK + "&src=push" }]);
   });
 
-  it("hands a refused or unreachable acknowledge to the app instead of swallowing it", async () => {
-    for (const mode of ["status", "throw"] as const) {
-      const h = makeSelf({ clients: [], fetchFails: mode });
-      await fire(h.handlers, "notificationclick", { action: "ack", notification: ackNotification() });
-      expect(h.shown, `mode ${mode}`).toHaveLength(0);
-      expect(h.opened, `mode ${mode}`).toEqual([ORIGIN + "/automations.html"]);
-    }
-  });
-
-  it("never forwards the POST to another origin", async () => {
+  it("never navigates to another origin", async () => {
     const h = makeSelf({ clients: [] });
     await fire(h.handlers, "notificationclick", {
       action: "ack",
-      notification: ackNotification({ ackUrl: "https://evil.example.net/ack/x" }),
+      notification: ackNotification({ ackUrl: "https://evil.example.net/alert-ack.html?id=n1" }),
     });
     expect(h.fetches).toHaveLength(0);
     expect(h.opened).toEqual([ORIGIN + "/automations.html"]);
