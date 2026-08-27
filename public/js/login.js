@@ -135,9 +135,7 @@ document.getElementById("btn-sso").addEventListener("click", function () {
 // Check OIDC config and show its button if enabled
 (async function () {
   try {
-    var res = await fetch("/api/v1/auth/oidc/config");
-    if (!res.ok) return;
-    var cfg = await res.json();
+    var cfg = await PolarisAuthFlow.fetchOidcConfig();
     if (!cfg.enabled) return;
     document.getElementById("btn-oidc").style.display = "";
     document.getElementById("sso-section").style.display = "block";

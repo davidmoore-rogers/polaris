@@ -61,10 +61,22 @@
       }
     },
 
-    /** GET /auth/azure/config → config object ({ enabled: false } on any failure). */
+    /** GET /auth/azure/config → config object ({ enabled: false } on any failure).
+     *  Carries `skipLoginPage`, which is a SHARED setting rather than a SAML
+     *  one — an OIDC-only install reads it from here too. */
     fetchAzureConfig: async function () {
       try {
         var res = await fetch("/api/v1/auth/azure/config");
+        return res.ok ? await res.json() : { enabled: false };
+      } catch (_) {
+        return { enabled: false };
+      }
+    },
+
+    /** GET /auth/oidc/config → { enabled } ({ enabled: false } on any failure). */
+    fetchOidcConfig: async function () {
+      try {
+        var res = await fetch("/api/v1/auth/oidc/config");
         return res.ok ? await res.json() : { enabled: false };
       } catch (_) {
         return { enabled: false };

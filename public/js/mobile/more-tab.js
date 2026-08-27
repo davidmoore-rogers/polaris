@@ -487,6 +487,13 @@
     document.getElementById("sign-out-btn").addEventListener("click", function () {
       // _csrfHeaders is the api.js canonical (carries the stale-Secure-cookie
       // detection this inline copy bypassed — 2026-08 audit).
+      //
+      // Mark the sign-out first: with "Skip login page" on, the login screen
+      // redirects to SSO, and a silent (prompt=none) provider would sign the
+      // operator straight back in. The marker buys one render of the local
+      // form, matching the desktop, whose logout lands on the unprotected
+      // /login.html.
+      PolarisAuth.markSignedOut();
       fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() })
         .finally(function () { window.PolarisMobile.boot(); });
     });

@@ -102,7 +102,74 @@
     document.addEventListener("focusin", scheduleKeyboardFit);
   }
 
-  function renderLogin(app) {
+  // ─── "Skip login page" ───────────────────────────────────────────────
+  //
+  // The desktop enforces the setting server-side, in app.ts's protected-page
+  // redirect. /mobile.html is deliberately NOT a protected page — the phone SPA
+  // draws its own login screen, so an unauthenticated visitor has to be allowed
+  // to load the page — which left the phone as the one surface still offering a
+  // username/password form the setting says should not exist. So the SPA
+  // enforces it here, at the single choke point where a local login gets drawn:
+  // boot, session-expiry 401, and Cancel out of the TOTP step all land in
+  // renderLogin.
+  //
+  // Same provider precedence as app.ts: SAML first, OIDC as the fallback, and
+  // `skipLoginPage` rides the azure config payload because it is a shared
+  // setting rather than a SAML one. If neither provider resolves we fall
+  // through and draw the form — the flag can only be set by an SSO-authenticated
+  // admin, but SSO can be torn down afterwards, and a phone with no way back in
+  // is worse than one showing a form the desktop would have hidden.
+  //
+  // One exception: an explicit Sign out. With skip on and a silent SSO
+  // (prompt=none) the redirect would sign the operator straight back in and the
+  // button would look broken. The desktop dodges this by landing logout on
+  // /login.html, which is not a protected page and so is never redirected; the
+  // phone has no such page, so more-tab marks the transition instead and the
+  // check below spends the marker to draw the form once.
+  var SIGNED_OUT_KEY = "polaris-mobile-signed-out";
+
+  function markSignedOut() {
+    try { sessionStorage.setItem(SIGNED_OUT_KEY, "1"); } catch (_) {}
+  }
+
+  function takeSignedOutFlag() {
+    try {
+      var v = sessionStorage.getItem(SIGNED_OUT_KEY);
+      sessionStorage.removeItem(SIGNED_OUT_KEY);
+      return v === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function redirectToSsoIfLoginSkipped() {
+    var justSignedOut = takeSignedOutFlag();
+    var azure = await loadSsoConfig();
+    if (justSignedOut) return false;
+    if (!azure || !azure.skipLoginPage) return false;
+    if (azure.enabled) {
+      window.location.href = "/api/v1/auth/azure/login?prompt=none";
+      return true;
+    }
+    var oidc = await PolarisAuthFlow.fetchOidcConfig();
+    if (oidc && oidc.enabled) {
+      window.location.href = "/api/v1/auth/oidc/login";
+      return true;
+    }
+    return false;
+  }
+
+  // Async because of the skip-login check above: hold the spinner while it
+  // resolves rather than painting a login form we may be about to navigate
+  // away from. Callers fire-and-forget — nothing waits on the login screen.
+  async function renderLogin(app) {
+    app.dataset.tab = "";
+    app.innerHTML = '<div class="loading-screen"><div class="spinner"></div></div>';
+    if (await redirectToSsoIfLoginSkipped()) return;  // navigating away; leave the spinner up
+    renderLoginForm(app);
+  }
+
+  function renderLoginForm(app) {
     app.dataset.tab = "";
     app.innerHTML = ''
       + '<div class="app-body">'
@@ -306,5 +373,6 @@
 
   window.PolarisAuth = {
     renderLogin: renderLogin,
+    markSignedOut: markSignedOut,
   };
 })();
