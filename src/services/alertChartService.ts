@@ -22,6 +22,7 @@
  */
 
 import { prisma } from "../db.js";
+import { foldProbeOutages } from "./probeOutageService.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
@@ -272,10 +273,11 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
   return thin(rows.map((r) => ({ t: r.timestamp.getTime(), v: r.responseTimeMs! })));
 }
 
-/** The charts that shade failed polls: the device-story trio. Not the loss
+/** The charts that DIVE on a failed poll: the device-story trio. Not the loss
  *  chart (it IS the failures, drawn as a ratio) and not the sensor chart
- *  (its red shading is the device's own alarm bit — two red vocabularies on
- *  one chart would be unreadable). */
+ *  (its red is a band for the device's own alarm bit — two red vocabularies on
+ *  one chart would be unreadable, and the two claims are different: an alarm
+ *  is about a reading that is still arriving). */
 const FAIL_SPAN_TOKENS: ReadonlySet<ChartToken> = new Set(["chart.cpu", "chart.memory", "chart.responseTime"]);
 
 export interface FailSpanSeries {
@@ -294,25 +296,19 @@ export interface FailSpanSeries {
  * email sends is down up to the right edge, not up to its last poll.
  */
 export function failSpansFrom(rows: Array<{ timestamp: Date; success: boolean }>, windowEndMs: number): FailSpanSeries {
-  const spans: Array<{ from: number; to: number }> = [];
-  let open: { from: number; to: number } | null = null;
-  let failedCount = 0;
-  for (const r of rows) {
-    const t = r.timestamp.getTime();
-    if (!r.success) {
-      failedCount++;
-      if (open) open.to = t;
-      else open = { from: t, to: t };
-    } else if (open) {
-      spans.push(open);
-      open = null;
-    }
-  }
-  if (open) {
-    open.to = Math.max(open.to, windowEndMs);
-    spans.push(open);
-  }
-  return { spans, failedCount };
+  // ONE fold, shared with the in-app charts (probeOutageService), so an email
+  // and the device page can't disagree about where an outage started and
+  // ended. `openToMs` is what carries a still-failing run out to the right
+  // edge: a device that is down as the email sends is down up to "now".
+  const windows = foldProbeOutages(
+    rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success })),
+    0,
+    windowEndMs,
+  );
+  return {
+    spans: windows.map((w) => ({ from: w.from.getTime(), to: w.to.getTime() })),
+    failedCount: rows.reduce((n, r) => (r.success ? n : n + 1), 0),
+  };
 }
 
 /**

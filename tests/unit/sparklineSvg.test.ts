@@ -180,68 +180,88 @@ describe("failed-poll spans", () => {
   // them is an interpolation across the exact minutes nothing answered.
   const fiveMin = series([10, 20, 30, 40, 50]); // T0 .. T0+4min
 
-  it("shades the failed window red", () => {
-    const svg = sparklineSvg(fiveMin, {
-      label: "CPU",
-      failSpans: [{ from: T0 + 60_000, to: T0 + 120_000 }],
-      from: T0,
-      to: T0 + 240_000,
-    });
-    expect(svg).toContain('fill="#dc2626"');
+  // What an outage actually looks like in the data: samples for three minutes,
+  // nothing for the next six (the heavy cadence doesn't run while the device is
+  // down), then samples again. The failure window sits inside that hole.
+  const withHole = [
+    { t: T0, v: 10 }, { t: T0 + 60_000, v: 20 }, { t: T0 + 120_000, v: 30 },
+    { t: T0 + 480_000, v: 40 }, { t: T0 + 540_000, v: 50 }, { t: T0 + 600_000, v: 60 },
+  ];
+  const holeSpan = [{ from: T0 + 180_000, to: T0 + 420_000 }];
+  const holeWindow = { from: T0, to: T0 + 600_000 };
+
+  it("dives to the baseline in red instead of shading a band", () => {
+    // Bands mean "the gap is explained" — that vocabulary belongs to
+    // maintenance windows. A missed poll is the opposite, so it gets the dive.
+    const svg = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
+    expect(svg).toContain('#d32f2f');
+    expect(svg).not.toContain('fill="#dc2626"');
+  });
+
+  it("plots the failure at the chart baseline, never at a value", () => {
+    const svg = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
+    // PAD_T (22) + plotH (120 - 22 - 18) = 102.
+    const dots = [...svg.matchAll(/<circle cx="[\d.]+" cy="([\d.]+)" r="3" fill="#d32f2f"\/>/g)];
+    expect(dots).toHaveLength(2);
+    dots.forEach((m) => expect(Number(m[1])).toBeCloseTo(102, 1));
   });
 
   it("breaks the line across the gap instead of interpolating through it", () => {
-    const solid = sparklineSvg(fiveMin, { label: "CPU", from: T0, to: T0 + 240_000 });
-    const broken = sparklineSvg(fiveMin, {
-      label: "CPU",
-      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
-      from: T0,
-      to: T0 + 240_000,
-    });
+    const solid = sparklineSvg(withHole, { label: "CPU", ...holeWindow });
+    const dived = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
+    // Without the outage the hole is bridged by one unbroken line.
     expect((solid.match(/<polyline/g) ?? []).length).toBe(1);
-    // Two runs — before the gap and after it.
-    expect((broken.match(/<polyline/g) ?? []).length).toBe(2);
+    // With it: samples, the red baseline run, samples again.
+    expect((dived.match(/<polyline/g) ?? []).length).toBe(3);
+    expect(dived).toContain('stroke="#d32f2f"');
   });
 
-  it("fades the bridging segment out and back in rather than dropping it", () => {
-    // Nothing at all across the gap would read as a chart that stopped
-    // rendering; the fade says "the line goes through here, we just don't know
-    // where".
-    const svg = sparklineSvg(fiveMin, {
-      label: "CPU",
-      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
-      from: T0,
-      to: T0 + 240_000,
-    });
-    expect(svg).toContain("<linearGradient");
-    expect(svg).toContain("stop-opacity=\"0.05\"");
+  it("fades each transition between the series color and red", () => {
+    // A hard color jump would read as two unrelated lines; the fade keeps the
+    // dive legible as one.
+    const svg = sparklineSvg(withHole, { label: "CPU", color: "#2563eb", failSpans: holeSpan, ...holeWindow });
+    // One gradient in, one back out.
+    expect((svg.match(/<linearGradient/g) ?? []).length).toBe(2);
+    expect(svg).toContain('stop-color="#2563eb"');
+    expect(svg).toContain('stop-color="#d32f2f"');
     expect(svg).toMatch(/stroke="url\(#polaris-fade-\d+\)"/);
   });
 
-  it("fades out to the right when the device is still down as the email sends", () => {
+  it("rides the dive to the right edge when the device is still down as the email sends", () => {
     const svg = sparklineSvg(fiveMin, {
       label: "CPU",
-      failSpans: [{ from: T0 + 240_000, to: T0 + 600_000 }],
+      failSpans: [{ from: T0 + 300_000, to: T0 + 600_000 }],
       from: T0,
       to: T0 + 600_000,
     });
-    // One unbroken run (the failures are all after the last sample) plus a
-    // trailing fade.
-    expect((svg.match(/<polyline/g) ?? []).length).toBe(1);
-    expect(svg).toContain("<linearGradient");
-    expect(svg).toContain("stop-opacity=\"0\"");
+    // The samples' run, plus a failure run along the baseline out to "now".
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(2);
+    expect(svg).toContain('stroke="#d32f2f"');
+    // The failure run reaches the right edge of the plot (width 520 - PAD_R 12).
+    expect(svg).toMatch(/508\.0,102\.0/);
   });
 
   it("does not fill the area under a gap", () => {
     // The translucent fill is what makes an outage look like a period of
-    // readings; each run closes at its own extent instead.
+    // readings; each OK run closes at its own extent instead, and the failure
+    // run — which sits ON the baseline — gets no fill at all.
+    const svg = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
+    expect((svg.match(/<polygon/g) ?? []).length).toBe(2);
+  });
+
+  it("ignores a window the series has data inside — an agent kept pushing", () => {
+    // The probe transport failed but the host's agent is not gated on
+    // monitorStatus and kept reporting. Diving a line that HAS data would
+    // misreport what we hold — and marking only the window's edges would leave
+    // the interior samples in place, zigzagging in and out of the baseline.
     const svg = sparklineSvg(fiveMin, {
       label: "CPU",
-      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
+      failSpans: [{ from: T0 + 60_000, to: T0 + 180_000 }],
       from: T0,
       to: T0 + 240_000,
     });
-    expect((svg.match(/<polygon/g) ?? []).length).toBe(2);
+    expect(svg).not.toContain("#d32f2f");
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(1);
   });
 
   it("ignores a span outside the charted window", () => {
@@ -251,23 +271,18 @@ describe("failed-poll spans", () => {
       from: T0,
       to: T0 + 240_000,
     });
-    expect(svg).not.toContain('fill="#dc2626"');
+    expect(svg).not.toContain('fill="#d32f2f"');
     expect((svg.match(/<polyline/g) ?? []).length).toBe(1);
   });
 
   it("draws nothing extra when no poll failed", () => {
     const svg = sparklineSvg(fiveMin, { label: "CPU", failSpans: [], from: T0, to: T0 + 240_000 });
-    expect(svg).not.toContain('fill="#dc2626"');
+    expect(svg).not.toContain('fill="#d32f2f"');
     expect(svg).not.toContain("<linearGradient");
   });
 
   it("still stays self-contained and NaN-free with gaps", () => {
-    const svg = sparklineSvg(fiveMin, {
-      label: "CPU",
-      failSpans: [{ from: T0 + 90_000, to: T0 + 150_000 }],
-      from: T0,
-      to: T0 + 240_000,
-    });
+    const svg = sparklineSvg(withHole, { label: "CPU", failSpans: holeSpan, ...holeWindow });
     expect(svg).not.toContain("NaN");
     // The gradient is an in-document reference, not a fetch — resvg has no
     // network and a mail client would block one.

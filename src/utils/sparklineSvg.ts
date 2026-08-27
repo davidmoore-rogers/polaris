@@ -64,15 +64,30 @@ export interface SparklineOptions {
    */
   alarmSpans?: Array<{ from: number; to: number }>;
   /**
-   * Spans (epoch ms) where the device's polls FAILED. Shaded red like
-   * alarmSpans, and — the part that matters — the line is BROKEN across each
-   * span: the segment bridging a failure fades out and back in instead of
-   * interpolating a healthy-looking straight line through the exact period
-   * nothing answered. A span still open at the last point fades the line out
-   * to the right rather than just stopping it.
+   * Spans (epoch ms) where the device's polls FAILED. Rendered as the DIVE:
+   * the line drops to the chart baseline in red across the span and climbs
+   * back out, each transition fading between the series color and red, with a
+   * red dot on every failure point. This is the one missed-poll treatment —
+   * UI-GUIDE section 15 — shared with the in-app and phone charts, so an
+   * outage looks the same in an alert email as it does on the device page.
+   *
+   * Deliberately NOT a red band. Bands mean "the gap is explained" (the in-app
+   * charts shade maintenance windows purple), and a missed poll is the
+   * opposite: the thing the operator is looking for. `alarmSpans` keeps its
+   * band because a sensor's own alarm bit is a different claim about a reading
+   * that is still arriving.
+   *
+   * A span still open at the last point rides to the right edge, because a
+   * device that is down as the email sends is down up to "now".
    */
   failSpans?: Array<{ from: number; to: number }>;
 }
+
+/** The missed-poll red. Shared with the in-app charts' _CHART_FAIL_COLOR so
+ *  one outage is one color across email, desktop and phone. Distinct from the
+ *  #dc2626 used for alarm bands and the threshold line, which are different
+ *  claims. */
+const FAIL_COLOR = "#d32f2f";
 
 const W = 520;
 const H = 120;
@@ -206,9 +221,10 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     })
     .join("");
 
-  // Red bands sit BEHIND everything (drawn first) so the line stays readable
+  // Alarm bands sit BEHIND everything (drawn first) so the line stays readable
   // over them. Clamped to the plot, and a zero-width span still gets ~2px so a
-  // single alarming/failed sample is visible rather than invisible.
+  // single alarming sample is visible rather than invisible. Failed polls do
+  // NOT get a band — see failSpans below.
   const bandRects = (spans: Array<{ from: number; to: number }>, opacity: string): string =>
     spans
       .map((s) => {
@@ -220,76 +236,113 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
       .join("");
   const failSpans = (opts.failSpans ?? []).filter((s) => s.to > from && s.from < to).sort((a, b) => a.from - b.from);
   const alarmBands = bandRects(opts.alarmSpans ?? [], "0.13");
-  const failBands = bandRects(failSpans, "0.10");
 
-  // Failure spans break the line into runs: interpolating straight across an
-  // outage draws a healthy-looking reading through the exact period nothing
-  // answered. Each gap is bridged by a gradient stroke that fades out and back
-  // in instead.
-  const gapBetween = (a: SparkPoint, b: SparkPoint) => failSpans.some((s) => s.to > a.t && s.from < b.t);
-  const runs: SparkPoint[][] = [];
-  for (const p of points) {
-    const cur = runs[runs.length - 1];
-    if (cur && !gapBetween(cur[cur.length - 1]!, p)) cur.push(p);
-    else runs.push([p]);
+  const baseY = PAD_T + plotH;
+
+  // Failed polls plot AT the baseline with no value of their own, so an outage
+  // reads as the line diving to zero (UI-GUIDE section 15) instead of bridging
+  // the hole or hiding behind a shaded band. One marker at each end of a span
+  // so the line drops and climbs back; a span narrower than that collapses to
+  // a single point, which is what one missed poll is.
+  //
+  // A window the series has DATA inside is skipped whole. An agent pushes on
+  // its own schedule and is not gated on monitorStatus, so an agent host can
+  // keep reporting CPU straight through an outage of the server-side probe
+  // transport; diving a line that has data would misreport what we hold. Same
+  // rule, same half-median-cadence guard, as _outageMarkers in the browser.
+  const sampleTimes = points.map((p) => p.t);
+  const cadences: number[] = [];
+  for (let i = 1; i < sampleTimes.length; i++) {
+    const dt = sampleTimes[i]! - sampleTimes[i - 1]!;
+    if (dt > 0) cadences.push(dt);
+  }
+  cadences.sort((a, b) => a - b);
+  const guardMs = cadences.length >= 2 ? cadences[Math.floor(cadences.length / 2)]! / 2 : 0;
+  // The whole window is skipped when the series has data anywhere in it
+  // (padded by the guard), not merely at its edges: dropping only the end
+  // markers would leave any interior samples in place and the line would dive,
+  // climb back for each of them, and dive again.
+  const hasData = (a: number, b: number) =>
+    guardMs > 0 && sampleTimes.some((st) => st > a - guardMs && st < b + guardMs);
+
+  const failTimes: number[] = [];
+  for (const sp of failSpans) {
+    const a = Math.max(sp.from, from);
+    const b = Math.min(sp.to, to);
+    if (hasData(a, b)) continue;
+    failTimes.push(a);
+    if (b > a) failTimes.push(b);
   }
 
-  const baseY = `${PAD_T + plotH}`;
+  type PlotPoint = { t: number; py: number; ok: boolean };
+  const plot: PlotPoint[] = [
+    ...points.map((p) => ({ t: p.t, py: y(p.v), ok: true })),
+    ...failTimes.map((t) => ({ t, py: baseY, ok: false })),
+  ].sort((a, b) => a.t - b.t);
+
   const defs: string[] = [];
   // Gradients are local defs, not external references — resvg resolves them
-  // in-document. Stops are in user space so the fade tracks the gap's own x.
-  const fadeLine = (x1: number, y1: number, x2: number, y2: number, kind: "bridge" | "out" | "in"): string => {
-    if (x2 - x1 < 1) return "";
+  // in-document. Stops are in user space so the fade tracks the segment's own
+  // geometry.
+  const fadeSegment = (a: PlotPoint, b: PlotPoint): string => {
+    const x1 = x(a.t), x2 = x(b.t);
     const id = `polaris-fade-${defs.length}`;
-    const stops =
-      kind === "bridge"
-        ? `<stop offset="0" stop-color="${color}" stop-opacity="0.9"/><stop offset="0.5" stop-color="${color}" stop-opacity="0.05"/><stop offset="1" stop-color="${color}" stop-opacity="0.9"/>`
-        : kind === "out"
-          ? `<stop offset="0" stop-color="${color}" stop-opacity="0.9"/><stop offset="1" stop-color="${color}" stop-opacity="0"/>`
-          : `<stop offset="0" stop-color="${color}" stop-opacity="0"/><stop offset="1" stop-color="${color}" stop-opacity="0.9"/>`;
     defs.push(
-      `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}">${stops}</linearGradient>`,
+      `<linearGradient id="${id}" gradientUnits="userSpaceOnUse" x1="${x1.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${b.py.toFixed(1)}">` +
+        `<stop offset="0" stop-color="${a.ok ? color : FAIL_COLOR}"/>` +
+        `<stop offset="1" stop-color="${b.ok ? color : FAIL_COLOR}"/>` +
+      `</linearGradient>`,
     );
-    return `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="url(#${id})" stroke-width="2" stroke-linecap="round"/>`;
+    return `<line x1="${x1.toFixed(1)}" y1="${a.py.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${b.py.toFixed(1)}" stroke="url(#${id})" stroke-width="2" stroke-linecap="round"/>`;
   };
+
+  // Runs of same-state points collapse into one polyline rather than a <line>
+  // per segment the way the desktop chart emits them: a FortiGate can land
+  // thousands of points in an hour, and per-segment elements would balloon the
+  // PNG. Same divergence, same reason, as the phone port.
+  const runs: PlotPoint[][] = [];
+  for (const p of plot) {
+    const cur = runs[runs.length - 1];
+    if (cur && cur[0]!.ok === p.ok) cur.push(p);
+    else runs.push([p]);
+  }
 
   const lineParts: string[] = [];
   const areaParts: string[] = [];
   const dotParts: string[] = [];
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i]!;
-    const rp = run.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`);
+    const stroke = run[0]!.ok ? color : FAIL_COLOR;
+    const rp = run.map((p) => `${x(p.t).toFixed(1)},${p.py.toFixed(1)}`);
     if (run.length === 1) {
-      // A single sample has no line to draw — mark it so it isn't invisible.
-      dotParts.push(`<circle cx="${x(run[0]!.t).toFixed(1)}" cy="${y(run[0]!.v).toFixed(1)}" r="3" fill="${color}"/>`);
+      // A lone point has no line to draw — mark it so it isn't invisible.
+      // Failures get the bigger dot below either way.
+      if (run[0]!.ok) dotParts.push(`<circle cx="${x(run[0]!.t).toFixed(1)}" cy="${run[0]!.py.toFixed(1)}" r="3" fill="${color}"/>`);
     } else {
       lineParts.push(
-        `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${rp.join(" ")}"/>`,
+        `<polyline fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${rp.join(" ")}"/>`,
       );
-      // The fill closes vertically at the run's own extent, so an outage gap
-      // isn't filled and a series that ends mid-window doesn't ramp to the
-      // corner.
-      areaParts.push(
-        `<polygon fill="${color}" fill-opacity="0.10" points="${x(run[0]!.t).toFixed(1)},${baseY} ${rp.join(" ")} ${x(run[run.length - 1]!.t).toFixed(1)},${baseY}"/>`,
-      );
+      // Only the OK runs carry the area fill: a failure run sits ON the
+      // baseline, so filling it would paint a zero-height sliver for nothing,
+      // and filling ACROSS the outage is the interpolation we're avoiding.
+      if (run[0]!.ok) {
+        areaParts.push(
+          `<polygon fill="${color}" fill-opacity="0.10" points="${x(run[0]!.t).toFixed(1)},${baseY} ${rp.join(" ")} ${x(run[run.length - 1]!.t).toFixed(1)},${baseY}"/>`,
+        );
+      }
     }
+    // Each OK<->fail transition fades between the two colors instead of
+    // jumping, so the dive reads as one line rather than two.
     if (i > 0) {
       const prev = runs[i - 1]!;
-      const a = prev[prev.length - 1]!;
-      const b = run[0]!;
-      lineParts.push(fadeLine(x(a.t), y(a.v), x(b.t), y(b.v), "bridge"));
+      lineParts.push(fadeSegment(prev[prev.length - 1]!, run[0]!));
     }
   }
-  // A failure open past the last point (still down as the email sends) fades
-  // the line out to the right; one open before the first point fades it in.
-  if (runs.length > 0) {
-    const first = runs[0]![0]!;
-    const lastRun = runs[runs.length - 1]!;
-    const last = lastRun[lastRun.length - 1]!;
-    const leadFroms = failSpans.filter((s) => s.from < first.t).map((s) => Math.max(s.from, from));
-    if (leadFroms.length) lineParts.push(fadeLine(x(Math.min(...leadFroms)), y(first.v), x(first.t), y(first.v), "in"));
-    const trailTos = failSpans.filter((s) => s.to > last.t).map((s) => Math.min(s.to, to));
-    if (trailTos.length) lineParts.push(fadeLine(x(last.t), y(last.v), x(Math.max(...trailTos)), y(last.v), "out"));
+  // Every failure also carries a red dot — bigger than the 1.5px series dots on
+  // the in-app chart, scaled here for the smaller plot — so a lone miss is
+  // visible and not a hairline notch.
+  for (const p of plot) {
+    if (!p.ok) dotParts.push(`<circle cx="${x(p.t).toFixed(1)}" cy="${p.py.toFixed(1)}" r="3" fill="${FAIL_COLOR}"/>`);
   }
   const defsBlock = defs.length ? `<defs>${defs.join("")}</defs>` : "";
   const line = lineParts.join("");
@@ -311,5 +364,5 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-${esc(timeAxisLabel(tSpan))}</text>` +
     `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
 
-  return head + defsBlock + alarmBands + failBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
+  return head + defsBlock + alarmBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
 }

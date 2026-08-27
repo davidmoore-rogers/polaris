@@ -103,14 +103,12 @@
       var from = +new Date(o.from);
       var to   = +new Date(o.to);
       if (!isFinite(from) || !isFinite(to)) return;
+      // Skip the WHOLE window when the series has data anywhere in it, not
+      // merely at its edges — see _outageMarkers in public/js/assets.js.
+      if (guardMs > 0 && times.some(function (t) { return t > from - guardMs && t < to + guardMs; })) return;
       markers.push(from);
       if (to > from) markers.push(to);
     });
-    if (guardMs > 0) {
-      markers = markers.filter(function (m) {
-        return !times.some(function (t) { return Math.abs(t - m) < guardMs; });
-      });
-    }
     return markers.sort(function (a, b) { return a - b; });
   }
 

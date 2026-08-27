@@ -893,7 +893,10 @@ acknowledge page can share it.
    so it can't push IP and location out of the first glance), then event rows.
 4. **Context block** — what was on the port, for an interface alert.
 5. **Charts** — last hour of the metrics that explain the alert, as inline CID
-   images, under one `data-section="charts"` row.
+   images, under one `data-section="charts"` row. **They are section 15's charts,
+   rasterized.** A missed poll dives to the baseline in red here exactly as it
+   does on the device page; the surface may diverge on size, palette and the
+   absence of hover, never on the shape of an outage.
 6. **Actions** — primary button in the severity colour, secondary outlined.
 7. **Footnote** — who sent it and which automation.
 
@@ -1082,9 +1085,16 @@ Hand-rolled SVG, one render function per chart, no charting library. Shared
 scale/clip/tooltip helpers live at the top of the assets module; the phone app
 ports the same rules into its own tiny helper.
 
+**Three surfaces, one set of rules.** The in-app charts, the phone app, and the
+charts rasterized into alert emails (section 13) all obey this section. They
+differ in size, in palette weight, and in whether a tooltip exists at all — but
+never in what a missed poll looks like. An operator who learns to read an
+outage on the device page must not have to learn it again from an email about
+the same outage.
+
 ### A missed poll is a red dive to the baseline
 
-One treatment, every chart, both surfaces:
+One treatment, every chart, all three surfaces:
 
 - Failed polls plot **at the chart baseline** (`y = padT + innerH`) with no
   value of their own — they never widen the y-axis.
@@ -1153,3 +1163,22 @@ inline when the band is wider than 46px, native `<title>` for the tooltip.
 Never band a missed poll. Red-tinted shading would read as a second kind of
 scheduled window, and the two states are opposites: one is expected, one is the
 thing the operator is looking for.
+
+This is the rule the alert-email charts used to break — they shaded the failed
+window red and broke the line across it, which is the treatment for a gap you
+are explaining, not one you are reporting. They dive now, like everything else.
+The one band that survives on an email chart is the **hardware sensor's own
+alarm bit**, which is a different claim: the reading is still arriving, and the
+device is telling you it doesn't like it.
+
+### What the email surface may and may not diverge on
+
+May: physical size, the raster palette (flat hex, no CSS variables — a mail
+client has no theme to read), no tooltips or hover targets, runs of same-state
+points collapsed into one polyline rather than a `<line>` per segment (a
+FortiGate can land thousands of points in an hour, and per-segment elements
+balloon the PNG — the phone port collapses them for the same reason).
+
+May not: the shape of an outage. Same red, same baseline dive, same fade
+between the series color and red at each transition, same rule about what
+counts as a missed poll in the first place.

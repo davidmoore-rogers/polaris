@@ -5279,7 +5279,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **Cross-service deps:** `sampleQueryRouter` (`pickSampleTierForAsset`, `SampleTier`), `prisma`.
 
-**Used by:** `src/api/routes/assets.ts` — served as `outages` on `/assets/:id/telemetry-history`, `/storage-history` and `/interface-history`. Consumed browser-side by `_outageMarkers` in `public/js/assets.js` and its two ports (`public/js/mobile/charts.js`, `public/js/assets-compare.js`).
+**Used by:** `src/api/routes/assets.ts` — served as `outages` on `/assets/:id/telemetry-history`, `/storage-history` and `/interface-history`. Consumed browser-side by `_outageMarkers` in `public/js/assets.js` and its two ports (`public/js/mobile/charts.js`, `public/js/assets-compare.js`). `alertChartService.failSpansFrom` also delegates to `foldProbeOutages`, so the alert-email charts and the in-app charts cannot disagree about where an outage began and ended.
 
 **Invariants:**
 - **Read-only, and deliberately so.** An earlier design wrote synthetic failure rows into the telemetry/storage/interface tables so those streams would carry their own flag. Rejected: the alert engine (`notificationEngine` selects raw rows and aggregates them), the hourly/daily rollups, and the vanished-state sweep all read those tables with no way to tell a marker from a reading — and a failure row would have had to invent a `mountPath` / `ifName` for a poll that never ran. Never add a writer here.
@@ -5293,6 +5293,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - The browser-side collision guard lives in `_outageMarkers`, not here: a marker landing on a real sample is dropped, because the Polaris Agent pushes on its own schedule and is not gated on `monitorStatus`, so an agent host can keep reporting CPU straight through an outage of the server-side probe transport.
 - `_outageMarkers` + `_medianCadenceMs` exist in three copies by design (desktop / mobile / compare) — the mobile and compare files say so in their headers. Keep them in step.
 - Adding `outages` to a new chart endpoint means adding it to the renderer too, or the payload grows for nothing.
+- `openToMs` rides a still-failing run out to the window end (a device down as the chart is drawn is down up to the right edge). Only the FINAL run qualifies, and it is a `Math.max` — a window end older than the last failure must never shorten an outage.
 
 ---
 ## services/sampleWriteBuffer.ts

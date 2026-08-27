@@ -59,18 +59,24 @@ export interface ProbeVerdict {
  * bucket — a fully-failed daily bucket describes the whole day, not the
  * instant its bucketStart names.
  *
- * Pure and exported for the tests; the reader below is the only production
- * caller.
+ * `openToMs` extends a run that is STILL FAILING at the newest verdict out to
+ * the end of the window, because a device that is down as the chart is drawn is
+ * down up to the right edge, not up to its last poll. Only the final run
+ * qualifies — a run closed by a later success ends where it ended.
+ *
+ * Pure and exported for the tests; the readers below and
+ * alertChartService.failSpansFrom are the production callers.
  */
-export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0): OutageWindow[] {
+export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0, openToMs?: number): OutageWindow[] {
   const windows: OutageWindow[] = [];
   let from: Date | null = null;
   let to: Date | null = null;
 
-  const close = () => {
+  const close = (stillOpen = false) => {
     if (!from || !to) return;
-    const end = bucketSeconds > 0 ? new Date(to.getTime() + bucketSeconds * 1000) : to;
-    windows.push({ from, to: end });
+    let endMs = bucketSeconds > 0 ? to.getTime() + bucketSeconds * 1000 : to.getTime();
+    if (stillOpen && openToMs != null) endMs = Math.max(endMs, openToMs);
+    windows.push({ from, to: new Date(endMs) });
     from = null;
     to = null;
   };
@@ -83,7 +89,7 @@ export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0): O
       close();
     }
   }
-  close();
+  close(true);
   return windows;
 }
 
@@ -134,7 +140,11 @@ export async function readProbeOutagesAtTier(
       orderBy: { timestamp: "asc" },
       select: { timestamp: true, success: true },
     });
-    return foldProbeOutages(rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success })));
+    return foldProbeOutages(
+      rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success })),
+      0,
+      until.getTime(),
+    );
   }
 
   const table = tier === "hourly" ? "asset_monitor_samples_hourly" : "asset_monitor_samples_daily";
@@ -157,6 +167,7 @@ export async function readProbeOutagesAtTier(
       failed: r.sampleCount > 0 && r.successCount === 0,
     })),
     bucketSeconds,
+    until.getTime(),
   );
 }
 
