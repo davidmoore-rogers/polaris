@@ -42,6 +42,8 @@ interface AssetRow {
   assetType?: string;
   macAddress?: string | null;
   macAddresses?: unknown[];
+  ipAddress?: string | null;
+  managementAccess?: unknown;
 }
 
 const g = globalThis as Record<string, any>;
@@ -58,6 +60,7 @@ function fnSrc(name: string): string {
 
 let assetMenuItems: (a: AssetRow) => MenuItem[];
 let quarantineMenuItems: (a: AssetRow) => MenuItem[];
+let mgmtMenuItems: (a: AssetRow) => MenuItem[];
 
 /** Actionable labels only, separators dropped. */
 const labels = (items: MenuItem[]) => items.filter((i) => !i.separator).map((i) => i.label);
@@ -78,9 +81,26 @@ function withPerms(assets: boolean, quarantine: boolean, pushEnabled = true) {
   g.canQuarantineAssets = () => quarantine;
   g._quarantinePushAvailable = () => pushEnabled;
   (0, eval)(fnSrc("_quarantineMenuItems"));
+  (0, eval)(fnSrc("_assetMgmtAccess"));
+  (0, eval)(fnSrc("_managementAccessMenuItems"));
   (0, eval)(fnSrc("_assetMenuItems"));
   assetMenuItems = g._assetMenuItems;
   quarantineMenuItems = g._quarantineMenuItems;
+  mgmtMenuItems = g._managementAccessMenuItems;
+}
+
+/**
+ * A Fortinet-discovered device whose captured access list says HTTPS and SSH
+ * are both open. `managementAccess` is the four-field projection the list
+ * endpoint ships (shapeManagementAccess in src/api/routes/assets.ts), not the
+ * full stored blob.
+ */
+function mgmtAsset(over: Record<string, unknown> = {}): AssetRow {
+  return endpoint({
+    assetType: "firewall",
+    ipAddress: "10.0.0.1",
+    managementAccess: { mgmtIp: "10.0.0.1", protocols: ["https", "ssh", "snmp"], https: true, ssh: true, ...over },
+  });
 }
 
 beforeEach(() => {
@@ -89,6 +109,8 @@ beforeEach(() => {
   g.confirmDelete = () => {};
   g.quarantineAssetRow = () => {};
   g.releaseAssetQuarantine = () => {};
+  g._sshAction = () => "uri";
+  g._doSshLaunch = () => {};
   withPerms(true, true);
   expect(typeof assetMenuItems, "assets.js no longer declares _assetMenuItems").toBe("function");
 });
@@ -175,6 +197,63 @@ describe("_quarantineMenuItems — which devices", () => {
   });
 });
 
+describe("_managementAccessMenuItems", () => {
+  it("offers both verbs when the access list permits both", () => {
+    expect(labels(mgmtMenuItems(mgmtAsset()))).toEqual(["Open HTTPS", "Open SSH"]);
+  });
+
+  it("offers only what the device actually permits", () => {
+    expect(labels(mgmtMenuItems(mgmtAsset({ ssh: false, protocols: ["https"] })))).toEqual(["Open HTTPS"]);
+    expect(labels(mgmtMenuItems(mgmtAsset({ https: false, protocols: ["ssh"] })))).toEqual(["Open SSH"]);
+    expect(mgmtMenuItems(mgmtAsset({ https: false, ssh: false, protocols: [] }))).toEqual([]);
+  });
+
+  it("offers both when the access list could NOT be read", () => {
+    // protocols == null is the best-effort switch path: unknown, not denied.
+    // Withholding the verbs there would hide management access on every
+    // FortiSwitch, so the slide-over renders them optimistically and so does
+    // the row menu.
+    expect(labels(mgmtMenuItems(mgmtAsset({ protocols: null, https: false, ssh: false }))))
+      .toEqual(["Open HTTPS", "Open SSH"]);
+  });
+
+  it("offers nothing for an asset with no captured access list", () => {
+    // Every endpoint, and every asset from a non-Fortinet discovery.
+    expect(mgmtMenuItems(endpoint())).toEqual([]);
+    expect(mgmtMenuItems(endpoint({ managementAccess: null }))).toEqual([]);
+  });
+
+  it("offers nothing when there is no address to dial", () => {
+    const noIp = mgmtAsset({ mgmtIp: null });
+    noIp.ipAddress = null;
+    expect(mgmtMenuItems(noIp)).toEqual([]);
+  });
+
+  it("falls back to the asset's own IP when the blob carries no mgmtIp", () => {
+    const items = mgmtMenuItems(mgmtAsset({ mgmtIp: undefined }));
+    expect(labels(items)).toEqual(["Open HTTPS", "Open SSH"]);
+    expect(items[0]!.title).toContain("10.0.0.1");
+  });
+
+  it("performs the operator's stored SSH default rather than a second menu", () => {
+    // The slide-over's split button owns the ssh://-vs-copy choice; a flat row
+    // menu has no room for a caret, so it obeys whatever that choice was.
+    const launched: Array<[string, string]> = [];
+    g._doSshLaunch = (ip: string, act: string) => { launched.push([ip, act]); };
+    g._sshAction = () => "copy";
+    withPerms(true, true);
+    const ssh = mgmtMenuItems(mgmtAsset()).find((i) => i.label === "Open SSH")!;
+    expect(ssh.title).toContain("Copy an ssh command");
+    ssh.onSelect!();
+    expect(launched).toEqual([["10.0.0.1", "copy"]]);
+  });
+
+  it("is not gated on assets:write — reaching a device is not editing it", () => {
+    withPerms(false, false);
+    expect(labels(mgmtMenuItems(mgmtAsset()))).toEqual(["Open HTTPS", "Open SSH"]);
+  });
+});
+
 describe("_assetMenuItems", () => {
   it("always offers Open, so a read-only viewer still gets a working menu", () => {
     withPerms(false, false);
@@ -190,6 +269,20 @@ describe("_assetMenuItems", () => {
     expect(labels(assetMenuItems(endpoint()))).toEqual(["Open", "Edit…", "Quarantine…", "Delete"]);
   });
 
+  it("puts the remote-access verbs between Edit and the quarantine group", () => {
+    // A firewall is never quarantinable, so this shape shows the access verbs
+    // sitting on their own between the edit and delete groups.
+    expect(labels(assetMenuItems(mgmtAsset())))
+      .toEqual(["Open", "Edit…", "Open HTTPS", "Open SSH", "Delete"]);
+  });
+
+  it("leaves an ordinary endpoint's menu untouched", () => {
+    // The gate is the captured access list, not the asset type — a row without
+    // one must not grow two dead verbs.
+    expect(labels(assetMenuItems(endpoint()))).not.toContain("Open HTTPS");
+    expect(labels(assetMenuItems(endpoint()))).not.toContain("Open SSH");
+  });
+
   it("marks Delete destructive and puts it last", () => {
     const items = assetMenuItems(endpoint());
     const last = items[items.length - 1]!;
@@ -202,7 +295,7 @@ describe("_assetMenuItems", () => {
     // every permission × asset-shape combination.
     for (const [ma, qa] of [[true, true], [true, false], [false, true], [false, false]] as const) {
       withPerms(ma, qa);
-      for (const shape of [endpoint(), endpoint({ macAddress: null }), endpoint({ status: "quarantined" }), endpoint({ assetType: "switch" })]) {
+      for (const shape of [endpoint(), endpoint({ macAddress: null }), endpoint({ status: "quarantined" }), endpoint({ assetType: "switch" }), mgmtAsset(), mgmtAsset({ https: false, protocols: ["ssh"] })]) {
         const items = assetMenuItems(shape);
         expect(items[0]!.separator, JSON.stringify([ma, qa, shape.assetType, shape.status])).toBeFalsy();
         expect(items[items.length - 1]!.separator).toBeFalsy();

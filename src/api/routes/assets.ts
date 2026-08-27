@@ -538,6 +538,11 @@ const ASSET_LIST_SELECT = {
   // `ha` projection (shapeHaInfo) — enrichAssetList strips the raw blob so
   // list rows never ship the full fortinetTopology JSON.
   fortinetTopology: true,
+  // Row-menu Open HTTPS / Open SSH gate: the `allowaccess` list read during
+  // FMG/FortiGate discovery. Reduced to four fields by shapeManagementAccess
+  // so the list never ships the whole blob; null on every asset discovery has
+  // never read an access list for, which is most of the fleet.
+  managementAccess: true,
 } as const;
 
 const ASSET_LIST_DEFAULT_LIMIT = 50;
@@ -674,6 +679,29 @@ function shapeHaInfo(topo: unknown): { mode: string; role: string; memberStatus?
   };
 }
 
+/**
+ * Reduce `Asset.managementAccess` to the four fields the Assets list needs to
+ * decide whether a row's menu offers Open HTTPS / Open SSH (`_assetMgmtAccess`
+ * in public/js/assets.js). The stored blob also carries source / interfaceName
+ * / profileName / snmp / checkedAt, which only the slide-over reads — and the
+ * slide-over loads the full asset from GET /assets/:id.
+ *
+ * `protocols` is passed through as a NULL-vs-not signal only: null means the
+ * access list could not be read (the best-effort switch path) and the client
+ * then offers both verbs optimistically, so collapsing it to a boolean here
+ * would be collapsing the very distinction the client branches on.
+ */
+function shapeManagementAccess(ma: unknown): { mgmtIp: string | null; protocols: string[] | null; https: boolean; ssh: boolean } | null {
+  const m = ma as Record<string, unknown> | null;
+  if (!m || typeof m !== "object") return null;
+  return {
+    mgmtIp: typeof m.mgmtIp === "string" ? m.mgmtIp : null,
+    protocols: Array.isArray(m.protocols) ? (m.protocols as string[]) : null,
+    https: m.https === true,
+    ssh: m.ssh === true,
+  };
+}
+
 // Reduce an asset's monitoring transports to the compact array the
 // "Monitored Via" list column renders. Empty = not monitored / nothing to
 // show. An active Polaris Agent owns all streams, so it short-circuits to
@@ -728,7 +756,7 @@ async function computeMonitoringMethods(a: {
 }
 
 async function enrichAssetList(
-  assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown } & Record<string, unknown>>,
+  assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown; managementAccess?: unknown } & Record<string, unknown>>,
   ipCtx: Map<string, IpContext>,
 ) {
   // `hostnameDiscovered` — what discovery says the hostname is, for the rows
@@ -743,7 +771,7 @@ async function enrichAssetList(
     : new Map<string, string | null>();
 
   return Promise.all(assets.map(async ({
-    associatedIpRows, macAddressRows, fortinetTopology,
+    associatedIpRows, macAddressRows, fortinetTopology, managementAccess,
     // Strip the raw resolver inputs from the wire shape — only the reduced
     // `monitoringMethods` array is surfaced to the list.
     responseTimePolling, cpuMemoryPolling, temperaturePolling, interfacesPolling, lldpPolling, storagePolling,
@@ -756,6 +784,7 @@ async function enrichAssetList(
     hostnameDiscovered: discoveredHostnames.get(a.id as string) ?? null,
     ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     ha: shapeHaInfo(fortinetTopology),
+    managementAccess: shapeManagementAccess(managementAccess),
     monitoringMethods: await computeMonitoringMethods({
       monitored: a.monitored as boolean | undefined,
       assetType: a.assetType,

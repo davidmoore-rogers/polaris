@@ -1786,10 +1786,56 @@ function _addAssetMenuItems() {
   return items;
 }
 
+/**
+ * The row menu's remote-access verbs — the same Open HTTPS / Open SSH the asset
+ * slide-over header carries (`_managementAccessButtonsHTML`), so an operator
+ * can reach a device's management UI without opening it first.
+ *
+ * Gated identically to the slide-over: `_assetMgmtAccess` reads
+ * `Asset.managementAccess` (the `allowaccess` list captured during
+ * FMG/FortiGate discovery) and offers only the protocols the device actually
+ * permits; a device whose access list could not be read (the best-effort
+ * switch path, `protocols == null`) gets both optimistically. A row with no
+ * management surface — every endpoint, every asset from a non-Fortinet
+ * discovery — contributes nothing, so its menu is unchanged.
+ *
+ * SSH is ONE item here, not the header's split button: a row menu is a flat
+ * list with no room for a caret, so it performs the operator's stored default
+ * (`_sshAction()` — open an ssh:// link, or copy the command) and leaves the
+ * ssh://-vs-copy and default-user choices on the slide-over that owns them.
+ */
+function _managementAccessMenuItems(a) {
+  var info = _assetMgmtAccess(a);
+  if (!info) return [];
+  var items = [];
+  if (info.showHttps) {
+    items.push({
+      label: "Open HTTPS",
+      title: "Open https://" + info.mgmtIp + " in a new tab",
+      onSelect: function () { window.open("https://" + info.mgmtIp, "_blank", "noopener"); },
+    });
+  }
+  if (info.showSsh) {
+    items.push({
+      label: "Open SSH",
+      title: _sshAction() === "copy"
+        ? "Copy an ssh command for " + info.mgmtIp
+        : "Open an SSH session to " + info.mgmtIp,
+      onSelect: function () { _doSshLaunch(info.mgmtIp, _sshAction()); },
+    });
+  }
+  return items;
+}
+
 function _assetMenuItems(a) {
   var items = [{ label: "Open", onSelect: function () { openViewModal(a.id); } }];
   if (canManageAssets()) {
     items.push({ label: "Edit…", onSelect: function () { openEditModal(a.id); } });
+  }
+  var mgmt = _managementAccessMenuItems(a);
+  if (mgmt.length) {
+    items.push({ separator: true });
+    mgmt.forEach(function (m) { items.push(m); });
   }
   var quarantine = _quarantineMenuItems(a);
   if (quarantine.length) {
