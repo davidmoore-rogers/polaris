@@ -123,23 +123,36 @@
     var sev = r.severity || "info";
     var pillCls = SEV_PILL[sev] || "widget-pill-watch";
     var bar = SEV_BAR[sev] || "#4fc3f7";
+    // The dim marks the ALERT as handled; it must not reach the acknowledgement.
+    // Fading the whole row compounded .6 onto an already-tertiary grey and put
+    // the owner's name near the AA floor — on precisely the rows someone still
+    // has to read it off. Dim the alert, never the annotation on it.
+    var fade = r.acknowledged ? "opacity:.6" : "";
+    var fadeTail = fade ? ";" + fade : "";      // append to an existing inline style
+    var fadeAttr = fade ? ' style="' + fade + '"' : "";  // for a span carrying none
     // The automation's name is the row's title — it says what KIND of problem
     // this is, which the message alone often doesn't. The device follows it.
-    var title = r.ruleName ? '<span style="margin-right:6px">' + escapeHtml(r.ruleName) + '</span>' : "";
-    var who = r.hostname ? '<span style="margin-right:6px;color:var(--color-text-secondary)">' + escapeHtml(r.hostname) + '</span>' : "";
+    var title = r.ruleName ? '<span style="margin-right:6px' + fadeTail + '">' + escapeHtml(r.ruleName) + '</span>' : "";
+    var who = r.hostname ? '<span style="margin-right:6px;color:var(--color-text-secondary)' + fadeTail + '">' + escapeHtml(r.hostname) + '</span>' : "";
     // The sub-asset the alert is ABOUT (port, sensor, mount, tunnel). Monospace
     // because it's an identifier, and beside the hostname because that pair is
     // what tells two rows of one per-interface automation apart.
     var dim = r.dimension
-      ? '<span class="dash-alert-dim" title="' + escapeHtml("Alert detail: " + r.dimension) + '">' +
+      ? '<span class="dash-alert-dim"' + fadeAttr + ' title="' + escapeHtml("Alert detail: " + r.dimension) + '">' +
         escapeHtml(r.dimension) + '</span>'
       : "";
     // An acknowledged alert is still active — hiding it would surprise, so it
-    // stays listed and says who has it, and the row dims to push the
+    // stays listed and says who has it, and the alert dims to push the
     // unhandled alerts forward on a wallboard.
+    //
+    // The owner is IN the pill, not only in the title: these run on wallboards,
+    // which never hover. The bare "ack" stays as the fallback for a feed that
+    // gives no name.
+    var ackWho = r.acknowledgedBy ? "ack " + r.acknowledgedBy : "ack";
     var ack = r.acknowledged
       ? '<span class="widget-pill widget-pill-neutral" style="margin-left:4px" title="' +
-        escapeHtml("Acknowledged" + (r.acknowledgedBy ? " by " + r.acknowledgedBy : "")) + '">ack</span>'
+        escapeHtml("Acknowledged" + (r.acknowledgedBy ? " by " + r.acknowledgedBy : "")) + '">' +
+        escapeHtml(ackWho) + '</span>'
       : "";
     // An alert is a prompt to go look at the device, so the row opens that
     // device's details slide-in. An alert about Polaris ITSELF (a host_metric
@@ -151,10 +164,10 @@
         '" data-asset-id="' + escapeHtml(r.assetId) + '"'
       : "";
     return "<" + tag + ' class="recent-item' + (r.assetId ? " recent-item-link" : "") + '"' + attrs +
-      ' style="border-left:3px solid ' + bar + ';padding-left:8px' + (r.acknowledged ? ";opacity:.6" : "") + '">' +
+      ' style="border-left:3px solid ' + bar + ';padding-left:8px">' +
       '<div style="min-width:0">' +
-        '<div class="recent-item-title"><span class="widget-pill ' + pillCls + '" style="margin-right:6px">' + escapeHtml(sev) + '</span>' + title + who + dim + ack + '</div>' +
-        '<div class="recent-item-meta">' + escapeHtml(r.message || "") + '</div>' +
+        '<div class="recent-item-title"><span class="widget-pill ' + pillCls + '" style="margin-right:6px' + fadeTail + '">' + escapeHtml(sev) + '</span>' + title + who + dim + ack + '</div>' +
+        '<div class="recent-item-meta"' + fadeAttr + '>' + escapeHtml(r.message || "") + '</div>' +
       '</div>' +
       '<span class="recent-item-time">' + timeAgo(r.raisedAt) + '</span>' +
     "</" + tag + ">";

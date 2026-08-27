@@ -202,13 +202,35 @@ describe("row contents", () => {
     expect(row.hasAttribute("data-asset-id")).toBe(false);
   });
 
-  it("keeps an acknowledged alert listed, dimmed, and says who has it", () => {
+  it("keeps an acknowledged alert listed, dims the ALERT, and names who has it", () => {
     const el = render([alert({ id: "a", severity: "critical", acknowledged: true, acknowledgedBy: "jsmith" })], 1,
       { minSeverity: "warning" });
     const row = rowsOf(el)[0];
-    expect(row.getAttribute("style")).toContain("opacity:.6");
-    expect(row.textContent).toContain("ack");
-    expect(row.querySelector(".widget-pill-neutral").getAttribute("title")).toBe("Acknowledged by jsmith");
+    // The row itself must NOT dim: compounded onto the ack pill's already-
+    // tertiary grey it lands under the AA floor, on exactly the rows whose
+    // owner someone has to read. The alert's own parts carry it instead.
+    expect(row.getAttribute("style")).not.toContain("opacity");
+    expect(row.querySelector(".recent-item-meta")!.getAttribute("style")).toContain("opacity:.6");
+    expect(row.querySelector(".widget-pill-red")!.getAttribute("style")).toContain("opacity:.6");
+    // Wallboards never hover, so the owner is in the pill, not only its title.
+    const ackPill = row.querySelector(".widget-pill-neutral")!;
+    expect(ackPill.textContent).toBe("ack jsmith");
+    expect(ackPill.getAttribute("style") || "").not.toContain("opacity");
+    expect(ackPill.getAttribute("title")).toBe("Acknowledged by jsmith");
+  });
+
+  it("falls back to a bare ack pill when the feed gives no owner", () => {
+    const el = render([alert({ id: "a", severity: "critical", acknowledged: true, acknowledgedBy: null })], 1,
+      { minSeverity: "warning" });
+    const ackPill = rowsOf(el)[0].querySelector(".widget-pill-neutral")!;
+    expect(ackPill.textContent).toBe("ack");
+    expect(ackPill.getAttribute("title")).toBe("Acknowledged");
+  });
+
+  it("leaves an unacknowledged row undimmed end to end", () => {
+    const el = render([alert({ id: "a", severity: "critical", acknowledged: false })], 1,
+      { minSeverity: "warning" });
+    expect(rowsOf(el)[0].innerHTML).not.toContain("opacity");
   });
 });
 
