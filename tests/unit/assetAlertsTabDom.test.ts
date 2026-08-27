@@ -10,8 +10,13 @@
  * clearing one had done anything.
  *
  * What's pinned here is what makes that list usable and would rot silently:
- *  - the dimension column (the interface / sensor the alert is ABOUT), since
- *    without it the rows are genuinely indistinguishable;
+ *  - the dimension (the interface / sensor the alert is ABOUT), since without
+ *    it the rows are genuinely indistinguishable. It rides the Alert cell's
+ *    title rather than a Detail column of its own — that column restated the
+ *    sentence, which already carries the label;
+ *  - the Acknowledge column carrying what the acknowledger WROTE, which is the
+ *    whole point of requireAckNote and was stored-and-never-rendered until it
+ *    got a column;
  *  - the empty-state colspan tracking the permission-dependent column count;
  *  - equal-timestamp ordering by dimension, numerically (port2 before port10);
  *  - the select/bulk wiring, including that a reload does NOT stack a second
@@ -75,7 +80,7 @@ function makeAlerts() {
   return [
     { id: "n2", severity: "serious", message: "LAKESIDE-148F-1: a monitored interface is down", dimension: "port10", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
     { id: "n1", severity: "serious", message: "LAKESIDE-148F-1: a monitored interface is down", dimension: "port2", metric: "ifOperStatus", triggeredAt: "2026-07-23T14:50:00Z", acknowledged: false },
-    { id: "n0", severity: "warning", message: "LAKESIDE-148F-1 is down", dimension: null, metric: "monitorStatus", triggeredAt: "2026-07-22T14:50:00Z", acknowledged: true, acknowledgedBy: "jsmith", acknowledgedAt: "2026-07-22T15:00:00Z" },
+    { id: "n0", severity: "warning", message: "LAKESIDE-148F-1 is down", dimension: null, metric: "monitorStatus", triggeredAt: "2026-07-22T14:50:00Z", acknowledged: true, acknowledgedBy: "jsmith", acknowledgedAt: "2026-07-22T15:00:00Z", acknowledgeNote: "Bad SFP in the uplink — swapped it, monitoring" },
   ];
 }
 
@@ -161,15 +166,48 @@ describe("asset Alerts tab — active list", () => {
     expect(wrap.querySelector("thead")).toBeTruthy();
   });
 
-  it("names the dimension each alert was raised for", async () => {
+  // cb(0) time(1) severity(2) alert(3) acknowledge(4) actions(5)
+  const ALERT_COL = 3, ACK_COL = 4, ACTIONS_COL = 5;
+
+  it("names the dimension each alert was raised for, on the Alert cell", async () => {
     await mount();
-    const detail = rows().map((tr) => cell(tr, 3)); // cb(0) time(1) severity(2) detail(3)
-    expect(detail.slice(0, 2)).toEqual(["port2", "port10"]);
-    // A whole-device alert has no dimension and must not print a bare blank.
-    expect(detail[2]).toBe("—");
-    // The metric identifies what the dimension IS, on the cell rather than in
-    // a column that would repeat one value down the whole table.
-    expect((rows()[0].children[3] as HTMLElement).getAttribute("title")).toBe("ifOperStatus");
+    // The metric and the dimension identify what the sentence's `[label]` IS,
+    // on the cell rather than in a column that would repeat one value down the
+    // whole table and restate the message besides.
+    const titles = rows().map((tr) => (tr.children[ALERT_COL] as HTMLElement).getAttribute("title"));
+    expect(titles.slice(0, 2)).toEqual(["ifOperStatus · port2", "ifOperStatus · port10"]);
+    // A whole-device alert has no dimension: the metric alone, no dangling
+    // separator.
+    expect(titles[2]).toBe("monitorStatus");
+    expect(rows().map((tr) => cell(tr, ALERT_COL))).toEqual([
+      "LAKESIDE-148F-1: a monitored interface is down",
+      "LAKESIDE-148F-1: a monitored interface is down",
+      "LAKESIDE-148F-1 is down",
+    ]);
+  });
+
+  it("shows what the acknowledger wrote, with who and when under it", async () => {
+    await mount();
+    const ack = cell(rows()[2], ACK_COL);
+    expect(ack).toContain("Bad SFP in the uplink — swapped it, monitoring");
+    expect(ack).toContain("jsmith");
+    // The attribution moved OUT of Actions when the note got a column, so the
+    // acknowledger's name must not render twice.
+    expect(cell(rows()[2], ACTIONS_COL)).not.toContain("jsmith");
+    // An unacknowledged row has nothing to say here, and must not print blank.
+    expect(cell(rows()[0], ACK_COL)).toBe("—");
+  });
+
+  it("distinguishes acknowledged-with-no-note from unacknowledged", async () => {
+    // The note is optional unless the automation sets requireAckNote, so a
+    // silent acknowledgement is a real state — and rendering it as an em dash
+    // would make it read as nobody having touched the alert.
+    await mount({
+      alerts: [{ id: "q1", severity: "warning", message: "x is down", dimension: null, metric: "monitorStatus", triggeredAt: "2026-07-22T14:50:00Z", acknowledged: true, acknowledgedBy: "jsmith", acknowledgedAt: "2026-07-22T15:00:00Z", acknowledgeNote: null }],
+    });
+    const ack = cell(rows()[0], ACK_COL);
+    expect(ack).toContain("No note");
+    expect(ack).toContain("jsmith");
   });
 
   it("orders equal timestamps by dimension, numerically", async () => {

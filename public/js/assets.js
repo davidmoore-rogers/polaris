@@ -18294,7 +18294,7 @@ function _assetAlertTableShape() {
     canAck: canAck,
     canClear: canClear,
     canSelect: canSelect,
-    // Time, Severity, Detail, Message, Actions (+ the checkbox column).
+    // Time, Severity, Alert, Acknowledge, Actions (+ the checkbox column).
     colspan: 5 + (canSelect ? 1 : 0),
   };
 }
@@ -18338,14 +18338,18 @@ function _assetNotificationsTabHTML() {
     '<div class="table-wrapper table-wrapper-modal-sticky" style="max-height:42vh"><table><thead><tr>' +
       (shape.canSelect ? '<th class="cb-col"><input type="checkbox" id="asset-alert-selall" title="Select all"></th>' : "") +
       '<th style="width:160px">Time</th><th style="width:80px">Severity</th>' +
-      // The dimension the alert was raised FOR — an interface, a sensor, a
-      // mount. Without it every alert one per-interface automation raises on
-      // one device renders the same sentence at the same minute, which is
-      // exactly what a switch losing its uplink produces: two dozen rows an
-      // operator cannot tell apart, and no way to know whether clearing one
-      // did anything.
-      '<th style="width:150px">Detail</th>' +
-      '<th>Message</th><th style="width:' + actionW + 'px">Actions</th>' +
+      // The alert sentence. It already carries the dimension the alert was
+      // raised FOR — an interface, a sensor, a mount — as `[label]`, which is
+      // what keeps the two dozen rows a switch losing its uplink produces
+      // tellable apart; the dimension had its own column until that turned out
+      // to restate the sentence. A rule with a custom messageTemplate that
+      // drops the label keeps it in this cell's title instead.
+      '<th>Alert</th>' +
+      // What the acknowledger wrote. requireAckNote exists to make an operator
+      // say what the problem was and what the fix was, and until this column
+      // the answer was stored on the row and rendered by nothing.
+      '<th style="width:240px">Acknowledge</th>' +
+      '<th style="width:' + actionW + 'px">Actions</th>' +
     '</tr></thead><tbody id="asset-notif-active-tbody"><tr><td colspan="' + shape.colspan + '" class="empty-state">Loading…</td></tr></tbody></table></div>' +
     '<h4 style="margin:1rem 0 0.5rem">Automations that can trigger for this asset</h4>' +
     '<div class="table-wrapper"><table><thead><tr>' +
@@ -18454,17 +18458,12 @@ function _loadAssetNotificationsTab(assetId) {
       if (countEl) countEl.textContent = active.length ? "(" + active.length + ")" : "";
       aTbody.innerHTML = active.length ? active.map(function (n) {
         var ts = new Date(n.triggeredAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
-        // Acknowledge OR the acknowledgement itself, then Clear — the two are
-        // separate permission levels (write vs fullwrite), so a row can carry
+        // Actions is buttons only now — who acknowledged moved to the
+        // Acknowledge column, next to what they wrote. Acknowledge (write) and
+        // Clear (fullwrite) are separate permission levels, so a row can carry
         // either, both, or neither.
         var parts = [];
-        if (n.acknowledged) {
-          var when = n.acknowledgedAt
-            ? new Date(n.acknowledgedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
-            : "";
-          parts.push('<span style="font-size:0.82rem">' + escapeHtml(n.acknowledgedBy || "acknowledged") +
-            (when ? ' <span style="color:var(--color-text-tertiary);font-size:0.8rem">' + escapeHtml(when) + '</span>' : "") + '</span>');
-        } else if (shape.canAck) {
+        if (!n.acknowledged && shape.canAck) {
           // The automation's note policy rides the control that uses it, so
           // the modal can mark the field required without a second fetch.
           parts.push('<button class="btn btn-sm btn-secondary asset-alert-ack" data-id="' + escapeHtml(n.id) + '"' +
@@ -18478,19 +18477,37 @@ function _loadAssetNotificationsTab(assetId) {
           ? '<td class="cb-col"><input type="checkbox" class="asset-alert-sel" data-id="' + escapeHtml(n.id) + '"' +
             (n.requireAckNote ? ' data-note-required="1"' : "") + ' aria-label="Select this alert"></td>'
           : "";
-        // The metric rides the cell title rather than a column of its own: it
-        // is the same value on every row of one automation, so it identifies
-        // nothing, but it says what the dimension IS on the rows where the
-        // bare name ("port12", "TMP1") could be several things.
-        var detailTitle = n.metric ? ' title="' + escapeHtml(n.metric) + '"' : "";
-        var detail = n.dimension
-          ? '<span style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(n.dimension) + '</span>'
-          : '<span style="color:var(--color-text-tertiary)">—</span>';
+        // The acknowledgement, note first: that is the part telling the next
+        // operator what happened. An acknowledged row with no note still shows
+        // its attribution — "acknowledged, nothing said" and "not
+        // acknowledged" are different facts, and the note is optional unless
+        // the automation sets requireAckNote.
+        var ackCell = '<span style="color:var(--color-text-tertiary)">—</span>';
+        if (n.acknowledged) {
+          var when = n.acknowledgedAt
+            ? new Date(n.acknowledgedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+            : "";
+          var note = (n.acknowledgeNote || "").trim();
+          // A note is free text an operator typed, so it wraps and breaks
+          // rather than stretching the column past its declared width.
+          ackCell = (note
+            ? '<div style="font-size:0.82rem;white-space:pre-wrap;overflow-wrap:anywhere">' + escapeHtml(note) + '</div>'
+            : '<div style="font-size:0.82rem;color:var(--color-text-tertiary)">No note</div>') +
+            '<div style="color:var(--color-text-tertiary);font-size:0.78rem;margin-top:0.15rem">' +
+            escapeHtml((n.acknowledgedBy || "acknowledged") + (when ? " · " + when : "")) + '</div>';
+        }
+        // The metric and the dimension ride the Alert cell's title rather than
+        // a column of their own: both are the same value on every row of one
+        // automation, so they identify nothing, but together they say what the
+        // sentence's `[label]` IS on the rows where a bare name ("port12",
+        // "TMP1") could be several things — and they are the fallback for a
+        // custom messageTemplate that renders no label at all.
+        var alertTitle = [n.metric, n.dimension].filter(Boolean).join(" · ");
         return '<tr>' + sel +
           '<td style="font-family:var(--font-mono);font-size:0.82rem">' + escapeHtml(ts) + '</td>' +
           '<td><span class="badge badge-level-' + escapeHtml(n.severity || "info") + '">' + escapeHtml((n.severity || "info").toUpperCase()) + '</span></td>' +
-          '<td' + detailTitle + '>' + detail + '</td>' +
-          '<td>' + escapeHtml(n.message || "") + '</td>' +
+          '<td' + (alertTitle ? ' title="' + escapeHtml(alertTitle) + '"' : "") + '>' + escapeHtml(n.message || "") + '</td>' +
+          '<td>' + ackCell + '</td>' +
           '<td><div style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap">' + parts.join("") + '</div></td></tr>';
       }).join("") : '<tr><td colspan="' + shape.colspan + '" class="empty-state">No active alerts</td></tr>';
       aTbody.querySelectorAll(".asset-alert-ack").forEach(function (btn) {
