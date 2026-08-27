@@ -737,8 +737,11 @@
       if (chartHost) {
         chartHost.innerHTML = PolarisCharts.lineChart({
           // The telemetry stream carries no per-sample success flag — a failed
-          // poll just leaves no row — so missed polls are inferred from each
-          // series' own cadence and faded to red at the baseline.
+          // poll just leaves no row, because the telemetry cadence does not run
+          // while the asset is down. `outages` carries the response-time probe’s
+          // own failure record for the window, which is what the gapFade series
+          // dive across.
+          outages: resp.outages,
           series: [
             { values: cpuSeries, color: "var(--md-primary)", gapFade: true },
             { values: memSeries, color: "var(--md-tertiary)", gapFade: true },

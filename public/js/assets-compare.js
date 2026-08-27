@@ -594,7 +594,20 @@ function _cmpFetchSeries(s) {
 
 function _cmpPack(data, pts) {
   return {
-    points: pts.filter(function (p) { return typeof p.v === "number" && isFinite(p.v); }),
+    // A failed poll has no value of its own — it plots at the baseline — so it
+    // has to survive this filter on its `ok:false` flag rather than being
+    // dropped as a non-numeric row. Everything else without a finite number is
+    // junk and still goes.
+    points: pts.filter(function (p) {
+      return p.ok === false || (typeof p.v === "number" && isFinite(p.v));
+    }),
+    // Response-time failure windows for THIS asset over the same range, served
+    // by the chart endpoints (services/probeOutageService.ts). The streams with
+    // no success flag of their own dive across these. Per series, so one
+    // asset's outage never pulls another asset's line to the baseline — which
+    // is the trap a chart-wide union would have walked into, since a compare
+    // chart co-plots different assets.
+    outages: (data && data.outages) || [],
     since: data && data.since,
     until: data && data.until,
   };
@@ -610,7 +623,15 @@ async function _cmpFetchSeriesRaw(s) {
         // successCount + the bucket average in responseTimeMs and have no
         // per-sample `success`; detail tier carries `success`. Without the
         // tier check the response series vanished entirely on 7d/30d.
-        var v = (typeof x.successCount === "number")
+        //
+        // Response time is the one metric here that carries its OWN failure
+        // flag, so it marks failures directly rather than reading `outages`. A
+        // partial-loss rollup bucket is NOT an outage — it still plots its
+        // average.
+        var rollup = typeof x.successCount === "number";
+        var failed = rollup ? (x.sampleCount > 0 && x.successCount === 0) : !x.success;
+        if (failed) return { t: x.timestamp, v: null, ok: false };
+        var v = rollup
           ? (x.successCount > 0 && typeof x.responseTimeMs === "number" ? x.responseTimeMs : null)
           : ((x.success && typeof x.responseTimeMs === "number") ? x.responseTimeMs : null);
         return { t: x.timestamp, v: v };
@@ -652,6 +673,37 @@ async function _cmpFetchSeriesRaw(s) {
   return { points: [], since: null, until: null };
 }
 
+// Fold each series' probe-outage windows into its own point list as valueless
+// baseline points, so the render pass sees one uniform { t, v, ok } series.
+//
+// Called from _cmpReload once per load — deliberately NOT from
+// _renderCompareChart, which re-runs on every resize observation and would
+// append a duplicate set of markers each time.
+//
+// Response time is skipped: it carries an explicit per-sample flag and marked
+// its own failures at fetch time.
+function _cmpApplyOutageMarkers(series) {
+  series.forEach(function (s) {
+    if (s.metricKey === "response") return;
+    if (!s.data || !s.data.points.length) return;
+    // Idempotent per data object. `s.data` comes from _cmpPanel.fetchCache and
+    // is shared by anything holding the same (metric, asset, ifName, range)
+    // key, so a second pass over an already-marked series would append a
+    // duplicate set of red dots. Today every _cmpReload caller clears the cache
+    // first, which makes this belt-and-braces — but that is an invariant three
+    // call sites away, and a future "re-render without refetch" path would
+    // silently break it.
+    if (s.data._outagesApplied) return;
+    s.data._outagesApplied = true;
+    var good = s.data.points
+      .filter(function (p) { return p.ok !== false; })
+      .map(function (p) { return +new Date(p.t); });
+    _outageMarkers(s.data.outages, good).forEach(function (t) {
+      s.data.points.push({ t: new Date(t).toISOString(), v: null, ok: false });
+    });
+  });
+}
+
 async function _cmpReload() {
   var chartsEl = document.getElementById("cmp-charts");
   if (!chartsEl) return;
@@ -676,6 +728,7 @@ async function _cmpReload() {
     })).then(function () {
       var card = cards[i];
       if (!card) return;
+      _cmpApplyOutageMarkers(sp.series);
       var legendEl = card.querySelector(".cmp-legend");
       legendEl.innerHTML = sp.series.map(function (s) {
         return '<span style="display:inline-flex;align-items:center;gap:4px">' +
@@ -709,7 +762,10 @@ function _renderCompareChart(container, spec) {
     if (s.data.until != null) untilVals.push(new Date(s.data.until).getTime());
     s.data.points.forEach(function (p) {
       boundsPts.push({ timestamp: p.t });
-      if (p.v > yPeak) yPeak = p.v;
+      // Failures carry no value and plot at the baseline, so they must never
+      // widen the axis. Explicit rather than relying on `null > yPeak` being
+      // false by accident — those points reach this loop now.
+      if (typeof p.v === "number" && isFinite(p.v) && p.v > yPeak) yPeak = p.v;
     });
   });
   var since = sinceVals.length ? Math.min.apply(null, sinceVals) : null;
@@ -748,28 +804,52 @@ function _renderCompareChart(container, spec) {
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
 
-  var polylines = "", dots = "", hits = "";
-  series.forEach(function (s) {
+  // clipId is built BEFORE the series loop because it seeds the per-render
+  // gradient id prefix the failure-aware renderer needs — several cards share
+  // the panel, and a colliding prefix would cross-wire their fade gradients.
+  // The series index rides along too, since one chart holds several series.
+  var clipId = _chartClipId("compare");
+  var baselineY = padT + innerH;
+  var polylines = "", dots = "", hits = "", failDefs = "";
+  series.forEach(function (s, si) {
     var pts = s.data.points.slice().sort(function (a, b) { return new Date(a.t) - new Date(b.t); });
-    var coords = pts.map(function (p) { return xFor(p.t) + "," + yFor(p.v); }).join(" ");
-    if (coords) polylines += '<polyline points="' + coords + '" fill="none" stroke="' + s.color + '" stroke-width="1.5"/>';
-    pts.forEach(function (p) {
-      dots += '<circle cx="' + xFor(p.t) + '" cy="' + yFor(p.v) + '" r="1.5" fill="' + s.color + '"/>';
-      hits += '<circle class="chart-hit" cx="' + xFor(p.t) + '" cy="' + yFor(p.v) + '" r="5" fill="transparent" style="cursor:crosshair"' +
-        ' data-ts="' + escapeHtml(String(p.t)) + '"' +
-        ' data-label="' + escapeHtml(s.label) + '"' +
-        ' data-val="' + escapeHtml(_cmpFmtVal(p.v, unit)) + '"/>';
+    // Failed polls sit at the baseline with no value of their own, so an outage
+    // reads as the line diving to zero rather than a straight bridge over it.
+    var plot = pts.map(function (p) {
+      var ok = p.ok !== false;
+      return { x: xFor(p.t), y: ok ? yFor(p.v) : baselineY, ok: ok, t: p.t, v: p.v };
+    });
+    var seg = _failureAwareSeriesSVG(plot, s.color, clipId + "-" + si);
+    failDefs += seg.defs;
+    polylines += seg.segments;
+    // 2.5px red dots for the failures; OK points keep their 1.5px series dot.
+    dots += _failureDotsSVG(plot);
+    plot.forEach(function (p) {
+      if (p.ok) {
+        dots += '<circle cx="' + p.x + '" cy="' + p.y + '" r="1.5" fill="' + s.color + '"/>';
+        hits += '<circle class="chart-hit" cx="' + p.x + '" cy="' + p.y + '" r="5" fill="transparent" style="cursor:crosshair"' +
+          ' data-ts="' + escapeHtml(String(p.t)) + '"' +
+          ' data-label="' + escapeHtml(s.label) + '"' +
+          ' data-val="' + escapeHtml(_cmpFmtVal(p.v, unit)) + '"/>';
+      } else {
+        hits += '<circle class="chart-hit" cx="' + p.x + '" cy="' + p.y + '" r="5" fill="transparent" style="cursor:crosshair"' +
+          ' data-ts="' + escapeHtml(String(p.t)) + '"' +
+          ' data-label="' + escapeHtml(s.label) + '"' +
+          ' data-failed="1"/>';
+      }
     });
   });
 
   var yLabelX = 14, yLabelY = padT + innerH / 2;
   var yTitle = '<text class="chart-axis-title" x="' + yLabelX + '" y="' + yLabelY + '" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.85" transform="rotate(-90 ' + yLabelX + ' ' + yLabelY + ')">' + escapeHtml(_cmpAxisLabel(unit)) + '</text>';
 
-  var clipId = _chartClipId("compare");
   container.style.display = "block";
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      // Fade gradients get their own <defs> next to the clip's. They must not
+      // sit inside the clipped <g> that references them.
+      (failDefs ? '<defs>' + failDefs + '</defs>' : '') +
       ticks + xTicks + yTitle +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       '<g ' + _chartClipAttr(clipId) + '>' + polylines + dots + hits + '</g>' +
@@ -777,7 +857,12 @@ function _renderCompareChart(container, spec) {
   container.style.position = "relative";
 
   _wireChartTooltip(container, function (target) {
-    return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+    var head = '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>';
+    if (target.getAttribute("data-failed")) {
+      return head +
+        '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+    }
+    return head +
       '<div>' + escapeHtml(target.getAttribute("data-label")) + ': ' + escapeHtml(target.getAttribute("data-val")) + '</div>';
   });
 }

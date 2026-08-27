@@ -5271,6 +5271,30 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/probeOutageService.ts
+
+**What it owns:** "When was this device unreachable?", answered from the response-time probe stream — for the charts of streams that carry no failure record of their own (telemetry, storage, interface counters).
+
+**Public API:** `foldProbeOutages` (pure), `readProbeOutages`, `readProbeOutagesAtTier`, `serializeOutages`
+
+**Cross-service deps:** `sampleQueryRouter` (`pickSampleTierForAsset`, `SampleTier`), `prisma`.
+
+**Used by:** `src/api/routes/assets.ts` — served as `outages` on `/assets/:id/telemetry-history`, `/storage-history` and `/interface-history`. Consumed browser-side by `_outageMarkers` in `public/js/assets.js` and its two ports (`public/js/mobile/charts.js`, `public/js/assets-compare.js`).
+
+**Invariants:**
+- **Read-only, and deliberately so.** An earlier design wrote synthetic failure rows into the telemetry/storage/interface tables so those streams would carry their own flag. Rejected: the alert engine (`notificationEngine` selects raw rows and aggregates them), the hourly/daily rollups, and the vanished-state sweep all read those tables with no way to tell a marker from a reading — and a failure row would have had to invent a `mountPath` / `ifName` for a poll that never ran. Never add a writer here.
+- **The heavy cadences do not run while an asset is down** (`runsHeavyCadences` gates telemetry / systemInfo / lldp / storage / processes on `up`), so a skipped poll leaves NO row. That is the whole reason this service exists: there is nothing in the stream's own table to mark, and the probe — which runs in every state — is the only record.
+- **Partial loss is not an outage.** On the rollup tiers only `sampleCount > 0 && successCount === 0` counts; a bucket with some successes still plots its average. An empty bucket (`sampleCount === 0`) is a gap in the probe stream itself, not a failure.
+- **Response-time poll only** (`probeKind` NULL or `"primary"`), matching `readMonitorHistory`. The ICMP loss sampler is a different transport that never calls `recordProbeResult` and cannot move `monitorStatus`; its failures are not the same claim.
+- **Maintenance needs no special case.** Polling stops entirely inside a maintenance window, so the window contains no failed probes and yields no outage — the purple band explains the gap and no red dive is drawn over it. UI-GUIDE section 15 requires exactly that ("never band a missed poll"; the two states are opposites), and the heuristic this replaced got it wrong.
+- **Tier is picked against the `assets` retention entity**, independently of whichever entity the calling chart reads. `assets` and `cpuMem` retention are configured separately, so an install keeping CPU history longer than probe history loses outage shading at the far end of a wide range; the chart degrades to an unmarked gap, which is honest — the evidence is gone.
+
+**When changing this:**
+- The browser-side collision guard lives in `_outageMarkers`, not here: a marker landing on a real sample is dropped, because the Polaris Agent pushes on its own schedule and is not gated on `monitorStatus`, so an agent host can keep reporting CPU straight through an outage of the server-side probe transport.
+- `_outageMarkers` + `_medianCadenceMs` exist in three copies by design (desktop / mobile / compare) — the mobile and compare files say so in their headers. Keep them in step.
+- Adding `outages` to a new chart endpoint means adding it to the renderer too, or the payload grows for nothing.
+
+---
 ## services/sampleWriteBuffer.ts
 
 **What it owns:** Periodic batch-flush buffer for the seven append-only monitor sample tables (asset_monitor_samples / asset_telemetry_samples / asset_hardware_sensor_samples / asset_interface_samples / asset_storage_samples / asset_ipsec_tunnel_samples / asset_perf_sla_samples). Collapses per-work-item `prisma.<table>.create*` calls into one `createMany` per 2 s flush window so the monitor hot loop stops eating DB pool capacity per probe. (SD-WAN **rules** are no longer buffered — they're current-state, written via `persistSdwanRules`; only the SD-WAN SLA-metrics stream `asset_perf_sla_samples` rides this buffer.)

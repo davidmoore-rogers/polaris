@@ -6,8 +6,10 @@
  * bridge straight over the hole, so an outage was invisible on a phone. Now a
  * failed poll sits at the baseline in red with a gradient transition segment,
  * matching the desktop response-time chart. Two feeds have to keep working:
- * explicit `ok:false` points (monitor stream) and inferred gaps (`gapFade`, for
- * the telemetry stream, which has no per-sample success flag).
+ * explicit `ok:false` points (monitor stream) and, for the telemetry stream
+ * which has no per-sample success flag, the `gapFade` series combined with the
+ * chart's `outages` list — the response-time probe's own failure record, which
+ * replaced an inferred 2.5x-median-cadence gap heuristic.
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
@@ -20,10 +22,18 @@ type Series = { values: Point[]; color?: string; fill?: boolean; gapFade?: boole
 type Prepared = { s: Series; pts: { ts: number; v: number | null; ok: boolean }[] };
 type Charts = {
   lineChart: (opts: Record<string, unknown>) => string;
-  _pollGapMarkers: (ts: number[]) => number[];
+  _outageMarkers: (outages: Outage[] | undefined, sampleTimesMs: number[]) => number[];
+  _medianCadenceMs: (ts: number[]) => number;
   _seriesPoints: (s: Series) => { ts: number; v: number | null; ok: boolean }[];
-  _applySharedGapMarkers: (prepared: Prepared[]) => number[];
+  _applySharedOutageMarkers: (prepared: Prepared[], outages?: Outage[]) => number[];
 };
+
+type Outage = { from: string; to: string };
+
+/** Build an outage window from two epoch-ms instants. */
+function outage(fromMs: number, toMs: number): Outage {
+  return { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() };
+}
 
 const FAIL = "#d32f2f";
 let charts: Charts;
@@ -47,39 +57,47 @@ function okSeries(ts: number[], v = 10): Series {
   return { values: ts.map((t) => ({ ts: t, v })) };
 }
 
-describe("pollGapMarkers", () => {
-  it("returns nothing for a steady cadence", () => {
-    expect(charts._pollGapMarkers(minutes(10))).toEqual([]);
-  });
-
-  it("needs at least three samples to have a median cadence", () => {
-    const [a, b] = minutes(2);
-    expect(charts._pollGapMarkers([a, b + 3_600_000])).toEqual([]);
-  });
-
-  it("brackets a gap with a marker one cadence inside each edge", () => {
-    const ts = minutes(5);
-    // drop the middle: ...t2, then jump 30 minutes to t3
+describe("outageMarkers", () => {
+  it("marks nothing when the probe reported no outage, however wide the hole", () => {
+    const ts = minutes(3);
     const withGap = [ts[0], ts[1], ts[2], ts[2] + 30 * 60_000, ts[2] + 31 * 60_000];
-    const markers = charts._pollGapMarkers(withGap);
-    expect(markers).toEqual([ts[2] + 60_000, ts[2] + 29 * 60_000]);
+    expect(charts._outageMarkers([], withGap)).toEqual([]);
+    expect(charts._outageMarkers(undefined, withGap)).toEqual([]);
   });
 
-  it("keeps every marker strictly inside the hole it marks", () => {
-    const ts = minutes(4);
-    // 3× the median — the narrowest gap that clears the 2.5× threshold
-    const withGap = [ts[0], ts[1], ts[2], ts[2] + 3 * 60_000];
-    const markers = charts._pollGapMarkers(withGap);
-    expect(markers.length).toBeGreaterThan(0);
-    markers.forEach((m) => {
-      expect(m).toBeGreaterThan(ts[2]);
-      expect(m).toBeLessThan(ts[2] + 3 * 60_000);
-    });
+  it("brackets an outage with one marker at each end", () => {
+    const ts = minutes(40);
+    // The probe fails BETWEEN telemetry polls, so the outage sits strictly
+    // inside the sampling hole: last good sample ts[5], first good again ts[20].
+    const start = ts[6], end = ts[19];
+    const sampled = [...ts.slice(0, 6), ...ts.slice(20)];
+    expect(charts._outageMarkers([outage(start, end)], sampled)).toEqual([start, end]);
   });
 
-  it("ignores a gap inside the 2.5× cadence tolerance", () => {
-    const ts = minutes(4);
-    expect(charts._pollGapMarkers([ts[0], ts[1], ts[2], ts[2] + 2 * 60_000])).toEqual([]);
+  it("collapses a single-probe outage to one marker", () => {
+    const ts = minutes(10);
+    expect(charts._outageMarkers([outage(ts[4], ts[4])], [ts[0], ts[1], ts[8], ts[9]])).toEqual([ts[4]]);
+  });
+
+  it("drops a marker that lands on real data — an agent keeps pushing when the probe transport fails", () => {
+    // The probe says the device was unreachable, but the host's agent pushed
+    // telemetry straight through it. Diving a line that has data would
+    // misreport what we are holding.
+    const ts = minutes(20);
+    expect(charts._outageMarkers([outage(ts[5], ts[9])], ts)).toEqual([]);
+  });
+
+  it("ignores an unparseable window rather than plotting NaN", () => {
+    const ts = minutes(6);
+    expect(charts._outageMarkers([{ from: "nope", to: "also-nope" }], ts)).toEqual([]);
+  });
+
+  it("returns markers in time order", () => {
+    const ts = minutes(60);
+    const sampled = [ts[0], ts[1], ts[50], ts[51]];
+    const out = charts._outageMarkers([outage(ts[30], ts[40]), outage(ts[5], ts[10])], sampled);
+    expect(out).toEqual([...out].sort((a, b) => a - b));
+    expect(out).toHaveLength(4);
   });
 });
 
@@ -115,13 +133,16 @@ describe("seriesPoints", () => {
   });
 });
 
-describe("applySharedGapMarkers", () => {
-  const ts = minutes(3);
-  const withGap = [ts[0], ts[1], ts[2], ts[2] + 30 * 60_000, ts[2] + 31 * 60_000];
+describe("applySharedOutageMarkers", () => {
+  const ts = minutes(40);
+  // Telemetry stops for the duration of the outage, then resumes; the outage
+  // itself sits strictly inside that hole (see outageMarkers above).
+  const withGap = [...ts.slice(0, 6), ...ts.slice(20)];
+  const outages = [outage(ts[6], ts[19])];
 
-  function prep(list: Series[]) {
+  function prep(list: Series[], o: Outage[] | undefined = outages) {
     const prepared = list.map((s) => ({ s, pts: charts._seriesPoints(s) }));
-    const marks = charts._applySharedGapMarkers(prepared);
+    const marks = charts._applySharedOutageMarkers(prepared, o);
     return { prepared, marks };
   }
 
@@ -152,13 +173,14 @@ describe("applySharedGapMarkers", () => {
     expect(memMarks).toEqual(marks);
   });
 
-  it("a series absent from a stretch the other covers does not invent an outage", () => {
-    // No real gap in the union — memory just stops reporting partway through.
+  it("a series that simply stops reporting is not an outage without a probe failure", () => {
+    // Memory stops partway through and the probe never failed. Under the old
+    // gap heuristic a wide enough hole was reason enough; now it takes evidence.
     const full = minutes(8);
     const { marks } = prep([
       { ...okSeries(full), gapFade: true },
       { ...okSeries(full.slice(0, 4)), gapFade: true },
-    ]);
+    ], []);
     expect(marks).toEqual([]);
   });
 });
@@ -222,15 +244,33 @@ describe("lineChart missed-poll rendering", () => {
     expect(svg).toContain('stroke="' + FAIL + '"');
   });
 
-  it("fades a gapFade series across an inferred hole, and leaves a plain one bridging", () => {
-    const ts = minutes(3);
-    const withGap = [ts[0], ts[1], ts[2], ts[2] + 30 * 60_000, ts[2] + 31 * 60_000];
-    const faded = charts.lineChart({ series: [{ ...okSeries(withGap, 30), gapFade: true }], yMin: 0, yMax: 100 });
+  it("fades a gapFade series across a reported outage, and leaves a plain one bridging", () => {
+    const ts = minutes(40);
+    const withGap = [...ts.slice(0, 6), ...ts.slice(20)];
+    const outages = [outage(ts[6], ts[19])];
+    const faded = charts.lineChart({
+      series: [{ ...okSeries(withGap, 30), gapFade: true }],
+      outages, yMin: 0, yMax: 100,
+    });
     expect(faded).toContain(FAIL);
     expect(faded.match(/<linearGradient /g)).toHaveLength(2);
 
-    const plain = charts.lineChart({ series: [okSeries(withGap, 30)], yMin: 0, yMax: 100 });
+    // Same hole, same outage list — but without gapFade the series opts out.
+    const plain = charts.lineChart({ series: [okSeries(withGap, 30)], outages, yMin: 0, yMax: 100 });
     expect(plain).not.toContain(FAIL);
+  });
+
+  it("bridges the same hole when the probe reported no outage", () => {
+    // The hole alone is no longer evidence: without a probe failure behind it,
+    // the line bridges. This is the case the old 2.5x gap heuristic got wrong
+    // for unmounted disks and maintenance windows.
+    const ts = minutes(40);
+    const withGap = [...ts.slice(0, 6), ...ts.slice(20)];
+    const svg = charts.lineChart({
+      series: [{ ...okSeries(withGap, 30), gapFade: true }],
+      outages: [], yMin: 0, yMax: 100,
+    });
+    expect(svg).not.toContain(FAIL);
   });
 
   it("still shows the empty state when there are no points at all", () => {

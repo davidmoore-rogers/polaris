@@ -94,6 +94,7 @@ import {
   readPerfSlaHistory,
   readSdwanMembers,
 } from "../../services/sampleHistoryService.js";
+import { readProbeOutages, serializeOutages } from "../../services/probeOutageService.js";
 import {
   type PollingMethod,
   assetSourceKindFromIntegrationType,
@@ -1869,7 +1870,15 @@ router.get("/:id/telemetry-history", requirePermission("assets", "read"), async 
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "cpuMem", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
-    const result = await readTelemetryHistory(id, since, until, pick.tier, fetchSince);
+    // The telemetry cadence does not run while an asset is down, so a missed
+    // poll leaves no row to mark. `outages` carries the response-time probe's
+    // own failure record for the same window — the chart dives its line to the
+    // baseline across each one instead of guessing at the outage from the size
+    // of the hole. See services/probeOutageService.ts.
+    const [result, outages] = await Promise.all([
+      readTelemetryHistory(id, since, until, pick.tier, fetchSince),
+      readProbeOutages(id, since, until),
+    ]);
     res.json({
       range: rangeLabel,
       since,
@@ -1878,6 +1887,7 @@ router.get("/:id/telemetry-history", requirePermission("assets", "read"), async 
       bucketSeconds: pick.bucketSeconds,
       samples: result.samples,
       stats: result.stats,
+      outages: serializeOutages(outages),
     });
   } catch (err) { next(err); }
 });
@@ -2600,7 +2610,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
     // header reflects what was configured during that window; the
     // operator-typed override (Polaris-local) takes precedence for the
     // resolved `description` field shown in the UI.
-    const [history, override, allNeighbors, inferredAll, interfaceMeta] = await Promise.all([
+    const [history, override, allNeighbors, inferredAll, interfaceMeta, outages] = await Promise.all([
       readInterfaceHistory(id, since, until, pick.tier, ifName, fetchSince),
       prisma.assetInterfaceOverride.findUnique({
         where: { assetId_ifName: { assetId: id, ifName } },
@@ -2635,6 +2645,11 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
         where: { assetId: id },
         select: { ifName: true, ifType: true, ifParent: true },
       }),
+      // Response-time failures over the same window — the interface counters
+      // carry no success flag of their own and the cadence doesn't run while
+      // the asset is down, so this is what tells the chart where to dive. See
+      // the note on telemetry-history.
+      readProbeOutages(id, since, until),
     ]);
     const neighbors = allNeighbors.filter((n) => n.localIfName === ifName);
     const inferredForIf = inferredAll.filter((n) => n.localIfName === ifName);
@@ -2671,6 +2686,7 @@ router.get("/:id/interface-history", requirePermission("assets", "read"), async 
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
       samples: history.samples,
+      outages: serializeOutages(outages),
       lldpNeighbors: mergedNeighbors.map((n) => ({
         chassisIdSubtype:  n.chassisIdSubtype,
         chassisId:         n.chassisId,
@@ -3010,7 +3026,16 @@ router.get("/:id/storage-history", requirePermission("assets", "read"), async (r
     const { since, until, rangeLabel } = resolveRange(req);
     const pick = await pickSampleTierForAsset(id, "storage", since);
     const fetchSince = extendSinceForLookback(since, pick.bucketSeconds);
-    const result = await readStorageHistory(id, since, until, pick.tier, mountPath, fetchSince);
+    // See the note on telemetry-history: the storage cadence is skipped while
+    // the asset is down, so the probe stream is what knows an outage happened.
+    // This is also what lets storage be treated like every other stream — a
+    // mount that is simply unmounted on a HEALTHY device sits inside no outage
+    // window and draws no dive, which is the distinction the old gap heuristic
+    // could not make.
+    const [result, outages] = await Promise.all([
+      readStorageHistory(id, since, until, pick.tier, mountPath, fetchSince),
+      readProbeOutages(id, since, until),
+    ]);
     res.json({
       range: rangeLabel,
       mountPath,
@@ -3019,6 +3044,7 @@ router.get("/:id/storage-history", requirePermission("assets", "read"), async (r
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
       samples: result.samples,
+      outages: serializeOutages(outages),
     });
   } catch (err) { next(err); }
 });

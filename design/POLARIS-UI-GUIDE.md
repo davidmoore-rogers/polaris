@@ -1073,3 +1073,83 @@ shape rather than rejecting; a widget must not take the dashboard with it.
 7. Row limit, minimum severity and scope from the shared controls.
 8. Every timer and listener torn down in `ctx.onUnmount`.
 9. Check it at 3 columns wide and at height 1.
+
+---
+
+## 15. Time-series charts
+
+Hand-rolled SVG, one render function per chart, no charting library. Shared
+scale/clip/tooltip helpers live at the top of the assets module; the phone app
+ports the same rules into its own tiny helper.
+
+### A missed poll is a red dive to the baseline
+
+One treatment, every chart, both surfaces:
+
+- Failed polls plot **at the chart baseline** (`y = padT + innerH`) with no
+  value of their own — they never widen the y-axis.
+- Consecutive failures connect **in red** (`#d32f2f`, the danger hue the
+  tooltips use) along that baseline.
+- Each OK↔fail transition segment gets its own `userSpaceOnUse`
+  `linearGradient` so the stroke **fades** between the series color and red
+  instead of jumping. Gradient ids are prefixed per render (the chart's clip id
+  works) so they can't collide between charts on one panel.
+- Every failure also carries a **2.5px red dot** — bigger than the 1.5px series
+  dots — so a lone miss is visible and not a hairline notch. On the phone the
+  dot is a near-zero-length round-capped stroke, not a `<circle>`: the plot uses
+  `preserveAspectRatio="none"`, which squashes circles into ellipses.
+- Tooltip on a failure point: **"Missed poll — no data collected"** in
+  `var(--color-danger)`.
+
+The point of the dive is that an outage reads as the line **going to zero**.
+Bridging over the gap hides it; a marker beside an unbroken line understates it.
+
+Two ways a stream reports a failure, and both must be handled:
+
+| Stream | Signal |
+| --- | --- |
+| Monitor / response time | explicit per-sample flag — `success: false`, or `successCount === 0` on the rollup tiers |
+| Telemetry, storage, interface counters | **no flag** — a failed poll leaves no row, because these cadences are not RUN while a device is down. Their failures come from the monitor stream instead: the endpoint serves an `outages` list (`[{from, to}]`) built from that device's failed probes, and the chart plots one marker at each end of each window |
+
+### A missed poll is evidence, never a shape
+
+The flagless streams do not guess. A hole in a CPU series is not itself a
+missed poll — it is equally the signature of a disk that was unmounted, a
+metric this device never reported, an operator widening the cadence, or a
+maintenance window. Only one stream is still measuring while a device is down:
+the response-time probe, which runs in every state and writes a real failure
+row per interval. That record is what the other charts read.
+
+The consequence worth stating plainly: **a gap with no failed probe behind it
+bridges.** Silence is not an outage until something says it was one.
+
+This also means maintenance needs no special case. Polling stops entirely
+inside a window, so the window holds no failed probes and draws no dive — the
+band explains the gap, which is the whole point of the band.
+
+Markers are derived **once per device** from the union of the co-plotted
+series' good timestamps: CPU and memory ride the same row, so an outage is an
+outage for both, and one shared marker set keeps them diving at the same x
+instead of drawing two offset red notches. On a chart that co-plots **several
+devices** — the comparison view — that union is per asset and never chart-wide,
+or one device going dark would pull every other line to the baseline.
+
+A marker landing on top of a real sample is **dropped**. An agent pushes on its
+own schedule and is not gated on device state, so an agent host can keep
+reporting CPU straight through an outage of the server-side probe transport;
+diving a line that has data would misreport what is actually held.
+
+A counter reset is not a missed poll. Neither is a partial-loss rollup bucket —
+it still plots its average.
+
+### Bands are maintenance, not failure
+
+A translucent band across the plot means **the asset was in a maintenance
+window** — polling was paused on purpose, so the gap has an explanation.
+Purple, `rgba(149,117,205,0.14)` fill with a dashed `rgba(149,117,205,0.45)`
+outline, drawn **before** the series group so the data line stays on top, named
+inline when the band is wider than 46px, native `<title>` for the tooltip.
+
+Never band a missed poll. Red-tinted shading would read as a second kind of
+scheduled window, and the two states are opposites: one is expected, one is the
+thing the operator is looking for.

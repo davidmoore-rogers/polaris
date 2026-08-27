@@ -256,37 +256,68 @@ function _failureDotsSVG(pts) {
   }).join("");
 }
 
-// Detect missed-poll gaps in a time-ordered sample series (charts whose
-// streams have no explicit per-sample success flag — interface throughput /
-// errors — where a failed poll simply leaves no row). Returns synthetic
-// marker timestamps (ms) to plot as failures: one just after the last good
-// sample and one just before the next, so the line dives to the baseline
-// across the gap instead of drawing a straight bridge over it. A gap counts
-// when it exceeds 2.5× the series' median cadence (needs ≥3 samples to have
-// a meaningful median; rollup tiers work the same way — a missing bucket is
-// a gap in bucket-sized steps).
-function _pollGapMarkers(timestampsMs) {
-  if (!timestampsMs || timestampsMs.length < 3) return [];
+// Median sampling cadence of a time-ordered series, in ms. Needs >= 3
+// timestamps to have a meaningful middle. Sizes the collision guard in
+// _outageMarkers below.
+function _medianCadenceMs(timestampsMs) {
+  if (!timestampsMs || timestampsMs.length < 3) return 0;
   var dts = [];
   for (var i = 1; i < timestampsMs.length; i++) {
     var dt = timestampsMs[i] - timestampsMs[i - 1];
     if (dt > 0) dts.push(dt);
   }
-  if (!dts.length) return [];
+  if (!dts.length) return 0;
   dts.sort(function (a, b) { return a - b; });
-  var median = dts[Math.floor(dts.length / 2)];
-  if (!(median > 0)) return [];
-  var threshold = median * 2.5;
+  return dts[Math.floor(dts.length / 2)];
+}
+
+// Missed-poll markers for the streams that carry no per-sample success flag —
+// telemetry (CPU / memory), storage, interface counters. A failed poll on any
+// of those leaves no row at all, because the heavy cadences do not RUN while
+// an asset is down (runsHeavyCadences gates them on `up`), so there is nothing
+// in those tables to mark.
+//
+// The record therefore lives in the one stream that kept measuring: the
+// response-time probe, which runs in every state and writes a real
+// success:false row per interval. The chart endpoints serve it as `outages` —
+// [{from, to}] stretches during which every probe failed (built by
+// services/probeOutageService.ts).
+//
+// This replaced a 2.5x-median-cadence gap heuristic. That guess could not tell
+// an outage from a disk that was unmounted, from a metric this device never
+// reports, or from an operator widening the cadence — and it drew a red dive
+// straight through maintenance windows, which is backwards (a band means the
+// gap is explained; a dive means it isn't). Polling stops entirely during
+// maintenance, so a maintenance window contains no failed probes and yields no
+// outage, with no special case needed.
+//
+// One marker at each end of an outage so the line dives to the baseline and
+// climbs back out; an outage that lasted a single probe collapses to one
+// marker, which is what one missed poll looks like.
+//
+// `sampleTimesMs` is the series' OWN good timestamps, and a marker landing on
+// top of real data is dropped: the Polaris Agent pushes on its own schedule
+// and is not gated on monitorStatus, so an agent host can keep reporting CPU
+// straight through an outage of the server-side probe transport. Diving a line
+// that has data would misreport the data we are actually holding.
+function _outageMarkers(outages, sampleTimesMs) {
+  if (!outages || !outages.length) return [];
+  var times = (sampleTimesMs || []).slice().sort(function (a, b) { return a - b; });
+  var guardMs = _medianCadenceMs(times) / 2;
   var markers = [];
-  for (i = 1; i < timestampsMs.length; i++) {
-    var gap = timestampsMs[i] - timestampsMs[i - 1];
-    if (gap <= threshold) continue;
-    var a = timestampsMs[i - 1] + median;
-    var b = timestampsMs[i] - median;
-    if (b <= a) markers.push(timestampsMs[i - 1] + gap / 2);
-    else markers.push(a, b);
+  outages.forEach(function (o) {
+    var from = +new Date(o.from);
+    var to   = +new Date(o.to);
+    if (!isFinite(from) || !isFinite(to)) return;
+    markers.push(from);
+    if (to > from) markers.push(to);
+  });
+  if (guardMs > 0) {
+    markers = markers.filter(function (m) {
+      return !times.some(function (t) { return Math.abs(t - m) < guardMs; });
+    });
   }
-  return markers;
+  return markers.sort(function (a, b) { return a - b; });
 }
 
 // Stash the rendered plot geometry on the chart container so the drag-select
@@ -9871,16 +9902,18 @@ function _renderSystemChart(container, data, asset, si) {
 
   // Missed polls (the telemetry stream has no per-sample success flag — a
   // failed poll simply leaves no row) render the same way the response-time
-  // and interface charts render theirs: red dots at the baseline flanking each
-  // cadence gap, with both lines fading into red across the gap instead of
-  // bridging it. Markers come from the UNION of the two series' timestamps, so
-  // a transport that reports CPU but not memory reads as a data-availability
-  // difference (memory bridges) rather than an outage on the memory line.
+  // and interface charts render theirs: red dots at the baseline flanking the
+  // outage, with both lines fading into red across it instead of bridging it.
+  // The outage windows come from the response-time probe (payload `outages`,
+  // see _outageMarkers) rather than from the shape of the hole. Both lines
+  // dive together: CPU and memory ride the same telemetry row, so an outage is
+  // an outage for both, while a transport that reports CPU but not memory has
+  // no probe failure behind it and correctly bridges instead.
   var unionTs = Object.keys(cpuValues.concat(memValues).reduce(function (acc, e) {
     acc[+new Date(e.s.timestamp)] = true;
     return acc;
   }, {})).map(Number).sort(function (a, b) { return a - b; });
-  var gapMarkers = _pollGapMarkers(unionTs);
+  var gapMarkers = _outageMarkers(data && data.outages, unionTs);
   var baselineY = padT + innerH;
   function failAwarePts(list) {
     if (!list.length) return [];
@@ -11505,7 +11538,7 @@ async function _loadInterfaceHistoryFor(assetId, ifName, range, callOpts) {
     }
     _populateInterfaceCommentEditor(assetId, ifName, data, { silent: silent });
     _renderIfaceLldpBlock(data.lldpNeighbors || []);
-    var ifaceOpts = { since: data.since, until: data.until, subject: ifName };
+    var ifaceOpts = { since: data.since, until: data.until, subject: ifName, outages: data.outages };
     _renderIfaceThroughputChart(tputEl, derived, ifaceOpts);
     _renderIfaceErrorChart(errEl, derived, ifaceOpts);
     // Stash the active selection on each chart container so silent ticks /
@@ -11951,9 +11984,10 @@ function _renderIfaceThroughputChart(container, derived, opts) {
 
   // Missed polls (interface streams have no per-sample success flag — a
   // failed poll simply leaves no row) render exactly like response-time
-  // failures: red dots at the baseline flanking each cadence gap, with the
-  // series lines fading into red across the gap instead of bridging it.
-  var gapMarkers = _pollGapMarkers(derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
+  // failures: red dots at the baseline flanking the outage, with the series
+  // lines fading into red across it instead of bridging. Outage windows come
+  // from the response-time probe (see _outageMarkers).
+  var gapMarkers = _outageMarkers(opts && opts.outages, derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
   var baselineY = padT + innerH;
   function failAwarePts(list, key) {
     if (!list.length) return [];
@@ -12084,8 +12118,8 @@ function _renderIfaceErrorChart(container, derived, opts) {
   var inErrColor  = "#f59e0b";
   var outErrColor = "#9b5de5";
   // Same missed-poll treatment as the throughput chart: red baseline dots
-  // flanking each cadence gap, with the series lines fading into red.
-  var gapMarkers = _pollGapMarkers(derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
+  // flanking each probe outage, with the series lines fading into red.
+  var gapMarkers = _outageMarkers(opts && opts.outages, derived.map(function (d) { return new Date(d.timestamp).getTime(); }));
   var baselineY = padT + innerH;
   function failAwarePts(list, key) {
     if (!list.length) return [];
@@ -13530,6 +13564,7 @@ function _rerenderStorageSectionFromState(mountPath) {
   _renderStorageChart(chartEl, mountState.samples, {
     since: mountState.data && mountState.data.since,
     until: mountState.data && mountState.data.until,
+    outages: mountState.data && mountState.data.outages,
     subject: mountPath,
     view: view,
     forecast: mountState.forecast,
@@ -13837,14 +13872,61 @@ function _renderStorageChart(container, samples, opts) {
       '<text x="' + xPos + '" y="' + (padT + innerH + 14) + '" text-anchor="middle" font-size="10" fill="currentColor">' + fmtTick(tsTick) + '</text>';
   }
 
+  // Missed polls. The storage cadence doesn't run while an asset is down, so a
+  // skipped scrape leaves no row — same as telemetry and the interface
+  // counters, and handled the same way: outage windows come from the
+  // response-time probe (see _outageMarkers) rather than from the size of the
+  // hole. That distinction is what makes this safe HERE in particular — a
+  // mount that is simply unmounted on a healthy device sits inside no outage
+  // window and draws no dive, where a gap heuristic would have called it one.
+  //
+  // clipId is built here rather than at the SVG assembly below because it seeds
+  // the per-render gradient id prefix _failureAwareSeriesSVG needs; without a
+  // unique prefix the fade gradients collide between the several mount charts
+  // on the Storage tab.
+  var clipId = _chartClipId("storage");
+  var baselineY = padT + innerH;
+  var gapMarkers = _outageMarkers(opts.outages, samples.map(function (s) { return +new Date(s.timestamp); }));
+  var failDefs = "";
+  // Both bytes-view series dive together: used and total ride the same storage
+  // row, so an outage is an outage for both.
+  function storageFailAwarePts(list) {
+    if (!list.length) return [];
+    var pts = list.map(function (e) {
+      return { t: +new Date(e.ts), x: xFor(e.ts), y: yFor(e.v), ok: true };
+    });
+    gapMarkers.forEach(function (m) { pts.push({ t: m, x: xFor(m), y: baselineY, ok: false }); });
+    pts.sort(function (a, b) { return a.t - b.t; });
+    return pts;
+  }
+  // `dash` re-applies a dashed stroke per emitted segment. _failureAwareSeriesSVG
+  // returns one <line> per segment (so each OK<->fail transition can carry its
+  // own fade gradient), so a dash baked into a single polyline has nowhere to
+  // live — it has to be stamped onto each segment instead.
+  function storageFailLine(list, color, idSuffix, dash) {
+    var pts = storageFailAwarePts(list);
+    if (!pts.length) return "";
+    var seg = _failureAwareSeriesSVG(pts, color, clipId + "-" + idSuffix);
+    failDefs += seg.defs;
+    return dash ? seg.segments.replace(/<line /g, '<line stroke-dasharray="4 3" ') : seg.segments;
+  }
+  var failDots = gapMarkers.map(function (m) {
+    return '<circle cx="' + xFor(m) + '" cy="' + baselineY + '" r="2.5" fill="' + _CHART_FAIL_COLOR + '"/>';
+  }).join("");
+  var missHits = gapMarkers.map(function (m) {
+    return '<rect class="chart-hit" x="' + (xFor(m) - 5) + '" y="' + padT + '" width="10" height="' + innerH +
+      '" fill="transparent" style="cursor:crosshair" data-ts="' + escapeHtml(new Date(m).toISOString()) + '" data-miss="1"/>';
+  }).join("");
+
   // Build main series, hit-targets, and forecast overlay per view.
   var seriesSvg = "", hitSvg = "", legendSvg = "", forecastSvg = "", nowMarkerSvg = "";
   if (view === "bytes") {
-    var usedPts  = samples.filter(function (s) { return typeof s.usedBytes  === "number"; }).map(function (s) { return xFor(s.timestamp) + "," + yFor(s.usedBytes);  }).join(" ");
-    var totalPts = samples.filter(function (s) { return typeof s.totalBytes === "number"; }).map(function (s) { return xFor(s.timestamp) + "," + yFor(s.totalBytes); }).join(" ");
+    var usedSeries  = samples.filter(function (s) { return typeof s.usedBytes  === "number"; }).map(function (s) { return { ts: s.timestamp, v: s.usedBytes  }; });
+    var totalSeries = samples.filter(function (s) { return typeof s.totalBytes === "number"; }).map(function (s) { return { ts: s.timestamp, v: s.totalBytes }; });
     seriesSvg =
-      (totalPts ? '<polyline points="' + totalPts + '" fill="none" stroke="#9b5de5" stroke-width="1.5" stroke-dasharray="4 3"/>' : '') +
-      (usedPts  ? '<polyline points="' + usedPts  + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' : '') +
+      storageFailLine(totalSeries, "#9b5de5", "total", true) +
+      storageFailLine(usedSeries, "var(--color-accent)", "used") +
+      failDots +
       samples.filter(function (s) { return typeof s.totalBytes === "number"; }).map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.totalBytes) + '" r="1.5" fill="#9b5de5"/>'; }).join("") +
       samples.filter(function (s) { return typeof s.usedBytes  === "number"; }).map(function (s) { return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.usedBytes)  + '" r="1.5" fill="var(--color-accent)"/>'; }).join("");
     legendSvg =
@@ -13869,9 +13951,9 @@ function _renderStorageChart(container, samples, opts) {
       var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? (s.usedBytes / s.totalBytes) * 100 : null;
       return { ts: s.timestamp, v: pct };
     }).filter(function (e) { return typeof e.v === "number"; });
-    var pctPts = pctSeries.map(function (e) { return xFor(e.ts) + "," + yFor(e.v); }).join(" ");
     seriesSvg =
-      '<polyline points="' + pctPts + '" fill="none" stroke="var(--color-accent)" stroke-width="1.5"/>' +
+      storageFailLine(pctSeries, "var(--color-accent)", "pct") +
+      failDots +
       pctSeries.map(function (e) { return '<circle cx="' + xFor(e.ts) + '" cy="' + yFor(e.v) + '" r="1.5" fill="var(--color-accent)"/>'; }).join("");
     if (drawForecast) {
       legendSvg =
@@ -13916,10 +13998,12 @@ function _renderStorageChart(container, samples, opts) {
       '<text x="' + (x1 + 3) + '" y="' + (padT + 9) + '" font-size="9" fill="currentColor" opacity="0.7">now</text>';
   }
 
-  var clipId = _chartClipId("storage");
   container.innerHTML =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
+      // Fade gradients get their own <defs> beside the clip's — valid SVG, and
+      // they must NOT sit inside the clipped <g> that references them.
+      (failDefs ? '<defs>' + failDefs + '</defs>' : '') +
       ticks + xTicks +
       _dateChangeMarkers(t0, t1, padL, padT, innerW, innerH) +
       _maintenanceBandLayer(t0, t1, padL, padT, innerW, innerH) +
@@ -13927,6 +14011,12 @@ function _renderStorageChart(container, samples, opts) {
         seriesSvg +
         forecastSvg +
         nowMarkerSvg +
+        // missHits BEFORE hitSvg: the storage chart's hit targets are small
+        // circles anchored on the line, so the full-height miss rect has to
+        // paint under them or it would steal the hover from the real samples
+        // flanking the gap. (The CPU/Memory chart is the opposite case — its
+        // hits are full-height Voronoi lanes, so its miss rect must go last.)
+        missHits +
         hitSvg +
       '</g>' +
       legendSvg +
@@ -13937,6 +14027,10 @@ function _renderStorageChart(container, samples, opts) {
   _stashChartGeometry(container, t0, t1, padL, innerW, W);
   if (view === "bytes") {
     _wireChartTooltip(container, function (target) {
+      if (target.getAttribute("data-miss") === "1") {
+        return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+          '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      }
       var u = target.getAttribute("data-used");
       var t = target.getAttribute("data-total");
       return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
@@ -13946,6 +14040,10 @@ function _renderStorageChart(container, samples, opts) {
     _addChartScreenshotButton(container, "Storage usage (bytes)", { yAxis: "Bytes", subject: opts.subject, getStats: _storageStatsSummaryFor(container) });
   } else {
     _wireChartTooltip(container, function (target) {
+      if (target.getAttribute("data-miss") === "1") {
+        return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
+          '<div style="color:var(--color-danger,#d32f2f)">Missed poll — no data collected</div>';
+      }
       return '<div style="font-weight:600;margin-bottom:2px">' + escapeHtml(_fmtTooltipTs(target.getAttribute("data-ts"))) + '</div>' +
         '<div>Used: ' + Number(target.getAttribute("data-v")).toFixed(2) + '%</div>';
     });

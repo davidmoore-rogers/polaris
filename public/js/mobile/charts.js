@@ -30,9 +30,12 @@
 //
 //   • `{ ts, v: null, ok: false }` points — for streams that carry an explicit
 //     per-sample success flag (the monitor/response-time stream).
-//   • `gapFade: true` on the series — for streams where a failed poll simply
-//     leaves no row (CPU/memory telemetry); gaps are inferred from the
-//     series' own median cadence.
+//   • `gapFade: true` on the series PLUS `outages` on the chart options — for
+//     streams where a failed poll simply leaves no row (CPU/memory telemetry).
+//     `outages` is the [{from, to}] list the chart endpoints serve: the
+//     stretches during which every response-time probe failed. The heavy
+//     cadences do not run while an asset is down, so that probe stream is the
+//     only record that the poll was missed at all.
 
 (function () {
   // Gutter widths chosen so axis labels fit without crowding the plot at
@@ -62,37 +65,53 @@
   // asset sheet's DOM (response time, CPU/memory, three SD-WAN charts).
   var _chartSeq = 0;
 
-  // Detect missed-poll gaps in a time-ordered list of sample timestamps (ms),
-  // for streams with no per-sample success flag — a failed poll simply leaves
-  // no row. Returns synthetic marker timestamps to plot as failures: one just
-  // after the last good sample and one just before the next, so the line dives
-  // to the baseline across the gap instead of drawing a straight bridge over
-  // it. A gap counts when it exceeds 2.5× the series' median cadence (needs ≥3
-  // samples for a meaningful median; rollup tiers work the same way — a missing
-  // bucket is a gap in bucket-sized steps). Port of `_pollGapMarkers` in
+  // Median sampling cadence of a time-ordered series (ms); sizes the collision
+  // guard in outageMarkers below. Port of `_medianCadenceMs` in
   // public/js/assets.js — keep the two in step.
-  function pollGapMarkers(timestampsMs) {
-    if (!timestampsMs || timestampsMs.length < 3) return [];
+  function medianCadenceMs(timestampsMs) {
+    if (!timestampsMs || timestampsMs.length < 3) return 0;
     var dts = [];
     for (var i = 1; i < timestampsMs.length; i++) {
       var dt = timestampsMs[i] - timestampsMs[i - 1];
       if (dt > 0) dts.push(dt);
     }
-    if (!dts.length) return [];
+    if (!dts.length) return 0;
     dts.sort(function (a, b) { return a - b; });
-    var median = dts[Math.floor(dts.length / 2)];
-    if (!(median > 0)) return [];
-    var threshold = median * 2.5;
+    return dts[Math.floor(dts.length / 2)];
+  }
+
+  // Missed-poll markers for the streams with no per-sample success flag, read
+  // from the response-time probe's own failure record rather than guessed at
+  // from the shape of the hole: the heavy cadences do not RUN while an asset is
+  // down, so a skipped poll leaves nothing behind, and the probe — which keeps
+  // running in every state — is what knows the device was unreachable.
+  //
+  // One marker at each end of an outage so the line dives to the baseline and
+  // climbs back out; a single-probe outage collapses to one marker.
+  //
+  // A marker landing on top of a real sample is dropped: the Polaris Agent
+  // pushes on its own schedule and is not gated on monitorStatus, so an agent
+  // host can keep reporting CPU straight through an outage of the server-side
+  // probe transport. Port of `_outageMarkers` in public/js/assets.js — keep the
+  // two in step.
+  function outageMarkers(outages, sampleTimesMs) {
+    if (!outages || !outages.length) return [];
+    var times = (sampleTimesMs || []).slice().sort(function (a, b) { return a - b; });
+    var guardMs = medianCadenceMs(times) / 2;
     var markers = [];
-    for (i = 1; i < timestampsMs.length; i++) {
-      var gap = timestampsMs[i] - timestampsMs[i - 1];
-      if (gap <= threshold) continue;
-      var a = timestampsMs[i - 1] + median;
-      var b = timestampsMs[i] - median;
-      if (b <= a) markers.push(timestampsMs[i - 1] + gap / 2);
-      else markers.push(a, b);
+    outages.forEach(function (o) {
+      var from = +new Date(o.from);
+      var to   = +new Date(o.to);
+      if (!isFinite(from) || !isFinite(to)) return;
+      markers.push(from);
+      if (to > from) markers.push(to);
+    });
+    if (guardMs > 0) {
+      markers = markers.filter(function (m) {
+        return !times.some(function (t) { return Math.abs(t - m) < guardMs; });
+      });
     }
-    return markers;
+    return markers.sort(function (a, b) { return a - b; });
   }
 
   // Normalize one series' `values` into time-ordered { ts (ms), v, ok } points:
@@ -112,14 +131,15 @@
     return pts;
   }
 
-  // Inferred missed-poll markers for the `gapFade` series, derived ONCE from
-  // the union of their good timestamps and applied to all of them — the same
-  // rule the desktop CPU/memory + interface charts use. Union rather than
-  // per-series because CPU and memory ride the same telemetry row: a transport
-  // that reports one but not the other is a data-availability difference (that
-  // series bridges), not an outage, and shared markers keep both lines diving
-  // at the same x instead of drawing two offset red notches.
-  function applySharedGapMarkers(prepared) {
+  // Missed-poll markers for the `gapFade` series, derived ONCE from the chart's
+  // outage windows and the UNION of those series' good timestamps, then applied
+  // to all of them — the same rule the desktop CPU/memory + interface charts
+  // use. Union rather than per-series because CPU and memory ride the same
+  // telemetry row: shared markers keep both lines diving at the same x instead
+  // of drawing two offset red notches, and the union is also the right input to
+  // the collision guard (a sample on EITHER series proves the host was
+  // reporting).
+  function applySharedOutageMarkers(prepared, outages) {
     var seen = {};
     var any = false;
     prepared.forEach(function (e) {
@@ -129,7 +149,7 @@
     });
     if (!any) return [];
     var union = Object.keys(seen).map(Number).sort(function (a, b) { return a - b; });
-    var marks = pollGapMarkers(union);
+    var marks = outageMarkers(outages, union);
     if (!marks.length) return marks;
     prepared.forEach(function (e) {
       if (!e.s.gapFade || !e.pts.length) return;
@@ -199,7 +219,7 @@
     // Normalize every series up front so the range/axis passes and the render
     // pass agree on exactly which points exist (gap markers included).
     var prepared = series.map(function (s) { return { s: s, pts: seriesPoints(s) }; });
-    applySharedGapMarkers(prepared);
+    applySharedOutageMarkers(prepared, opts.outages);
 
     // Figure out the y-axis range across all visible points. Failed polls carry
     // no value — they plot at the baseline — so they never widen the range.
@@ -339,8 +359,9 @@
   window.PolarisCharts = {
     lineChart: lineChart,
     // exported for unit tests
-    _pollGapMarkers: pollGapMarkers,
+    _outageMarkers: outageMarkers,
+    _medianCadenceMs: medianCadenceMs,
     _seriesPoints: seriesPoints,
-    _applySharedGapMarkers: applySharedGapMarkers,
+    _applySharedOutageMarkers: applySharedOutageMarkers,
   };
 })();
