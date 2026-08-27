@@ -68,11 +68,16 @@
                 <th style="width:280px" data-col-id="trigsum"  data-sf-key="triggerSummary" data-sf-type="string">Trigger</th>
                 <th style="width:240px" data-col-id="resetsum" data-sf-key="resetSummary"   data-sf-type="string">Reset</th>
                 <th                       data-col-id="actsum"   data-sf-key="actionsSummary" data-sf-type="string">Actions</th>
+                <!-- WHO the automation reaches. The cell is the flat deduped
+                     address list (so the filter answers "every automation that
+                     mails Jane"); the hover breaks it down by base / severity
+                     band / escalation tier / reset, each with its channel. -->
+                <th style="width:220px" data-col-id="addresses" data-sf-key="addressesSummary" data-sf-type="string">Addresses</th>
                 <th style="width:120px" data-col-id="createdBy" data-sf-key="createdBy" data-sf-type="string">Created by</th>
               </tr>
             </thead>
             <tbody id="rules-tbody">
-              <tr><td colspan="9" class="empty-state">Loading...</td></tr>
+              <tr><td colspan="10" class="empty-state">Loading...</td></tr>
             </tbody>
           </table>
         </div>

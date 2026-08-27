@@ -28,6 +28,8 @@ let S: {
   trigger: (r: Rule) => string;
   reset: (r: Rule) => string;
   actions: (r: Rule) => string;
+  addresses: (r: Rule) => string;
+  addressesTooltip: (r: Rule) => string;
 };
 
 /** Enough schema for the sentence factory to name things properly. */
@@ -159,5 +161,51 @@ describe("Actions column", () => {
       }],
     });
     expect(out).toContain("4 escalation tiers");
+  });
+});
+
+
+describe("Addresses column", () => {
+  // The pure recipient walk is pinned in automationRecipientGroups.test.ts.
+  // What matters HERE is that the list actually reaches it — automations.js
+  // and the wizard are two files, and the column silently rendering blank
+  // because the factory was missing is the failure this catches.
+  it("lists the addresses a notify action reaches", () => {
+    const out = S.addresses({
+      actions: [{ type: "notify", channelId: "c1", addresses: ["ops@example.com", "oncall@example.com"] }],
+    });
+    expect(out).toBe("ops@example.com, oncall@example.com");
+  });
+
+  it("dedupes an address that appears in more than one place", () => {
+    const out = S.addresses({
+      actions: [{ type: "notify", channelId: "c1", addresses: ["ops@example.com"] }],
+      resetActions: [{ type: "notify", channelId: "c1", addresses: ["OPS@example.com"] }],
+    });
+    expect(out).toBe("ops@example.com");
+  });
+
+  // A notify action with nobody on it is a real misconfiguration, and the
+  // cell going blank is the only place it becomes visible without opening the
+  // wizard — so the hover has to say WHY it is blank.
+  it("is blank for a notify action with no recipients, and the hover says so", () => {
+    expect(S.addresses(METRIC_RULE)).toBe("");
+    expect(S.addressesTooltip(METRIC_RULE)).toMatch(/no recipients configured/i);
+  });
+
+  it("groups the hover by severity band and reset, which the flat cell can't show", () => {
+    const tip = S.addressesTooltip({
+      actions: [{ type: "notify", channelId: "c1", addresses: ["base@example.com"] }],
+      severityBands: [{ severity: "critical", actions: [{ type: "notify", channelId: "c1", addresses: ["pager@example.com"] }] }],
+      resetActions: [{ type: "notify", channelId: "c1", addresses: ["allclear@example.com"] }],
+    });
+    expect(tip).toContain("When it fires:");
+    expect(tip).toContain("At critical severity:");
+    expect(tip).toContain("When it clears:");
+    expect(tip.indexOf("pager@example.com")).toBeGreaterThan(tip.indexOf("base@example.com"));
+  });
+
+  it("says so rather than going blank when the automation sends nothing at all", () => {
+    expect(S.addressesTooltip({ actions: [{ type: "event" }] })).toMatch(/in-app alert/i);
   });
 });

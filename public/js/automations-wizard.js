@@ -42,6 +42,11 @@ var _ruleTagList = null;  // cached distinct asset tags for the scope picker
 var _ruleAssetTypes = null; // cached asset-type registry (finite set) for the scope picker
 var _ruleChannels = null; // cached configured delivery channels (rule-builder picker)
 var _ruleRecipientUsers = null; // cached users for the recipient picker
+// Role id → name, lifted off the scope-options payload on every wizard open.
+// Module scope because the list page's Addresses column needs the same map to
+// name a recipientRoles pill, and scopeOptions is the only endpoint that
+// publishes roles without the users:read key.
+var _ruleScopeRoles = null;
 
 // A tag value that looks like a machine identifier — an Entra/Intune GUID
 // (8-4-4-4-12 hex, possibly with a prefix like "prev-entra:<guid>") or a long
@@ -164,10 +169,171 @@ function recipientsToPills(rec, users, roles, maxLevel) {
   return out;
 }
 
+// ─── Recipient roll-up: WHO an automation notifies, and from where ─────────
+//
+// Backs the list's Addresses column. Lives here rather than in automations.js
+// for the same reason recipientsToPills does: this file owns the recipient
+// vocabulary, and a second walk in the list would be free to disagree with the
+// editor about who a rule reaches.
+//
+// The walk order MUST match the server's allRuleActionRefs (actions + their
+// tiers, rule tiers, band actions + their tiers, band tiers, resolved actions,
+// reset actions) — a location missed here reads in the UI as "nobody is
+// notified", which is the failure mode this column exists to prevent.
+
+/** Channel types that route to RECIPIENTS. Mirrors RECIPIENT_ROUTED_TYPES in
+ *  notificationTypes.ts — the rest post to the channel's own fixed destination
+ *  (webhook URL / Pushbullet token), where the action's recipient fields are
+ *  ignored, so listing them would name people who never get the message. */
+var RECIPIENT_ROUTED_CHANNEL_TYPES = { smtp: true, oauth_m365: true, web_push: true };
+
+/**
+ * Legacy email-tier escalation → v2 tiers-of-actions, exactly as the server's
+ * normalizeEscalationToV2 does it (tier overrides become the notify action's
+ * emailComposition). `withV2` on the read path fills reset/actions but NOT
+ * escalation, so any consumer of a stored rule's chain has to do this itself.
+ */
+function normalizeEscalationV2(esc) {
+  if (!esc || !Array.isArray(esc.tiers) || !esc.tiers.length) return esc || null;
+  if (esc.tiers[0].actions !== undefined) return esc; // already v2
+  return {
+    stopOn: esc.stopOn || "acknowledge",
+    tiers: esc.tiers.map(function (t) {
+      var hasComp = t.subjectTemplate != null || t.bodyTextTemplate != null || t.bodyHtmlTemplate != null || t.cc != null || t.bcc != null;
+      var action = { type: "notify", channelId: t.channelId };
+      if (t.to && t.to.recipientUserIds && t.to.recipientUserIds.length) action.recipientUserIds = t.to.recipientUserIds;
+      if (t.to && t.to.addresses && t.to.addresses.length) action.addresses = t.to.addresses;
+      if (t.to && t.to.recipientRoles && t.to.recipientRoles.length) action.recipientRoles = t.to.recipientRoles;
+      if (t.to && t.to.recipientRegions && t.to.recipientRegions.length) action.recipientRegions = t.to.recipientRegions;
+      if (hasComp) {
+        action.emailComposition = {};
+        if (t.subjectTemplate != null) action.emailComposition.subjectTemplate = t.subjectTemplate;
+        if (t.bodyTextTemplate != null) action.emailComposition.bodyTextTemplate = t.bodyTextTemplate;
+        if (t.bodyHtmlTemplate != null) action.emailComposition.bodyHtmlTemplate = t.bodyHtmlTemplate;
+        if (t.cc != null) action.emailComposition.cc = t.cc;
+        if (t.bcc != null) action.emailComposition.bcc = t.bcc;
+      }
+      var tier = { afterMin: t.afterMin, actions: [action] };
+      if (t.repeatEveryMin != null) tier.repeatEveryMin = t.repeatEveryMin;
+      if (t.maxRepeats != null) tier.maxRepeats = t.maxRepeats;
+      return tier;
+    }),
+  };
+}
+
+/**
+ * One recipient block (a To / Cc / Bcc list) → display strings.
+ *
+ * Goes through recipientsToPills so the unknown-user / unknown-role policy is
+ * the editor's, then relabels: this column answers "what ADDRESS receives
+ * this", so a Polaris account shows its email and falls back to the account
+ * name only when it has none. The three broadcast flags and the legacy tag
+ * routing have no pill kind (pillsToRecipients never emits them) and are
+ * prepended by hand.
+ */
+function recipientDisplayLabels(rec, catalogs) {
+  var out = [];
+  if (!rec) return out;
+  var cat = catalogs || {};
+  var users = cat.users || [];
+  if (rec.recipientAllUsers) out.push("All users");
+  if (rec.recipientAllRegions) out.push("All region users");
+  (rec.recipientTags || []).forEach(function (t) { out.push("Tag: " + t); });
+  recipientsToPills(rec, users, cat.roles || [], 0).forEach(function (p) {
+    if (p.kind === "user") {
+      var u = null;
+      for (var i = 0; i < users.length; i++) if (users[i].id === p.value) { u = users[i]; break; }
+      out.push((u && u.email) || p.label);
+    } else if (p.kind === "role") {
+      out.push("Role: " + p.label);
+    } else if (p.kind === "region") {
+      out.push("Region: " + p.label);
+    } else {
+      out.push(p.label);
+    }
+  });
+  return out;
+}
+
+/**
+ * Every notify action on a rule, grouped by WHERE it is declared, with the
+ * addresses each reaches.
+ *
+ * `catalogs` = { users, roles, channels } — the same three the wizard caches.
+ * All three are optional: a missing users list degrades a recipient to
+ * "(unknown user)" rather than dropping it, and a missing channel catalogue
+ * costs the channel name and the fixed-destination test, never a group.
+ *
+ * Returns [{ where, channel, channelType, fixedDestination, to, cc, bcc }].
+ */
+function ruleRecipientGroups(rule, catalogs) {
+  var cat = catalogs || {};
+  var channels = cat.channels || [];
+  var groups = [];
+  var chanById = function (id) {
+    for (var i = 0; i < channels.length; i++) if (channels[i].id === id) return channels[i];
+    return null;
+  };
+  // Non-escalation notify actions inherit the rule's emailComposition
+  // wholesale when they carry none (composeForNotify: `actionComp ?? rule`);
+  // an escalation tier merges the TEMPLATE fields but takes cc/bcc from the
+  // action alone, so a tier never inherits the rule's Cc list.
+  var addNotify = function (action, where, inTier) {
+    if (!action || action.type !== "notify") return;
+    var ch = chanById(action.channelId);
+    var fixed = !!ch && !RECIPIENT_ROUTED_CHANNEL_TYPES[ch.type];
+    var comp = action.emailComposition || (inTier ? null : rule.emailComposition) || null;
+    groups.push({
+      where: where,
+      channel: ch ? ch.name : null,
+      channelType: ch ? ch.type : null,
+      fixedDestination: fixed,
+      to: fixed ? [] : recipientDisplayLabels(action, cat),
+      cc: fixed ? [] : recipientDisplayLabels(comp && comp.cc, cat),
+      bcc: fixed ? [] : recipientDisplayLabels(comp && comp.bcc, cat),
+    });
+  };
+  // `prefix` names WHICH chain — a per-action chain chases that one action, the
+  // rule/band-level chain chases the alert. Both can exist at once and used to
+  // render as the same "escalation tier 1" line.
+  var addTiers = function (esc, prefix) {
+    var v2 = normalizeEscalationV2(esc);
+    ((v2 && v2.tiers) || []).forEach(function (t, i) {
+      var label = prefix + " tier " + (i + 1) +
+        (t.afterMin != null ? " (after " + t.afterMin + "m)" : "");
+      (t.actions || []).forEach(function (a) { addNotify(a, label, true); });
+    });
+  };
+  // Action-then-its-tiers, interleaved, exactly as allRuleActionRefs walks it.
+  (rule.actions || []).forEach(function (a, i) {
+    addNotify(a, "When it fires", false);
+    addTiers(a && a.escalation, "Action " + (i + 1) + " escalation");
+  });
+  addTiers(rule.escalation, "Escalation");
+  (rule.severityBands || []).forEach(function (b) {
+    var head = "At " + String((b && b.severity) || "band") + " severity";
+    (b.actions || []).forEach(function (a, i) {
+      addNotify(a, head, false);
+      addTiers(a && a.escalation, head + ", action " + (i + 1) + " escalation");
+    });
+    addTiers(b && b.escalation, head + " escalation");
+  });
+  // Only "dedicated" resolved actions are their own list — "reuse" re-runs the
+  // last-fired band's actions, which are already grouped above.
+  if (rule.bandNotify && rule.bandNotify.resolvedMode === "dedicated") {
+    (rule.bandNotify.resolvedActions || []).forEach(function (a) { addNotify(a, "When it eases to normal", false); });
+  }
+  (rule.resetActions || []).forEach(function (a) { addNotify(a, "When it clears", false); });
+  return groups;
+}
+
 if (typeof window !== "undefined") {
   window.PolarisAutomationRecipients = {
     pillsToRecipients: pillsToRecipients,
     recipientsToPills: recipientsToPills,
+    recipientDisplayLabels: recipientDisplayLabels,
+    ruleRecipientGroups: ruleRecipientGroups,
+    normalizeEscalationV2: normalizeEscalationV2,
   };
 }
 
@@ -1167,6 +1333,7 @@ async function openAutomationWizard(existing, opts) {
   // refreshed every open, they're one cheap query each.
   var _awScopeOptions = { manufacturers: [], models: [], interfaceNames: [], subnets: [], regions: [] };
   try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
+  if (_awScopeOptions && Array.isArray(_awScopeOptions.roles)) _ruleScopeRoles = _awScopeOptions.roles;
   try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
   catch (_e) { _ruleChannels = _ruleChannels || []; }
   if (_ruleRecipientUsers === null) {
@@ -4838,8 +5005,8 @@ async function openAutomationWizard(existing, opts) {
         out.dataset.result = "1";
         out.innerHTML = '<strong style="color:var(--color-' + (r.ok ? "success" : "danger") + ')">' + (r.ok ? "✓" : "✗") + "</strong> " +
           escapeHtml(r.message || "") + ' <span style="color:var(--color-text-tertiary)">· ' + escapeHtml(stamp) + "</span>" +
-          (r.ackLinks && r.ackLinks.minted
-            ? '<br><span style="color:var(--color-text-tertiary)">The Acknowledge link in it will clear the test alert.</span>'
+          (r.ackLinks && r.ackLinks.enabled
+            ? '<br><span style="color:var(--color-text-tertiary)">The Acknowledge button in it opens this test alert in Polaris.</span>'
             : r.ackLinks && r.ackLinks.reason
               ? '<br><span style="color:var(--color-text-tertiary)">No acknowledge link: ' + escapeHtml(r.ackLinks.reason) + "</span>"
               : "");
@@ -6507,35 +6674,11 @@ async function openAutomationWizard(existing, opts) {
 }
 
 /** Rule record (API row, rule-shape v2 via the server's withV2 read) → wizard
- *  draft. Escalation may still be stored in the legacy email-tier shape —
- *  convert it to v2 tiers-of-actions exactly like the server's
- *  normalizeEscalationToV2 (tier overrides → the notify action's
- *  emailComposition). */
+ *  draft. `withV2` fills reset/actions but not escalation, so the chain rides
+ *  through normalizeEscalationV2 — shared with the list's Addresses column,
+ *  which has to read the same stored shapes. */
 function _awDraftFromRule(r) {
-  var esc = r.escalation || null;
-  if (esc && Array.isArray(esc.tiers) && esc.tiers.length && esc.tiers[0].actions === undefined) {
-    esc = {
-      stopOn: esc.stopOn || "acknowledge",
-      tiers: esc.tiers.map(function (t) {
-        var hasComp = t.subjectTemplate != null || t.bodyTextTemplate != null || t.bodyHtmlTemplate != null || t.cc != null || t.bcc != null;
-        var action = { type: "notify", channelId: t.channelId };
-        if (t.to && t.to.recipientUserIds && t.to.recipientUserIds.length) action.recipientUserIds = t.to.recipientUserIds;
-        if (t.to && t.to.addresses && t.to.addresses.length) action.addresses = t.to.addresses;
-        if (hasComp) {
-          action.emailComposition = {};
-          if (t.subjectTemplate != null) action.emailComposition.subjectTemplate = t.subjectTemplate;
-          if (t.bodyTextTemplate != null) action.emailComposition.bodyTextTemplate = t.bodyTextTemplate;
-          if (t.bodyHtmlTemplate != null) action.emailComposition.bodyHtmlTemplate = t.bodyHtmlTemplate;
-          if (t.cc != null) action.emailComposition.cc = t.cc;
-          if (t.bcc != null) action.emailComposition.bcc = t.bcc;
-        }
-        var tier = { afterMin: t.afterMin, actions: [action] };
-        if (t.repeatEveryMin != null) tier.repeatEveryMin = t.repeatEveryMin;
-        if (t.maxRepeats != null) tier.maxRepeats = t.maxRepeats;
-        return tier;
-      }),
-    };
-  }
+  var esc = normalizeEscalationV2(r.escalation || null);
   return {
     name: r.name || "",
     description: r.description != null ? r.description : null,

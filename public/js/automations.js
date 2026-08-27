@@ -224,9 +224,12 @@ var _rulesPage = 1;
       : api.automations.schema().then(function (s) { _ruleSchema = s; }).catch(function () {});
     Promise.all([api.automations.list(), schemaReady]).then(function (results) {
       _rules = results[0].rules || [];
-      renderRules();
+      // Before the first paint: the Addresses column resolves user ids, role
+      // ids and channel ids client-side, and rendering without the catalogs
+      // would show stubs and then silently rewrite them a moment later.
+      return loadRuleRecipientCatalogs(_rules).then(function () { renderRules(); });
     }).catch(function () {
-      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="9" class="empty-state">Failed to load automations</td></tr>';
+      document.getElementById("rules-tbody").innerHTML = '<tr><td colspan="10" class="empty-state">Failed to load automations</td></tr>';
     });
   }
   window._reloadRules = loadRules;
@@ -442,7 +445,125 @@ var _rulesPage = 1;
     trigger: triggerSummary,
     reset: resetSummary,
     actions: actionsTooltipText,
+    addresses: addressesSummary,
+    addressesTooltip: addressesTooltip,
   };
+
+  // ── Addresses column ──────────────────────────────────────────────────────
+  //
+  // "Who does this actually reach?" was only answerable by opening the wizard
+  // and walking six action locations by hand. The cell carries the deduped flat
+  // list (so TableSF can filter the list by an address) and the hover carries
+  // the breakdown — the base notification, each severity band, each escalation
+  // tier, and the reset/all-clear notifications, each with its channel.
+  //
+  // Resolution runs entirely client-side off three catalogs, fetched lazily
+  // (see loadRuleRecipientCatalogs) — a role or a user id resolves to a name
+  // only if the corresponding fetch succeeded, and degrades to the editor's
+  // own "(unknown …)" stub otherwise rather than dropping a recipient.
+  function recipientCatalogs() {
+    return {
+      users: _ruleRecipientUsers || [],
+      roles: _ruleScopeRoles || [],
+      channels: _ruleChannels || [],
+    };
+  }
+
+  function ruleGroups(r) {
+    var f = window.PolarisAutomationRecipients;
+    if (!f || !f.ruleRecipientGroups) return [];
+    try { return f.ruleRecipientGroups(r, recipientCatalogs()); } catch (_e) { return []; }
+  }
+
+  /** Flat, deduped, order-preserving list of every address the rule reaches. */
+  function addressesSummary(r, groups) {
+    groups = groups || ruleGroups(r);
+    var seen = {};
+    var out = [];
+    groups.forEach(function (g) {
+      g.to.concat(g.cc, g.bcc).forEach(function (a) {
+        var k = a.toLowerCase();
+        if (!seen[k]) { seen[k] = true; out.push(a); }
+      });
+    });
+    if (out.length) return out.join(", ");
+    // An automation with only chat/webhook notify actions still reaches real
+    // people, through the channel's own destination — "none" would be wrong.
+    var fixed = groups.filter(function (g) { return g.fixedDestination; });
+    if (!fixed.length) return "";
+    return fixed.map(function (g) { return g.channel || "channel"; })
+      .filter(function (n, i, a) { return a.indexOf(n) === i; })
+      .join(", ") + " (channel destination)";
+  }
+
+  /** The same information grouped by where in the automation it's declared. */
+  function addressesTooltip(r, groups) {
+    groups = groups || ruleGroups(r);
+    if (!groups.length) return "No notifications are sent — this automation only raises an in-app alert.";
+    var lines = [];
+    groups.forEach(function (g) {
+      var head = g.where + (g.channel ? " — " + g.channel : "");
+      if (g.fixedDestination) {
+        lines.push(head + ": posts to the channel's own destination");
+        return;
+      }
+      lines.push(head + ":");
+      var row = function (prefix, list) {
+        list.forEach(function (a) { lines.push("    " + prefix + a); });
+      };
+      if (!g.to.length && !g.cc.length && !g.bcc.length) lines.push("    (no recipients configured)");
+      row("", g.to);
+      row("Cc: ", g.cc);
+      row("Bcc: ", g.bcc);
+    });
+    return lines.join("\n");
+  }
+
+  /**
+   * The three catalogs the Addresses column resolves against, fetched once and
+   * only when a rule actually needs them: a fleet with no role- or user-routed
+   * notify action never pays for the lookup, and `/automations/scope-options`
+   * in particular is the page's most expensive read (fleet-wide groupBys), so
+   * it's gated on a rule genuinely naming a role.
+   *
+   * Every fetch is best-effort — the column degrades to unresolved stubs, and
+   * the list must never fail to render because a catalog 403'd.
+   */
+  function loadRuleRecipientCatalogs(rules) {
+    var wantsNotify = false, wantsUsers = false, wantsRoles = false;
+    // Deliberately a loose deep sweep rather than the canonical action walk:
+    // this only decides WHICH fetches to make, and over-fetching is cheaper
+    // than a missed location. It keys on the recipient fields themselves so a
+    // Cc block anywhere — rule-level emailComposition, a legacy escalation
+    // tier's `to` — counts. ruleRecipientGroups does the exact walk afterwards.
+    var deep = function (v, depth) {
+      if (!v || typeof v !== "object" || depth > 8) return;
+      if (Array.isArray(v)) { v.forEach(function (x) { deep(x, depth + 1); }); return; }
+      if (v.type === "notify") wantsNotify = true;
+      if ((v.recipientUserIds || []).length) wantsUsers = true;
+      if ((v.recipientRoles || []).length) wantsRoles = true;
+      Object.keys(v).forEach(function (k) { deep(v[k], depth + 1); });
+    };
+    (rules || []).forEach(function (r) { deep(r, 0); });
+    if (!wantsNotify) return Promise.resolve();
+    var jobs = [];
+    if (_ruleChannels === null) {
+      jobs.push(api.deliveryChannels.list()
+        .then(function (d) { _ruleChannels = (d && d.channels) || []; })
+        .catch(function () { _ruleChannels = []; }));
+    }
+    if (wantsUsers && _ruleRecipientUsers === null) {
+      jobs.push(api.automations.recipientUsers()
+        .then(function (d) { _ruleRecipientUsers = (d && d.users) || []; })
+        .catch(function () { _ruleRecipientUsers = []; }));
+    }
+    if (wantsRoles && _ruleScopeRoles === null) {
+      jobs.push(api.automations.scopeOptions()
+        .then(function (d) { _ruleScopeRoles = (d && d.roles) || []; })
+        .catch(function () { _ruleScopeRoles = []; }));
+    }
+    return Promise.all(jobs);
+  }
 
   function scopeSummary(scope) {
     if (!scope || typeof scope !== "object") return "-";
@@ -474,6 +595,7 @@ var _rulesPage = 1;
   function renderRules() {
     var tbody = document.getElementById("rules-tbody");
     var data = _rules.map(function (r) {
+      var groups = ruleGroups(r);
       return Object.assign({}, r, {
         // "down detection" rather than the raw "asset_state" for an automation
         // that DEFINES down: it is a different kind of thing from a rule that
@@ -485,12 +607,15 @@ var _rulesPage = 1;
         triggerSummary: triggerSummary(r),
         resetSummary: resetSummary(r),
         actionsSummary: actionsTooltipText(r),
+        // One recipient walk per rule, read by both the cell and its hover.
+        addressesSummary: addressesSummary(r, groups),
+        addressesTooltip: addressesTooltip(r, groups),
         scopeTooltip: scopeTooltip(r),
       });
     });
     if (_rulesSF) data = _rulesSF.apply(data);
     if (!data.length) {
-      tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10" class="empty-state">No automations yet' + (canEditRules ? ' — click "+ New automation" to create one.' : "") + '</td></tr>';
       clearPageControls("rules-pagination");
       return;
     }
@@ -546,6 +671,11 @@ var _rulesPage = 1;
         prose(r.triggerSummary) +
         prose(r.resetSummary) +
         prose(r.actionsSummary) +
+        '<td class="rules-prose" style="font-size:0.82rem" title="' + escapeHtml(r.addressesTooltip) + '">' +
+          (r.addressesSummary
+            ? escapeHtml(r.addressesSummary)
+            : '<span style="color:var(--color-text-tertiary)">none</span>') +
+        '</td>' +
         '<td>' + escapeHtml(r.createdBy || "-") + '</td>' +
         '</tr>';
     }).join("");
