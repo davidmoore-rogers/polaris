@@ -51,7 +51,6 @@ import {
 } from "./tagAssignmentService.js";
 import {
   deviceFilterConditionSchema,
-  conditionFields,
   conditionNeedsInterfaces,
   evaluateScopeCondition,
   scopeConditionStats,
@@ -60,7 +59,7 @@ import {
   type ScopeConditionAsset,
   type ScopeConditionGroup,
 } from "./notificationTypes.js";
-import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
+import { resolveDeviceFilterAssetIds } from "./deviceFilterService.js";
 import { criteriaToCondition } from "../utils/criteriaToCondition.js";
 import { listRecipientUsers } from "./notificationRecipientService.js";
 import { logEvent } from "./eventLogService.js";
@@ -788,44 +787,12 @@ export async function previewContactAssets(
 /**
  * Which assets a condition tree covers right now — the editor's live preview.
  *
- * In-memory over a fleet read, deliberately with no SQL prefilter: an OR / NONE
- * / notAll group makes any narrowing `WHERE` unsound, and unlike the flat
- * criteria (whose rules are always ANDed, which is what lets
- * buildPrefilterWhere exist) there is no safe superset to ask the DB for. The
- * cost is one findMany of scalar columns, operator-triggered — not a tick — and
- * the sighting relation is joined ONLY when a rule actually asks about the
- * FortiGate, which is the expensive half at 2000 assets.
+ * Delegates to the shared `resolveDeviceFilterAssetIds`: tags ask the identical
+ * question of the identical tree, and the conditional relation joins behind it
+ * are exactly the detail that must not exist in two copies.
  */
-async function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<Set<string>> {
-  const fields = conditionFields(cond);
-  const rows = await prisma.asset.findMany({
-    select: {
-      id: true,
-      assetType: true,
-      manufacturer: true,
-      model: true,
-      hostname: true,
-      os: true,
-      osVersion: true,
-      department: true,
-      location: true,
-      status: true,
-      ipAddress: true,
-      tags: true,
-      ...(fields.has("fortigate")
-        ? { learnedLocation: true, fortigateSightings: { select: { fortigateDevice: true } } }
-        : {}),
-    },
-  });
-  // `interfaceName` is the other relation-backed field, and the expensive one —
-  // the interface inventory dwarfs the fleet. Resolved in SQL to per-asset
-  // verdicts rather than joined; no interface leaf means no query at all.
-  await decorateInterfaceLeafHits(rows, [cond]);
-  const out = new Set<string>();
-  for (const row of rows) {
-    if (evaluateScopeCondition(cond, row as ScopeConditionAsset)) out.add(row.id);
-  }
-  return out;
+function resolveAssetIdsForCondition(cond: ScopeConditionGroup): Promise<Set<string>> {
+  return resolveDeviceFilterAssetIds(cond);
 }
 
 /**

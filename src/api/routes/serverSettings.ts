@@ -54,9 +54,23 @@ import {
 import {
   normalizeCriteria,
   reconcileTag,
-  previewTagCriteria,
+  normalizeTagCondition,
+  previewTagFilter,
+  tagIsManaged,
+  tagFilterView,
   stripTagAssignments,
+  type TagCriteria,
 } from "../../services/tagAssignmentService.js";
+import { REGION_TAG_CATEGORY } from "../../services/mapRegionService.js";
+import {
+  DEVICE_FILTER_FIELD_OPS,
+  scopeConditionMeta,
+  scopeConditionStats,
+  type ScopeConditionGroup,
+} from "../../services/notificationTypes.js";
+import { listScopeOptions } from "../../services/notificationRuleService.js";
+import { listAssetTypes } from "../../services/assetTypeService.js";
+import { listAssetTags } from "../../services/tagAssignmentService.js";
 import { setEnvVar } from "../../utils/envFile.js";
 import {
   checkForUpdates,
@@ -529,10 +543,82 @@ router.get("/database/backups/:id/download", maintenanceLimiter, requirePermissi
 
 // ─── Tags ──────────────────────────────────────────────────────────────────
 
+/**
+ * The Map Regions category belongs to the Device Map, and only to it.
+ *
+ * Every tag in it is minted by a region save and kept in step by the region
+ * reconcile through RegionTagAssignment provenance. A hand-created sibling would
+ * be indistinguishable from one of those rows and owned by nothing — so the
+ * registry refuses both creating a tag in the category and MOVING an existing
+ * one into it, naming the Device Map as the way in. Editing a row already there
+ * (colour, name) is untouched: those are the map's rows and this is not about
+ * freezing them, it is about not adding to them from the side.
+ */
+function assertNotRegionCategory(category: string | null | undefined, verb: string): void {
+  if ((category ?? "").trim() !== REGION_TAG_CATEGORY) return;
+  throw new AppError(
+    409,
+    `The "${REGION_TAG_CATEGORY}" category is managed by the Device Map — draw or edit a region there to ${verb} its tag.`,
+  );
+}
+
+/**
+ * How the audit Event describes the filter a write left on the tag. Counts
+ * only — the tree itself is on the row, and an Event is shipped off-host by the
+ * syslog / SFTP archivers.
+ */
+function describeTagFilter(
+  condition: ScopeConditionGroup | null,
+  criteria: TagCriteria | null,
+): string {
+  if (condition) {
+    const { rules } = scopeConditionStats(condition);
+    return ` with an auto-assign device filter (${rules} condition${rules === 1 ? "" : "s"})`;
+  }
+  if (criteria) return ` with ${criteria.rules.length} auto-assign rule(s)`;
+  return "";
+}
+
+/**
+ * The device filter posted for a tag, validated. Absent key = leave as-is;
+ * explicit null / an empty tree = clear (the tag becomes manual).
+ *
+ * A tag in the Map Regions category may not carry one at all: RegionTagAssignment
+ * already manages those tag names, and layering TagAutoAssignment on the same
+ * name would put two managed-sync reconcilers on one string, each stripping what
+ * the other applied.
+ */
+function readPostedTagFilter(
+  body: Record<string, unknown>,
+  category: string | null | undefined,
+): { provided: boolean; condition: ScopeConditionGroup | null; criteria: TagCriteria | null } {
+  const hasCondition = Object.prototype.hasOwnProperty.call(body, "assetCondition");
+  const hasCriteria = Object.prototype.hasOwnProperty.call(body, "criteria");
+  if (!hasCondition && !hasCriteria) return { provided: false, condition: null, criteria: null };
+
+  const condition = hasCondition ? normalizeTagCondition(body.assetCondition) : null;
+  // A tree wins outright; the flat blob is only read when no tree was posted, so
+  // a caller that sends both can't leave two live answers on the row.
+  const criteria = condition ? null : normalizeCriteria(hasCriteria ? body.criteria : null);
+
+  if ((condition || criteria) && (category ?? "").trim() === REGION_TAG_CATEGORY) {
+    throw new AppError(
+      409,
+      `Tags in "${REGION_TAG_CATEGORY}" are auto-applied by the Device Map's regions — they cannot also carry a device filter.`,
+    );
+  }
+  return { provided: true, condition, criteria };
+}
+
+
 router.get("/tags", async (_req, res, next) => {
   try {
     const tags = await prisma.tag.findMany({ orderBy: [{ category: "asc" }, { name: "asc" }] });
-    res.json(tags);
+    // Each row carries the fold-forward alongside its stored columns, so the
+    // editor opens a tag still on the legacy flat shape in the condition builder
+    // with its rules intact. Without it such a tag would render as unfiltered
+    // and the operator's next save would silently clear a live filter.
+    res.json(tags.map((t) => ({ ...t, ...tagFilterView(t) })));
   } catch (err) {
     next(err);
   }
@@ -546,14 +632,19 @@ router.post("/tags", requirePermission("serverSettingsSystem", "fullwrite"), asy
     const existing = await prisma.tag.findUnique({ where: { name } });
     if (existing) throw new AppError(409, `Tag "${name}" already exists`);
 
-    // Validate + normalize optional auto-assignment criteria (null = manual tag).
-    const criteria = normalizeCriteria(req.body.criteria);
+    const category = req.body.category || "General";
+    assertNotRegionCategory(category, "add");
+
+    // Validate + normalize the optional auto-assignment device filter
+    // (neither shape set = an ordinary manual tag).
+    const { condition, criteria } = readPostedTagFilter(req.body, category);
 
     const tag = await prisma.tag.create({
       data: {
         name,
-        category: req.body.category || "General",
+        category,
         color: req.body.color || randomTagColor(),
+        assetCondition: condition ? (condition as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
         criteria: criteria ? (criteria as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     });
@@ -564,10 +655,10 @@ router.post("/tags", requirePermission("serverSettingsSystem", "fullwrite"), asy
       resourceId: tag.id,
       resourceName: tag.name,
       actor: req.session?.username,
-      message: `Tag created: "${tag.name}" (category ${tag.category})${criteria ? ` with ${criteria.rules.length} auto-assign rule(s)` : ""}`,
+      message: `Tag created: "${tag.name}" (category ${tag.category})${describeTagFilter(condition, criteria)}`,
     });
-    // Apply criteria immediately (best-effort; the periodic job is the safety net).
-    if (criteria) {
+    // Apply the filter immediately (best-effort; the periodic job is the safety net).
+    if (condition || criteria) {
       reconcileTag(tag.id).catch((err) =>
         logger.warn({ err: err?.message ?? String(err), tagId: tag.id }, "tag create: reconcile failed"),
       );
@@ -609,6 +700,44 @@ router.put("/tags/settings", requirePermission("serverSettingsSystem", "fullwrit
   }
 });
 
+// GET /server-settings/tags/filter-schema — the condition builder's vocabulary
+// + value suggestions for a tag's auto-assign device filter. Its own route
+// rather than /automations/schema or /contacts/filter-schema because those are
+// gated automationManagement:read / contacts:read, and managing the tag registry
+// must not require permission to edit automations or browse the address book
+// (the /assets/pin-filter-schema precedent). Built from the same shared
+// scopeConditionMeta so the vocabularies can't drift.
+//
+// The WIDE DEVICE_FILTER field set, matching the address book rather than the
+// automations Devices step: that vocabulary was widened in the first place to
+// cover what the flat tag criteria could already say (osVersion / department /
+// location / fortigate, plus the wildcard operator), so anything narrower would
+// make the shape cutover a regression.
+//
+// Declared before "/tags/:id" so the literal path can't be captured as an id.
+router.get("/tags/filter-schema", requirePermission("serverSettingsSystem", "read"), async (_req, res, next) => {
+  try {
+    // assetTypes + tags ride this payload for the same reason they ride
+    // /contacts/filter-schema: their own endpoints are gated `assets:read`,
+    // which a caller managing the tag registry need not hold, and the value
+    // pickers would silently degrade to free text.
+    const [options, assetTypes, tags] = await Promise.all([
+      listScopeOptions(),
+      listAssetTypes(),
+      listAssetTags(),
+    ]);
+    res.json({
+      scopeCondition: scopeConditionMeta(DEVICE_FILTER_FIELD_OPS),
+      options: {
+        ...options,
+        assetTypes: assetTypes.map((t) => ({ name: t.name, label: t.label || t.name })),
+        tags,
+      },
+      regionCategory: REGION_TAG_CATEGORY,
+    });
+  } catch (err) { next(err); }
+});
+
 router.put("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
@@ -624,20 +753,35 @@ router.put("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"), 
       if (dupe) throw new AppError(409, `Tag "${name}" already exists`);
     }
 
-    // `criteria` only changes when the key is present in the body. Absent key =
-    // leave as-is; explicit null / empty = clear (becomes a manual tag).
-    const criteriaProvided = Object.prototype.hasOwnProperty.call(req.body, "criteria");
-    const nextCriteria = criteriaProvided ? normalizeCriteria(req.body.criteria) : undefined;
+    const category = req.body.category ?? existing.category;
+    // Moving a tag INTO the map's category is the same act as creating one there.
+    // A row already in it keeps its category with no complaint.
+    if (category !== existing.category) assertNotRegionCategory(category, "add");
+
+    // The filter only changes when a shape key is present in the body. Absent =
+    // leave as-is; explicit null / an empty tree = clear (becomes a manual tag).
+    const posted = readPostedTagFilter(req.body, category);
+    const filterWrite = posted.provided
+      ? {
+          assetCondition: posted.condition
+            ? (posted.condition as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
+          // Exactly one shape is ever live on a row, so writing either clears
+          // the other — a criteria blob left behind a tree would be a second
+          // answer to "which devices?".
+          criteria: posted.criteria
+            ? (posted.criteria as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
+        }
+      : {};
 
     const tag = await prisma.tag.update({
       where: { id },
       data: {
         name,
-        category: req.body.category ?? existing.category,
+        category,
         color: req.body.color ?? existing.color,
-        ...(criteriaProvided
-          ? { criteria: nextCriteria ? (nextCriteria as unknown as Prisma.InputJsonValue) : Prisma.DbNull }
-          : {}),
+        ...filterWrite,
       },
     });
 
@@ -662,9 +806,9 @@ router.put("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"), 
         : `Tag updated: "${tag.name}"`,
     });
 
-    // Re-run the managed-sync diff whenever criteria changed (or the tag was
+    // Re-run the managed-sync diff whenever the filter changed (or the tag was
     // renamed, since provenance is keyed by tagId but the applied string moved).
-    if (criteriaProvided || renamed) {
+    if (posted.provided || renamed) {
       reconcileTag(tag.id).catch((err) =>
         logger.warn({ err: err?.message ?? String(err), tagId: tag.id }, "tag update: reconcile failed"),
       );
@@ -684,7 +828,7 @@ router.delete("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"
     // Strip engine-applied copies (and their provenance) before deleting. Manual
     // copies on assets the engine never tagged are untouched — same as before.
     let stripped = 0;
-    if (tag.criteria != null) {
+    if (tagIsManaged(tag)) {
       stripped = await stripTagAssignments(tag.id, tag.name);
     }
     await prisma.tag.delete({ where: { id: tagId } });
@@ -703,13 +847,18 @@ router.delete("/tags/:id", requirePermission("serverSettingsSystem", "fullwrite"
   }
 });
 
-// Dry-run a criteria blob: how many assets match, a sample, and (when tagId is
-// given) the +add / -remove delta vs. that tag's current auto-assignments.
-// Drives the live preview line in the tag criteria builder.
+// Dry-run a tag's device filter: how many assets match, a sample, and (when
+// tagId is given) the +add / -remove delta vs. that tag's current
+// auto-assignments. Drives the live preview line under the builder. Takes
+// EITHER shape — `assetCondition` (what the builder posts) or a legacy flat
+// `criteria` blob — so one route serves the editor and any older caller.
 router.post("/tags/preview-criteria", async (req, res, next) => {
   try {
     const tagId = typeof req.body.tagId === "string" ? req.body.tagId : undefined;
-    const preview = await previewTagCriteria(req.body.criteria, tagId);
+    const preview = await previewTagFilter(
+      { condition: req.body.assetCondition, criteria: req.body.criteria },
+      tagId,
+    );
     res.json(preview);
   } catch (err) {
     next(err);

@@ -1102,6 +1102,7 @@ const api = {
     getTagSettings: ()    => request("GET", "/server-settings/tags/settings"),
     updateTagSettings: (body) => request("PUT", "/server-settings/tags/settings", body),
     previewTagCriteria: (body) => request("POST", "/server-settings/tags/preview-criteria", body),
+    tagFilterSchema: ()   => request("GET", "/server-settings/tags/filter-schema"),
     getBranding:  ()       => request("GET", "/server-settings/branding"),
     updateBranding: (body) => request("PUT", "/server-settings/branding", body),
     uploadLogo: (file) => {

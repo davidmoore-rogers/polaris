@@ -1,10 +1,31 @@
 /**
  * src/services/tagAssignmentService.ts
  *
- * Criteria-based tag auto-assignment ("managed sync"). A Tag may carry a
- * `criteria` JSON blob; when present, this service keeps the tag applied to
- * exactly the set of assets that match the criteria — adding the tag to newly
- * matching assets and removing it from assets that have drifted out of match.
+ * Filter-based tag auto-assignment ("managed sync"). A Tag may carry a device
+ * filter; when present, this service keeps the tag applied to exactly the set of
+ * assets that match it — adding the tag to newly matching assets and removing it
+ * from assets that have drifted out of match.
+ *
+ * FILTER SHAPE. `Tag.assetCondition` — the SAME nested AND/OR condition tree the
+ * automations device filter and the address book store — superseded the flat
+ * `Tag.criteria` blob, so operators are not asked "which devices?" in two
+ * different languages. Both columns are still READ (a row written before the
+ * cutover keeps matching through the flat predicate until it folds forward) but
+ * only one is ever live on a row: a write of the condition nulls the criteria.
+ * Readers go through `tagFilterOf`, `criteriaToCondition` is the fold-forward,
+ * and the migrateTagFilterShape one-shot persists it. The Contact
+ * assetCriteria -> assetCondition cutover is the precedent throughout.
+ *
+ * Two asymmetries with contacts, both load-bearing:
+ *   - An EMPTY tree is NO FILTER here, never "all devices". A contact stores
+ *     `and([])` deliberately, as the form of an explicit All-devices checkbox; a
+ *     tag has no such control, so an empty tree could only arrive from a
+ *     half-built form and reading it as "every asset" would tag the whole fleet
+ *     on save. normalizeTagCondition collapses it to null.
+ *   - A DECOMMISSIONED device is ineligible unless the filter mentions status.
+ *     Carried over from the flat criteria's buildPrefilterWhere, where it was
+ *     implicit; stated explicitly for the tree (tagEligibilityWhere) because an
+ *     upgrade must not silently start tagging retired inventory.
  *
  * Collision defense (two layers, so manual operator tagging is never clobbered):
  *   1. Owned-tag allowlist — only tags whose `criteria` is non-null are ever
@@ -18,7 +39,7 @@
  *   - reconcileTag(tagId)         — one tag, full diff (inline on tag create/edit)
  *   - reconcileAllTags()          — every managed tag (periodic job + discovery-end)
  *   - reconcileTagsForAsset(id)   — one asset vs. all managed tags (asset-write hook)
- *   - previewTagCriteria(...)     — dry-run match count + diff for the editor UI
+ *   - previewTagFilter(...)       — dry-run match count + diff for the editor UI
  *
  * Modeled on mapRegionService (add/remove tag primitives + diff-based
  * reconcile) and autoMonitorInterfacesService (resolver → preview →
@@ -33,6 +54,19 @@ import { logger } from "../utils/logger.js";
 import { compileWildcard } from "./autoMonitorInterfacesService.js";
 import { isValidCidr, isValidIpAddress } from "../utils/cidr.js";
 import { isKnownAssetType, normalizeAssetTypeName } from "../utils/assetTypes.js";
+import { criteriaToCondition } from "../utils/criteriaToCondition.js";
+import {
+  conditionFields,
+  conditionNeedsInterfaces,
+  deviceFilterConditionSchema,
+  evaluateScopeCondition,
+  scopeConditionStats,
+  SCOPE_CONDITION_MAX_DEPTH,
+  SCOPE_CONDITION_MAX_RULES,
+  type ScopeConditionAsset,
+  type ScopeConditionGroup,
+} from "./notificationTypes.js";
+import { deviceFilterSelect, resolveDeviceFilterAssetIds } from "./deviceFilterService.js";
 
 // ─── Criteria shape ──────────────────────────────────────────────────────────
 
@@ -194,6 +228,154 @@ export function normalizeCriteria(raw: unknown): TagCriteria | null {
 
   if (rules.length === 0) return null;
   return { version: 1, match: "all", rules };
+}
+
+// ─── Filter shape: condition tree (current) + flat criteria (legacy) ─────────
+
+/**
+ * The ONE filter a tag auto-assigns by. A stored condition wins; otherwise a
+ * legacy flat blob is folded forward on the fly, so every consumer sees a tree
+ * whether or not the row has been rewritten yet — and a blob the tree can't
+ * express (an `integration` rule, which only an API caller could have written,
+ * the builder having never offered it) keeps matching through the flat predicate
+ * instead of being half-converted. `contactFilterOf` is the same function for
+ * the address book.
+ */
+export interface TagFilter {
+  condition: ScopeConditionGroup | null;
+  criteria: TagCriteria | null;
+}
+
+export function tagFilterOf(tag: {
+  assetCondition?: unknown;
+  criteria?: unknown;
+}): TagFilter {
+  const stored = safeStoredCondition(tag.assetCondition);
+  if (stored) return { condition: stored, criteria: null };
+  const criteria = normalizeCriteria(tag.criteria ?? null);
+  if (!criteria) return { condition: null, criteria: null };
+  const { condition, unconvertible } = criteriaToCondition(criteria);
+  return unconvertible.length > 0
+    ? { condition: null, criteria }
+    : { condition: condition as ScopeConditionGroup | null, criteria: null };
+}
+
+/**
+ * One tag as the tag registry UI reads it. Beyond the stored columns it carries
+ * the fold-forward, so the editor can open a tag still on the LEGACY flat shape
+ * in the condition builder with its rules intact rather than showing it as
+ * unfiltered (which is what "just send the columns" would have done, and the
+ * operator's next save would then have silently cleared a live filter).
+ */
+export interface TagFilterView {
+  /** The stored tree — null on a row that has not folded forward yet. */
+  assetCondition: ScopeConditionGroup | null;
+  /** What the builder should EDIT: the stored tree, else the fold of the flat
+   *  blob. Null means the tag genuinely has no filter. */
+  assetConditionEffective: ScopeConditionGroup | null;
+  /** Non-empty when a legacy blob could NOT be folded (an `integration` rule).
+   *  The filter still applies through the flat predicate; the editor says so and
+   *  carries it through the save untouched. */
+  assetFilterUnconvertible: string[];
+}
+
+export function tagFilterView(tag: { assetCondition?: unknown; criteria?: unknown }): TagFilterView {
+  const stored = safeStoredCondition(tag.assetCondition);
+  if (stored) {
+    return { assetCondition: stored, assetConditionEffective: stored, assetFilterUnconvertible: [] };
+  }
+  const criteria = normalizeCriteria(tag.criteria ?? null);
+  if (!criteria) {
+    return { assetCondition: null, assetConditionEffective: null, assetFilterUnconvertible: [] };
+  }
+  const { condition, unconvertible } = criteriaToCondition(criteria);
+  return {
+    assetCondition: null,
+    assetConditionEffective: unconvertible.length > 0 ? null : (condition as ScopeConditionGroup | null),
+    assetFilterUnconvertible: unconvertible,
+  };
+}
+
+/** Does this tag auto-assign at all? — the managed-tag allowlist (layer 1 of
+ *  the collision defense in the header). A tag with neither column set is
+ *  invisible to this engine. */
+export function tagIsManaged(tag: { assetCondition?: unknown; criteria?: unknown }): boolean {
+  return tag.assetCondition != null || tag.criteria != null;
+}
+
+/**
+ * Validate a POSTED condition tree against the DEVICE_FILTER vocabulary (the
+ * automations scope fields plus the four the flat builder carried, so nothing
+ * the old builder could say is lost).
+ *
+ * An empty tree collapses to null — "no filter", i.e. an ordinary manual tag.
+ * It is emphatically NOT "all assets": `and([])` is true for every asset by
+ * boolean identity, so honoring it would apply the tag to the entire fleet, and
+ * the only way to reach it through the UI is an Auto-assign toggle switched on
+ * with nothing built underneath it.
+ */
+export function normalizeTagCondition(raw: unknown): ScopeConditionGroup | null {
+  if (raw == null) return null;
+  const parsed = deviceFilterConditionSchema.safeParse(raw);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    throw new AppError(400, `Device filter is invalid${first ? `: ${first.message}` : ""}`);
+  }
+  const cond = parsed.data;
+  const { depth, rules } = scopeConditionStats(cond);
+  if (depth > SCOPE_CONDITION_MAX_DEPTH) {
+    throw new AppError(400, `Device filter groups nest at most ${SCOPE_CONDITION_MAX_DEPTH} deep`);
+  }
+  if (rules > SCOPE_CONDITION_MAX_RULES) {
+    throw new AppError(400, `At most ${SCOPE_CONDITION_MAX_RULES} conditions per device filter`);
+  }
+  return rules === 0 ? null : cond;
+}
+
+/**
+ * Re-validate a STORED tree on read. A shape written before a vocabulary change
+ * would otherwise reach the matcher unvalidated; one that no longer validates
+ * drops to null (the tag falls back to manual) rather than throwing, because a
+ * single bad row must not 500 the tag list or wedge the reconcile job.
+ */
+function safeStoredCondition(raw: unknown): ScopeConditionGroup | null {
+  if (raw == null) return null;
+  const parsed = deviceFilterConditionSchema.safeParse(raw);
+  if (!parsed.success) {
+    logger.warn({ issue: parsed.error.issues[0]?.message }, "tagAssignment: stored device filter no longer validates — treating the tag as manual");
+    return null;
+  }
+  const { rules } = scopeConditionStats(parsed.data);
+  return rules === 0 ? null : parsed.data;
+}
+
+/**
+ * Which devices a tag filter may touch AT ALL, ANDed outside the filter itself.
+ *
+ * Decommissioned assets are excluded unless the filter explicitly mentions
+ * status — the flat criteria's `buildPrefilterWhere` has always done this, and
+ * the tree path has to state it or the shape cutover would quietly begin
+ * auto-tagging retired inventory. Kept as an outer AND (rather than folded into
+ * the tree) so it stays sound under `or` / `none` / `notAll` groups.
+ */
+function tagEligibilityWhere(cond: ScopeConditionGroup): Prisma.AssetWhereInput | undefined {
+  return conditionFields(cond).has("status") ? undefined : { status: { not: "decommissioned" } };
+}
+
+/** Is this ONE asset eligible for auto-tagging by this filter? The single-asset
+ *  counterpart of tagEligibilityWhere — same rule, tested in memory. */
+function tagAssetIsEligible(cond: ScopeConditionGroup, status: string | null | undefined): boolean {
+  if (conditionFields(cond).has("status")) return true;
+  return String(status ?? "") !== "decommissioned";
+}
+
+/** Every asset id a tag filter currently covers, whichever shape it is in. */
+export async function resolveTagFilterAssetIds(filter: TagFilter): Promise<Set<string>> {
+  if (filter.condition) {
+    return resolveDeviceFilterAssetIds(filter.condition, { where: tagEligibilityWhere(filter.condition) });
+  }
+  if (filter.criteria) return resolveMatchingAssetIds(filter.criteria);
+  return new Set<string>();
 }
 
 // ─── DB-side prefilter (must be a SUPERSET of the in-memory predicate) ────────
@@ -589,7 +771,7 @@ export interface TagReconcileSummary extends Record<string, unknown> {
 }
 
 /**
- * Reconcile one tag. If it has no criteria (manual tag, or criteria just
+ * Reconcile one tag. If it has no filter (manual tag, or the filter was just
  * cleared), strip every engine-owned copy and exit. Otherwise diff expected
  * vs. provenance and apply the add/remove delta.
  */
@@ -597,14 +779,14 @@ export async function reconcileTag(tagId: string): Promise<TagReconcileSummary> 
   const tag = await prisma.tag.findUnique({ where: { id: tagId } });
   if (!tag) return { tagId, added: 0, removed: 0 };
 
-  const criteria = normalizeCriteria(tag.criteria);
+  const filter = tagFilterOf(tag);
   const provRows = await prisma.tagAutoAssignment.findMany({
     where: { tagId },
     select: { assetId: true },
   });
   const currentIds = new Set(provRows.map((p) => p.assetId));
 
-  const expectedIds = criteria ? await resolveMatchingAssetIds(criteria) : new Set<string>();
+  const expectedIds = await resolveTagFilterAssetIds(filter);
 
   const toAdd = [...expectedIds].filter((id) => !currentIds.has(id));
   const toRemove = [...currentIds].filter((id) => !expectedIds.has(id));
@@ -615,10 +797,10 @@ export async function reconcileTag(tagId: string): Promise<TagReconcileSummary> 
   return { tagId, added: toAdd.length, removed: toRemove.length };
 }
 
-/** Reconcile every managed (criteria-bearing) tag. Periodic + discovery-end. */
+/** Reconcile every managed (filter-bearing) tag. Periodic + discovery-end. */
 export async function reconcileAllTags(): Promise<TagReconcileSummary> {
-  const tags = await prisma.tag.findMany({ select: { id: true, criteria: true } });
-  const managed = tags.filter((t) => t.criteria != null);
+  const tags = await prisma.tag.findMany({ select: { id: true, criteria: true, assetCondition: true } });
+  const managed = tags.filter(tagIsManaged);
   let added = 0;
   let removed = 0;
   for (const t of managed) {
@@ -639,25 +821,38 @@ export async function reconcileAllTags(): Promise<TagReconcileSummary> {
 /**
  * Fast path for asset-write hooks: evaluate ONE asset against every managed
  * tag, diff its provenance, and write once. O(#managed tags), one extra inet
- * round-trip for all subnet CIDRs across those tags.
+ * round-trip for all subnet CIDRs across the tags still on the LEGACY shape
+ * (a tree does its own CIDR math in memory, so a fleet that has folded forward
+ * makes no extra query at all).
  */
 export async function reconcileTagsForAsset(assetId: string): Promise<TagReconcileSummary> {
-  // Single asset — always load the relation extras rather than computing the
-  // union of every managed tag's field needs (trivial cost at n=1).
+  const tags = await prisma.tag.findMany({
+    select: { id: true, name: true, criteria: true, assetCondition: true },
+  });
+  const managed = tags
+    .map((t) => ({ id: t.id, name: t.name, filter: tagFilterOf(t) }))
+    .filter((t) => t.filter.condition != null || t.filter.criteria != null);
+  if (managed.length === 0) return { added: 0, removed: 0 };
+
+  // Single asset — always load the legacy matcher's relation extras rather than
+  // computing the union of every tag's field needs (trivial cost at n=1). The
+  // tree half adds `tags` (the condition vocabulary has a `tag` field, which the
+  // flat one never had) and joins the interface inventory only when some filter
+  // actually asks about it — this runs on every asset write.
+  const conditions = managed.map((t) => t.filter.condition);
   const asset: CandidateAsset | null = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: SINGLE_ASSET_CANDIDATE_SELECT,
+    select: {
+      ...SINGLE_ASSET_CANDIDATE_SELECT,
+      ...deviceFilterSelect(conditions, {
+        needsInterfaces: conditions.some((c) => conditionNeedsInterfaces(c)),
+      }),
+    },
   }) as CandidateAsset | null;
   if (!asset) return { added: 0, removed: 0 };
 
-  const tags = await prisma.tag.findMany({ select: { id: true, name: true, criteria: true } });
-  const managed = tags
-    .map((t) => ({ id: t.id, name: t.name, criteria: normalizeCriteria(t.criteria) }))
-    .filter((t): t is { id: string; name: string; criteria: TagCriteria } => t.criteria != null);
-  if (managed.length === 0) return { added: 0, removed: 0 };
-
-  // One containment lookup for this asset's IP across all managed CIDRs.
-  const allCidrs = managed.flatMap((t) => collectCidrs(t.criteria));
+  // One containment lookup for this asset's IP across every LEGACY tag's CIDRs.
+  const allCidrs = managed.flatMap((t) => (t.filter.criteria ? collectCidrs(t.filter.criteria) : []));
   const map = allCidrs.length
     ? await cidrContainmentMap([asset.ipAddress], allCidrs)
     : new Map<string, Set<string>>();
@@ -675,7 +870,10 @@ export async function reconcileTagsForAsset(assetId: string): Promise<TagReconci
   let added = 0;
   let removed = 0;
   for (const t of managed) {
-    const matches = buildMatcher(t.criteria, cidrMatch)(asset);
+    const matches = t.filter.condition
+      ? tagAssetIsEligible(t.filter.condition, asset.status) &&
+        evaluateScopeCondition(t.filter.condition, asset as unknown as ScopeConditionAsset)
+      : buildMatcher(t.filter.criteria as TagCriteria, cidrMatch)(asset);
     if (matches && !provSet.has(t.id)) {
       await applyDelta(t.id, t.name, [assetId], []);
       added++;
@@ -689,27 +887,33 @@ export async function reconcileTagsForAsset(assetId: string): Promise<TagReconci
 
 // ─── Preview (dry-run for the editor UI) ──────────────────────────────────────
 
-export interface TagCriteriaPreview {
+export interface TagFilterPreview {
   matchCount: number;
   sample: Array<{ id: string; hostname: string | null; ipAddress: string | null; assetType: string }>;
   diff?: { add: number; remove: number };
 }
 
 /**
- * Dry-run: how many assets a criteria blob matches, a small sample, and (when a
+ * Dry-run: how many assets a device filter matches, a small sample, and (when a
  * tagId is given) the +add / -remove delta vs. that tag's current provenance.
- * Writes nothing. Mirrors previewAutoMonitorForClass.
+ * Writes nothing. Accepts EITHER shape — the condition tree the builder posts,
+ * or a flat criteria blob from an older caller — so the editor and any stored
+ * row preview through one path.
  */
-export async function previewTagCriteria(
-  rawCriteria: unknown,
+export async function previewTagFilter(
+  input: { condition?: unknown; criteria?: unknown },
   tagId?: string,
-): Promise<TagCriteriaPreview> {
-  const criteria = normalizeCriteria(rawCriteria);
-  if (!criteria) {
+): Promise<TagFilterPreview> {
+  const condition = normalizeTagCondition(input.condition ?? null);
+  const filter: TagFilter = condition
+    ? { condition, criteria: null }
+    : { condition: null, criteria: normalizeCriteria(input.criteria ?? null) };
+
+  if (!filter.condition && !filter.criteria) {
     return { matchCount: 0, sample: [], diff: tagId ? { add: 0, remove: 0 } : undefined };
   }
 
-  const expected = await resolveMatchingAssetIds(criteria);
+  const expected = await resolveTagFilterAssetIds(filter);
   const sampleIds = [...expected].slice(0, 25);
   const sample = sampleIds.length
     ? await prisma.asset.findMany({

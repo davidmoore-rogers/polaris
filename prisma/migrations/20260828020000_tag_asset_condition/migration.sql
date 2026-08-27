@@ -1,0 +1,15 @@
+-- Tag auto-assignment moves from the flat `criteria` blob to the shared nested
+-- AND/OR device-filter condition tree (the same shape NotificationRule.scope
+-- and Contact.assetCondition store), so operators are not asked "which
+-- devices?" in two different languages.
+--
+-- Additive only. `criteria` stays and is still READ: a row written before this
+-- keeps matching through the flat predicate until the migrateTagFilterShape
+-- one-shot folds it forward (which nulls it, so exactly one shape is ever live
+-- on a row). The Contact.assetCriteria -> Contact.assetCondition cutover is the
+-- precedent, including leaving the legacy column in place rather than
+-- converting in SQL: the fold is a pure TypeScript function
+-- (criteriaToCondition) that reports the one rule it cannot express
+-- (`integration`), and a blob carrying that must be LEFT FLAT rather than
+-- half-converted -- silently widening or narrowing which devices a tag claims.
+ALTER TABLE "tags" ADD COLUMN "assetCondition" JSONB;

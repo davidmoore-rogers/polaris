@@ -3122,10 +3122,27 @@ model Tag {
   category String @default("General")
   color    String @default("#4fc3f7")
 
-  // Optional auto-assignment criteria. NULL = ordinary manual tag (legacy
-  // behavior). When set, the tag is auto-applied to / removed from assets
-  // matching the criteria by tagAssignmentService (managed sync). Shape:
-  // { version, match: "all", rules: [{ field, op, values[] } | { field:"subnet", op:"inCidr", cidrs[] }] }.
+  // Optional auto-assignment device filter — the SAME nested AND/OR condition
+  // tree the automations device filter and the address book store, so "which
+  // devices?" is asked in one language everywhere. NULL = ordinary manual tag.
+  // When set, the tag is auto-applied to / removed from matching assets by
+  // tagAssignmentService (managed sync, provenance in TagAutoAssignment).
+  //
+  // An EMPTY tree is "no filter", never "all devices" — unlike Contact, where
+  // and([]) is the stored form of an explicit All-devices checkbox. A tag has
+  // no such control (just an Auto-assign toggle), so an empty tree could only
+  // arrive from a half-built form, and reading it as "every asset" would tag
+  // the whole fleet on save. normalizeTagCondition collapses it to NULL.
+  assetCondition Json?
+
+  // LEGACY flat criteria, superseded by assetCondition. Still READ — a row
+  // written before the cutover keeps matching through the flat predicate until
+  // it folds forward — but only one of the two is ever live on a row: a write
+  // of the condition nulls this. Readers normalize through `tagFilterOf`, and
+  // `criteriaToCondition` is the fold-forward (persisted by the
+  // migrateTagFilterShape one-shot, the migrateContactFilterShape precedent).
+  // Shape: { version, match: "all", rules: [{ field, op, values[] } |
+  // { field:"subnet", op:"inCidr", cidrs[] }] }.
   criteria Json?
 
   createdAt DateTime @default(now())

@@ -834,6 +834,7 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/bootstrapProxyConfig.js",
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/migrateContactFilterShape.js",
+      "./jobs/migrateTagFilterShape.js",
       "./jobs/seedBaselineAutomations.js",
       // Seals previously-plaintext secrets in Credential / Integration /
       // NotificationChannel config + Setting values. Not marker-guarded: the

@@ -9,8 +9,12 @@
 import { describe, it, expect } from "vitest";
 import {
   normalizeCriteria,
+  normalizeTagCondition,
   buildPrefilterWhere,
   assetMatchesCriteria,
+  tagFilterOf,
+  tagFilterView,
+  tagIsManaged,
   type TagCriteria,
 } from "../../src/services/tagAssignmentService.js";
 
@@ -208,5 +212,130 @@ describe("buildPrefilterWhere (superset invariant)", () => {
       rules: [{ field: "fortigate", op: "pattern", values: ["*-FG"] }],
     };
     expect(JSON.stringify(buildPrefilterWhere(prefixless))).not.toContain("learnedLocation");
+  });
+});
+
+// ─── Filter shape: the condition tree, and the legacy blob's fold-forward ────
+
+describe("normalizeTagCondition", () => {
+  it("accepts a tree over the WIDE device-filter vocabulary", () => {
+    // osVersion / department / location / fortigate + the wildcard operator are
+    // the fields the flat criteria builder already offered, so the tag surface
+    // has to keep reaching them or the shape cutover is a regression.
+    const cond = normalizeTagCondition({
+      op: "and",
+      children: [
+        { field: "osVersion", operator: "matches", value: "24H2*" },
+        { field: "department", operator: "equals", value: "Ops" },
+        { field: "location", operator: "contains", value: "Ashfield" },
+        { field: "fortigate", operator: "startsWith", value: "PLV" },
+      ],
+    });
+    expect(cond).not.toBeNull();
+    expect(cond!.children).toHaveLength(4);
+  });
+
+  it("collapses an EMPTY tree to null rather than reading it as every asset", () => {
+    // and([]) is true for any asset by boolean identity. A tag has no
+    // All-devices control, so an empty tree can only come from a half-built
+    // form — honoring it would tag the whole fleet on save.
+    expect(normalizeTagCondition({ op: "and", children: [] })).toBeNull();
+    expect(normalizeTagCondition(null)).toBeNull();
+  });
+
+  it("rejects a field outside the vocabulary", () => {
+    expect(() =>
+      normalizeTagCondition({ op: "and", children: [{ field: "nope", operator: "equals", value: "x" }] }),
+    ).toThrow();
+  });
+});
+
+describe("tagFilterOf", () => {
+  const tree = { op: "and" as const, children: [{ field: "manufacturer", operator: "equals", value: "Cisco" }] };
+
+  it("prefers a stored condition over a legacy blob", () => {
+    const filter = tagFilterOf({
+      assetCondition: tree,
+      criteria: { version: 1, match: "all", rules: [{ field: "model", op: "exact", values: ["X"] }] },
+    });
+    expect(filter.condition).toEqual(tree);
+    expect(filter.criteria).toBeNull();
+  });
+
+  it("folds a legacy blob forward so consumers only ever see a tree", () => {
+    const filter = tagFilterOf({
+      criteria: { version: 1, match: "all", rules: [{ field: "manufacturer", op: "exact", values: ["Cisco"] }] },
+    });
+    expect(filter.criteria).toBeNull();
+    expect(filter.condition).toEqual({
+      op: "and",
+      children: [{ field: "manufacturer", operator: "equals", value: "Cisco" }],
+    });
+  });
+
+  it("keeps a blob the tree cannot express on the LEGACY predicate", () => {
+    // An `integration` rule has no tree equivalent. Converting would widen which
+    // devices carry the tag and dropping the rule would narrow it, so the flat
+    // blob stays live instead of being half-converted.
+    const filter = tagFilterOf({
+      criteria: { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] },
+    });
+    expect(filter.condition).toBeNull();
+    expect(filter.criteria).not.toBeNull();
+  });
+
+  it("treats a tag with neither shape as unmanaged", () => {
+    expect(tagFilterOf({})).toEqual({ condition: null, criteria: null });
+    expect(tagIsManaged({})).toBe(false);
+    expect(tagIsManaged({ criteria: { version: 1, match: "all", rules: [] } })).toBe(true);
+    expect(tagIsManaged({ assetCondition: tree })).toBe(true);
+  });
+
+  it("drops a stored tree that no longer validates instead of throwing", () => {
+    // One bad row must not 500 the tag list or wedge the reconcile job.
+    expect(tagFilterOf({ assetCondition: { op: "and", children: [{ field: "gone", operator: "eq", value: "x" }] } }))
+      .toEqual({ condition: null, criteria: null });
+  });
+});
+
+describe("tagFilterView", () => {
+  it("hands the editor a tree for a tag still on the flat shape", () => {
+    // Without the fold the editor would render an auto-assigning tag as
+    // unfiltered, and the next save would silently clear a live filter.
+    const view = tagFilterView({
+      criteria: { version: 1, match: "all", rules: [{ field: "model", op: "contains", values: ["FS-108"] }] },
+    });
+    expect(view.assetCondition).toBeNull();
+    expect(view.assetConditionEffective).toEqual({
+      op: "and",
+      children: [{ field: "model", operator: "contains", value: "FS-108" }],
+    });
+    expect(view.assetFilterUnconvertible).toEqual([]);
+  });
+
+  it("names the fields that blocked the fold so the editor can say so", () => {
+    const view = tagFilterView({
+      criteria: { version: 1, match: "all", rules: [{ field: "integration", op: "exact", values: ["int-1"] }] },
+    });
+    expect(view.assetConditionEffective).toBeNull();
+    expect(view.assetFilterUnconvertible).toEqual(["integration"]);
+  });
+
+  it("ORs a multi-value rule into a subgroup", () => {
+    const view = tagFilterView({
+      criteria: { version: 1, match: "all", rules: [{ field: "manufacturer", op: "exact", values: ["Cisco", "Juniper"] }] },
+    });
+    expect(view.assetConditionEffective).toEqual({
+      op: "and",
+      children: [
+        {
+          op: "or",
+          children: [
+            { field: "manufacturer", operator: "equals", value: "Cisco" },
+            { field: "manufacturer", operator: "equals", value: "Juniper" },
+          ],
+        },
+      ],
+    });
   });
 });

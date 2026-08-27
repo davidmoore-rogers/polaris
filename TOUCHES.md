@@ -1671,6 +1671,32 @@ Listed alphabetically.
 1. Adding a dimension → walk the lockstep list above, then add a `DIMENSION_SOURCES` entry + a case to `tests/unit/automationDimensionValues.test.ts`.
 2. Changing the window/caps → re-reason at 100 AND 2000 assets (default scope is every asset) and update the numbers quoted in ARCHITECTURE.md.
 3. New sibling narrowing → extend `DimensionNarrow`, the route's `narrow` schema, AND the client's `awDimNarrow`, or the client will keep asking for the unnarrowed list.
+## services/deviceFilterService.ts
+
+**What it owns:** Resolving a device-filter CONDITION TREE against inventory — the shared half of the "which devices?" question. Three surfaces store the same tree over `DEVICE_FILTER_FIELD_OPS`: an automation's `scope.condition`, a `Contact.assetCondition`, and a `Tag.assetCondition`. Automations resolve theirs inside the engine (the tree rides a scope that also carries flat dimensions, and the read is shaped by the tick's own select); the other two want the plain answer — the SET of asset ids the tree covers. That answer lived privately in `contactService` until tags needed the identical thing, at which point a second copy would have been two places for the relation-join decisions to drift apart.
+
+**Public API:** `resolveDeviceFilterAssetIds(cond, {where?})`, `deviceFilterSelect(conditions, {needsInterfaces?})`, `ResolveDeviceFilterOptions`.
+
+**Cross-service deps:** `conditionFields` / `evaluateScopeCondition` / `ScopeConditionAsset` / `ScopeConditionGroup` from `notificationTypes.ts`; `decorateInterfaceLeafHits` from `scopeInterfaceIndex.ts`; `prisma.asset.findMany`.
+
+**Used by:**
+- `src/services/contactService.ts` — `resolveAssetIdsForCondition` (the address-book editor's live device preview) delegates straight to it.
+- `src/services/tagAssignmentService.ts` — `resolveTagFilterAssetIds` for a tree-shaped tag filter (passing the decommissioned-exclusion `where`), and `deviceFilterSelect` for the single-asset `reconcileTagsForAsset` read.
+
+**Invariants:**
+- **No SQL prefilter for the tree itself.** An `or` / `none` / `notAll` group makes any narrowing `WHERE` unsound, and unlike the flat criteria (whose rules are always ANDed, which is what lets `tagAssignmentService.buildPrefilterWhere` exist) there is no safe superset to ask the DB for. Never "optimize" this into a derived WHERE.
+- **`opts.where` is ANDed OUTSIDE the tree** and is only for a caller-owned eligibility rule — never for narrowing derived FROM the tree, which is the unsound case above. Today's one caller is tag auto-assignment's "skip decommissioned unless the filter mentions status".
+- **Both relation-backed fields stay conditional**, which is why the select is a function rather than a constant. `fortigate` joins the sighting relation only when a rule asks about the gate — the expensive half at 2000 assets. `interfaceName` is resolved to per-asset verdicts in SQL by `scopeInterfaceIndex` and NEVER joined here: the interface inventory dwarfs the fleet. No interface leaf ⇒ no query.
+- **The scalar select covers the DEVICE_FILTER SUPERSET** (`osVersion` / `department` / `location` on top of the automations scope fields). A caller validating against the narrower `SCOPE_FIELD_OPS` can't produce a tree that reads the extras, so there is nothing to gate — but dropping a column here silently makes every rule on it match nothing.
+- **An empty tree resolves to the whole (eligible) fleet** and that is deliberate: `and([])` is true for every asset. Whether that is the right meaning is the CALLER's decision — `Contact` means it, `Tag` must never store it (`normalizeTagCondition`).
+- Cost is one `findMany` of scalar columns, operator- or reconcile-triggered — never a per-tick path. Scale-checked at 2000 assets: fine here, which is exactly why the engine does NOT use it.
+
+**When changing this:**
+- Adding a condition field backed by a RELATION: decide join-vs-prefetch here, and follow `interfaceName`'s precedent (prefetch to per-asset verdicts) for anything whose row count exceeds the fleet's.
+- Adding a scalar field to `DEVICE_FILTER_FIELD_OPS`: add the column to `DEVICE_FILTER_SCALAR_SELECT` in the same change, or the field validates, stores, and matches nothing.
+
+---
+
 ## services/contactService.ts
 
 **What it owns:** The address book — `Contact` CRUD, the unified recipient search that backs both the address-book picker and the wizard's typeahead, and the fire-time "who is responsible for this device?" lookup.
@@ -2548,14 +2574,15 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ## services/tagAssignmentService.ts
 
-**What it owns:** Criteria-based tag auto-assignment ("managed sync"). The `Tag.criteria` JSON contract (validation/normalization), the asset-matching engine (DB prefilter + inet subnet membership + in-memory predicate), and the diff-based reconcile that keeps each criteria-bearing tag synced onto matching assets via the `TagAutoAssignment` provenance table. Strictly an asset-tagging service — it never writes block/subnet tags.
+**What it owns:** Filter-based tag auto-assignment ("managed sync"). Both device-filter contracts on `Tag` — the CURRENT `assetCondition` condition tree (the automations / address-book shape) and the LEGACY flat `criteria` blob it superseded — the asset-matching engines behind each, and the diff-based reconcile that keeps every filter-bearing tag synced onto matching assets via the `TagAutoAssignment` provenance table. Strictly an asset-tagging service — it never writes block/subnet tags.
 
-**Public API:** `TagCriteria` / `CriteriaRule` types, `normalizeCriteria`, `buildPrefilterWhere`, `assetMatchesCriteria` (pure predicate, test-only convenience), `resolveMatchingAssetIds`, `reconcileTag`, `reconcileAllTags`, `reconcileTagsForAsset`, `previewTagCriteria`, `stripTagAssignments`.
+**Public API:** Filter shape — `TagFilter` / `TagFilterView` types, `tagFilterOf` (the ONE normalizer every reader goes through), `tagIsManaged`, `normalizeTagCondition` (validate a POSTED tree), `tagFilterView` (the editor projection), `resolveTagFilterAssetIds`. Legacy shape — `TagCriteria` / `CriteriaRule` types, `normalizeCriteria`, `buildPrefilterWhere`, `assetMatchesCriteria` (pure predicate, test-only convenience), `resolveMatchingAssetIds`. Reconcile + preview — `reconcileTag`, `reconcileAllTags`, `reconcileTagsForAsset`, `previewTagFilter`, `stripTagAssignments`. Also `listAssetTags` (the `tag` value list behind either device-filter builder).
 
-**Cross-service deps:** `compileWildcard` from `autoMonitorInterfacesService.ts` (pattern compile); `isValidCidr` / `isValidIpAddress` from `utils/cidr.ts`; `isKnownAssetType` / `normalizeAssetTypeName` from `utils/assetTypes.ts`; `prisma.asset` (tags[] read-modify-write), `prisma.tag` (criteria read), `prisma.tagAutoAssignment` (provenance), one raw inet `>>=` query for subnet membership.
+**Cross-service deps:** `deviceFilterConditionSchema` / `evaluateScopeCondition` / `scopeConditionStats` / `conditionFields` / `conditionNeedsInterfaces` from `notificationTypes.ts` (the tree contract + evaluator); `resolveDeviceFilterAssetIds` / `deviceFilterSelect` from `deviceFilterService.ts` (fleet-wide tree resolution); `criteriaToCondition` from `utils/criteriaToCondition.ts` (the fold-forward); `compileWildcard` from `autoMonitorInterfacesService.ts` (pattern compile); `isValidCidr` / `isValidIpAddress` from `utils/cidr.ts`; `isKnownAssetType` / `normalizeAssetTypeName` from `utils/assetTypes.ts`; `prisma.asset` (tags[] read-modify-write), `prisma.tag` (criteria read), `prisma.tagAutoAssignment` (provenance), one raw inet `>>=` query for subnet membership.
 
 **Used by:**
-- `src/api/routes/serverSettings.ts` Tag routes — `normalizeCriteria` (validate on POST/PUT), `reconcileTag` (inline after create/edit), `stripTagAssignments` (on delete of a criteria tag), `previewTagCriteria` (`POST /server-settings/tags/preview-criteria`).
+- `src/api/routes/serverSettings.ts` Tag routes — `normalizeTagCondition` + `normalizeCriteria` (validate on POST/PUT via the local `readPostedTagFilter`), `tagFilterView` (decorates `GET /tags` so the editor can open a legacy tag in the builder), `tagIsManaged` (whether DELETE has provenance to strip), `reconcileTag` (inline after create/edit), `stripTagAssignments` (on delete), `previewTagFilter` (`POST /server-settings/tags/preview-criteria`), plus `listAssetTags` for `GET /server-settings/tags/filter-schema`.
+- `src/services/contactService.ts` — `normalizeCriteria` / `assetMatchesCriteria` / `resolveMatchingAssetIds` / `cidrsContainingIp` / `collectCidrs` / `SINGLE_ASSET_CANDIDATE_SELECT` for contacts still on the legacy blob, and `listAssetTags` for the address book's filter schema.
 - `src/services/discovery/discoveryEngine.ts` Phase 13.65 — `reconcileAllTags()` at end of FMG/FortiGate discovery.
 - `src/api/routes/assets.ts` POST/PUT — `reconcileTagsForAsset(id)` (best-effort) on create + on update when a criteria-relevant field changed.
 - `src/jobs/reconcileTagAssignments.ts` — 6h safety-net tick calls `reconcileAllTags()`.
@@ -2563,15 +2590,21 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **Invariants:**
 - **The prefilter is a strict SUPERSET of the predicate.** `buildPrefilterWhere` may only ever loosen: exact→insensitive-equals, contains→insensitive-contains, pattern→`startsWith(literalPrefix)` ONLY when every value in the rule has a prefix (else the rule contributes no DB clause); subnet rules are always predicate-only. Never tighten — a candidate dropped by the prefilter is silently never matched.
 - **Managed sync touches only engine-owned copies.** A tag is removed from an asset only when a `TagAutoAssignment` row exists for that (tag, asset). A hand-applied copy of the same tag name on a non-matching asset (no provenance) is preserved forever. This is the manual-vs-auto collision defense — keep the provenance check on every remove path.
-- Decommissioned assets are excluded from the prefilter unless the criteria explicitly target `status`.
+- **Decommissioned assets are ineligible unless the filter mentions `status`** — on BOTH paths. Implicit in `buildPrefilterWhere` for the flat shape; stated explicitly for the tree in `tagEligibilityWhere` (fleet) / `tagAssetIsEligible` (single asset), ANDed OUTSIDE the tree so it stays sound under `or` / `none` / `notAll` groups. The shape cutover would otherwise have quietly begun auto-tagging retired inventory.
+- **An EMPTY condition tree is NO filter, never "all devices."** `and([])` is true for every asset by boolean identity — which is exactly what `Contact` means by it, as the stored form of an explicit All-devices checkbox. A tag has no such control (just an Auto-assign toggle), so an empty tree could only arrive from a half-built form and honoring it would tag the whole fleet on save. `normalizeTagCondition` collapses it to null, and the browser posts an explicit `assetCondition: null` rather than the empty tree.
+- **Exactly ONE filter shape is live per row.** A write of either column clears the other, so a row can never carry two answers to "which devices?". Readers must go through `tagFilterOf` and never branch on a column directly.
+- **A stored tree that no longer validates drops to null, it does not throw** — one bad row must not 500 the tag list or wedge the reconcile job.
 - Subnet membership goes through the family-aware inet query (`cidrContainmentMap`), NOT the v4-only `Netmask`/`ipInCidr` path — IPv6 CIDRs must work.
-- `criteria == null` (manual tag) makes the tag invisible to the engine — it is never added or removed.
+- Neither column set (`tagIsManaged` false — an ordinary manual tag) makes the tag invisible to the engine: it is never added or removed.
+- **The "Map Regions" category is locked to the Device Map**, enforced in `serverSettings.ts` (`assertNotRegionCategory` + the filter check in `readPostedTagFilter`), not here: creating a tag in it is refused, MOVING one in is refused (the same act), and a tag in it may not carry an auto-assign filter — `RegionTagAssignment` already manages those tag NAMES, and `TagAutoAssignment` on the same name would be a second reconciler stripping the first's work every cycle.
 - Reconcile writes are idempotent + batched (chunks of 50 in `$transaction`); skip when the tags array doesn't change. Scale-checked: fleet passes are bounded to (#managed tags) prefilter queries; per-asset path is O(#managed tags) + one inet round-trip.
 
 **When changing this:**
-- Adding a new criteria field: extend `STRING_FIELDS`/`ENUM_FIELDS` (+ domain validation), add the column to `CANDIDATE_SELECT`, ensure `buildPrefilterWhere` stays a superset, and add it to the asset-write hook's `TAG_CRITERIA_FIELDS` list in `assets.ts` + the frontend `TAG_CRITERIA_FIELDS` in `server-settings.js`.
+- Adding a field to the CURRENT (tree) vocabulary is a change to `DEVICE_FILTER_FIELD_OPS` in `notificationTypes.ts`, not here — see that service's entry; the tag surface picks it up for free through `GET /server-settings/tags/filter-schema`. Remember the asset-write hook's field list in `assets.ts`, which decides when a PUT re-runs `reconcileTagsForAsset`.
+- Adding a field to the LEGACY (flat) vocabulary: don't. It exists only to keep un-migrated rows matching. If you must, extend `STRING_FIELDS`/`ENUM_FIELDS` (+ domain validation), add the column to `CANDIDATE_SELECT`, keep `buildPrefilterWhere` a superset, AND teach `utils/criteriaToCondition.ts` to fold it — an unfoldable field pins every row carrying it on the legacy predicate forever.
 - Relation-backed fields (`RELATION_FIELDS` = `integration`, `fortigate` — added for the maintenance asset filter) match discovery provenance, not Asset columns: `integration` (exact-only Integration ids) = `discoveredByIntegrationId` OR any `AssetSource.integrationId`; `fortigate` (string ops) = `learnedLocation` OR any `AssetFortigateSighting.fortigateDevice`. Their relations are loaded only when referenced (`buildCandidateSelect`); their prefilter must OR across BOTH surfaces (narrowing on one would drop predicate matches from the other). They're deliberately NOT in the assets.ts write-hook field list — operator PUTs can't change provenance; the periodic reconcile covers discovery-side drift. The maintenance builder surfaces them; the Tags UI doesn't yet.
-- The `Tag.criteria` JSON shape is also parsed in `public/js/server-settings.js` (`_collectTagCriteria` / `_tagRuleRowHTML`) — keep the two in sync.
+- The browser no longer parses either shape by hand: `public/js/server-settings.js` renders the tag filter through the shared `PolarisConditionBuilder` (`_tagFilterSectionHTML` / `_collectTagFilter` / `_wireTagFilterBuilder`), so there is nothing to keep in sync beyond the vocabulary the schema route serves. `server-settings.html` must keep loading `/js/condition-builder.js`.
+- **The editor omits BOTH shape keys to mean "leave the filter alone."** A tag whose legacy blob can't be folded (`assetFilterUnconvertible` non-empty) renders the toggle ON with an empty builder and a warning; saving without building anything must not post `assetCondition: null`, which would clear a live filter the operator was only warned about. `_collectTagFilter(builder, stuck)` is where that lives.
 - Criteria tags are normal registry tags, fully editable in the manual tag picker. (`region:` tags are too, since 2026-08 — the picker's protected-prefix machinery is gone; provenance is what protects hand-edits now, for both engines.)
 - See cross-cutting **Asset.tags** for the full writer list (this service is now one of them).
 

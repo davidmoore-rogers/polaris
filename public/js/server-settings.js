@@ -4336,8 +4336,11 @@ function renderIdentificationTab() {
         html += '<div class="tag-chip-list">';
         tags.forEach(function (t) {
           var colorStyle = t.color ? ' style="background:' + escapeHtml(t.color) + '22;border-color:' + escapeHtml(t.color) + ';color:' + escapeHtml(t.color) + '"' : '';
-          var autoMark = (t.criteria && t.criteria.rules && t.criteria.rules.length)
-            ? '<span title="Auto-assigned by criteria" style="margin-right:4px">&#9881;</span>'
+          // Either filter shape counts — a tag written before the condition-tree
+          // cutover still auto-assigns through the folded-forward flat blob.
+          var managed = !!(t.assetCondition || (t.criteria && t.criteria.rules && t.criteria.rules.length));
+          var autoMark = managed
+            ? '<span title="Auto-assigned by device filter" style="margin-right:4px">&#9881;</span>'
             : '';
           html += '<span class="tag-chip"' + colorStyle + '>' +
             autoMark +
@@ -5612,153 +5615,183 @@ async function deleteIconUI(id, label) {
 // (mibProfileStatusHTML removed — superseded by the editable Manufacturer
 // Profiles card on the same Identification tab.)
 
-// ─── Tag auto-assignment criteria builder ────────────────────────────────────
-// Shared by the Add Tag and Edit Tag modals. A tag with criteria is
-// auto-applied to / removed from assets matching the rules (managed sync,
-// engine-owned copies only — hand-applied tags are never disturbed).
+// ─── Tag auto-assign device filter ───────────────────────────────────────────
+// Shared by the Add Tag and Edit Tag modals. A tag with a filter is
+// auto-applied to / removed from assets matching it (managed sync, engine-owned
+// copies only — hand-applied tags are never disturbed).
+//
+// The filter IS the automations device filter: the same shared
+// PolarisConditionBuilder, the same stored condition-tree shape, the same
+// server-side evaluator. It replaced a flat one-rule-per-row builder that could
+// only AND its rules, so "which devices?" is now asked one way everywhere. A tag
+// still carrying the legacy flat shape opens here with its rules intact — the
+// server folds it forward through criteriaToCondition on read.
+//
+// Vocabulary comes from GET /server-settings/tags/filter-schema, which carries
+// the WIDE device-filter field set (the address book's, not the narrower
+// automations Devices step's) because the flat tag builder already offered
+// osVersion / department / location / fortigate and the wildcard operator.
 
-var TAG_CRITERIA_FIELDS = [
-  { value: "manufacturer", label: "Manufacturer", kind: "string" },
-  { value: "model",        label: "Model",            kind: "string" },
-  { value: "os",           label: "Operating system", kind: "string" },
-  { value: "osVersion",    label: "OS version",       kind: "string" },
-  { value: "hostname",     label: "Hostname",         kind: "string" },
-  { value: "department",   label: "Department",       kind: "string" },
-  { value: "location",     label: "Location",         kind: "string" },
-  { value: "assetType",    label: "Asset type",       kind: "assetType" },
-  { value: "status",       label: "Status",           kind: "status" },
-  { value: "subnet",       label: "Subnet / CIDR",    kind: "subnet" },
-];
-var TAG_STRING_OPS = [
-  { value: "exact",    label: "is" },
-  { value: "contains", label: "contains" },
-  { value: "pattern",  label: "matches (wildcard *)" },
-];
-var TAG_STATUSES = ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"];
-var _tagAssetTypesCache = null;
+var _tagFilterSchemaPromise = null;
 var _tagPreviewTimer = null;
 
-function _tagFieldKind(field) {
-  var f = TAG_CRITERIA_FIELDS.find(function (x) { return x.value === field; });
-  return f ? f.kind : "string";
+/** The builder vocabulary, fetched once per page load. */
+function _loadTagFilterSchema() {
+  if (!_tagFilterSchemaPromise) {
+    _tagFilterSchemaPromise = api.serverSettings.tagFilterSchema().catch(function (err) {
+      _tagFilterSchemaPromise = null; // let a later open retry
+      throw err;
+    });
+  }
+  return _tagFilterSchemaPromise;
 }
 
-// Build the inner HTML for a single rule row's op + value cells, depending on
-// the selected field. Called on row creation and whenever the field changes.
-function _tagRuleCellsHTML(field, op, valueStr) {
-  var kind = _tagFieldKind(field);
-  var opHtml = "";
-  if (kind === "string") {
-    opHtml = '<select class="tag-rule-op" style="flex:0 0 auto">' +
-      TAG_STRING_OPS.map(function (o) {
-        return '<option value="' + o.value + '"' + (o.value === op ? ' selected' : '') + '>' + escapeHtml(o.label) + '</option>';
-      }).join("") + '</select>';
-  } else if (kind === "subnet") {
-    opHtml = '<span class="tag-rule-op-static" style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">in</span>';
-  } else {
-    opHtml = '<span class="tag-rule-op-static" style="flex:0 0 auto;align-self:center;color:var(--color-text-secondary);font-size:0.82rem">is</span>';
-  }
-
-  var placeholder, listAttr = "", listHtml = "";
-  if (kind === "subnet") {
-    placeholder = "10.0.0.0/16, 2001:db8::/32";
-  } else if (kind === "status") {
-    placeholder = "active, maintenance";
-    listAttr = ' list="tag-status-list"';
-  } else if (kind === "assetType") {
-    placeholder = "firewall, switch";
-    listAttr = ' list="tag-assettype-list"';
-  } else {
-    placeholder = "value, another value";
-  }
-  var valHtml = '<input type="text" class="tag-rule-input" style="flex:1"' + listAttr +
-    ' placeholder="' + escapeHtml(placeholder) + '" value="' + escapeHtml(valueStr || "") + '">';
-
-  return opHtml + valHtml + listHtml;
+/** The category the Device Map owns. Server-authoritative; this is the fallback
+ *  for a schema payload that predates the field. */
+function _regionCategoryOf(schema) {
+  return (schema && schema.regionCategory) || "Map Regions";
 }
 
-function _tagRuleRowHTML(rule) {
-  var field = rule ? rule.field : "manufacturer";
-  var op = rule ? rule.op : "exact";
-  var valueStr = "";
-  if (rule) {
-    valueStr = rule.field === "subnet"
-      ? (rule.cidrs || []).join(", ")
-      : (rule.values || []).join(", ");
-  }
-  var fieldOpts = TAG_CRITERIA_FIELDS.map(function (f) {
-    return '<option value="' + f.value + '"' + (f.value === field ? ' selected' : '') + '>' + escapeHtml(f.label) + '</option>';
-  }).join("");
-  return '<div class="tag-rule" style="display:flex;gap:6px;margin-bottom:6px;align-items:flex-start">' +
-    '<select class="tag-rule-field" style="flex:0 0 9.5rem">' + fieldOpts + '</select>' +
-    '<div class="tag-rule-cells" style="display:flex;gap:6px;flex:1">' + _tagRuleCellsHTML(field, op, valueStr) + '</div>' +
-    '<button type="button" class="tag-rule-remove btn-icon" title="Remove rule" aria-label="Remove rule" ' +
-      'style="flex:0 0 auto;border:1px solid var(--color-border);border-radius:4px;background:transparent;color:var(--color-text-secondary);cursor:pointer;width:30px;height:30px">×</button>' +
-  '</div>';
+/** Suggestion source for one field, mirroring the address book's mapping. */
+function _tagValueOptions(schema) {
+  return function (field) {
+    var fm = (((schema.scopeCondition || {}).fields) || []).find(function (f) { return f.field === field; }) || {};
+    if (fm.values) return fm.values.map(function (v) { return { value: v, label: v }; });
+    var o = schema.options || {};
+    var plain = function (list) { return (list || []).map(function (v) { return { value: v, label: v }; }); };
+    switch (fm.optionsFrom) {
+      case "assetTypes":
+        return (o.assetTypes || []).map(function (t) { return { value: t.name, label: t.label || t.name }; });
+      case "manufacturers":  return plain(o.manufacturers);
+      case "models":         return plain(o.models);
+      case "interfaceNames": return plain(o.interfaceNames);
+      case "tags":           return plain(o.tags);
+      case "subnets":
+        return (o.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
+      default: return [];
+    }
+  };
 }
 
-function _tagCriteriaSectionHTML(criteria) {
-  var on = !!(criteria && criteria.rules && criteria.rules.length);
-  var rulesHtml = on
-    ? criteria.rules.map(function (r) { return _tagRuleRowHTML(r); }).join("")
-    : _tagRuleRowHTML(null);
+/**
+ * The tree a tag opens with. `assetCondition` is the current shape;
+ * `assetConditionEffective` is the server's fold-forward of a legacy `criteria`
+ * blob, so an un-migrated tag still opens with its rules in the builder.
+ */
+function _tagStoredCondition(tag) {
+  if (!tag) return null;
+  var cond = tag.assetCondition || tag.assetConditionEffective || null;
+  return cond && (cond.children || []).length ? cond : null;
+}
+
+/**
+ * The auto-assign section. `builder` must already exist (its field/operator
+ * selects are rendered from the fetched vocabulary), which is why both modals
+ * await the schema before assembling their body.
+ *
+ * A tag in the Device Map's category gets an explanation instead of a builder:
+ * those tag names are already managed by the region reconcile through
+ * RegionTagAssignment, and a second managed-sync engine on the same string would
+ * spend every cycle undoing the first.
+ */
+function _tagFilterSectionHTML(tag, builder, schema) {
+  var regionCat = _regionCategoryOf(schema);
+  if (tag && (tag.category || "") === regionCat) {
+    return '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:12px;margin-top:4px">' +
+      '<label>Auto-assign</label>' +
+      '<p class="hint" style="margin:0">This tag belongs to the <strong>' + escapeHtml(regionCat) + '</strong> category, so the ' +
+        'Device Map applies it to every device inside its region &mdash; edit the region there to change who gets it. ' +
+        'It cannot also carry a device filter.</p>' +
+    '</div>';
+  }
+
+  var stored = _tagStoredCondition(tag);
+  var stuck = (tag && tag.assetFilterUnconvertible) || [];
+  // A stuck filter is one the builder can't RENDER, not one that stopped
+  // applying — so the toggle reads as on and the warning explains the empty
+  // builder. Leaving it off would advertise the tag as unfiltered.
+  var on = !!stored || stuck.length > 0;
+  var root = stored || { op: "and", children: [] };
+
   return '<div class="form-group" style="border-top:1px solid var(--color-border);padding-top:12px;margin-top:4px">' +
     '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
       '<input type="checkbox" id="f-tag-auto-toggle"' + (on ? ' checked' : '') + ' style="width:auto">' +
-      '<span>Auto-assign by criteria</span>' +
+      '<span>Auto-assign by device filter</span>' +
     '</label>' +
-    '<p class="hint">When on, this tag is automatically applied to every asset matching ALL of the rules below, and removed when an asset no longer matches. Tags you add by hand are never removed.</p>' +
-    '<div id="f-tag-criteria-body" style="' + (on ? '' : 'display:none;') + '">' +
-      '<div id="f-tag-rules">' + rulesHtml + '</div>' +
-      '<button type="button" id="f-tag-add-rule" class="btn btn-secondary btn-sm" style="margin-top:4px">+ Add rule</button>' +
+    '<p class="hint">When on, this tag is automatically applied to every device matching the filter below, and removed when a ' +
+      'device no longer matches. Tags you add by hand are never removed. Decommissioned devices are skipped unless the filter ' +
+      'mentions status.</p>' +
+    '<div id="f-tag-filter-body" style="' + (on ? '' : 'display:none;') + '">' +
+      (stuck.length
+        ? '<p class="hint" style="color:var(--color-warning);margin:0 0 8px">This tag&rsquo;s filter uses ' +
+            escapeHtml(stuck.join(", ")) + ', which this builder cannot show. It still applies &mdash; ' +
+            'saving without changing the conditions below leaves it exactly as it is.</p>'
+        : '') +
+      '<p class="hint" style="margin:0 0 8px">Drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to ' +
+        'move a condition into another group or reorder groups.</p>' +
+      '<div id="f-tag-cond-root">' + builder.groupHtml(root, 0) + '</div>' +
       '<div id="f-tag-preview" class="hint" style="margin-top:8px;font-style:italic"></div>' +
     '</div>' +
-    // Shared datalists for status / asset-type value inputs.
-    '<datalist id="tag-status-list">' + TAG_STATUSES.map(function (s) { return '<option value="' + s + '">'; }).join("") + '</datalist>' +
-    '<datalist id="tag-assettype-list"></datalist>' +
   '</div>';
 }
 
-// Read the builder DOM into a criteria object (or null when the toggle is off
-// or no usable rules exist).
-function _collectTagCriteria() {
+/**
+ * The auto-assign half of the request body.
+ *
+ * An empty tree posts an explicit null rather than the tree: `and([])` is true
+ * for every asset, so shipping it would ask the server to tag the entire fleet.
+ * (The server collapses it too — normalizeTagCondition — but the toggle being
+ * off must mean "clear the filter" on the wire, not "match everything".)
+ */
+function _collectTagFilter(builder, stuck) {
   var toggle = document.getElementById("f-tag-auto-toggle");
-  if (!toggle || !toggle.checked) return null;
-  var rules = [];
-  document.querySelectorAll("#f-tag-rules .tag-rule").forEach(function (row) {
-    var field = row.querySelector(".tag-rule-field").value;
-    var input = row.querySelector(".tag-rule-input");
-    var parts = (input && input.value ? input.value : "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
-    if (!parts.length) return;
-    if (field === "subnet") {
-      rules.push({ field: "subnet", op: "inCidr", cidrs: parts });
-    } else {
-      var kind = _tagFieldKind(field);
-      var op = "exact";
-      if (kind === "string") {
-        var opSel = row.querySelector(".tag-rule-op");
-        if (opSel) op = opSel.value;
-      }
-      rules.push({ field: field, op: op, values: parts });
-    }
-  });
-  if (!rules.length) return null;
-  return { version: 1, match: "all", rules: rules };
+  // No toggle at all = the region-category form, which never writes a filter.
+  if (!toggle) return {};
+  if (!toggle.checked) return { assetCondition: null };
+  var rootGroup = document.querySelector("#f-tag-cond-root > .scg-group");
+  var tree = rootGroup && builder ? builder.collect(rootGroup) : null;
+  if (!tree || !(tree.children || []).length) {
+    // On, but nothing built. For a tag whose LEGACY filter this builder can't
+    // render, that is the "leave it exactly as it is" case: omit both shape keys
+    // so the server touches neither column. Posting assetCondition:null here
+    // would clear a filter the operator was only shown a warning about.
+    return (stuck && stuck.length) ? {} : { assetCondition: null };
+  }
+  return { assetCondition: tree };
 }
 
-function _refreshTagCriteriaPreview(tagId) {
+/** Validation problem string, or null. Called before save so a bad CIDR or an
+ *  empty group is refused here rather than as a 400. */
+function _validateTagFilter(builder, stuck) {
+  var toggle = document.getElementById("f-tag-auto-toggle");
+  if (!toggle || !toggle.checked || !builder) return null;
+  var rootGroup = document.querySelector("#f-tag-cond-root > .scg-group");
+  if (!rootGroup) return null;
+  var tree = builder.collect(rootGroup);
+  if (!(tree.children || []).length) {
+    // An unrenderable legacy filter is allowed to stay untouched (see
+    // _collectTagFilter); anything else needs a condition or the toggle off.
+    if (stuck && stuck.length) return null;
+    return 'Add a condition, or switch "Auto-assign by device filter" off.';
+  }
+  return builder.validate(tree);
+}
+
+function _refreshTagFilterPreview(tagId, builder) {
   var el = document.getElementById("f-tag-preview");
   if (!el) return;
-  var criteria = _collectTagCriteria();
-  if (!criteria) { el.textContent = ""; return; }
+  // No `stuck` here on purpose: the preview only ever describes a tree the
+  // builder can show, and an omitted key would make it preview nothing.
+  var body = _collectTagFilter(builder);
+  if (!body.assetCondition) { el.textContent = ""; return; }
   el.textContent = "Checking…";
   if (_tagPreviewTimer) clearTimeout(_tagPreviewTimer);
   _tagPreviewTimer = setTimeout(async function () {
     try {
-      var body = { criteria: criteria };
-      if (tagId) body.tagId = tagId;
-      var res = await api.serverSettings.previewTagCriteria(body);
-      var msg = res.matchCount + " asset" + (res.matchCount === 1 ? "" : "s") + " match";
+      var payload = { assetCondition: body.assetCondition };
+      if (tagId) payload.tagId = tagId;
+      var res = await api.serverSettings.previewTagCriteria(payload);
+      var msg = res.matchCount + " device" + (res.matchCount === 1 ? "" : "s") + " match";
       if (res.diff) msg += " · this save: +" + res.diff.add + " / −" + res.diff.remove;
       el.textContent = msg;
     } catch (err) {
@@ -5767,70 +5800,65 @@ function _refreshTagCriteriaPreview(tagId) {
   }, 350);
 }
 
-async function _wireTagCriteriaBuilder(tagId) {
-  // Populate asset-type datalist (best-effort — may be denied for some roles).
-  var dl = document.getElementById("tag-assettype-list");
-  if (dl) {
-    if (!_tagAssetTypesCache) {
-      try { _tagAssetTypesCache = await api.assetTypes.list(); } catch (e) { _tagAssetTypesCache = []; }
-    }
-    dl.innerHTML = (_tagAssetTypesCache || []).map(function (t) {
-      return '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.label || t.name) + '</option>';
-    }).join("");
-  }
-
+/** Wire the toggle + the shared builder. Safe to call when the section rendered
+ *  the region-category explanation instead (nothing to wire). */
+function _wireTagFilterBuilder(tagId, builder) {
   var toggle = document.getElementById("f-tag-auto-toggle");
-  var bodyEl = document.getElementById("f-tag-criteria-body");
-  var rulesEl = document.getElementById("f-tag-rules");
-  var addBtn = document.getElementById("f-tag-add-rule");
+  if (!toggle || !builder) return;
+  var bodyEl = document.getElementById("f-tag-filter-body");
+  var rootEl = document.getElementById("f-tag-cond-root");
 
-  if (toggle) toggle.addEventListener("change", function () {
+  toggle.addEventListener("change", function () {
     bodyEl.style.display = toggle.checked ? "" : "none";
-    if (toggle.checked && rulesEl.children.length === 0) {
-      rulesEl.insertAdjacentHTML("beforeend", _tagRuleRowHTML(null));
-    }
-    _refreshTagCriteriaPreview(tagId);
+    // Revealed empty: seed a starter row so the operator lands on something
+    // editable (the address book's All-devices untick does the same).
+    if (toggle.checked) builder.seedIfEmpty(rootEl);
+    _refreshTagFilterPreview(tagId, builder);
   });
 
-  if (addBtn) addBtn.addEventListener("click", function () {
-    rulesEl.insertAdjacentHTML("beforeend", _tagRuleRowHTML(null));
-  });
-
-  // Delegate row interactions: field change rebuilds op/value cells; remove
-  // drops the row; any change/input refreshes the live preview.
-  if (rulesEl) {
-    rulesEl.addEventListener("change", function (e) {
-      var fieldSel = e.target.closest ? e.target.closest(".tag-rule-field") : null;
-      if (fieldSel) {
-        var row = fieldSel.closest(".tag-rule");
-        var cells = row.querySelector(".tag-rule-cells");
-        cells.innerHTML = _tagRuleCellsHTML(fieldSel.value, "exact", "");
-      }
-      _refreshTagCriteriaPreview(tagId);
-    });
-    rulesEl.addEventListener("input", function () { _refreshTagCriteriaPreview(tagId); });
-    rulesEl.addEventListener("click", function (e) {
-      var rm = e.target.closest ? e.target.closest(".tag-rule-remove") : null;
-      if (rm) {
-        var row = rm.closest(".tag-rule");
-        if (row) row.remove();
-        _refreshTagCriteriaPreview(tagId);
-      }
-    });
-  }
-
-  _refreshTagCriteriaPreview(tagId);
+  // Rows, groups, the value combobox and the grip drag all live in the shared
+  // module; the preview debounce rides its onChange.
+  //
+  // Bind to the SECTION, never to #modal-overlay. openModal reuses one
+  // persistent overlay element, so binding there would leave the delegated
+  // change/input/click listeners attached after the dialog closed and add a
+  // fresh set on every open — by the third Add Tag, one "+ Condition" click
+  // appends three rows. Every other consumer binds to a container that dies
+  // with its form (the wizard's step panel, #mp-root, the address book's own
+  // overlay); #f-tag-filter-body is this surface's equivalent and contains the
+  // tree root, which is all wire() needs.
+  builder.wire(bodyEl, "#f-tag-cond-root");
+  _refreshTagFilterPreview(tagId, builder);
 }
 
 async function openAddTagModal() {
-  // Collect existing categories (including empty tracked ones) for the dropdown
+  // The device-filter vocabulary has to be in hand BEFORE the body is assembled:
+  // the builder renders its field/operator selects from it.
+  var schema, condBuilder;
+  try {
+    schema = await _loadTagFilterSchema();
+    condBuilder = window.PolarisConditionBuilder.create({
+      meta: schema.scopeCondition,
+      valueOptions: _tagValueOptions(schema),
+      onChange: function () { _refreshTagFilterPreview(null, condBuilder); },
+    });
+  } catch (err) {
+    showToast((err && err.message) || "Couldn't load the device-filter options", "error");
+    return;
+  }
+  var regionCat = _regionCategoryOf(schema);
+
+  // Collect existing categories (including empty tracked ones) for the dropdown.
+  // The Device Map's category is deliberately NOT offered: every tag in it is
+  // minted by a region save and kept in step by the region reconcile, so a
+  // hand-added sibling would be owned by nothing. The server refuses it too.
   var existingCats = [];
   _tagsData.forEach(function (t) {
     var cat = t.category || "General";
-    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+    if (cat !== regionCat && existingCats.indexOf(cat) === -1) existingCats.push(cat);
   });
   _emptyCategories.forEach(function (cat) {
-    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+    if (cat !== regionCat && existingCats.indexOf(cat) === -1) existingCats.push(cat);
   });
   existingCats.sort();
 
@@ -5863,12 +5891,12 @@ async function openAddTagModal() {
         '<span id="f-tag-color-hex" style="font-family:var(--font-mono);font-size:0.82rem;color:var(--color-text-secondary)"></span>' +
       '</div>' +
     '</div>' +
-    _tagCriteriaSectionHTML(null);
+    _tagFilterSectionHTML(null, condBuilder, schema);
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save-tag">Add Tag</button>';
   openModal("Add Tag", body, footer);
-  _wireTagCriteriaBuilder(null);
+  _wireTagFilterBuilder(null, condBuilder);
 
   // Toggle new category input
   var catSelect = document.getElementById("f-tag-category-select");
@@ -5908,14 +5936,16 @@ async function openAddTagModal() {
       category = catSelect.value || "General";
     }
 
+    var problem = _validateTagFilter(condBuilder);
+    if (problem) { showToast(problem, "error"); return; }
+
     btn.disabled = true;
     try {
-      await api.serverSettings.createTag({
+      await api.serverSettings.createTag(Object.assign({
         name: name,
         category: category,
         color: colorInput.value,
-        criteria: _collectTagCriteria(),
-      });
+      }, _collectTagFilter(condBuilder)));
       closeModal();
       showToast('Tag "' + name + '" created');
       // Remove from empty categories if a tag was added to it
@@ -5934,17 +5964,39 @@ async function openEditTagModal(id) {
   var tag = _tagsData.find(function (t) { return t.id === id; });
   if (!tag) return;
 
+  var schema, condBuilder;
+  try {
+    schema = await _loadTagFilterSchema();
+    condBuilder = window.PolarisConditionBuilder.create({
+      meta: schema.scopeCondition,
+      valueOptions: _tagValueOptions(schema),
+      onChange: function () { _refreshTagFilterPreview(tag.id, condBuilder); },
+    });
+  } catch (err) {
+    showToast((err && err.message) || "Couldn't load the device-filter options", "error");
+    return;
+  }
+  var regionCat = _regionCategoryOf(schema);
+  // A tag ALREADY in the Device Map's category keeps it (that is the map's own
+  // row); it just isn't offered as a destination for anything else.
+  var inRegionCat = (tag.category || "") === regionCat;
+  // Fields a legacy filter uses that the builder can't render — see
+  // _collectTagFilter for why the save has to know.
+  var stuckFields = tag.assetFilterUnconvertible || [];
+
   var existingCats = [];
   _tagsData.forEach(function (t) {
     var cat = t.category || "General";
-    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+    if (cat !== regionCat && existingCats.indexOf(cat) === -1) existingCats.push(cat);
   });
   _emptyCategories.forEach(function (cat) {
-    if (existingCats.indexOf(cat) === -1) existingCats.push(cat);
+    if (cat !== regionCat && existingCats.indexOf(cat) === -1) existingCats.push(cat);
   });
   existingCats.sort();
 
-  var catOptions = '<option value="General"' + (tag.category === "General" ? ' selected' : '') + '>General</option>';
+  var catOptions = inRegionCat
+    ? '<option value="' + escapeHtml(regionCat) + '" selected>' + escapeHtml(regionCat) + '</option>'
+    : '<option value="General"' + (tag.category === "General" ? ' selected' : '') + '>General</option>';
   existingCats.forEach(function (c) {
     if (c !== "General") {
       catOptions += '<option value="' + escapeHtml(c) + '"' + (tag.category === c ? ' selected' : '') + '>' + escapeHtml(c) + '</option>';
@@ -5972,12 +6024,12 @@ async function openEditTagModal(id) {
         '<span id="f-tag-color-hex" style="font-family:var(--font-mono);font-size:0.82rem;color:var(--color-text-secondary)">' + escapeHtml(tag.color || "#4fc3f7") + '</span>' +
       '</div>' +
     '</div>' +
-    _tagCriteriaSectionHTML(tag.criteria || null);
+    _tagFilterSectionHTML(tag, condBuilder, schema);
 
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save-tag">Save Changes</button>';
   openModal("Edit Tag", body, footer);
-  _wireTagCriteriaBuilder(tag.id);
+  _wireTagFilterBuilder(tag.id, condBuilder);
 
   var catSelect = document.getElementById("f-tag-category-select");
   var catNew = document.getElementById("f-tag-category-new");
@@ -6015,14 +6067,16 @@ async function openEditTagModal(id) {
       category = catSelect.value || "General";
     }
 
+    var problem = _validateTagFilter(condBuilder, stuckFields);
+    if (problem) { showToast(problem, "error"); return; }
+
     btn.disabled = true;
     try {
-      await api.serverSettings.updateTag(id, {
+      await api.serverSettings.updateTag(id, Object.assign({
         name: name,
         category: category,
         color: colorInput.value,
-        criteria: _collectTagCriteria(),
-      });
+      }, _collectTagFilter(condBuilder, stuckFields)));
       closeModal();
       showToast('Tag "' + name + '" updated');
       if (typeof _tagCache !== "undefined") _tagCache.loaded = false;

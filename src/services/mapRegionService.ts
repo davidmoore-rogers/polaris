@@ -63,7 +63,18 @@ import { createTtlCache } from "../utils/ttlCache.js";
 
 const SETTING_KEY = "mapRegions";
 const TAG_PREFIX = "region:";
-const TAG_CATEGORY = "Map Regions";
+/**
+ * The tag category this service OWNS. Exported because the tag registry refuses
+ * hand-created tags in it (and refuses to move a tag into it): every row here is
+ * minted by a region save and kept in step by the region reconcile through
+ * RegionTagAssignment provenance, so a hand-added sibling would look identical
+ * and belong to nobody. It is also why a tag in this category is not offered the
+ * auto-assign device filter — TagAutoAssignment managing the same tag NAME that
+ * RegionTagAssignment manages would be two reconcilers taking turns undoing
+ * each other.
+ */
+export const REGION_TAG_CATEGORY = "Map Regions";
+const TAG_CATEGORY = REGION_TAG_CATEGORY;
 const TAG_COLOR_PALETTE = [
   "#4fc3f7", "#4ade80", "#f59e0b", "#f472b6", "#a78bfa",
   "#fb923c", "#38bdf8", "#34d399", "#e879f9", "#facc15",

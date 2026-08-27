@@ -1,7 +1,7 @@
 /**
  * tests/integration/tagAssignment.test.ts
  *
- * Service-level integration coverage for criteria-based tag auto-assignment
+ * Service-level integration coverage for filter-based tag auto-assignment
  * (src/services/tagAssignmentService.ts). DB-driven (Prisma reads/writes +
  * raw inet containment), so we drive the service and assert against the
  * resulting Asset.tags arrays + TagAutoAssignment provenance rows. Skips
@@ -14,8 +14,12 @@
  *   - A hand-applied copy of the same tag name on a NON-matching asset (no
  *     provenance) is preserved forever.
  *   - Subnet/CIDR membership works (v4) via the inet query.
- *   - Clearing criteria strips engine-owned copies.
- *   - previewTagCriteria returns match count + diff without writing.
+ *   - Clearing the filter strips engine-owned copies.
+ *   - previewTagFilter returns match count + diff without writing.
+ *
+ * Both filter SHAPES are exercised: the current `assetCondition` condition tree
+ * and the legacy flat `criteria` blob, which still has to keep matching until
+ * migrateTagFilterShape folds it forward.
  */
 
 import { it, expect, beforeEach, afterAll } from "vitest";
@@ -23,7 +27,8 @@ import { prisma } from "../../src/db.js";
 import { dbDescribe, dbReachable } from "./_helpers.js";
 import {
   reconcileTag,
-  previewTagCriteria,
+  reconcileTagsForAsset,
+  previewTagFilter,
   stripTagAssignments,
 } from "../../src/services/tagAssignmentService.js";
 
@@ -33,6 +38,7 @@ const TAG_NAME = "auto-test-tag";
 const BLOCK_CIDR = "10.88.0.0/16";
 const SUBNET_CIDR = "10.88.1.0/24";
 
+/** A tag on the LEGACY flat shape. */
 async function makeTag(criteria: unknown) {
   return prisma.tag.create({
     data: {
@@ -40,6 +46,18 @@ async function makeTag(criteria: unknown) {
       category: "Test",
       color: "#4fc3f7",
       criteria: criteria as any,
+    },
+  });
+}
+
+/** A tag on the CURRENT shape — the shared device-filter condition tree. */
+async function makeCondTag(assetCondition: unknown) {
+  return prisma.tag.create({
+    data: {
+      name: TAG_NAME,
+      category: "Test",
+      color: "#4fc3f7",
+      assetCondition: assetCondition as any,
     },
   });
 }
@@ -154,19 +172,126 @@ d("tagAssignmentService.reconcileTag", () => {
   });
 });
 
-d("tagAssignmentService.previewTagCriteria", () => {
+d("tagAssignmentService.previewTagFilter", () => {
   it("returns match count + diff without writing", async () => {
     const tag = await makeTag({ version: 1, match: "all", rules: [{ field: "manufacturer", op: "exact", values: ["Cisco"] }] });
     await makeAsset({ hostname: "tagtest-j", manufacturer: "Cisco" });
     await makeAsset({ hostname: "tagtest-k", manufacturer: "Cisco" });
 
-    const preview = await previewTagCriteria(
-      { version: 1, match: "all", rules: [{ field: "manufacturer", op: "exact", values: ["Cisco"] }] },
+    const preview = await previewTagFilter(
+      { criteria: { version: 1, match: "all", rules: [{ field: "manufacturer", op: "exact", values: ["Cisco"] }] } },
       tag.id,
     );
     expect(preview.matchCount).toBe(2);
     expect(preview.diff).toEqual({ add: 2, remove: 0 }); // nothing applied yet
     // No writes: no provenance rows created by a preview.
+    expect(await prisma.tagAutoAssignment.count({ where: { tagId: tag.id } })).toBe(0);
+  });
+});
+
+// ─── The condition-tree shape ────────────────────────────────────────────────
+// The tree is the shape the builder writes, so these are the cases the flat
+// blob's tests can't reach: an OR group (flat criteria could only AND), and the
+// decommissioned rule the tree path has to state explicitly because it used to
+// be implicit in buildPrefilterWhere.
+
+d("tagAssignmentService — assetCondition (device filter tree)", () => {
+  it("applies the tag to assets matching an OR group, and strips drift", async () => {
+    const tag = await makeCondTag({
+      op: "or",
+      children: [
+        { field: "manufacturer", operator: "equals", value: "Cisco" },
+        { field: "manufacturer", operator: "equals", value: "Juniper" },
+      ],
+    });
+    const cisco = await makeAsset({ hostname: "tagtest-cond-a", manufacturer: "Cisco" });
+    const juniper = await makeAsset({ hostname: "tagtest-cond-b", manufacturer: "Juniper" });
+    const arista = await makeAsset({ hostname: "tagtest-cond-c", manufacturer: "Arista" });
+
+    const added = await reconcileTag(tag.id);
+    expect(added.added).toBe(2);
+    expect((await prisma.asset.findUnique({ where: { id: cisco.id } }))!.tags).toContain(TAG_NAME);
+    expect((await prisma.asset.findUnique({ where: { id: juniper.id } }))!.tags).toContain(TAG_NAME);
+    expect((await prisma.asset.findUnique({ where: { id: arista.id } }))!.tags).not.toContain(TAG_NAME);
+
+    // Drift one out of match — managed sync removes its engine-owned copy.
+    await prisma.asset.update({ where: { id: juniper.id }, data: { manufacturer: "Arista" } });
+    const after = await reconcileTag(tag.id);
+    expect(after.removed).toBe(1);
+    expect((await prisma.asset.findUnique({ where: { id: juniper.id } }))!.tags).not.toContain(TAG_NAME);
+  });
+
+  it("skips decommissioned assets unless the filter mentions status", async () => {
+    const tag = await makeCondTag({
+      op: "and",
+      children: [{ field: "manufacturer", operator: "equals", value: "Cisco" }],
+    });
+    const live = await makeAsset({ hostname: "tagtest-cond-d", manufacturer: "Cisco" });
+    const dead = await makeAsset({ hostname: "tagtest-cond-e", manufacturer: "Cisco", status: "decommissioned" });
+
+    await reconcileTag(tag.id);
+    expect((await prisma.asset.findUnique({ where: { id: live.id } }))!.tags).toContain(TAG_NAME);
+    expect((await prisma.asset.findUnique({ where: { id: dead.id } }))!.tags).not.toContain(TAG_NAME);
+
+    // Naming status opts INTO retired inventory — the operator asked for it.
+    await prisma.tag.update({
+      where: { id: tag.id },
+      data: {
+        assetCondition: {
+          op: "and",
+          children: [{ field: "status", operator: "equals", value: "decommissioned" }],
+        } as any,
+      },
+    });
+    await reconcileTag(tag.id);
+    expect((await prisma.asset.findUnique({ where: { id: dead.id } }))!.tags).toContain(TAG_NAME);
+  });
+
+  it("reconcileTagsForAsset evaluates a tree against one asset", async () => {
+    const tag = await makeCondTag({
+      op: "and",
+      children: [{ field: "hostname", operator: "startsWith", value: "tagtest-cond-f" }],
+    });
+    const hit = await makeAsset({ hostname: "tagtest-cond-f-1" });
+    const miss = await makeAsset({ hostname: "tagtest-cond-g-1" });
+
+    expect((await reconcileTagsForAsset(hit.id)).added).toBe(1);
+    expect((await prisma.asset.findUnique({ where: { id: hit.id } }))!.tags).toContain(TAG_NAME);
+    expect((await reconcileTagsForAsset(miss.id)).added).toBe(0);
+    expect((await prisma.asset.findUnique({ where: { id: miss.id } }))!.tags).not.toContain(TAG_NAME);
+
+    // Drift the matching asset out — the per-asset hook strips it too.
+    await prisma.asset.update({ where: { id: hit.id }, data: { hostname: "moved-away-1" } });
+    expect((await reconcileTagsForAsset(hit.id)).removed).toBe(1);
+    expect((await prisma.asset.findUnique({ where: { id: hit.id } }))!.tags).not.toContain(TAG_NAME);
+  });
+
+  it("treats an EMPTY tree as no filter, never as every asset", async () => {
+    // The whole-fleet hazard: and([]) is true for any asset, so a half-built
+    // form must not be able to tag everything.
+    const tag = await makeCondTag({ op: "and", children: [] });
+    await makeAsset({ hostname: "tagtest-cond-h", manufacturer: "Cisco" });
+    const summary = await reconcileTag(tag.id);
+    expect(summary.added).toBe(0);
+
+    const preview = await previewTagFilter({ condition: { op: "and", children: [] } });
+    expect(preview.matchCount).toBe(0);
+  });
+
+  it("previewTagFilter counts a tree's matches without writing", async () => {
+    const tag = await makeCondTag({
+      op: "and",
+      children: [{ field: "manufacturer", operator: "contains", value: "cisc" }],
+    });
+    await makeAsset({ hostname: "tagtest-cond-i", manufacturer: "Cisco" });
+    await makeAsset({ hostname: "tagtest-cond-j", manufacturer: "CISCO Systems" });
+
+    const preview = await previewTagFilter(
+      { condition: { op: "and", children: [{ field: "manufacturer", operator: "contains", value: "cisc" }] } },
+      tag.id,
+    );
+    expect(preview.matchCount).toBe(2);
+    expect(preview.diff).toEqual({ add: 2, remove: 0 });
     expect(await prisma.tagAutoAssignment.count({ where: { tagId: tag.id } })).toBe(0);
   });
 });
