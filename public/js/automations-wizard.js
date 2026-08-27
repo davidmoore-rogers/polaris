@@ -2048,15 +2048,15 @@ async function openAutomationWizard(existing, opts) {
       }).join("");
       // MONITORED devices are what the list and the count report — those are
       // what an operator is choosing between. The unmonitored remainder is
-      // stated rather than hidden: the filter does select them, and event and
-      // change triggers fire on them.
+      // stated rather than hidden (the filter does select them), but no
+      // trigger fires about an unmonitored device, so the note says so.
       var un = res.unmonitoredCount || 0;
       // The "first 15" note rides the head rather than trailing the list: in a
       // scrolling body it would sit below the fold, i.e. exactly where an
       // operator wondering whether the list is complete can't see it.
       box.innerHTML = scopePreviewHtml(
         '<strong>' + res.totalEvaluated + '</strong> monitored device(s) match this filter.' +
-          (un ? ' <span class="aw-preview-muted">(+' + un + ' unmonitored — only event and change triggers fire on those.)</span>' : "") +
+          (un ? ' <span class="aw-preview-muted">(+' + un + ' unmonitored — automations never fire on those.)</span>' : "") +
           (res.totalEvaluated > 15 ? ' <span class="aw-preview-muted">Showing the first 15.</span>' : ""),
         rows ? '<table><tbody>' + rows + '</tbody></table>' : ""
       );
@@ -5057,6 +5057,32 @@ async function openAutomationWizard(existing, opts) {
       .map(function (r) { return { source: "role", id: r.id, email: "", name: r.name, description: "Every user with this role" }; });
   }
 
+  /**
+   * Map regions matching the typed fragment, as suggestion entries. Local for
+   * the same reason roles are: the catalogue rode in with the wizard's
+   * /scope-options payload, and a region is not an address, so
+   * /contacts/search never returns one. Without this the only way to route to
+   * a region was the Address book button's Regions tab, so an operator who
+   * typed a region name got the PEOPLE whose names happened to match it and no
+   * sign of the region that reaches all of them.
+   */
+  function regionSuggestions(q) {
+    var needle = String(q || "").toLowerCase();
+    var levels = (_awScopeOptions && _awScopeOptions.regionLevels && _awScopeOptions.regionLevels.byName) || {};
+    return ((_awScopeOptions && _awScopeOptions.regions) || [])
+      .filter(function (name) { return String(name).toLowerCase().indexOf(needle) !== -1; })
+      .map(function (name) {
+        // Level is the same L1/L2 vocabulary the picker's Regions tab and the
+        // "Asset's L<n> Region Users" entries use; omitted rather than assumed
+        // when the catalogue couldn't be levelled.
+        var lv = levels[String(name).toLowerCase()];
+        return {
+          source: "region", id: name, email: "", name: name,
+          description: "Every user tagged with this region" + (lv ? " (L" + lv + ")" : ""),
+        };
+      });
+  }
+
   function canReadContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "read"); }
   function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
 
@@ -5130,7 +5156,7 @@ async function openAutomationWizard(existing, opts) {
   }
 
   function recipBoxHtml(field, label, pills, withBook) {
-    var placeholder = field === "to" ? "Type a name or address…" : "";
+    var placeholder = field === "to" ? "Type a name, address, role or region…" : "";
     return '<div class="na-recip-row">' +
       '<label class="na-recip-label">' + escapeHtml(label) + "</label>" +
       '<div class="na-recip-box" data-field="' + field + '">' +
@@ -5226,6 +5252,7 @@ async function openAutomationWizard(existing, opts) {
         // keyed by id, which survives a rename; only a bare address is stored
         // as the string itself.
         if (e.source === "role") return { kind: "role", value: e.id, label: e.name };
+        if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
         return e.source === "user"
           ? { kind: "user", value: e.id, label: e.name || e.email }
           : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
@@ -5249,18 +5276,19 @@ async function openAutomationWizard(existing, opts) {
         var q = input.value.trim();
         clearTimeout(suggestTimer);
         if (q.length < 2) { closeSuggest(); return; }
-        // Roles resolve LOCALLY and show immediately — they're already loaded,
-        // so the list shouldn't wait on a network round trip (or disappear when
-        // the caller lacks contacts:read).
-        var roles = roleSuggestions(q);
-        if (!canReadContacts()) { openSuggest(roles); return; }
-        openSuggest(roles);
+        // Roles and regions resolve LOCALLY and show immediately — both
+        // catalogues are already loaded, so the list shouldn't wait on a
+        // network round trip (or disappear when the caller lacks
+        // contacts:read).
+        var local = roleSuggestions(q).concat(regionSuggestions(q));
+        if (!canReadContacts()) { openSuggest(local); return; }
+        openSuggest(local);
         suggestTimer = setTimeout(function () {
           api.contacts.search(q, true).then(function (r) {
             // Ignore a response that lost the race with newer typing.
             if (input.value.trim() !== q) return;
-            openSuggest(roles.concat((r && r.entries) || []));
-          }).catch(function () { /* keep the role matches already shown */ });
+            openSuggest(local.concat((r && r.entries) || []));
+          }).catch(function () { /* keep the local matches already shown */ });
         }, 250);
       });
       input.addEventListener("keydown", function (ev) {
