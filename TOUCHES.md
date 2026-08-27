@@ -3392,7 +3392,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **Cross-service deps:** `prisma` (the `Setting` table), `utils/version.getAppVersion` (the `version` field on the response).
 
-**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/api/routes/ack.ts` (`displayAppName`), `src/services/appIconService.ts`, `src/services/brandLogoService.ts`. Browser-side, `public/js/brand-logo.js` is the only reader of the logo/placement fields — surfaces call it rather than branching on the payload themselves.
+**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/services/appIconService.ts`, `src/services/brandLogoService.ts`. Browser-side, `public/js/brand-logo.js` is the only reader of the logo/placement fields — surfaces call it rather than branching on the payload themselves.
 
 **Invariants:**
 - Extracted from `routes/serverSettings.ts` precisely so services can read branding without importing a route module — do not reintroduce the reverse dependency.
