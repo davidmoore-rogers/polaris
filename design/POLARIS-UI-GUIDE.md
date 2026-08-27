@@ -1057,6 +1057,33 @@ so a 10s widget gets cached data two ticks out of three; and a widget with **no
 timer at all** is frozen forever on a kiosk wall, which is where these live.
 Everything with a live feed gets a timer.
 
+### An acknowledged alert says who, and why
+
+Acknowledging is not clearing. The alert is still active, so it **stays in
+the list** — removing it on ack would train operators to ack things to tidy
+the board. The row instead dims to `opacity: .6`, which is what pushes the
+unhandled alerts forward on a wallboard.
+
+What dims is the **alert**: severity pill, automation name, hostname,
+dimension, message. What does **not** dim is the **acknowledgement**:
+
+- The pill reads **`ack <user>`**, never a bare `ack`. Who owns it is the
+  reason the pill exists, and a wallboard cannot hover a `title` attribute.
+- The acknowledgement note, when there is one, renders on **its own line
+  under the message** — indented behind a 2px border, secondary text,
+  italic, wrapping freely. It is the one piece of a handled alert someone
+  still needs to read: "generator running, crew at first light" is the
+  difference between a dispatch and a wasted callout.
+- Both render at **full strength inside the dimmed row.**
+
+That last rule is not a preference. `.6` multiplied onto the tertiary grey
+these started in composites to 2.43:1 against the card — under the 4.5:1 AA
+floor and under even the 3:1 large-text floor, at 12.8px italic — and it
+lands on exactly the rows that have a note. Dim the alert, never the
+annotation on it.
+
+A row acked with no note shows the pill alone; no empty line, no placeholder.
+
 ### Empty and failure states
 
 One shape: `el.innerHTML = '<p class="empty-state">…</p>'`. The text says what

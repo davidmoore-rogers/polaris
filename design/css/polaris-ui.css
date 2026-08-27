@@ -12,6 +12,16 @@
      undefined — references fell back to a hardcoded grey (#1c1f24) or, where
      no fallback was given (dashboard hover states), silently did nothing. */
   --color-bg-elevated: #26264a;
+  /* Pointer-feedback tint — the background every hover paints. Dark family is
+     white-ish, daylight family black-ish; a literal rgba(255,255,255,…) is
+     invisible on a light surface, which is how widget chrome lost its hover
+     states in morning and noon. */
+  --color-hover-tint: rgba(255,255,255,0.06);
+  /* Sibling of --color-hover-tint for STATIC faint fills — count badges, chips
+     and cards that sit on a surface rather than reacting to a pointer.
+     Deliberately not --color-bg-elevated: these already sit ON an elevated
+     surface, so an elevated fill would vanish against its own parent. */
+  --color-fill-subtle: rgba(255,255,255,0.06);
   --color-border: #252540;
   --color-border-light: #1e1e36;
   --color-text-primary: #e6e6e6;
@@ -54,6 +64,8 @@
   --color-bg-tertiary: #edeef4;
   --color-surface: #ffffff;
   --color-bg-elevated: #eceef4;
+  --color-hover-tint: rgba(0,0,0,0.05);
+  --color-fill-subtle: rgba(0,0,0,0.05);
   --color-border: #d0d1dc;
   --color-border-light: #e2e3ec;
   --color-text-primary: #1a1a2e;
@@ -2950,8 +2962,9 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border: 1px solid var(--color-border);
   border-radius: 6px;
   /* Explicit faint overlay (not --color-bg-elevated) so this asset-modal
-     dependency card keeps its pre-token subtle look over the navy slide-over. */
-  background: rgba(255,255,255,0.02);
+     dependency card keeps its pre-token subtle look over the navy slide-over.
+     Via the token because the literal white was invisible on the daylight themes. */
+  background: var(--color-fill-subtle);
 }
 .dep-tree-header {
   font-size: 0.78rem;
@@ -3988,6 +4001,25 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .recent-item-link:hover { background: var(--color-bg-elevated); }
 
+/* The sub-asset an alert was raised for (Notification.dimension) — a port,
+   sensor, mount or tunnel. Monospace because it's an identifier, and sized down
+   so it reads as a qualifier on the hostname beside it rather than a second
+   name. Overrides .recent-item-title span, which paints every child white. */
+.recent-item-title .dash-alert-dim {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+/* "Showing 25 of 214 …" under a capped widget list. Centered and quiet: it's a
+   statement about the view, not another row. */
+.widget-overflow-note {
+  padding: 8px 0 0;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
+
 .block-util-link {
   display: block;
   text-decoration: none;
@@ -4162,7 +4194,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   cursor: grab; user-select: none; color: var(--color-text-tertiary);
   font-size: 0.9rem; line-height: 1; padding: 2px 3px; border-radius: 4px; flex-shrink: 0;
 }
-.dashboard-tab-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-tab-grip:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
 .dashboard-tab-grip:active { cursor: grabbing; }
 .dashboard-tab-remove {
   background: transparent;
@@ -4174,7 +4206,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   border-radius: 3px;
   cursor: pointer;
 }
-.dashboard-tab-remove:hover { color: #ef5350; background: rgba(255,255,255,0.08); }
+.dashboard-tab-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 /* Inline rename input on the active tab — looks like the tab text until focused. */
 .dashboard-tab-name-input {
   background: transparent;
@@ -4262,7 +4294,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   cursor: pointer;
   border-radius: 4px;
 }
-.dashboard-column-remove:hover { color: #ef5350; background: rgba(255,255,255,0.06); }
+.dashboard-column-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 
 /* Trailing "new column" drop target — only in edit mode. */
 .dashboard-newcol-target {
@@ -4348,7 +4380,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   cursor: grab; user-select: none; color: var(--color-text-tertiary);
   font-size: 1rem; line-height: 1; padding: 2px 4px; border-radius: 4px; flex-shrink: 0;
 }
-.dashboard-widget-grip:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
+.dashboard-widget-grip:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
 .dashboard-widget-grip:active { cursor: grabbing; }
 .dashboard-widget-action {
   background: transparent;
@@ -4362,7 +4394,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 }
 .dashboard-widget-action:hover {
   color: var(--color-text-primary);
-  background: rgba(255,255,255,0.06);
+  background: var(--color-hover-tint);
 }
 
 .dashboard-widget-body {
@@ -4383,8 +4415,8 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   font-size: 0.95rem;
   line-height: 1;
 }
-.dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: rgba(255,255,255,0.06); }
-.dashboard-widget-remove:hover { color: var(--color-danger); background: rgba(255,255,255,0.06); }
+.dashboard-widget-height-toggle:hover { color: var(--color-text-primary); background: var(--color-hover-tint); }
+.dashboard-widget-remove:hover { color: var(--color-danger); background: var(--color-hover-tint); }
 
 /* Widget-specific body wrappers reuse the rolled-up styles from the old
    dashboard surface — kept under .dashboard-widget-body so layout still
@@ -4394,6 +4426,52 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .dashboard-widget-body .block-util-item {
   padding-left: 0;
   padding-right: 0;
+}
+
+/* Severity-tier CSV export menu (widget header ⤓ button — setHeaderExport). */
+.widget-export-menu {
+  position: fixed;
+  z-index: 1300;
+  min-width: 176px;
+  padding: 4px;
+  background: var(--color-bg-elevated, #1c1f24);
+  border: 1px solid var(--color-border, rgba(255,255,255,0.10));
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.40);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.widget-export-menu-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--color-text-secondary);
+  padding: 5px 8px 3px;
+}
+.widget-export-menu button {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 0.83rem;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.widget-export-menu button:hover:not(:disabled) { background: var(--color-hover-tint); }
+.widget-export-menu button:disabled { color: var(--color-text-tertiary); cursor: default; }
+.widget-export-count {
+  font-size: 0.72rem;
+  color: var(--color-text-secondary);
+  background: var(--color-fill-subtle);
+  border-radius: 8px;
+  padding: 1px 7px;
 }
 
 /* Widget config popover (gear icon) — small, anchored, NOT a full modal. */
@@ -4552,7 +4630,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
   cursor: pointer;
   text-align: left;
 }
-.widget-picker-group:hover { background: rgba(255,255,255,0.04); color: var(--color-text-primary); }
+.widget-picker-group:hover { background: var(--color-hover-tint); color: var(--color-text-primary); }
 .widget-picker-group.active {
   color: var(--color-accent);
   box-shadow: inset 3px 0 0 var(--color-accent);
@@ -4561,7 +4639,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .widget-picker-group-count {
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
-  background: rgba(255,255,255,0.06);
+  background: var(--color-fill-subtle);
   border-radius: 8px;
   padding: 0 7px;
 }
