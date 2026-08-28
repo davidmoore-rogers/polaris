@@ -18,10 +18,17 @@
  *  2. Only `notify` actions execute (plus the audit Event in event mode).
  *     A test button that runs a registry script is RCE-by-button, and an
  *     api_call test would open real tickets in PagerDuty or ServiceNow.
- *  3. "Send to me only" is a recipient REWRITE, not a flag read downstream:
- *     the action's recipients become the caller and every other recipient
- *     field — including emailComposition cc/bcc — is dropped, so the self path
- *     is structurally incapable of reaching anyone else.
+ *  3. It ONLY EVER reaches the caller, and that is a recipient REWRITE
+ *     rather than a flag read downstream: the action's recipients become
+ *     the caller and every other recipient field — including
+ *     emailComposition cc/bcc — is dropped, so the path is
+ *     structurally incapable of reaching anyone else. There is
+ *     deliberately no "send to the automation's real recipients" mode: a
+ *     test answers "does this channel work, and what does the message
+ *     look like", and answering it by paging the on-call is a cost nobody
+ *     asked for. A destination with no private form (a Slack or Teams
+ *     webhook posts to one channel) is tested from the Delivery tab's own
+ *     per-channel Test button, which is honest about who sees it.
  */
 
 import { prisma } from "../db.js";
@@ -38,7 +45,6 @@ import { allRuleActionRefs } from "./notificationTypes.js";
 import { previewRule } from "./notificationEngine.js";
 import { triggerSummary } from "../utils/triggerSummary.js";
 
-export type TestMode = "self" | "recipients";
 export type TestTarget = "delivery" | "event";
 
 /** Which action of the draft to test — an index into the canonical walk. */
@@ -69,13 +75,12 @@ export interface TestDeliveryResult {
 const DISPATCH_BUDGET_MS = 20_000;
 
 /**
- * PURE. Resolve the addressed action, drop what a test must never run, and in
- * self mode rewrite the recipients to the caller alone.
+ * PURE. Resolve the addressed action, drop what a test must never run, and
+ * rewrite the recipients to the caller alone.
  */
 export function selectTestActions(
   rule: Pick<PreviewRuleInput, "actions" | "severityBands" | "bandNotify" | "resetActions" | "escalation">,
   path: TestActionPath,
-  mode: TestMode,
   callerUserId: string,
 ): { actions: AutomationAction[]; skipped: SkippedAction[] } {
   const refs = allRuleActionRefs(rule as never);
@@ -93,11 +98,9 @@ export function selectTestActions(
     return { actions: [], skipped: [{ type: action.type, reason: "nothing to deliver" }] };
   }
 
-  if (mode === "recipients") return { actions: [action], skipped: [] };
-
-  // Self mode: keep the channel and the message, drop every route to anyone
-  // else. Listing the dropped fields explicitly (rather than deleting a
-  // denylist) means a NEW recipient field can't silently survive a self-test.
+  // Keep the channel and the message, drop every route to anyone else.
+  // Listing the fields KEPT (rather than deleting a denylist) means a NEW
+  // recipient field can't silently survive a test.
   const comp = action.emailComposition
     ? { ...action.emailComposition, cc: null, bcc: null }
     : action.emailComposition;
@@ -169,7 +172,6 @@ function testMessage(ruleName: string, hostname: string | null): string {
 export interface RunTestArgs {
   rule: PreviewRuleInput;
   path: TestActionPath;
-  mode: TestMode;
   target: TestTarget;
   assetId?: string;
   actorUserId: string;
@@ -177,7 +179,7 @@ export interface RunTestArgs {
 }
 
 export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryResult> {
-  const { rule, mode, actorUserId, actorUsername } = args;
+  const { rule, actorUserId, actorUsername } = args;
 
   // A real device makes the test email look like a real one (the facts table
   // and the last-hour charts all key off it). Any monitored asset will do when
@@ -254,7 +256,7 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     };
   }
 
-  const { actions, skipped } = selectTestActions(rule, args.path, mode, actorUserId);
+  const { actions, skipped } = selectTestActions(rule, args.path, actorUserId);
   if (actions.length === 0) {
     return {
       ok: false,
@@ -327,10 +329,11 @@ export async function runTestDelivery(args: RunTestArgs): Promise<TestDeliveryRe
     resourceId: notif.id,
     resourceName: rule.name,
     actor: actorUsername,
-    // "recipients" mode reached real people — that belongs above info.
-    level: mode === "recipients" ? "warning" : "info",
-    message: `Delivery test for "${rule.name}": ${sent} sent, ${failed.length} failed (${mode === "self" ? "sender only" : "configured recipients"})`,
-    details: { mode, rows: rows.length, sent, failed: failed.length, skipped, ackLinks: ackLinksEnabled },
+    // Always info: a test reaches the operator who pressed the button and
+    // nobody else, so no variant of it pages real people any more.
+    level: "info",
+    message: `Delivery test for "${rule.name}": ${sent} sent, ${failed.length} failed (sender only)`,
+    details: { rows: rows.length, sent, failed: failed.length, skipped, ackLinks: ackLinksEnabled },
   });
 
   const detail = failed.length ? ` — ${failed[0]!.error ?? "delivery failed"}` : "";

@@ -84,15 +84,17 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
  * Fire ONE action of a draft for real, so an operator can see the delivery
  * work before saving. Creates a genuine (test-flagged) alert and dispatches
  * immediately — see automationTestService for the three safety properties
- * (ruleId always null, notify-only, self-mode recipient rewrite).
+ * (ruleId always null, notify-only, recipients rewritten to the caller).
  *
- * Session callers only: "send to me" resolves the CALLER, and a bearer token
- * has no user to be.
+ * Session callers only: the delivery resolves the CALLER and nobody else, and a
+ * bearer token has no user to be. There is no recipient mode to choose: the old
+ * `mode: "self" | "recipients"` field is gone rather than defaulted, so a stale
+ * browser tab posting `"recipients"` has it STRIPPED by this non-strict object
+ * and still reaches only the sender.
  */
 const testDeliverySchema = z.object({
   rule: previewInputSchema,
   path: z.object({ index: z.number().int().min(0).max(199) }),
-  mode: z.enum(["self", "recipients"]).default("self"),
   target: z.enum(["delivery", "event"]).default("delivery"),
   assetId: z.string().max(100).optional(),
 });
@@ -106,7 +108,6 @@ notificationRulesRouter.post("/test-delivery", requirePermission("automationMana
     res.json(await runTestDelivery({
       rule: body.rule,
       path: body.path,
-      mode: body.mode,
       target: body.target,
       assetId: body.assetId,
       actorUserId: userId,

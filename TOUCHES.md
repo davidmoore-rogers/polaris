@@ -2012,18 +2012,19 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **What it owns:** Firing ONE action of an automation draft for real, so the wizard's Summary step can prove delivery works before the rule is saved.
 
-**Public API:** `runTestDelivery({rule, path, mode, target, assetId?, actorUserId, actorUsername})`, the pure `selectTestActions(rule, path, mode, callerUserId)`.
+**Public API:** `runTestDelivery({rule, path, target, assetId?, actorUserId, actorUsername})`, the pure `selectTestActions(rule, path, callerUserId)`.
 
 **Cross-service deps:** `notificationTypes.allRuleActionRefs` (the walk the `path.index` addresses), `automationActionService.executeActions`, `notificationDeliveryService.drainPendingDeliveries({notificationId})`, `notificationRecipientService.scopeRegionTagsOf`, `utils/notificationTemplate.buildTemplateContext`, `eventLogService`.
 
-**Used by:** `src/api/routes/notificationRules.ts` (`POST /automations/test-delivery`, `automationManagement:fullwrite`, session callers only — "send to me" resolves the CALLER and a bearer token has no user to be).
+**Used by:** `src/api/routes/notificationRules.ts` (`POST /automations/test-delivery`, `automationManagement:fullwrite`, session callers only — the delivery resolves the CALLER and a bearer token has no user to be).
 
 **Invariants:**
 - The test Notification ALWAYS has `ruleId: null` and `testRun: true`, even when the draft is a saved rule. `notificationEscalationService` sweeps `{ cleared: false, ruleId: { in: enabledRuleIds } }`, so a real ruleId would enlist the test alert in the escalation ladder and start paging people on the next 60s tick.
 - No `NotificationRuleState` row is written — the engine must not conclude the asset is firing.
 - Only `notify` actions run (plus the audit Event in `event` mode). `script` and `api_call` are filtered and reported as `skipped`: a test button that runs a registry script is RCE-by-button, and an api_call would act on a live system.
-- `mode: "self"` is a recipient REWRITE, not a flag: `recipientUserIds: [caller]` with every other recipient field AND `emailComposition.cc/bcc` dropped. The self path must be structurally incapable of reaching anyone else, not merely intended to be.
-- `mode: "recipients"` is explicit-only (never a default) and audits at `warning` level, because it reaches real people.
+- The recipients are REWRITTEN to the caller, and that is a rewrite rather than a flag: `recipientUserIds: [caller]` with every other recipient field AND `emailComposition.cc/bcc` dropped. It must be structurally incapable of reaching anyone else, not merely intended to be.
+- **There is no recipient mode.** The former `mode: "self" | "recipients"` was REMOVED in 2026-08 rather than defaulted off: a test answers "does this channel work, and what does the message look like", and answering it by paging the on-call is a cost nobody asked for. The field is gone from `testDeliverySchema` too, which is a non-strict `z.object`, so a stale browser tab still posting `"recipients"` has it STRIPPED and reaches only the sender. Do not re-add it without a real requirement — the audit Event is now unconditionally `info` because no variant of this pages real people.
+- A destination with **no private form** — a Slack/Teams/Pushbullet webhook posts to one channel — is consequently not testable from the wizard at all. The Delivery tab's per-channel `POST /delivery-channels/:id/test` is where that decision belongs, and the wizard disables those buttons with a pointer to it rather than quietly messaging a team channel.
 - Dispatch EXTENDS the existing drain (`drainPendingDeliveries({notificationId})`) rather than cloning `dispatch()`, which owns retries, permanent-fail classification, dead-push pruning and the summary Event. A 20s budget bounds it so a dead SMTP host can't pin an HTTP worker.
 
 **When changing this:** any new recipient field on `notifyActionSchema` must be added to the self-mode rewrite (it lists what it KEEPS, so a new field is dropped by default — verify that stays true). If a new action type can act on the outside world, filter it here too. This file carries its OWN copy of the asset-detail select (a local `detailSelect`, deliberately not imported — the engine's `ASSET_DETAIL_SELECT` is private to its hot path), so a new asset-sourced `{asset.*}` token needs the column added in BOTH places or the test email mails a blank row for a fact the real alert prints.

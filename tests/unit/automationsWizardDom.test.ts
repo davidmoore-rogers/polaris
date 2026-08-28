@@ -428,29 +428,23 @@ describe("automation wizard DOM render", () => {
     expect(toastErrors).toEqual([]);
   });
 
-  it("step 6 offers a test per delivery destination, defaulting to 'me only'", async () => {
+  it("step 6 offers one send-to-me test per delivery, with no way to reach real recipients", async () => {
     const block = doc.querySelector("#aw-test-delivery")!;
     expect(block).toBeTruthy();
 
-    // "Send to me only" must be the default — a mis-aimed press otherwise
-    // emails the automation's real recipient list.
-    const self = doc.querySelector('input[name="aw-test-to"][value="self"]') as unknown as { checked: boolean };
-    expect(self.checked).toBe(true);
-    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("none");
+    // There is no recipient mode to mis-aim: the radios and the real-recipient
+    // warning are GONE, so every button on this step delivers to the operator
+    // who pressed it.
+    expect(doc.querySelector('input[name="aw-test-to"]')).toBeNull();
+    expect(doc.querySelector("#aw-test-real-warn")).toBeNull();
+    expect(block.textContent).toContain("to you only");
 
     // The draft carries the default audit-Event action, so the Event test is
     // offered; api_call/script actions never are (the server refuses to run
     // them from a button, so a button would be a lie).
     const labels = Array.from(doc.querySelectorAll(".awtd-btn")).map((b) => b.textContent);
-    expect(labels).toContain("Write a test Event");
+    expect(labels).toContain("Write a Test Event");
     expect(labels.join(" ")).not.toMatch(/script|API/i);
-
-    // Picking "real recipients" reveals the warning.
-    const win6 = g.window as InstanceType<typeof Window>;
-    const real = doc.querySelector('input[name="aw-test-to"][value="recipients"]') as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
-    real.checked = true;
-    real.dispatchEvent(new win6.Event("change", { bubbles: true }));
-    expect((doc.querySelector("#aw-test-real-warn") as unknown as { style: { display: string } }).style.display).toBe("");
   });
 
   it("edit-mode round-trip: per-action escalation, band actions, device-region and the moved template survive save", async () => {

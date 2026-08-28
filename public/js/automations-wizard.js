@@ -4808,7 +4808,7 @@ async function openAutomationWizard(existing, opts) {
     var push = function (action, where) {
       idx++;
       if (action.type === "event") {
-        if (!seen["event"]) { seen["event"] = true; out.push({ key: "event", kind: "event", index: idx, label: "Write a test Event", detail: "", usedIn: [where] }); }
+        if (!seen["event"]) { seen["event"] = true; out.push({ key: "event", kind: "event", index: idx, label: "Write a Test Event", detail: "", usedIn: [where] }); }
         else out.push(null);
         return;
       }
@@ -4827,7 +4827,12 @@ async function openAutomationWizard(existing, opts) {
       var kind = ch.type === "web_push" ? "push" : isEmailType(ch.type) ? "email" : "webhook";
       out.push({
         key: key, kind: kind, index: idx, channel: ch, action: action, usedIn: [where],
-        label: kind === "push" ? "Send test push" : kind === "email" ? "Send test email" : "Send test message",
+        // The button names the DELIVERY the operator is about to receive, not
+        // the action's index or the channel row: "Send Test Web Push" is what
+        // tells them to go look at their phone.
+        label: kind === "push" ? "Send Test Web Push"
+          : kind === "email" ? "Send Test Email"
+            : "Send Test " + chanTypeLabel(ch.type),
         detail: ch.name + " — " + chanTypeLabel(ch.type),
       });
     };
@@ -4862,16 +4867,15 @@ async function openAutomationWizard(existing, opts) {
     var selfDesc = me
       ? [me.email || "no email on your account", (me.pushDevices || 0) + " push device" + ((me.pushDevices || 0) === 1 ? "" : "s")].join(" · ")
       : "your account";
+    // One button per delivery this automation would perform, and every one of
+    // them lands on the CONFIGURING OPERATOR. There is deliberately no
+    // "send to the real recipients" option: the question a test answers is
+    // "does this channel work and what does the message look like", and
+    // answering it by paging the on-call is a cost nobody asked for.
     box.innerHTML =
-      '<p class="hint" style="margin:0 0 8px">Each test creates a <strong>real alert</strong> (flagged as a test) and delivers it through that one action immediately.</p>' +
-      '<div id="aw-test-mode" style="margin:0 0 8px">' +
-        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="self" checked> Send to me only ' +
-          '<span style="color:var(--color-text-tertiary)">— ' + escapeHtml(selfDesc) + '</span></label>' +
-        '<label style="display:block;font-size:0.85rem"><input type="radio" name="aw-test-to" value="recipients"> Send to this automation’s real recipients</label>' +
-        '<div id="aw-test-real-warn" style="display:none;border:1px solid var(--color-danger);border-radius:6px;padding:0.5rem 0.6rem;margin:6px 0 0">' +
-          '<p style="margin:0;font-size:0.82rem"><strong>This sends to real people.</strong> Every recipient the action targets receives an alert email or message now.</p>' +
-        '</div>' +
-      '</div>' +
+      '<p class="hint" style="margin:0 0 8px">Each test creates a <strong>real alert</strong> (flagged as a test) and delivers it through that one action immediately — ' +
+        '<strong>to you only</strong>, never to this automation’s recipients.<br>' +
+        '<span style="color:var(--color-text-tertiary)">You: ' + escapeHtml(selfDesc) + '</span></p>' +
       '<div id="aw-test-buttons">' + targets.map(function (t) {
         return '<div class="awtd-row" style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">' +
           '<button type="button" class="btn btn-sm btn-secondary awtd-btn" data-key="' + escapeHtml(t.key) + '">' + escapeHtml(t.label) + '</button>' +
@@ -4884,12 +4888,6 @@ async function openAutomationWizard(existing, opts) {
         '</div>';
       }).join("") + '</div>';
 
-    box.querySelectorAll('input[name="aw-test-to"]').forEach(function (r) {
-      r.addEventListener("change", function () {
-        box.querySelector("#aw-test-real-warn").style.display = r.value === "recipients" && r.checked ? "" : "none";
-        syncTestButtons(box, targets);
-      });
-    });
     box.querySelectorAll(".awtd-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var t = targets.find(function (x) { return x.key === btn.dataset.key; });
@@ -4899,22 +4897,21 @@ async function openAutomationWizard(existing, opts) {
     syncTestButtons(box, targets);
   }
 
-  /** Disable what the chosen mode can't honour, and say why. */
+  /** Disable what a send-to-me test can't honour, and say why. */
   function syncTestButtons(box, targets) {
-    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
     var me = (_ruleRecipientUsers || []).find(function (u) { return u.username === (typeof currentUsername !== "undefined" ? currentUsername : ""); });
     targets.forEach(function (t) {
       var btn = box.querySelector('.awtd-btn[data-key="' + t.key + '"]');
       var out = box.querySelector('.awtd-out[data-key="' + t.key + '"]');
       if (!btn) return;
       var why = "";
-      if (mode === "self") {
-        // A webhook/chat channel has exactly ONE destination — there is no
-        // private version of a Teams post.
-        if (t.kind === "webhook") why = "Posts to this channel’s configured destination — switch to real recipients to test it.";
-        else if (t.kind === "email" && me && !me.email) why = "Your account has no email address.";
-        else if (t.kind === "push" && me && !me.pushDevices) why = "You have no push-enabled device — turn push on from the sidebar, then reopen this step.";
-      }
+      // A webhook/chat channel has exactly ONE destination — there is no
+      // private version of a Teams post, so this surface can't test it without
+      // messaging the whole channel. The Delivery tab's per-channel Test button
+      // is where that decision belongs.
+      if (t.kind === "webhook") why = "Posts to the whole channel, so it can’t be sent to you alone — use the Test button on the Delivery tab.";
+      else if (t.kind === "email" && me && !me.email) why = "Your account has no email address.";
+      else if (t.kind === "push" && me && !me.pushDevices) why = "You have no push-enabled device — turn push on from the sidebar, then reopen this step.";
       if (t.channel && t.channel.enabled === false) why = "This channel is disabled — it won’t deliver until you enable it on the Delivery tab.";
       btn.disabled = !!why || _awTestBusy;
       if (out && why) out.innerHTML = '<span style="color:var(--color-text-tertiary)">' + escapeHtml(why) + "</span>";
@@ -4924,14 +4921,6 @@ async function openAutomationWizard(existing, opts) {
 
   async function runDeliveryTest(target, btn, box) {
     if (_awTestBusy) return;
-    var mode = (box.querySelector('input[name="aw-test-to"]:checked') || {}).value || "self";
-    if (mode === "recipients" && target.kind !== "event") {
-      var okToSend = await showConfirm(
-        'Send a REAL test through "' + (target.channel ? target.channel.name : "this channel") + '" to its configured recipients?\n\n' +
-        "Everyone the action targets receives it now.",
-      );
-      if (!okToSend) return;
-    }
     // One at a time: every press mints a real alert.
     _awTestBusy = true;
     var old = btn.textContent;
@@ -4943,7 +4932,6 @@ async function openAutomationWizard(existing, opts) {
       var r = await api.automations.testDelivery({
         rule: testDeliveryPayload(),
         path: { index: target.index },
-        mode: mode,
         target: target.kind === "event" ? "event" : "delivery",
       });
       showToast(r.message || "Test sent", r.ok ? "success" : "error");
