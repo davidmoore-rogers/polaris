@@ -366,3 +366,176 @@ d("reservation mutations write exactly one audit Event each", () => {
     expect(await prisma.event.count({ where: { action: "reservation.created" } })).toBe(1);
   });
 });
+
+// ─── POST /api/v1/reservations/next-available/preview ─────────────────────────
+
+d("POST /api/v1/reservations/next-available/preview", () => {
+  it("returns the first N free addresses without reserving anything", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.60.0.0/16", "10.60.1.0/24");
+
+    const resp = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 3 });
+    expect(resp.status).toBe(200);
+    expect(resp.body.ips).toEqual(["10.60.1.1", "10.60.1.2", "10.60.1.3"]);
+    // Preview writes nothing.
+    expect(await prisma.reservation.count({ where: { subnetId: subnet.id } })).toBe(0);
+  });
+
+  it("skips addresses that already carry an active reservation", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.61.0.0/16", "10.61.1.0/24");
+    for (const ip of ["10.61.1.1", "10.61.1.3"]) {
+      const r = await agent
+        .post("/api/v1/reservations")
+        .set("X-CSRF-Token", csrf)
+        .send({ subnetId: subnet.id, ipAddress: ip, hostname: `h-${ip}` });
+      expect(r.status).toBe(201);
+    }
+    const resp = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 3 });
+    expect(resp.status).toBe(200);
+    expect(resp.body.ips).toEqual(["10.61.1.2", "10.61.1.4", "10.61.1.5"]);
+  });
+
+  it("returns an unbroken run when contiguous is asked for", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.62.0.0/16", "10.62.1.0/24");
+    const taken = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.62.1.2", hostname: "in-the-way" });
+    expect(taken.status).toBe(201);
+
+    const loose = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 3, contiguous: false });
+    expect(loose.body.ips).toEqual(["10.62.1.1", "10.62.1.3", "10.62.1.4"]);
+
+    const run = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 3, contiguous: true });
+    expect(run.status).toBe(200);
+    expect(run.body.ips).toEqual(["10.62.1.3", "10.62.1.4", "10.62.1.5"]);
+  });
+
+  it("refuses a contiguous run that does not fit, naming the largest one that does", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    // /29 → hosts .1-.6. Taking .3 and .6 leaves runs of 2 (.1-.2) and 2 (.4-.5).
+    const { subnet } = await scaffold(agent, csrf, "10.63.0.0/16", "10.63.1.0/29");
+    for (const ip of ["10.63.1.3", "10.63.1.6"]) {
+      const r = await agent
+        .post("/api/v1/reservations")
+        .set("X-CSRF-Token", csrf)
+        .send({ subnetId: subnet.id, ipAddress: ip, hostname: `h-${ip}` });
+      expect(r.status).toBe(201);
+    }
+    const resp = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 3, contiguous: true });
+    expect(resp.status).toBe(409);
+    expect(resp.body.error).toContain("largest available run is 2");
+  });
+
+  it("refuses when the subnet has too few free addresses at all", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.64.0.0/16", "10.64.1.0/30");
+    const resp = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 5 });
+    expect(resp.status).toBe(409);
+    expect(resp.body.error).toContain("free address");
+  });
+
+  it("rejects a count above the bulk ceiling", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.65.0.0/16", "10.65.1.0/24");
+    const resp = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 500 });
+    expect(resp.status).toBe(400);
+  });
+});
+
+// ─── Device-owned addresses (VIP / interface IP) ──────────────────────────────
+//
+// A FortiGate VIP and a statically-configured interface address belong to the
+// device's own config. Polaris reports them; it must not offer to reserve,
+// release or edit one.
+
+d("device-owned reservations are read-only", () => {
+  /** Discovery-shaped row — created straight through Prisma, since no API
+   *  route mints a vip / interface_ip reservation. */
+  async function seedDeviceOwned(subnetId: string, ipAddress: string, sourceType: "vip" | "interface_ip") {
+    return prisma.reservation.create({
+      data: { subnetId, ipAddress, hostname: "device-owned", sourceType, status: "active", createdBy: "system:discovery" },
+    });
+  }
+
+  it("refuses to edit a VIP row", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.66.0.0/16", "10.66.1.0/24");
+    const row = await seedDeviceOwned(subnet.id, "10.66.1.10", "vip");
+    const resp = await agent
+      .put(`/api/v1/reservations/${row.id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ notes: "mine now" });
+    expect(resp.status).toBe(409);
+    expect(resp.body.error).toContain("FortiGate VIP");
+    const after = await prisma.reservation.findUnique({ where: { id: row.id } });
+    expect(after?.notes ?? null).toBeNull();
+  });
+
+  it("refuses to release a VIP row", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.67.0.0/16", "10.67.1.0/24");
+    const row = await seedDeviceOwned(subnet.id, "10.67.1.10", "vip");
+    const resp = await agent.delete(`/api/v1/reservations/${row.id}`).set("X-CSRF-Token", csrf);
+    expect(resp.status).toBe(409);
+    const after = await prisma.reservation.findUnique({ where: { id: row.id } });
+    expect(after?.status).toBe("active");
+  });
+
+  it("refuses to edit or release an interface-IP row", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.68.0.0/16", "10.68.1.0/24");
+    const row = await seedDeviceOwned(subnet.id, "10.68.1.1", "interface_ip");
+    const edit = await agent
+      .put(`/api/v1/reservations/${row.id}`)
+      .set("X-CSRF-Token", csrf)
+      .send({ notes: "mine now" });
+    expect(edit.status).toBe(409);
+    expect(edit.body.error).toContain("device interface address");
+    const del = await agent.delete(`/api/v1/reservations/${row.id}`).set("X-CSRF-Token", csrf);
+    expect(del.status).toBe(409);
+  });
+
+  it("refuses to reserve over a device-owned address, and never previews one", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const { subnet } = await scaffold(agent, csrf, "10.69.0.0/16", "10.69.1.0/24");
+    await seedDeviceOwned(subnet.id, "10.69.1.1", "interface_ip");
+    await seedDeviceOwned(subnet.id, "10.69.1.2", "vip");
+
+    const create = await agent
+      .post("/api/v1/reservations")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, ipAddress: "10.69.1.2", hostname: "steal-the-vip" });
+    expect(create.status).toBe(409);
+
+    const preview = await agent
+      .post("/api/v1/reservations/next-available/preview")
+      .set("X-CSRF-Token", csrf)
+      .send({ subnetId: subnet.id, count: 2 });
+    expect(preview.status).toBe(200);
+    expect(preview.body.ips).toEqual(["10.69.1.3", "10.69.1.4"]);
+  });
+});

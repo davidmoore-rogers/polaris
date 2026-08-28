@@ -424,6 +424,9 @@ const api = {
     get:           (id)     => request("GET", `/reservations/${id}`),
     create:        (body)   => request("POST", "/reservations", body),
     nextAvailable: (body)   => request("POST", "/reservations/next-available", body),
+    // Which addresses WOULD be allocated (Auto-Allocate modal, multiple mode).
+    // Read-only — the rows are created one at a time through create() above.
+    nextAvailablePreview: (body) => request("POST", "/reservations/next-available/preview", body),
     update:        (id, b)  => request("PUT", `/reservations/${id}`, b),
     release:       (id)     => request("DELETE", `/reservations/${id}`),
     // Stale-reservation alerts. Settings are admin-only writes; reads are

@@ -47,6 +47,15 @@ const CreateReservationSchema = z.object({
   macAddress: MacAddressSchema,
 });
 
+// Preview-only: which addresses WOULD be allocated. Creates nothing, so it is
+// gated at `reservations:read` (the IP panel already shows every free address
+// to that level) rather than the ownership gate the create below carries.
+const NextAvailablePreviewSchema = z.object({
+  subnetId: z.string().uuid(),
+  count: z.number().int().min(1).max(reservationService.MAX_BULK_ALLOCATE),
+  contiguous: z.boolean().optional().default(false),
+});
+
 const NextAvailableSchema = z.object({
   subnetId: z.string().uuid(),
   hostname: z.string().min(1, "Hostname is required"),
@@ -181,6 +190,23 @@ router.post("/:id/retry-push", requireOwnership("reservations"), async (req, res
   } catch (err) { next(err); }
 });
 
+// POST /reservations/next-available/preview  (must come before /:id)
+// Backs the Auto-Allocate modal's multiple-IP mode: the operator picks a count
+// and whether the run must be contiguous, and the table is filled from this
+// before anything is written. Each row is then created through POST / below,
+// one request per address, so a long allocation reports per-row progress and
+// per-row failures instead of riding one request that can outlive the proxy's
+// read timeout while it pushes to a FortiGate.
+router.post("/next-available/preview", requirePermission("reservations", "read"), async (req, res, next) => {
+  try {
+    const { subnetId, count, contiguous } = NextAvailablePreviewSchema.parse(req.body);
+    const ips = await reservationService.findNextAvailableIps(subnetId, count, contiguous);
+    res.json({ ips, count: ips.length, contiguous });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /reservations/next-available  (must come before /:id)
 router.post("/next-available", requireOwnership("reservations"), async (req, res, next) => {
   try {
@@ -234,10 +260,33 @@ router.post("/", requireOwnership("reservations"), async (req, res, next) => {
   }
 });
 
+// Addresses owned by the DEVICE's own configuration rather than by anything
+// Polaris granted: a FortiGate virtual IP, and a statically-configured router /
+// firewall interface address. Polaris discovers and reports them; every way of
+// changing one lives on the device. Creating over them was already refused
+// (neither sourceType is in `isSupersedableByCreate`, so the collision check
+// 409s) — this closes the other two verbs. Enforced at the ROUTE layer rather
+// than in the service, because discovery's own reconcile still has to be able
+// to refresh and retire these rows.
+const DEVICE_OWNED_SOURCE_TYPES = new Set(["vip", "interface_ip"]);
+
+function assertNotDeviceOwned(
+  reservation: { sourceType: string; ipAddress: string | null },
+  verb: string,
+): void {
+  if (!DEVICE_OWNED_SOURCE_TYPES.has(reservation.sourceType)) return;
+  const what = reservation.sourceType === "vip" ? "a FortiGate VIP" : "a device interface address";
+  throw new AppError(
+    409,
+    `${reservation.ipAddress ?? "This address"} is ${what} — it is configured on the device, so it cannot be ${verb} from Polaris`,
+  );
+}
+
 router.put("/:id", requireOwnership("reservations"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const before = await reservationService.getReservation(id);
+    assertNotDeviceOwned(before, "edited");
     assertOwnership(req, before.createdBy, "edit reservations");
     const input = UpdateReservationSchema.parse(req.body);
     const reservation = await reservationService.updateReservation(id, input, {
@@ -252,8 +301,9 @@ router.put("/:id", requireOwnership("reservations"), async (req, res, next) => {
 router.delete("/:id", requireOwnership("reservations"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const existing = await reservationService.getReservation(id);
+    assertNotDeviceOwned(existing, "released");
     if (req.permissionLevel !== "fullwrite") {
-      const existing = await reservationService.getReservation(id);
       assertOwnership(req, existing.createdBy, "release reservations");
     }
     await reservationService.releaseReservation(id, req.session?.username);

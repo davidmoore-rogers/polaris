@@ -3942,9 +3942,17 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
 .ip-dot-dhcp-reservation { background: #ce93d8; box-shadow: 0 0 4px rgba(206,147,216,0.5); }
 .ip-dot-dhcp-lease       { background: #ffb74d; box-shadow: 0 0 4px rgba(255,183,77,0.5); }
 .ip-dot-conflict         { background: #ef5350; box-shadow: 0 0 4px rgba(239,83,80,0.5); }
+/* Device-owned addresses — a FortiGate VIP or a statically-configured
+   interface IP. Purple because the address is spoken for by the DEVICE's own
+   config: Polaris reports it and offers no Reserve / Release / Edit. A deeper
+   violet than .ip-dot-dhcp-reservation's orchid on purpose — both read as
+   purple, but a DHCP reservation is something Polaris can manage and these
+   are not, so they must not be the same dot. */
+.ip-dot-device-config    { background: #9575cd; box-shadow: 0 0 4px rgba(149,117,205,0.5); }
 :is([data-theme="morning"],[data-theme="noon"]) .ip-dot-dhcp-reservation { background: #9c27b0; box-shadow: 0 0 4px rgba(156,39,176,0.3); }
 :is([data-theme="morning"],[data-theme="noon"]) .ip-dot-dhcp-lease       { background: #ef6c00; box-shadow: 0 0 4px rgba(239,108,0,0.3); }
 :is([data-theme="morning"],[data-theme="noon"]) .ip-dot-conflict         { background: #d32f2f; box-shadow: 0 0 4px rgba(211,47,47,0.3); }
+:is([data-theme="morning"],[data-theme="noon"]) .ip-dot-device-config    { background: #5e35b1; box-shadow: 0 0 4px rgba(94,53,177,0.3); }
 
 .conflict-label { cursor: help; color: #ef5350; font-weight: 600; }
 .conflict-icon { font-size: 0.85em; }
@@ -5626,3 +5634,63 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   .maint-cal-day { min-height: 70px; }
   .maint-cal-hint { display: none; }
 }
+
+/* ─── Auto-Allocate: multiple-IP row grid ──────────────────────────────────
+   The IP-panel Auto-Allocate modal's "Multiple IPs" mode. Same grid-of-rows
+   shape as .alloc-entry-row above (the Networks bulk modal) rather than a
+   <table>, so the inputs line up with the rest of the form and the row count
+   can change without re-cutting a layout. The body scrolls at ~9 rows so the
+   shared Owner / Project Ref / Expires fields below stay reachable at the
+   64-address ceiling. */
+.ipalloc-header,
+.ipalloc-row {
+  display: grid;
+  grid-template-columns: 132px 1fr 168px;
+  gap: 6px;
+  align-items: center;
+}
+.ipalloc-header {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 0 4px 4px;
+}
+.ipalloc-row { margin-bottom: 6px; }
+.ipalloc-row input { margin: 0; }
+.ipalloc-row .ipalloc-ip {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.82rem;
+  color: var(--color-text-primary);
+  padding-left: 4px;
+  white-space: nowrap;
+}
+.ipalloc-body {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 2px 2px 2px 0;
+}
+.ipalloc-status {
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+  margin: 0 0 8px;
+}
+.ipalloc-status.error { color: var(--color-danger, #d9534f); }
+/* Results table — read-only, so a plain table is right here where the editable
+   grid above is not. */
+.ipalloc-result-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.ipalloc-result-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--color-text-tertiary);
+  padding: 0 8px 6px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.ipalloc-result-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+.ipalloc-result-table td.mono { font-family: var(--font-mono, monospace); white-space: nowrap; }

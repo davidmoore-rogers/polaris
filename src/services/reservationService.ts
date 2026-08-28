@@ -12,6 +12,7 @@ import {
   classifyOrphanInfraRow,
 } from "../utils/infraDhcpBinding.js";
 import { mapSettledWithConcurrency } from "../utils/concurrency.js";
+import { selectAvailableIps } from "../utils/ipAllocation.js";
 import { logger } from "../utils/logger.js";
 import {
   pushReservation,
@@ -1318,6 +1319,23 @@ export async function reconcileOrphanedInfraReservations(
 
 // ─── Next Available IP ────────────────────────────────────────────────────────
 
+/**
+ * Ceiling on one bulk auto-allocation. The IP panel's multiple-IP mode builds
+ * a row per address and each row is created with its own request, so this is
+ * really a bound on how big a form an operator can be asked to fill in — not
+ * a database limit. Bumping it costs nothing server-side; the UI is what gets
+ * unwieldy first.
+ */
+export const MAX_BULK_ALLOCATE = 64;
+
+/**
+ * How far into a subnet the free-address scan will walk before giving up.
+ * A /16 is 65534 hosts; anything larger is enumerated lazily by the IP panel
+ * too, and an operator auto-allocating out of a /8 wants the low end of it
+ * regardless. Bounds the memory this holds at ~a few MB of address strings.
+ */
+const SCAN_CEILING = 65536;
+
 export interface NextAvailableReservationInput {
   subnetId: string;
   hostname?: string;
@@ -1329,42 +1347,89 @@ export interface NextAvailableReservationInput {
   macAddress?: string;
 }
 
-export async function nextAvailableReservation(input: NextAvailableReservationInput) {
-  const subnet = await prisma.subnet.findUnique({ where: { id: input.subnetId } });
-  if (!subnet) throw new AppError(404, `Subnet ${input.subnetId} not found`);
+/**
+ * The next `count` free host addresses in a subnet — the preview behind the
+ * Auto-Allocate modal, and the picker behind `nextAvailableReservation`.
+ *
+ * `contiguous` asks for a single unbroken run rather than the first `count`
+ * free addresses. When no such run exists the request is REFUSED with the
+ * largest run that does — a short allocation is not a partial success, and
+ * quietly falling back to scattered addresses would defeat the reason an
+ * operator asked for a run in the first place (see the modal's hint text).
+ *
+ * Selection is pure and lives in `utils/ipAllocation.ts`; everything here is
+ * the guards, the paged walk, and the message an operator reads when it can't
+ * be satisfied.
+ */
+export async function findNextAvailableIps(
+  subnetId: string,
+  count: number,
+  contiguous: boolean,
+): Promise<string[]> {
+  const subnet = await prisma.subnet.findUnique({ where: { id: subnetId } });
+  if (!subnet) throw new AppError(404, `Subnet ${subnetId} not found`);
   if (subnet.status === "deprecated")
     throw new AppError(409, `Subnet ${subnet.cidr} is deprecated and cannot accept new reservations`);
   if (detectIpVersion(subnet.cidr) !== "v4")
     throw new AppError(400, "Auto-allocate is only supported for IPv4 subnets");
+  if (!Number.isInteger(count) || count < 1)
+    throw new AppError(400, "Count must be a positive whole number");
+  if (count > MAX_BULK_ALLOCATE)
+    throw new AppError(400, `Auto-allocate is limited to ${MAX_BULK_ALLOCATE} addresses at a time`);
 
   const activeReservations = await prisma.reservation.findMany({
-    where: { subnetId: input.subnetId, status: "active" },
+    where: { subnetId, status: "active" },
     select: { ipAddress: true },
   });
   const reservedIps = new Set(
-    activeReservations.map((r) => r.ipAddress).filter(Boolean) as string[]
+    activeReservations.map((r) => r.ipAddress).filter(Boolean) as string[],
   );
 
   const pageSize = 256;
+  const hosts: string[] = [];
   let page = 1;
-  let found: string | null = null;
+  let selection = selectAvailableIps(hosts, reservedIps, count, contiguous);
 
-  while (!found) {
+  while (hosts.length < SCAN_CEILING) {
     const { addresses, total } = enumerateSubnetIps(subnet.cidr, page, pageSize);
     for (const addr of addresses) {
-      if (addr.type !== "host") continue;
-      if (!reservedIps.has(addr.address)) {
-        found = addr.address;
-        break;
-      }
+      if (addr.type === "host") hosts.push(addr.address);
     }
-    if (!found && page * pageSize >= total) break;
+    // Re-run the selection each page so a small ask out of a large subnet
+    // stops walking as soon as it's satisfied. The earliest fitting run (or
+    // the first `count` free addresses) can't move by scanning further, so
+    // exiting here returns exactly what a full scan would have.
+    if (hosts.length >= count) {
+      selection = selectAvailableIps(hosts, reservedIps, count, contiguous);
+      if (selection.ips.length === count) return selection.ips;
+    }
+    if (page * pageSize >= total) break;
     page++;
   }
 
-  if (!found) throw new AppError(409, `No available IP addresses in subnet ${subnet.cidr}`);
+  selection = selectAvailableIps(hosts, reservedIps, count, contiguous);
+  if (selection.ips.length === count) return selection.ips;
 
-  return createReservation({ ...input, ipAddress: found, via: "auto-allocate" });
+  if (count === 1) {
+    // Preserve the original single-IP wording — it's what the panel has
+    // always said and what the tests assert.
+    throw new AppError(409, `No available IP addresses in subnet ${subnet.cidr}`);
+  }
+  if (contiguous) {
+    throw new AppError(
+      409,
+      `No run of ${count} consecutive free addresses in ${subnet.cidr} — the largest available run is ${selection.largestRun}`,
+    );
+  }
+  throw new AppError(
+    409,
+    `Only ${selection.availableCount} free address${selection.availableCount === 1 ? "" : "es"} in ${subnet.cidr}`,
+  );
+}
+
+export async function nextAvailableReservation(input: NextAvailableReservationInput) {
+  const [found] = await findNextAvailableIps(input.subnetId, 1, false);
+  return createReservation({ ...input, ipAddress: found as string, via: "auto-allocate" });
 }
 
 // ─── Expire (called by scheduled job) ────────────────────────────────────────

@@ -225,6 +225,23 @@ under the same names.
 
 ---
 
+## Editable row grid inside a modal (one row per item, fields per row)
+
+**What it is:** A modal that has to collect a few fields for each of N items —
+N subnets to carve, N addresses to name — laid out as a header strip plus one
+CSS-grid row per item, not as a `<table>` and not as N repeated form groups.
+
+**Canonical implementation:** `.alloc-entries-header` / `.alloc-entry-row` in [public/css/styles.css](public/css/styles.css), built by `_addAllocEntryRow` in [public/js/subnets.js](public/js/subnets.js) (Networks → Auto-Allocate Next Networks). The second instance is `.ipalloc-header` / `.ipalloc-row`, rendered by `_renderAllocRows` in [public/js/ip-panel.js](public/js/ip-panel.js) (the IP panel's Auto-Allocate modal in Multiple-IPs mode) — same shape, one fixed-width leading cell for the immutable value.
+
+**Key conventions:**
+- **Grid, not table.** One `grid-template-columns` declared twice — on the header strip and on the row — so the inputs line up with the rest of the form and a row count can change without re-cutting a layout. `<input>`s get `margin: 0`; the surrounding `.form-group` supplies the spacing.
+- **The header strip is the only label.** Per-row `<label>`s would triple the height of a 40-row form. Mark a required column in the header (`Hostname *`) and validate per row on submit, naming the ROW in the message ("Hostname is required for 10.0.0.5") — a generic "fill in all fields" is unusable once the body scrolls.
+- **Scroll the body, not the modal.** Cap the row container (`max-height` ~320px, `overflow-y: auto`) so whatever sits below it — shared fields, the footer — stays reachable at the maximum row count. Focus + `scrollIntoView({ block: "nearest" })` on the first invalid row.
+- **Fields common to every row live BELOW the grid, once.** Owner / project / expiry / notes are one control each, not a column — a column of identical values is a form nobody wants to fill in.
+- **Rebuilding the rows must not discard typing.** Both callers re-render the whole grid when the count changes and re-seed each row from what was typed, keyed by POSITION (the only identity the operator can see). Values Polaris generated carry `data-auto="1"` and are cleared or regenerated freely; the moment an operator edits one it flips to `data-auto="0"` and is never overwritten.
+
+---
+
 ## Nested condition tree (AND/OR device filter)
 
 **What it is:** A SolarWinds-style filter builder — a root group with a combinator (AND / OR / NONE / NOT-ALL), rows of `[field][operator][value]`, nested sub-groups, and grip drag-and-drop between them. Use it wherever an operator picks *which devices* something applies to and a flat ANDed list would be a lie about what they meant ("switches in Ashfield OR anything tagged critical").

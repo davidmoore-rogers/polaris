@@ -314,8 +314,20 @@ function _renderIpList(data) {
       dotClass = "ip-dot-dhcp-lease";
       statusLabel = "DHCP Lease";
     } else if (r && r.status === "active" && r.sourceType === "vip") {
-      dotClass = "ip-dot-active";
+      // Purple marks an address owned by the DEVICE's own configuration
+      // rather than by anything Polaris can hand out or take back — see the
+      // interface_ip branch below, which shares the colour for the same
+      // reason. Neither row offers Reserve, Release or Edit.
+      dotClass = "ip-dot-device-config";
       statusLabel = "VIP";
+      statusTooltip = "This address is a FortiGate virtual IP (NAT config). It is owned by the device, so it cannot be reserved, released or edited from Polaris.";
+    } else if (r && r.status === "active" && r.sourceType === "interface_ip") {
+      // A router/firewall interface address — statically configured on the
+      // device itself. Same posture as a VIP: Polaris reports it, and every
+      // way of changing it lives on the device.
+      dotClass = "ip-dot-device-config";
+      statusLabel = "Interface";
+      statusTooltip = "This address is configured directly on a device interface. It is owned by the device, so it cannot be reserved, released or edited from Polaris.";
     } else if (r && r.status === "active" && r.sourceType === "dns_resolved") {
       dotClass = "ip-dot-dhcp-lease";
       statusLabel = "DNS Resolved";
@@ -414,14 +426,16 @@ function _renderIpList(data) {
         ? '<button class="btn btn-sm ' + reserveBtnClass + ' ip-lease-reserve-btn" data-ip="' + escapeHtml(ip.address) + '" data-rid="' + escapeHtml(r.id) + '" data-mac="' + escapeHtml(macRaw || "") + '" data-hostname="' + escapeHtml(r.hostname || "") + '" title="' + reserveTitle + '">Reserve</button>'
         : '';
       actions = reserveBtn + freeBtn + assetBtn + editBtn;
-    } else if (r && r.status === "active" && r.sourceType === "vip") {
-      // VIPs are FortiGate NAT config — they cannot be Freed from Polaris.
-      // Reserve lets the operator attach editable metadata (hostname / owner /
-      // notes) that survives across discovery cycles.
-      var vipReserveBtn = canReserveIps()
-        ? '<button class="btn btn-sm ' + reserveBtnClass + ' ip-vip-reserve-btn" data-rid="' + escapeHtml(r.id) + '" title="' + reserveTitle + '">Reserve</button>'
-        : '';
-      actions = vipReserveBtn + assetBtn + editBtn;
+    } else if (r && r.status === "active" && (r.sourceType === "vip" || r.sourceType === "interface_ip")) {
+      // Device-owned addresses: a FortiGate VIP (NAT config) or an interface
+      // address configured on the router/firewall itself. Polaris reports
+      // them and nothing more — no Release (Polaris did not grant it), no
+      // Reserve (it is already spoken for by device config), no Edit (the
+      // metadata would claim ownership Polaris does not have, and discovery
+      // rewrites the row every cycle anyway). "View Asset" stays, because
+      // knowing WHICH device holds the address is the whole question an
+      // operator has when they land on one of these rows.
+      actions = assetBtn;
     } else if (r && r.status === "active" && r.sourceType === "dns_resolved") {
       // DNS-resolved is a system-created placeholder for assets whose IP falls
       // inside a known subnet. Reserve promotes it to a real manual reservation;
@@ -564,11 +578,6 @@ function _renderIpList(data) {
         btn.getAttribute("data-mac"),
         btn.getAttribute("data-hostname")
       );
-    });
-  });
-  body.querySelectorAll(".ip-vip-reserve-btn").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      _openVipReserveModal(btn.getAttribute("data-rid"));
     });
   });
   body.querySelectorAll(".ip-dns-reserve-btn").forEach(function (btn) {
@@ -747,64 +756,488 @@ function _wireGenerateMacButton() {
   });
 }
 
+// ─── Auto-Allocate (single + multiple) ──────────────────────────────────────
+//
+// One modal, two modes. "Single IP" is the original flow: hostname + MAC, and
+// the server picks the next free address at create time. "Multiple IPs" asks
+// how many and whether they must be CONTIGUOUS, previews the addresses that
+// would be taken, and gives the operator a row per address to name.
+//
+// The multiple flow deliberately creates one reservation PER REQUEST rather
+// than posting a batch: a push-eligible network writes each reservation to the
+// FortiGate, so a 40-address batch in one request would sit well past the
+// proxy's read timeout with nothing to show for it. Per-row requests give
+// progress while it runs and a per-row outcome when it finishes — including
+// the honest case where an address was claimed by someone else between the
+// preview and the create.
+//
+// Contiguity is refused rather than downgraded when it can't be met (the
+// server reports the largest run available): a short run is not what was
+// asked for, and scattering the remainder defeats the point of asking.
+//
+// Note what never appears in a preview: any address carrying an ACTIVE
+// reservation, VIP rows included. The server builds its taken-set from every
+// active reservation regardless of sourceType, so a FortiGate VIP is simply
+// not an address auto-allocate can hand out.
+
+var _allocMode = "single";
+var _allocPreviewTimer = null;
+var _allocPreviewSeq = 0;
+var _allocSubnetId = null;
+
+var ALLOC_MAX = 64; // mirrors MAX_BULK_ALLOCATE in reservationService.ts
+
+// Batch-unique placeholder MAC. Collisions are vanishingly unlikely, but a
+// duplicate MAC inside one DHCP scope is a real failure, so the retry is worth
+// the three lines.
+function _generateBatchMac(used) {
+  for (var i = 0; i < 8; i++) {
+    var mac = _generateLocalMac();
+    if (!used || !used[mac.toLowerCase()]) {
+      if (used) used[mac.toLowerCase()] = true;
+      return mac;
+    }
+  }
+  return _generateLocalMac();
+}
+
+function _allocAutoMacOn() {
+  var cb = document.getElementById("f-automac");
+  return !!(cb && cb.checked);
+}
+
+// Mark a MAC input as operator-owned the moment it is edited, so unticking
+// "auto-generate" only clears the values Polaris put there.
+function _wireMacAutoTracking(input) {
+  if (!input) return;
+  input.addEventListener("input", function () { input.setAttribute("data-auto", "0"); });
+}
+
+function _autoMacLabelText(mode, pushEligible) {
+  var noun = mode === "multiple" ? "placeholder MAC addresses" : "a placeholder MAC address";
+  return "Auto-generate " + noun +
+    (pushEligible ? " (FortiGate DHCP reservations are MAC→IP)" : "");
+}
+
 function _openAutoAllocateModal(subnetId) {
   var s = _ipPanelData ? _ipPanelData.subnet : null;
   var subnetLabel = s ? escapeHtml(s.name) + ' (' + escapeHtml(s.cidr) + ')' : subnetId;
   var pushEligible = !!(s && s.pushEligible);
+  _allocSubnetId = subnetId;
+  _allocMode = "single";
 
   var macLabel = pushEligible ? 'MAC Address *' : 'MAC Address';
   var macHint = pushEligible
     ? 'Required &mdash; this network is configured to push reservations to FortiGate "' + escapeHtml((s && s.fortigateDevice) || '') + '". DHCP reservations are MAC&rarr;IP.'
     : 'Optional unless this network\'s integration pushes reservations to a FortiGate.';
+
   var body =
     '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
-    '<p class="hint" style="margin-bottom:12px">The next available host IP will be reserved automatically.</p>' +
-    '<div class="form-group"><label>Hostname *</label><input type="text" id="f-hostname" placeholder="e.g. web-server-01"></div>' +
-    _macFieldMarkup(macLabel, macHint) +
+    '<div class="form-group">' +
+      '<label>Allocate</label>' +
+      '<div style="display:flex;gap:6px">' +
+        '<button type="button" class="btn btn-sm btn-primary alloc-mode-btn" data-mode="single">Single IP</button>' +
+        '<button type="button" class="btn btn-sm btn-secondary alloc-mode-btn" data-mode="multiple">Multiple IPs</button>' +
+      '</div>' +
+    '</div>' +
+    '<div id="alloc-pane-single">' +
+      '<p class="hint" style="margin-bottom:12px">The next available host IP will be reserved automatically.</p>' +
+      '<div class="form-group"><label>Hostname *</label><input type="text" id="f-hostname" placeholder="e.g. web-server-01"></div>' +
+      _macFieldMarkup(macLabel, macHint) +
+    '</div>' +
+    '<div id="alloc-pane-multiple" style="display:none">' +
+      '<div class="alloc-two-col">' +
+        '<div class="form-group"><label>How Many?</label>' +
+          '<input type="number" id="f-alloc-count" min="1" max="' + ALLOC_MAX + '" value="2">' +
+          '<p class="hint">Up to ' + ALLOC_MAX + ' addresses at a time.</p>' +
+        '</div>' +
+        '<div class="form-group">' +
+          '<label>Placement</label>' +
+          '<div style="display:flex;align-items:center;gap:8px;margin-top:6px">' +
+            '<input type="checkbox" id="f-alloc-contiguous" style="width:auto">' +
+            '<label for="f-alloc-contiguous" style="margin:0">Contiguous addresses</label>' +
+          '</div>' +
+          '<p class="hint">An unbroken run. If the network has no gap that big, nothing is allocated.</p>' +
+        '</div>' +
+      '</div>' +
+      '<div class="form-group">' +
+        '<label>Addresses</label>' +
+        '<p class="ipalloc-status" id="alloc-preview-status">Finding available addresses&hellip;</p>' +
+        '<div id="alloc-preview-table"></div>' +
+      '</div>' +
+    '</div>' +
+    checkboxRow("f-automac", _autoMacLabelText("single", pushEligible), pushEligible) +
+    formDivider() +
     '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" placeholder="e.g. platform-team"></div>' +
     '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" placeholder="e.g. INFRA-001"></div>' +
     '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt"><p class="hint">Optional TTL</p></div>' +
     '<div class="form-group"><label>Reservation notes</label><textarea id="f-notes" placeholder="e.g. web-server-01"></textarea></div>';
+
   var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
     '<button class="btn btn-primary" id="btn-save">Auto-Allocate</button>';
   openModal("Auto-Allocate Next IP", body, footer);
   _wireGenerateMacButton();
+  _wireMacAutoTracking(document.getElementById("f-macAddress"));
 
-  document.getElementById("btn-save").addEventListener("click", async function () {
-    var btn = this;
-    btn.disabled = true;
-    try {
-      var expiresVal = document.getElementById("f-expiresAt").value;
-      var macVal = document.getElementById("f-macAddress").value.trim();
-      if (pushEligible && !macVal) {
-        showToast("MAC address is required for reservations on this network", "error");
-        btn.disabled = false;
-        return;
-      }
-      var input = {
-        subnetId: subnetId,
-        hostname: document.getElementById("f-hostname").value.trim(),
-        owner: document.getElementById("f-owner").value.trim() || undefined,
-        projectRef: document.getElementById("f-projectRef").value.trim() || undefined,
-        expiresAt: expiresVal ? new Date(expiresVal).toISOString() : undefined,
-        notes: document.getElementById("f-notes").value.trim() || undefined,
-        macAddress: macVal || undefined,
-      };
-      var reservation = await api.reservations.nextAvailable(input);
-      closeModal();
-      var pushStatus = reservation && reservation.pushStatus;
-      var msg = "Reserved " + reservation.ipAddress;
-      if (pushStatus === "synced") msg += " and pushed to FortiGate";
-      else if (pushStatus === "pending") msg += " — queued for push (FortiGate unreachable; will retry automatically)";
-      showToast(msg);
-      _ipPanelDirty = true;
-      _fetchIpPage();
-    } catch (err) {
-      showToast(err.message, "error");
-    } finally {
-      btn.disabled = false;
+  // Auto-generate defaults ON only where a MAC is actually required. On a
+  // network Polaris does not push to, a placeholder MAC is a marker nobody
+  // asked for (business rule 26), so the operator opts in instead.
+  if (pushEligible) {
+    var singleMac = document.getElementById("f-macAddress");
+    if (singleMac && !singleMac.value) {
+      singleMac.value = _generateLocalMac();
+      singleMac.setAttribute("data-auto", "1");
+    }
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll(".alloc-mode-btn"), function (btn) {
+    btn.addEventListener("click", function () { _setAllocMode(btn.getAttribute("data-mode"), pushEligible); });
+  });
+  document.getElementById("f-alloc-count").addEventListener("input", _scheduleAllocPreview);
+  document.getElementById("f-alloc-contiguous").addEventListener("change", _scheduleAllocPreview);
+  document.getElementById("f-automac").addEventListener("change", function () {
+    _applyAutoMac(this.checked);
+  });
+
+  document.getElementById("btn-save").addEventListener("click", function () {
+    if (_allocMode === "multiple") _submitMultipleAllocate(subnetId, pushEligible, this);
+    else _submitSingleAllocate(subnetId, pushEligible, this);
+  });
+}
+
+function _setAllocMode(mode, pushEligible) {
+  if (mode !== "single" && mode !== "multiple") return;
+  _allocMode = mode;
+  Array.prototype.forEach.call(document.querySelectorAll(".alloc-mode-btn"), function (btn) {
+    var active = btn.getAttribute("data-mode") === mode;
+    btn.classList.toggle("btn-primary", active);
+    btn.classList.toggle("btn-secondary", !active);
+  });
+  var single = document.getElementById("alloc-pane-single");
+  var multi = document.getElementById("alloc-pane-multiple");
+  if (single) single.style.display = mode === "single" ? "" : "none";
+  if (multi) multi.style.display = mode === "multiple" ? "" : "none";
+
+  // The row grid needs the room; the single form does not.
+  var modalEl = document.querySelector("#modal-overlay .modal");
+  if (modalEl) modalEl.classList.toggle("modal-wide", mode === "multiple");
+
+  var title = document.querySelector("#modal-overlay .modal-header h3");
+  if (title) title.textContent = mode === "multiple" ? "Auto-Allocate Next IPs" : "Auto-Allocate Next IP";
+
+  var automacLabel = document.querySelector('label[for="f-automac"]');
+  if (automacLabel) automacLabel.textContent = _autoMacLabelText(mode, pushEligible);
+
+  if (mode === "multiple") _scheduleAllocPreview();
+}
+
+function _scheduleAllocPreview() {
+  if (_allocPreviewTimer) clearTimeout(_allocPreviewTimer);
+  _allocPreviewTimer = setTimeout(_refreshAllocPreview, 300);
+}
+
+async function _refreshAllocPreview() {
+  var statusEl = document.getElementById("alloc-preview-status");
+  var tableEl = document.getElementById("alloc-preview-table");
+  if (!statusEl || !tableEl) return;
+
+  var countEl = document.getElementById("f-alloc-count");
+  var count = parseInt(countEl ? countEl.value : "", 10);
+  var contiguous = !!(document.getElementById("f-alloc-contiguous") || {}).checked;
+
+  if (!Number.isInteger(count) || count < 1 || count > ALLOC_MAX) {
+    statusEl.className = "ipalloc-status error";
+    statusEl.textContent = "Enter a number between 1 and " + ALLOC_MAX + ".";
+    tableEl.innerHTML = "";
+    return;
+  }
+
+  // Hostnames and operator-typed MACs survive a count change — they are keyed
+  // by row position, which is what the operator is looking at.
+  var typed = _collectAllocRows().map(function (r) {
+    return { hostname: r.hostname, mac: r.mac, auto: r.auto };
+  });
+
+  var seq = ++_allocPreviewSeq;
+  statusEl.className = "ipalloc-status";
+  statusEl.textContent = "Finding available addresses…";
+  try {
+    var res = await api.reservations.nextAvailablePreview({
+      subnetId: _allocSubnetId,
+      count: count,
+      contiguous: contiguous,
+    });
+    if (seq !== _allocPreviewSeq) return; // a later keystroke won the race
+    var ips = (res && res.ips) || [];
+    statusEl.className = "ipalloc-status";
+    statusEl.textContent = ips.length + (ips.length === 1 ? " address" : " addresses")
+      + (contiguous ? " (contiguous run)" : "")
+      + " — nothing is reserved until you click Auto-Allocate.";
+    _renderAllocRows(ips, typed);
+  } catch (err) {
+    if (seq !== _allocPreviewSeq) return;
+    statusEl.className = "ipalloc-status error";
+    statusEl.textContent = err.message || "Could not find available addresses";
+    tableEl.innerHTML = "";
+  }
+}
+
+function _renderAllocRows(ips, typed) {
+  var tableEl = document.getElementById("alloc-preview-table");
+  if (!tableEl) return;
+  if (!ips.length) { tableEl.innerHTML = ""; return; }
+
+  var auto = _allocAutoMacOn();
+  var used = {};
+  var rows = ips.map(function (ip, i) {
+    var prior = typed && typed[i] ? typed[i] : null;
+    var hostname = prior ? prior.hostname : "";
+    var mac = "";
+    var isAuto = true;
+    if (prior && prior.mac && prior.auto === false) {
+      mac = prior.mac;              // operator typed it — never overwrite
+      isAuto = false;
+    } else if (auto) {
+      mac = _generateBatchMac(used);
+    }
+    if (mac) used[mac.toLowerCase()] = true;
+    var placeholder = "e.g. web-server-" + (i + 1 < 10 ? "0" : "") + (i + 1);
+    return '<div class="ipalloc-row" data-ip="' + escapeHtml(ip) + '">' +
+      '<span class="ipalloc-ip" title="' + escapeHtml(ip) + '">' + escapeHtml(ip) + '</span>' +
+      '<input type="text" class="ipalloc-hostname" placeholder="' + placeholder + '" value="' + escapeHtml(hostname) + '">' +
+      '<input type="text" class="ipalloc-mac" placeholder="aa:bb:cc:dd:ee:ff" value="' + escapeHtml(mac) + '" data-auto="' + (isAuto ? "1" : "0") + '">' +
+    '</div>';
+  }).join("");
+
+  tableEl.innerHTML =
+    '<div class="ipalloc-header"><span>IP Address</span><span>Hostname *</span><span>MAC Address</span></div>' +
+    '<div class="ipalloc-body">' + rows + '</div>';
+
+  Array.prototype.forEach.call(tableEl.querySelectorAll(".ipalloc-mac"), _wireMacAutoTracking);
+}
+
+// Read the current rows back out of the DOM.
+function _collectAllocRows() {
+  var out = [];
+  Array.prototype.forEach.call(document.querySelectorAll("#alloc-preview-table .ipalloc-row"), function (row) {
+    var macEl = row.querySelector(".ipalloc-mac");
+    var hostEl = row.querySelector(".ipalloc-hostname");
+    out.push({
+      ip: row.getAttribute("data-ip"),
+      hostname: hostEl ? hostEl.value : "",
+      mac: macEl ? macEl.value : "",
+      auto: macEl ? macEl.getAttribute("data-auto") !== "0" : true,
+      el: row,
+    });
+  });
+  return out;
+}
+
+// Fill or clear the MACs Polaris owns when the auto-generate box is toggled.
+function _applyAutoMac(on) {
+  var used = {};
+  if (_allocMode === "single") {
+    var input = document.getElementById("f-macAddress");
+    if (!input) return;
+    if (on) {
+      if (!input.value) { input.value = _generateLocalMac(); input.setAttribute("data-auto", "1"); }
+    } else if (input.getAttribute("data-auto") === "1") {
+      input.value = "";
+    }
+    return;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("#alloc-preview-table .ipalloc-mac"), function (input) {
+    if (on) {
+      if (!input.value) { input.value = _generateBatchMac(used); input.setAttribute("data-auto", "1"); }
+      else used[input.value.toLowerCase()] = true;
+    } else if (input.getAttribute("data-auto") === "1") {
+      input.value = "";
     }
   });
+}
+
+// The four fields shared by every reservation in the batch.
+function _collectAllocSharedFields() {
+  var expiresVal = document.getElementById("f-expiresAt").value;
+  return {
+    owner: document.getElementById("f-owner").value.trim() || undefined,
+    projectRef: document.getElementById("f-projectRef").value.trim() || undefined,
+    expiresAt: expiresVal ? new Date(expiresVal).toISOString() : undefined,
+    notes: document.getElementById("f-notes").value.trim() || undefined,
+  };
+}
+
+async function _submitSingleAllocate(subnetId, pushEligible, btn) {
+  btn.disabled = true;
+  try {
+    var macVal = document.getElementById("f-macAddress").value.trim();
+    if (pushEligible && !macVal) {
+      showToast("MAC address is required for reservations on this network", "error");
+      btn.disabled = false;
+      return;
+    }
+    var shared = _collectAllocSharedFields();
+    var input = {
+      subnetId: subnetId,
+      hostname: document.getElementById("f-hostname").value.trim(),
+      owner: shared.owner,
+      projectRef: shared.projectRef,
+      expiresAt: shared.expiresAt,
+      notes: shared.notes,
+      macAddress: macVal || undefined,
+    };
+    var reservation = await api.reservations.nextAvailable(input);
+    closeModal();
+    var pushStatus = reservation && reservation.pushStatus;
+    var msg = "Reserved " + reservation.ipAddress;
+    if (pushStatus === "synced") msg += " and pushed to FortiGate";
+    else if (pushStatus === "pending") msg += " — queued for push (FortiGate unreachable; will retry automatically)";
+    showToast(msg);
+    _ipPanelDirty = true;
+    _fetchIpPage();
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function _submitMultipleAllocate(subnetId, pushEligible, btn) {
+  var rows = _collectAllocRows();
+  if (!rows.length) {
+    showToast("No addresses to allocate — choose a count first", "error");
+    return;
+  }
+
+  // Validate the whole form BEFORE writing anything: a batch that stops
+  // halfway on a missing hostname leaves the operator reconciling by hand.
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var bad = null;
+    if (!r.hostname.trim()) bad = { msg: "Hostname is required for " + r.ip, sel: ".ipalloc-hostname" };
+    else if (pushEligible && !r.mac.trim()) bad = { msg: "MAC address is required for " + r.ip + " on this network", sel: ".ipalloc-mac" };
+    if (bad) {
+      showToast(bad.msg, "error");
+      var el = r.el.querySelector(bad.sel);
+      if (el) { el.focus(); el.scrollIntoView({ block: "nearest" }); }
+      return;
+    }
+  }
+
+  var shared = _collectAllocSharedFields();
+  var originalLabel = btn.textContent;
+  btn.disabled = true;
+
+  var results = [];
+  for (var j = 0; j < rows.length; j++) {
+    btn.textContent = "Allocating " + (j + 1) + " of " + rows.length + "…";
+    var row = rows[j];
+    try {
+      var reservation = await api.reservations.create({
+        subnetId: subnetId,
+        ipAddress: row.ip,
+        hostname: row.hostname.trim(),
+        owner: shared.owner,
+        projectRef: shared.projectRef,
+        expiresAt: shared.expiresAt,
+        notes: shared.notes,
+        macAddress: row.mac.trim() || undefined,
+      });
+      results.push({
+        ok: true,
+        ip: reservation.ipAddress || row.ip,
+        hostname: row.hostname.trim(),
+        mac: row.mac.trim(),
+        pushStatus: reservation.pushStatus || null,
+      });
+    } catch (err) {
+      results.push({
+        ok: false,
+        ip: row.ip,
+        hostname: row.hostname.trim(),
+        mac: row.mac.trim(),
+        error: err.message || "Failed",
+      });
+    }
+  }
+
+  btn.textContent = originalLabel;
+  btn.disabled = false;
+
+  var okCount = results.filter(function (r) { return r.ok; }).length;
+  _ipPanelDirty = true;
+  _fetchIpPage();
+  _openAllocResultsModal(results, shared, okCount);
+  showToast(
+    okCount === results.length
+      ? "Allocated " + okCount + (okCount === 1 ? " address" : " addresses")
+      : "Allocated " + okCount + " of " + results.length + " — see the results for what failed",
+    okCount === results.length ? "success" : "error",
+  );
+}
+
+function _allocResultStatus(r) {
+  if (!r.ok) return "Failed: " + r.error;
+  if (r.pushStatus === "synced") return "Reserved · pushed to FortiGate";
+  if (r.pushStatus === "pending") return "Reserved · queued for push";
+  if (r.pushStatus === "failed_permanent") return "Reserved · push failed";
+  return "Reserved";
+}
+
+function _openAllocResultsModal(results, shared, okCount) {
+  var s = _ipPanelData ? _ipPanelData.subnet : null;
+  var cidr = (s && s.cidr) || "this network";
+  var rowsHtml = results.map(function (r) {
+    return '<tr>' +
+      '<td class="mono">' + escapeHtml(r.ip) + '</td>' +
+      '<td>' + escapeHtml(r.hostname) + '</td>' +
+      '<td class="mono">' + escapeHtml(r.mac || "—") + '</td>' +
+      '<td' + (r.ok ? '' : ' style="color:var(--color-danger,#d9534f)"') + '>' + escapeHtml(_allocResultStatus(r)) + '</td>' +
+    '</tr>';
+  }).join("");
+
+  var summary = okCount === results.length
+    ? okCount + (okCount === 1 ? " address" : " addresses") + " reserved in " + escapeHtml(cidr) + "."
+    : okCount + " of " + results.length + " reserved in " + escapeHtml(cidr) +
+      ". The rest are listed below with the reason they failed.";
+
+  var body =
+    '<p class="hint" style="margin-bottom:12px">' + summary + '</p>' +
+    '<table class="ipalloc-result-table">' +
+      '<thead><tr><th>IP Address</th><th>Hostname</th><th>MAC Address</th><th>Status</th></tr></thead>' +
+      '<tbody>' + rowsHtml + '</tbody>' +
+    '</table>';
+
+  var footer =
+    '<button class="btn btn-secondary" id="btn-alloc-export">Export CSV</button>' +
+    '<button class="btn btn-primary" onclick="closeModal()">Done</button>';
+
+  openModal("Allocation Results", body, footer, { wide: true });
+
+  document.getElementById("btn-alloc-export").addEventListener("click", function () {
+    _exportAllocResults(results, shared, s);
+  });
+}
+
+function _exportAllocResults(results, shared, s) {
+  var headers = ["IP Address", "Hostname", "MAC Address", "Owner", "Project Ref", "Expires At", "Notes", "Network", "Status"];
+  var rows = results.map(function (r) {
+    return [
+      r.ip,
+      r.hostname,
+      r.mac || "",
+      shared.owner || "",
+      shared.projectRef || "",
+      shared.expiresAt ? formatDate(shared.expiresAt) : "",
+      shared.notes || "",
+      (s && s.cidr) || "",
+      _allocResultStatus(r),
+    ];
+  });
+  var slug = ((s && s.cidr) || "network").replace(/[\/]/g, "_");
+  var filename = "polaris-allocated-" + slug + "-" + new Date().toISOString().slice(0, 10) + ".csv";
+  downloadCsv(headers, rows, filename);
+  showToast("Exported " + results.length + " rows to " + filename);
 }
 
 // ─── Refresh ────────────────────────────────────────────────────────────────
@@ -1094,55 +1527,6 @@ function _confirmPushReservation(ipAddress, macAddress, fortigateDevice) {
   });
 }
 
-function _openVipReserveModal(reservationId) {
-  api.reservations.get(reservationId).then(function (r) {
-    var subnetLabel = r.subnet ? escapeHtml(r.subnet.name) + " (" + escapeHtml(r.subnet.cidr) + ")" : r.subnetId;
-    var expiresVal = r.expiresAt ? _toDatetimeLocal(r.expiresAt) : "";
-    var vip = r.vipInfo || {};
-    var vipKindLabel = vip.isVirtualServer ? "virtual server" : "VIP";
-    var vipBlurb = '<p class="hint" style="margin-bottom:12px">Attach a reservation to this FortiGate ' + vipKindLabel + '. Hostname, owner, and notes are operator-editable and survive discovery cycles.' +
-      (vip.name ? ' <strong>' + (vip.isVirtualServer ? 'Virtual server' : 'VIP') + ':</strong> ' + escapeHtml(vip.name) + (vip.device ? ' on ' + escapeHtml(vip.device) : '') : '') +
-      '</p>';
-    var body = vipBlurb +
-      '<div class="form-group"><label>Network</label><input type="text" value="' + subnetLabel + '" disabled></div>' +
-      '<div class="form-group"><label>IP Address</label><input type="text" value="' + escapeHtml(r.ipAddress || "") + '" disabled></div>' +
-      '<div class="form-group"><label>Hostname</label><input type="text" id="f-hostname" value="' + escapeHtml(r.hostname || "") + '" placeholder="e.g. web-server-01"></div>' +
-      '<div class="form-group"><label>Owner</label><input type="text" id="f-owner" value="' + escapeHtml(r.owner || "") + '" placeholder="e.g. platform-team"></div>' +
-      '<div class="form-group"><label>Project Ref</label><input type="text" id="f-projectRef" value="' + escapeHtml(r.projectRef || "") + '" placeholder="e.g. INFRA-001"></div>' +
-      '<div class="form-group"><label>Expires At</label><input type="datetime-local" id="f-expiresAt" value="' + expiresVal + '"><p class="hint">Optional TTL</p></div>' +
-      '<div class="form-group"><label>Reservation notes</label><textarea id="f-notes" placeholder="Reservation notes — e.g. web-server-01">' + escapeHtml(r.notes || "") + '</textarea></div>';
-    var footer = '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
-      '<button class="btn btn-primary" id="btn-save">Save Reservation</button>';
-    openModal("Reserve VIP IP", body, footer);
-
-    document.getElementById("btn-save").addEventListener("click", async function () {
-      var btn = this;
-      btn.disabled = true;
-      try {
-        var expires = document.getElementById("f-expiresAt").value;
-        var input = {
-          hostname: document.getElementById("f-hostname").value.trim() || undefined,
-          owner: document.getElementById("f-owner").value.trim() || undefined,
-          projectRef: document.getElementById("f-projectRef").value.trim() || undefined,
-          expiresAt: expires ? new Date(expires).toISOString() : undefined,
-          notes: document.getElementById("f-notes").value.trim() || undefined,
-        };
-        await api.reservations.update(reservationId, input);
-        closeModal();
-        showToast("VIP reservation updated");
-        _ipPanelDirty = true;
-        _fetchIpPage();
-      } catch (err) {
-        showToast(err.message, "error");
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  }).catch(function (err) {
-    showToast(err.message, "error");
-  });
-}
-
 function _openEditReservationModal(reservationId) {
   // Read-only detection is a RESERVATIONS-permission decision:
   // reservations=fullwrite edits anyone's row, reservations=write edits only
@@ -1364,6 +1748,10 @@ function _generateIpPanelPdf(s, allIps) {
       statusLabel = "DHCP Reservation";
     } else if (r && r.status === "active" && (r.sourceType === "dhcp_lease" || r.owner === "dhcp-lease")) {
       statusLabel = "DHCP Lease";
+    } else if (r && r.status === "active" && r.sourceType === "vip") {
+      statusLabel = "VIP";
+    } else if (r && r.status === "active" && r.sourceType === "interface_ip") {
+      statusLabel = "Interface";
     } else if (r && r.status === "active") {
       statusLabel = "Active";
     } else if (r && r.status === "expired") {

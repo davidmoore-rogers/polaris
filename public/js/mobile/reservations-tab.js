@@ -186,7 +186,13 @@
       var reserveTitle = r.pushEligible ? "Reserve on Gate" : "Reserve in Polaris";
       buttons.push('<button class="btn ' + reserveCls + '" data-act="reserve" data-id="' + escapeHtml(r.id) + '" title="' + reserveTitle + '">Reserve</button>');
     }
-    if (canModify(user, r)) {
+    // A FortiGate VIP and a statically-configured interface address are owned
+    // by the DEVICE's config, not by Polaris: no Edit, no Release. The server
+    // refuses both (409) — this keeps the buttons off a row that can't use
+    // them. Matches the desktop IP panel, where the same two source types
+    // render read-only with a purple status dot.
+    var isDeviceOwned = r.sourceType === "vip" || r.sourceType === "interface_ip";
+    if (canModify(user, r) && !isDeviceOwned) {
       buttons.push('<button class="btn btn-tonal" data-act="edit" data-id="' + escapeHtml(r.id) + '">Edit</button>');
       // Leases → Revoke (forgets the current lease, client can re-acquire);
       // reservations → Release (gives up the reservation).
