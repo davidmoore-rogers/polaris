@@ -8066,6 +8066,27 @@ function _lldpNeighborInlineCell(neighbors) {
   return openTag + labelHtml + portStr + more + closeTag;
 }
 
+// Used-% cell for the storage table: the canonical utilization bar
+// (.util-bar-track/.util-bar-fill) plus a right-aligned label, colored on the
+// SAME thresholds as the Highest Disk Usage widget (widgets/diskUsage.js) so a
+// volume can't read amber in one place and blue in the other.
+var _STORAGE_PCT_THRESHOLDS = [{ over: 90, color: "#ff1744" }, { over: 75, color: "#ffd600" }];
+
+function _storagePctCell(pct) {
+  if (pct == null) return '<span style="color:var(--color-text-tertiary)">—</span>';
+  var v = Math.max(0, Math.min(100, pct));
+  var color = "#4fc3f7";
+  for (var i = 0; i < _STORAGE_PCT_THRESHOLDS.length; i++) {
+    if (v >= _STORAGE_PCT_THRESHOLDS[i].over) { color = _STORAGE_PCT_THRESHOLDS[i].color; break; }
+  }
+  // The label is rounded to fit the narrow column; the exact figure rides a
+  // native tooltip so nothing is lost.
+  return '<div class="util-row" title="' + escapeHtml(v.toFixed(1) + '% used') + '">' +
+    '<div class="util-bar-track"><div class="util-bar-fill" style="width:' + v.toFixed(1) + '%;background:' + color + '"></div></div>' +
+    '<span style="width:34px;flex:0 0 auto;text-align:right;font-size:0.78rem;color:var(--color-text-secondary)">' + Math.round(v) + '%</span>' +
+  '</div>';
+}
+
 function _renderStorageTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.storage) || [];
@@ -8077,7 +8098,6 @@ function _renderStorageTable(container, si, asset) {
   var canEdit = canManageAssets();
   var body = rows.map(function (s) {
     var pct = (s.totalBytes && s.usedBytes != null && s.totalBytes > 0) ? ((s.usedBytes / s.totalBytes) * 100) : null;
-    var pctStr = pct != null ? pct.toFixed(1) + '%' : '—';
     var checked = monitored.has(s.mountPath) ? ' checked' : '';
     var disabled = canEdit ? '' : ' disabled';
     var checkbox =
@@ -8089,7 +8109,7 @@ function _renderStorageTable(container, si, asset) {
       '<td class="mono">' + nameCell + '</td>' +
       '<td>' + (s.usedBytes  != null ? _fmtBytes(s.usedBytes)  : '—') + '</td>' +
       '<td>' + (s.totalBytes != null ? _fmtBytes(s.totalBytes) : '—') + '</td>' +
-      '<td>' + pctStr + '</td>' +
+      '<td>' + _storagePctCell(pct) + '</td>' +
     '</tr>';
   }).join("");
   container.innerHTML =

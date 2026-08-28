@@ -510,6 +510,22 @@ top-of-page "Show" filter-bar** — the selector lives in the controls row.
 
 ---
 
+## Utilization bar (a percentage drawn as a bar, not just a number)
+
+**What it is:** A 0–100% reading rendered as a slim filled track with the figure
+beside it, so a row of volumes/subnets reads as a shape at a glance instead of a
+column of numbers to compare by eye.
+
+**Canonical implementation:** `.util-row` / `.util-bar-track` / `.util-bar-fill` in [public/css/styles.css](public/css/styles.css) — a flex row, a `flex: 1` track and a width-percentage fill with a `0.4s` width transition. Consumers: the shared top-N widget renderer (`rowHTML` in [public/js/widgets/_topnBar.js](public/js/widgets/_topnBar.js)), the subnet-utilization line in [public/js/ip-panel.js](public/js/ip-panel.js), and the asset-details Storage table's Used % cell (`_storagePctCell` in [public/js/assets.js](public/js/assets.js)).
+
+**Key conventions:**
+- **The track flexes, the label is a fixed-width right-aligned cell.** Inside a resizable table column the fill percentage is a style attribute, never a CSS rule — under `table-layout: fixed` the column width is the `<col>`'s and the bar simply takes what is left after the label. Put the cell in the **last (auto-fill) column** where you can, so the column floor keeps the track from collapsing.
+- **Color thresholds must agree with whatever widget shows the same metric.** The Storage table's Used % cell copies the Highest Disk Usage bands verbatim (`#4fc3f7` base, `#ffd600` ≥ 75%, `#ff1744` ≥ 90% — [public/js/widgets/diskUsage.js](public/js/widgets/diskUsage.js)): a volume that reads amber on the dashboard and blue in the slide-over reads as a bug in one of the two. Change one, change both.
+- **Round the label, keep the precision in a `title`.** A bar plus `87%` fits a narrow column where `87.4%` does not; the exact figure rides a native tooltip on the row so nothing is lost. No data is a muted em dash — never a 0%-wide bar, which is a positive claim that the volume is empty.
+- Where the row carries an active alert, its **severity color wins over the value bands** (`PolarisWidgets.alertSeverityBarColor`) — see the widget-surface section below.
+
+---
+
 ## Operator-customizable widget surface
 
 **What it is:** A page where the operator enters an explicit EDIT MODE, chooses which widgets appear via a full picker (Group-By + search + favorites), arranges them into resizable COLUMNS, and configures per-widget options via a gear popover. Layout persists server-side per user. Read-only by default with a "Customize Page" affordance; empty state prompts the operator to customize. The Dashboard home page is the first instance; future operator-customizable surfaces should match this shape.
