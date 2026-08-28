@@ -1577,7 +1577,7 @@ router.get("/login-access", async (req, res, next) => {
   }
 });
 
-router.put("/login-access", requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+router.put("/login-access", maintenanceLimiter, requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
   try {
     const input = LoginAccessSchema.parse(req.body ?? {});
     const before = await getLoginAccessSettings();

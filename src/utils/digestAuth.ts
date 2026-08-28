@@ -250,7 +250,13 @@ export function buildDigestAuthorization(args: DigestAuthArgs): string {
     // No qop offered — RFC 2069 legacy form, still what some embedded servers do.
     : H(`${ha1}:${challenge.nonce}:${ha2}`);
 
-  const quoted = (k: string, v: string) => `${k}="${v.replace(/"/g, '\\"')}"`;
+  // RFC 7616 quoted-string: a backslash escapes the NEXT character, so the
+  // backslash itself has to be escaped FIRST. Escaping only the quote left a
+  // value ending in `\` turning our own closing delimiter into an escaped one
+  // and corrupting every field after it — and `realm` / `nonce` / `opaque` are
+  // echoed straight back from the SERVER's challenge, so the malformed value
+  // need not be ours.
+  const quoted = (k: string, v: string) => `${k}="${v.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   const fields = [
     quoted("username", username),
     quoted("realm", challenge.realm),

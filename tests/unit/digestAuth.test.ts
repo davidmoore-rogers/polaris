@@ -159,6 +159,19 @@ describe("buildDigestAuthorization — shape and refusals", () => {
     });
     expect(header).toContain('username="ad\\"min"');
   });
+
+  it("escapes a backslash so a server-supplied value cannot swallow the delimiter", () => {
+    // realm / nonce / opaque are echoed back from the SERVER's challenge, so a
+    // value ending in a backslash is not necessarily ours. Escaping only the
+    // quote left that backslash escaping our own closing delimiter, merging
+    // realm into the following field and corrupting the rest of the header.
+    const header = buildDigestAuthorization({
+      ...base,
+      challenge: { realm: "evil\\", nonce: "n", qop: ["auth"], stale: false },
+    });
+    expect(header).toContain('realm="evil\\\\"');
+    expect(header).toContain('nonce="n"');
+  });
 });
 
 describe("parseDigestChallenge", () => {

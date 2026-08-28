@@ -2277,17 +2277,17 @@ async function openAutomationWizard(existing, opts) {
       var hm = (findType("host_metric") || {}).metrics || [];
       return hm.map(function (m) {
         var v = "m:" + m;
-        return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
+        return '<option value="' + escapeHtml(v) + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
       }).join("");
     }
     var metrics = (findType("asset_metric") || {}).metrics || [];
     var fields = (findType("asset_state") || {}).fields || [];
     var html = '<optgroup label="Metrics">' + metrics.map(function (m) {
       var v = "m:" + m;
-      return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
+      return '<option value="' + escapeHtml(v) + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(metricLabel(m)) + '</option>';
     }).join("") + '</optgroup><optgroup label="Device state">' + fields.map(function (f) {
       var v = "f:" + f;
-      return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(fieldLabel(f)) + '</option>';
+      return '<option value="' + escapeHtml(v) + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(fieldLabel(f)) + '</option>';
     }).join("") + '</optgroup>';
     // Filter rows: narrow the conditions in this group by who the device is
     // (identifier) or which component the reading is about (name). Gated on the
@@ -2295,7 +2295,7 @@ async function openAutomationWizard(existing, opts) {
     if (tgFiltersAvailable()) {
       var filterOpt = function (d) {
         var v = "d:" + d;
-        return '<option value="' + v + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(tgFilterLabel(d)) + '</option>';
+        return '<option value="' + escapeHtml(v) + '"' + (v === selWhat ? " selected" : "") + '>' + escapeHtml(tgFilterLabel(d)) + '</option>';
       };
       var idDims = tgLiftableDims().filter(function (d) { return TG_FILTER_META[d].device; });
       var nameDims = tgLiftableDims().filter(function (d) { return !TG_FILTER_META[d].device; });
@@ -2342,18 +2342,18 @@ async function openAutomationWizard(existing, opts) {
     var meta = DIM_PICKERS[d];
     var placeholder = escapeHtml(DIM_PLACEHOLDER[d] || d);
     if (!meta) {
-      return '<input type="text" class="tgl-dim" data-dim="' + d + '" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
+      return '<input type="text" class="tgl-dim" data-dim="' + escapeHtml(d) + '" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '" style="flex:1;min-width:120px">';
     }
     var res = dimResult(metric, d, awDimNarrow(d, df));
     if (meta.strict) {
-      return '<select class="tgl-dim" data-dim="' + d + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + placeholder + '">' +
+      return '<select class="tgl-dim" data-dim="' + escapeHtml(d) + '" style="flex:1;min-width:150px;font-size:0.8rem" title="' + placeholder + '">' +
         awDimOptionsHtml(res, value) + '</select>';
     }
     // Combobox + a cue that says whether the typed pattern selects anything —
     // the whole point being that a sensor name is not guessable, so the field
     // has to offer the fleet's own names and confirm what's in it.
     return '<span class="aw-combo aw-combo-dim" style="flex:1;min-width:160px">' +
-        '<input type="text" class="tgl-dim" data-dim="' + d + '" autocomplete="off" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '">' +
+        '<input type="text" class="tgl-dim" data-dim="' + escapeHtml(d) + '" autocomplete="off" placeholder="' + placeholder + '" value="' + escapeHtml(value) + '">' +
         '<div class="aw-suggest"></div>' +
       '</span>' +
       '<span class="tgl-dim-cue" style="font-size:0.75rem;white-space:nowrap"></span>';
