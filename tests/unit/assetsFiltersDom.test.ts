@@ -7,8 +7,9 @@
  * Assets table header — the same idiom as automationsWizardDom.test.ts. It
  * covers the wiring that no server test can see: the menu grouping presets
  * into mine/shared, the delete affordance appearing only where permitted,
- * loading a preset pushing its state into TableSF, and the save modal posting
- * the live table state with the chosen visibility.
+ * loading a preset pushing its state into TableSF, the ★ that pins a preset as
+ * the active view tab's base filter, and the save modal posting the live table
+ * state with the chosen visibility.
  */
 
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
@@ -34,6 +35,11 @@ let canWrite = true;
 let newTabbed: unknown[];
 let noted: unknown[];
 let activeTabName = "";
+// The active view tab's base filter, as assets-tabs.js would report it.
+let based: unknown[];
+let unbased: number;
+let resets: number;
+let activeBase: { id: string; name: string; state: unknown } | null = null;
 
 const STATE_A = { sfFilters: { assetType: ["firewall"] }, sortKey: "hostname", sortDir: "asc" };
 
@@ -98,6 +104,13 @@ beforeAll(() => {
     openInNewTab: (p: unknown) => { newTabbed.push(p); return true; },
     noteFilterLoaded: (p: unknown) => { noted.push(p); },
     activeTabName: () => activeTabName,
+    // Base-filter half of the contract — the menu only offers the ★ when the
+    // strip publishes these, so a cached pre-base assets-tabs.js still works.
+    activeDefault: () => activeBase,
+    setDefaultFilter: (p: unknown) => { based.push(p); return true; },
+    clearDefaultFilter: () => { unbased += 1; return true; },
+    resetToDefault: () => { resets += 1; return true; },
+    refreshDefaultsFromPresets: () => {},
   };
 
   doc.body.innerHTML = TABLE_HTML;
@@ -118,6 +131,10 @@ beforeEach(() => {
   newTabbed = [];
   noted = [];
   activeTabName = "";
+  based = [];
+  unbased = 0;
+  resets = 0;
+  activeBase = null;
   listResponse = {
     filters: [
       { id: "f1", scope: "assets", name: "My firewalls", visibility: "private", ownerName: "me", isOwner: true, state: STATE_A },
@@ -208,6 +225,71 @@ describe("saved filters menu", () => {
     fire('[data-sfl-del="f1"]');
     await flush();
     expect(deleted).toEqual(["f1"]);
+  });
+});
+
+describe("base filter (★)", () => {
+  it("offers the ★ on every preset and pins the one clicked as the tab's base", async () => {
+    await openMenu();
+    expect(doc.querySelectorAll("[data-sfl-default]").length).toBe(2);
+    fire('[data-sfl-default="f1"]');
+    await flush();
+    expect((based[0] as { id: string }).id).toBe("f1");
+    // Pinning applies the base itself (assets-tabs.js drives the table), so the
+    // menu must not also push the state — that would fetch twice.
+    expect(applied).toEqual([]);
+    expect(toasts.some((t) => t.includes("My firewalls"))).toBe(true);
+  });
+
+  it("marks the current base and turns its ★ into an unpin", async () => {
+    activeBase = { id: "f1", name: "My firewalls", state: STATE_A };
+    await openMenu();
+    const star = doc.querySelector('[data-sfl-default="f1"]')!;
+    expect(star.classList.contains("active")).toBe(true);
+    expect(star.getAttribute("aria-pressed")).toBe("true");
+    expect(doc.querySelector('[data-sfl-default="f2"]')!.classList.contains("active")).toBe(false);
+    expect(doc.querySelector(".sfl-row-base")).toBeTruthy();
+
+    fire('[data-sfl-default="f1"]');
+    await flush();
+    expect(unbased).toBe(1);
+    expect(based).toEqual([]);
+  });
+
+  it("grows Reset + Remove entries and renames Clear while a base is set", async () => {
+    await openMenu();
+    let menu = doc.getElementById("saved-filters-menu")!;
+    expect(menu.querySelector('[data-sfl-act="reset"]')).toBeFalsy();
+    expect(menu.querySelector('[data-sfl-act="unbase"]')).toBeFalsy();
+    expect(menu.querySelector('[data-sfl-act="clear"]')!.textContent).toBe("Clear active filters");
+
+    activeBase = { id: "f1", name: "My firewalls", state: STATE_A };
+    fire("#btn-saved-filters");                            // close
+    await openMenu();
+    menu = doc.getElementById("saved-filters-menu")!;
+    expect(menu.querySelector('[data-sfl-act="reset"]')!.textContent).toContain("My firewalls");
+    expect(menu.querySelector('[data-sfl-act="clear"]')!.textContent).toBe("Clear all filters");
+
+    fire('[data-sfl-act="reset"]');
+    await flush();
+    expect(resets).toBe(1);
+    expect(applied).toEqual([]);                           // the tab module drives it
+
+    fire("#btn-saved-filters");
+    await openMenu();
+    fire('[data-sfl-act="unbase"]');
+    await flush();
+    expect(unbased).toBe(1);
+  });
+
+  it("Clear all filters still clears the live view, base or not", async () => {
+    activeBase = { id: "f1", name: "My firewalls", state: STATE_A };
+    await openMenu();
+    fire('[data-sfl-act="clear"]');
+    await flush();
+    expect(applied).toEqual(["cleared"]);
+    expect(refreshes).toBe(1);
+    expect(unbased).toBe(0);                               // clearing is not unpinning
   });
 });
 

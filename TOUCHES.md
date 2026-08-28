@@ -2421,11 +2421,13 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - Per-tab `state` MUST go through `savedFilterService.sanitizeFilterState` — a tab must never be a way to store a filter shape a preset couldn't.
 - A stale `activeId` is REPAIRED to the first tab, never rejected: the operator may have closed that tab in another window, and 400-ing would throw away the whole layout over a race.
 - Cascades with the user (nothing here is shared) — the opposite of `SavedTableFilter.ownerId`'s SetNull, and deliberately so.
-- `savedFilterId` on a tab is a REFERENCE, not a foreign key: it may dangle (preset deleted, or it was someone else's private one) and is never resolved server-side, because it only labels the tab.
+- `savedFilterId` on a tab is a REFERENCE, not a foreign key: it may dangle (preset deleted, or it was someone else's private one) and is never resolved server-side, because it only labels the tab. **`defaultFilterId` is the same kind of label** — the tab's BASE filter is carried by the `defaultState` SNAPSHOT, which is what Reset applies, so a preset its owner deletes can never cost a tab its way back.
+- The base-filter triple is normalized TOGETHER: no `defaultState` ⇒ `defaultFilterId` + `defaultFilterName` are dropped. The snapshot is the single truth for "this tab has a base", and a leftover label would advertise a Reset button that could do nothing (the frontend labels the page-controls button off `activeDefault()`).
+- A base snapshot goes through `sanitizeFilterState` exactly like the tab's own `state` — it is replayed into the table the same way.
 - Read-level gate on both verbs. Tabs are a view of data the caller can already see, so a readonly operator gets them.
 
 **When changing this:**
-- Adding a per-tab field: extend `TableTab` + `sanitizeTabs` + the route's Zod envelope + the client's serialize/restore in `assets-tabs.js` — all four, or the field silently vanishes on the next save.
+- Adding a per-tab field: extend `TableTab` + `sanitizeTabs` + the route's Zod envelope + the client's serialize/restore in `assets-tabs.js` — all four, or the field silently vanishes on the next save. (The base-filter triple `defaultFilterId` / `defaultFilterName` / `defaultState` is the worked example.)
 - Adding tabs to another list page: the scope must already exist in `SAVED_FILTER_SCOPES` (see [services/savedFilterService.ts](#servicessavedfilterservicets)); the strip itself is page-level code.
 - Tests: `tests/unit/tableTabsService.test.ts` (envelope validation), `tests/integration/tableTabs.test.ts` (per-user isolation + readonly access + cascade), `tests/unit/assetsTabsDom.test.ts` (the strip).
 

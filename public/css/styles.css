@@ -1439,6 +1439,15 @@ code {
   border-radius: 50%;
   background: var(--color-primary);
 }
+.table-tab-base {
+  flex: 0 0 auto;
+  /* Accent rather than the dot's primary: the dot says "this view is filtered",
+     the star says "this view has somewhere to go back to" — two facts, so they
+     must not read as one repeated marker. */
+  color: var(--color-accent);
+  font-size: 0.72rem;
+  line-height: 1;
+}
 .table-tab-close {
   flex: 0 0 auto;
   /* The glyph runs well ahead of the tab's own 0.84rem label: a bare x at label
@@ -1532,6 +1541,19 @@ code {
   line-height: 0;
 }
 .saved-filters-menu .sfl-newtab:hover { color: var(--color-accent); }
+.saved-filters-menu .sfl-star {
+  width: auto !important;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.3rem !important;
+  color: var(--color-text-tertiary);
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.saved-filters-menu .sfl-star:hover { color: var(--color-accent); }
+/* Pinned: stays lit without a hover, since it is now state rather than an offer. */
+.saved-filters-menu .sfl-star.active { color: var(--color-accent); }
+.saved-filters-menu .sfl-row-base { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.saved-filters-menu .sfl-row-base:hover { background: color-mix(in srgb, var(--color-accent) 16%, transparent); }
 .saved-filters-menu .sfl-del {
   width: auto !important;
   flex: 0 0 auto;

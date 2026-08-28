@@ -40,6 +40,12 @@ const BodySchema = z.object({
         state:           z.record(z.unknown()).optional(),
         savedFilterId:   z.string().max(64).nullish(),
         savedFilterName: z.string().max(MAX_TAB_NAME_LEN).nullish(),
+        // The tab's pinned BASE filter — `defaultState` is what Reset applies,
+        // the other two only label it. sanitizeTabs normalizes all three
+        // together, so a body carrying an id with no state loses the id.
+        defaultFilterId:   z.string().max(64).nullish(),
+        defaultFilterName: z.string().max(MAX_TAB_NAME_LEN).nullish(),
+        defaultState:      z.record(z.unknown()).nullish(),
       }),
     )
     .max(MAX_TABS),

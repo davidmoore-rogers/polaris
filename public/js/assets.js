@@ -1422,6 +1422,14 @@ async function _handleMacDeleteClick(e) {
 // Filters in exactly the state that needs it (empty table, no way back but a
 // reload) along with the page size the operator had chosen.
 function _renderAssetsPageControls() {
+  // The active view tab may pin a saved filter as its BASE — the view it
+  // returns to — in which case this row offers a way BACK to that view rather
+  // than a way to nothing. Read per render: switching tabs changes the answer,
+  // and assets-tabs.js repaints this row when a base is set or removed.
+  // Feature-tested, not assumed: a browser holding a cached pre-base
+  // assets-tabs.js must still get a controls row rather than a TypeError.
+  var _tabs = window.PolarisAssetTabs;
+  var _base = (_tabs && typeof _tabs.activeDefault === "function") ? _tabs.activeDefault() : null;
   // Nothing matched: there's no page to be on, so report page 1 rather than
   // whatever high page the operator filtered down from — fetchAssetsPage's
   // clamp only fires while the total is non-zero, so a stale page number would
@@ -1442,12 +1450,19 @@ function _renderAssetsPageControls() {
         onClick: loadAssets,
       },
       {
-        label: "Clear Filters",
+        label: _base ? "Reset Filter" : "Clear Filters",
+        title: _base
+          ? 'Back to this tab\'s base filter "' + (_base.name || "base") +
+            '" — clear it from Filters \u25be'
+          : "Clear every column filter on this view",
         onClick: function () {
+          // resetToDefault drives the table through assetsApplyFilterState, so
+          // the tab is mirrored either way — which the older inline
+          // fetch+saveprefs pair here did not do, leaving a cleared table and a
+          // tab still holding the filters a reload would bring back.
+          if (_base && _tabs.resetToDefault()) return;
           if (_assetsSF) _assetsSF.clearFilters();
-          _assetsPage = 1;
-          fetchAssetsPage();
-          _saveAssetsPrefs();
+          assetsApplyFilterState();
         },
       },
     ],

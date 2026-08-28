@@ -10,6 +10,9 @@
  * an empty table and no way back but a browser reload, so the row now renders
  * on every pass and the empty case is what these tests pin.
  *
+ * It also pins the row's one context-dependent button: Clear Filters becomes
+ * Reset Filter while the active view tab has a base filter pinned.
+ *
  * assets.js is an ~18k-line browser script with no module boundary, so the two
  * functions are sliced out by name and eval'd — the idiom in assetRowMenu.test.ts.
  */
@@ -50,6 +53,9 @@ let fetches: number;
 let prefsSaved: number;
 let clearedFilters: number;
 let tbodyHtml: string;
+let resets: number;
+/** The active tab's base filter, as assets-tabs.js would report it. */
+let activeBase: { id: string; name: string; state: unknown } | null;
 
 beforeEach(() => {
   calls = [];
@@ -58,6 +64,8 @@ beforeEach(() => {
   prefsSaved = 0;
   clearedFilters = 0;
   tbodyHtml = "";
+  resets = 0;
+  activeBase = null;
 
   const tbody = {
     addEventListener() {},
@@ -75,6 +83,10 @@ beforeEach(() => {
   g.clearPageControls = (id: string) => { cleared.push(id); };
 
   g.fetchAssetsPage = () => { fetches++; };
+  // The one "state changed" entry point: page 1 → re-fetch → persist prefs →
+  // mirror into the active tab (assets.js). Stubbed to the same composition so
+  // the button assertions below still mean what they say.
+  g.assetsApplyFilterState = () => { g._assetsPage = 1; fetches++; prefsSaved++; };
   g.loadAssets = () => {};
   g._saveAssetsPrefs = () => { prefsSaved++; };
   g._assetsUpdateSelectAll = () => {};
@@ -87,6 +99,16 @@ beforeEach(() => {
   g._assetsPage = 1;
   g._assetsPageSize = 25;
   g._assetsSF = { _filters: {}, clearFilters: () => { clearedFilters++; } };
+  // The page reads window.PolarisAssetTabs for the active tab's base filter;
+  // a page with no tab strip (or a cached older one) simply has none.
+  g.window = {
+    get PolarisAssetTabs() {
+      return activeBase === null ? undefined : {
+        activeDefault: () => activeBase,
+        resetToDefault: () => { resets++; g._assetsPage = 1; fetches++; prefsSaved++; return true; },
+      };
+    },
+  };
 
   (0, eval)(fnSrc("_renderAssetsPageControls"));
   (0, eval)(fnSrc("renderAssetsPage"));
@@ -155,6 +177,36 @@ describe("_renderAssetsPageControls — page number", () => {
     expect(g._assetsPage).toBe(3);
     expect(calls[0]!.page).toBe(3);
     expect(calls[0]!.total).toBe(140);
+  });
+});
+
+describe("Clear Filters vs Reset Filter", () => {
+  it("resets to the tab's base filter instead of clearing, when one is pinned", () => {
+    activeBase = { id: "f7", name: "Down switches", state: { sfFilters: { assetType: ["switch"] } } };
+    g._assetsTotal = 12;
+    g._renderAssetsPageControls();
+
+    const buttons = calls[0]!.opts?.actionButtons ?? [];
+    expect(buttons.map((b) => b.label)).toEqual(["Refresh", "Reset Filter"]);
+    // The base is named where the operator can find it — the label can't be.
+    expect((buttons[1] as unknown as { title: string }).title).toContain("Down switches");
+
+    buttons[1]!.onClick();
+    expect(resets).toBe(1);
+    // Reset REPLACES the clear — clearing as well would drop the base's own
+    // filters and land on the unfiltered table.
+    expect(clearedFilters).toBe(0);
+  });
+
+  it("falls back to clearing when the base filter has gone away", () => {
+    // e.g. the operator switched to a tab with no base between renders.
+    activeBase = null;
+    g._renderAssetsPageControls();
+    const buttons = calls[0]!.opts?.actionButtons ?? [];
+    expect(buttons.map((b) => b.label)).toEqual(["Refresh", "Clear Filters"]);
+    buttons[1]!.onClick();
+    expect(clearedFilters).toBe(1);
+    expect(resets).toBe(0);
   });
 });
 

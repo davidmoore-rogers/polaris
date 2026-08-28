@@ -4,7 +4,8 @@
  * `sanitizeTabs` — the validator behind per-user list-page tabs. Per-tab state
  * validation is delegated to savedFilterService.sanitizeFilterState (covered in
  * its own suite); what's tested here is the envelope: caps, uniqueness, name
- * hygiene, the preset back-reference, and the activeId repair rule.
+ * hygiene, the preset back-reference, the base-filter triple, and the activeId
+ * repair rule.
  */
 
 import { describe, it, expect } from "vitest";
@@ -31,6 +32,9 @@ describe("sanitizeTabs", () => {
         state: STATE,
         savedFilterId: "f1",
         savedFilterName: "Edge firewalls",
+        defaultFilterId: null,
+        defaultFilterName: null,
+        defaultState: null,
       }],
     });
   });
@@ -40,6 +44,38 @@ describe("sanitizeTabs", () => {
     expect(out.tabs[0]!.state).toEqual({ sfFilters: {}, sortKey: null, sortDir: null });
     expect(out.tabs[0]!.savedFilterId).toBeNull();
     expect(out.tabs[0]!.savedFilterName).toBeNull();
+  });
+
+  it("round-trips a tab's base filter", () => {
+    const out = sanitizeTabs({
+      tabs: [tab({ defaultFilterId: "f1", defaultFilterName: "Edge firewalls", defaultState: STATE })],
+      activeId: "t1",
+    });
+    expect(out.tabs[0]!.defaultFilterId).toBe("f1");
+    expect(out.tabs[0]!.defaultFilterName).toBe("Edge firewalls");
+    expect(out.tabs[0]!.defaultState).toEqual(STATE);
+  });
+
+  it("drops a base filter's id + name when there is no state to reset to", () => {
+    // The snapshot is the only thing Reset can apply, so a leftover label would
+    // advertise a Reset button that could do nothing.
+    const out = sanitizeTabs({ tabs: [tab({ defaultFilterId: "f1", defaultFilterName: "Gone" })] });
+    expect(out.tabs[0]!.defaultState).toBeNull();
+    expect(out.tabs[0]!.defaultFilterId).toBeNull();
+    expect(out.tabs[0]!.defaultFilterName).toBeNull();
+  });
+
+  it("holds a base filter's state to the same shape rules as the tab's own", () => {
+    expect(() => sanitizeTabs({ tabs: [tab({ defaultState: { sfFilters: { hostname: { op: "rm -rf" } } } })] }))
+      .toThrowError(/not a recognized filter shape/);
+  });
+
+  it("keeps a base filter whose preset id is gone — the snapshot still resets", () => {
+    // defaultFilterId is a label, never resolved server-side (same rule as
+    // savedFilterId): a deleted preset must not cost a tab its way back.
+    const out = sanitizeTabs({ tabs: [tab({ defaultFilterId: "deleted", defaultState: STATE })] });
+    expect(out.tabs[0]!.defaultState).toEqual(STATE);
+    expect(out.tabs[0]!.defaultFilterId).toBe("deleted");
   });
 
   it("trims names and rejects blank / control-character ones", () => {

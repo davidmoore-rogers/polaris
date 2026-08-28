@@ -9,11 +9,24 @@
  * keeps a REFERENCE for its label, and editing the tab never writes back — the
  * preset may belong to someone else.
  *
+ * A tab may also pin one preset as its BASE filter (Filters ▾ → ★): the view
+ * the tab returns to. That's what makes narrowing INSIDE a saved filter
+ * survivable — the operator filters further on top of the base and gets back
+ * with one click, and while a base is set the page-controls row says "Reset
+ * Filter" instead of "Clear Filters" (the label is assets.js's, read from
+ * activeDefault()). `defaultState` is a SNAPSHOT and is what Reset applies, so
+ * a preset that is deleted — or was someone else's private one — can never take
+ * a tab's base away; refreshDefaultsFromPresets() re-syncs the snapshot from the
+ * live preset every time the Filters menu lists them, which is how an edit to
+ * the preset reaches the tabs based on it.
+ *
  * Contract with assets.js:
  *   init({hashSeeded})  — awaited before the first fetch so the page loads once
  *   syncFromTable()     — called from assetsApplyFilterState on every change
+ *   activeDefault() / resetToDefault() — the Clear/Reset button's label + action
  * and with assets-filters.js:
  *   openInNewTab(preset) / noteFilterLoaded(preset) — the two load paths
+ *   setDefaultFilter(preset) / clearDefaultFilter() / refreshDefaultsFromPresets()
  *
  * Re-entrancy: applying a tab's state calls assetsApplyFilterState, which calls
  * syncFromTable — guarded by _applying so a tab switch can't dirty the tab it
@@ -33,7 +46,9 @@
   var MAX_NAME = 40;
   var SAVE_DEBOUNCE_MS = 800;
 
-  var _tabs = [];            // [{ id, name, state, savedFilterId, savedFilterName }]
+  // [{ id, name, state, savedFilterId, savedFilterName,
+  //    defaultFilterId, defaultFilterName, defaultState }]
+  var _tabs = [];
   var _activeId = "";
   var _applying = false;     // suppresses syncFromTable while we drive the table
   var _persisted = false;    // false until the server has a row for this user
@@ -50,13 +65,35 @@
     return _tabs[0] || null;
   }
 
+  function emptyState() {
+    return { sfFilters: {}, sortKey: null, sortDir: null };
+  }
+
   /** The live table state, in the shape the server stores. */
   function liveState() {
-    if (!_assetsSF || typeof _assetsSF.getPrefs !== "function") {
-      return { sfFilters: {}, sortKey: null, sortDir: null };
-    }
+    if (!_assetsSF || typeof _assetsSF.getPrefs !== "function") return emptyState();
     var p = _assetsSF.getPrefs();
     return { sfFilters: p.sfFilters || {}, sortKey: p.sortKey || null, sortDir: p.sortDir || null };
+  }
+
+  /**
+   * A detached copy of a filter state. A base snapshot must never alias the
+   * live table state or the Filters menu's preset cache: TableSF.applyState
+   * hands the filter objects it is given straight to the filter widgets, so a
+   * shared reference would let the operator's next keystroke quietly edit the
+   * thing they reset TO.
+   */
+  function cloneState(state) {
+    if (!state || typeof state !== "object") return emptyState();
+    return {
+      sfFilters: JSON.parse(JSON.stringify(state.sfFilters || {})),
+      sortKey: state.sortKey || null,
+      sortDir: state.sortDir || null,
+    };
+  }
+
+  function sameState(a, b) {
+    return JSON.stringify(cloneState(a)) === JSON.stringify(cloneState(b));
   }
 
   function filterCount(state) {
@@ -81,6 +118,9 @@
             state: t.state,
             savedFilterId: t.savedFilterId || null,
             savedFilterName: t.savedFilterName || null,
+            defaultFilterId: t.defaultFilterId || null,
+            defaultFilterName: t.defaultFilterName || null,
+            defaultState: t.defaultState || null,
           };
         }),
         activeId: _activeId,
@@ -107,12 +147,34 @@
     }
   }
 
+  /**
+   * Repaint the page-controls row, whose Clear/Reset button is labeled from the
+   * active tab's base. assets.js only re-renders it after a fetch, so a base
+   * change that leaves the query alone (setting one on the view already on
+   * screen, clearing one) has to ask for the repaint itself.
+   */
+  function notifyBaseChanged() {
+    if (typeof window._renderAssetsPageControls === "function") window._renderAssetsPageControls();
+  }
+
+  /** Drive the table to a state and let assets.js fetch + mirror it back. */
+  function applyStateToTable(state) {
+    if (!_assetsSF || typeof _assetsSF.applyState !== "function") return false;
+    _assetsSF.applyState(cloneState(state));
+    assetsApplyFilterState();
+    return true;
+  }
+
   // ─── Rendering ────────────────────────────────────────────────────────────
 
   function tabTitle(tab) {
     var n = filterCount(tab.state);
     var bits = [n ? (n + (n === 1 ? " filter" : " filters")) : "No filters"];
-    if (tab.savedFilterName) bits.push('from saved filter "' + tab.savedFilterName + '"');
+    if (tab.defaultState) {
+      bits.push('resets to base filter "' + (tab.defaultFilterName || "base") + '"');
+    } else if (tab.savedFilterName) {
+      bits.push('from saved filter "' + tab.savedFilterName + '"');
+    }
     bits.push("double-click to rename");
     return bits.join(" · ");
   }
@@ -124,10 +186,16 @@
     list.innerHTML = _tabs.map(function (t) {
       var active = t.id === _activeId;
       var dot = filterCount(t.state) ? '<span class="table-tab-dot" aria-hidden="true"></span>' : "";
+      // The base marker does not replace the dot: "has filters" and "has a base
+      // to get back to" are two different facts, and the operator acts on both.
+      var base = t.defaultState
+        ? '<span class="table-tab-base" title="Base filter: ' +
+          escapeHtml(t.defaultFilterName || "saved filter") + '">&#9733;</span>'
+        : "";
       return '<div class="table-tab' + (active ? " active" : "") + '" data-tab-id="' + escapeHtml(t.id) + '"' +
         ' role="tab" aria-selected="' + (active ? "true" : "false") + '" tabindex="0"' +
         ' title="' + escapeHtml(tabTitle(t)) + '">' +
-          dot +
+          base + dot +
           '<span class="table-tab-name">' + escapeHtml(t.name) + "</span>" +
           (closable
             ? '<button type="button" class="table-tab-close" data-tab-close="' + escapeHtml(t.id) +
@@ -158,9 +226,12 @@
     var tab = {
       id: uid(),
       name: (opts.name || defaultTabName()).slice(0, MAX_NAME),
-      state: opts.state || { sfFilters: {}, sortKey: null, sortDir: null },
+      state: opts.state ? cloneState(opts.state) : emptyState(),
       savedFilterId: opts.savedFilterId || null,
       savedFilterName: opts.savedFilterName || null,
+      defaultFilterId: opts.defaultFilterId || null,
+      defaultFilterName: opts.defaultFilterName || null,
+      defaultState: opts.defaultState ? cloneState(opts.defaultState) : null,
     };
     _tabs.push(tab);
     _activeId = tab.id;
@@ -185,8 +256,10 @@
     if (idx < 0) return;
     var tab = _tabs[idx];
     // Only ask when there's hand-built work to lose: a tab backed by a saved
-    // filter can be reopened from the Filters menu in one click.
-    if (filterCount(tab.state) && !tab.savedFilterId) {
+    // filter can be reopened from the Filters menu in one click, and a tab
+    // sitting exactly on its own base has nothing on top of it to lose.
+    var onBase = tab.defaultState && sameState(tab.state, tab.defaultState);
+    if (filterCount(tab.state) && !tab.savedFilterId && !onBase) {
       var ok = await showConfirm('Close "' + tab.name + '"? Its filters are not saved.');
       if (!ok) return;
     }
@@ -266,6 +339,11 @@
             state: (t.state && typeof t.state === "object") ? t.state : { sfFilters: {}, sortKey: null, sortDir: null },
             savedFilterId: t.savedFilterId || null,
             savedFilterName: t.savedFilterName || null,
+            // Rows written before base filters existed carry none — an absent
+            // default is simply a tab with nothing to reset to.
+            defaultFilterId: t.defaultFilterId || null,
+            defaultFilterName: t.defaultFilterName || null,
+            defaultState: (t.defaultState && typeof t.defaultState === "object") ? t.defaultState : null,
           };
         });
         _activeId = layout.activeId || _tabs[0].id;
@@ -279,6 +357,9 @@
           state: liveState(),
           savedFilterId: null,
           savedFilterName: null,
+          defaultFilterId: null,
+          defaultFilterName: null,
+          defaultState: null,
         }];
         _activeId = _tabs[0].id;
         _persisted = false;                               // don't write until they use it
@@ -342,6 +423,95 @@
       }
       render();
       scheduleSave();
+    },
+
+    /**
+     * Pin a saved preset as the ACTIVE tab's base filter, and apply it.
+     *
+     * Marking a base IS a reset to it: the base is where the tab starts from,
+     * and on a tab already carrying hand-built filters a click that visibly
+     * changed nothing would leave the operator unsure it took. What's lost is
+     * scratch column filters, which the base is now the way back to.
+     */
+    setDefaultFilter: function (preset) {
+      if (!_ready || !preset) return false;
+      var tab = activeTab();
+      if (!tab) return false;
+      tab.defaultFilterId = preset.id || null;
+      tab.defaultFilterName = preset.name ? String(preset.name).slice(0, MAX_NAME) : null;
+      tab.defaultState = cloneState(preset.state);
+      // The tab came from this preset in every sense now — keep the load-path
+      // provenance in step so the close confirmation and tooltip agree.
+      tab.savedFilterId = tab.defaultFilterId;
+      tab.savedFilterName = tab.defaultFilterName;
+      render();
+      scheduleSave();
+      // applyStateToTable mirrors the base back into tab.state via
+      // syncFromTable; the repaint below then relabels the button.
+      applyStateToTable(tab.defaultState);
+      notifyBaseChanged();
+      return true;
+    },
+
+    /**
+     * Unpin the active tab's base. Deliberately leaves the live filters where
+     * they are — the operator asked to stop having a way back, not to lose the
+     * view they are looking at.
+     */
+    clearDefaultFilter: function () {
+      if (!_ready) return false;
+      var tab = activeTab();
+      if (!tab || !tab.defaultState) return false;
+      tab.defaultFilterId = null;
+      tab.defaultFilterName = null;
+      tab.defaultState = null;
+      render();
+      scheduleSave();
+      notifyBaseChanged();
+      return true;
+    },
+
+    /** The active tab's base filter, or null — read by assets.js + the menu. */
+    activeDefault: function () {
+      var tab = activeTab();
+      if (!tab || !tab.defaultState) return null;
+      return {
+        id: tab.defaultFilterId,
+        name: tab.defaultFilterName,
+        state: cloneState(tab.defaultState),
+      };
+    },
+
+    /** Re-apply the active tab's base filter. False when it has none. */
+    resetToDefault: function () {
+      var tab = activeTab();
+      if (!tab || !tab.defaultState) return false;
+      return applyStateToTable(tab.defaultState);
+    },
+
+    /**
+     * Re-sync every tab's base snapshot from a fresh saved-filter list (the
+     * Filters menu calls this on each fetch). An edit to the preset reaches the
+     * tabs based on it this way; a preset that has gone — deleted, or someone
+     * else's private one — leaves the snapshot alone, so the tab keeps a base
+     * it can still reset to.
+     */
+    refreshDefaultsFromPresets: function (list) {
+      if (!_ready || !Array.isArray(list)) return;
+      var changed = false;
+      _tabs.forEach(function (t) {
+        if (!t.defaultState || !t.defaultFilterId) return;
+        var preset = null;
+        list.forEach(function (f) { if (f && f.id === t.defaultFilterId) preset = f; });
+        if (!preset) return;
+        var name = preset.name ? String(preset.name).slice(0, MAX_NAME) : null;
+        if (name && name !== t.defaultFilterName) { t.defaultFilterName = name; changed = true; }
+        if (!sameState(preset.state, t.defaultState)) { t.defaultState = cloneState(preset.state); changed = true; }
+      });
+      if (!changed) return;
+      render();
+      scheduleSave();
+      notifyBaseChanged();
     },
 
     /** The active tab's name — seeds the save-preset modal. */

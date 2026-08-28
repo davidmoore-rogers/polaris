@@ -3053,6 +3053,9 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
         var btn = document.createElement("button");
         btn.className = "btn btn-secondary btn-sm" + (cfg.className ? " " + cfg.className : "");
         btn.textContent = cfg.label;
+        // Optional: a button whose label changes with context (Assets' Clear
+        // Filters / Reset Filter) says which one it is here.
+        if (cfg.title) btn.title = cfg.title;
         btn.addEventListener("click", cfg.onClick);
         right.appendChild(btn);
       });

@@ -16,6 +16,14 @@
  * (applyTableLayout) — they describe the operator's screen, not what they're
  * looking for.
  *
+ * Each row's ★ pins that preset as the ACTIVE VIEW TAB's base filter — the view
+ * the tab returns to, so the operator can narrow further inside a saved filter
+ * and get back in one click (the page-controls button then reads "Reset Filter"
+ * instead of "Clear Filters"). The base lives on the tab, not on the preset:
+ * assets-tabs.js owns it, this file only offers the verb, and every list fetch
+ * hands the fresh presets to refreshDefaultsFromPresets so an edited preset
+ * reaches the tabs based on it.
+ *
  * Depends on globals from app.js (openModal/closeModal/showConfirm/permAtLeast),
  * api.js (api/showToast/escapeHtml), table-sf.js (TableSF.prototype.applyState)
  * and assets.js (_assetsSF, assetsApplyFilterState) — all loaded before this
@@ -36,7 +44,23 @@ async function _sflFetch() {
   var data = await api.savedFilters.list(SFL_SCOPE);
   _sflCache = (data && data.filters) || [];
   _sflLoaded = true;
+  // The presets a tab is based on may have been edited (or published) since the
+  // last look — this is the only moment we hold the current ones. Feature-tested
+  // rather than assumed: a browser holding a cached pre-base assets-tabs.js
+  // must keep a working Filters menu, not throw on every open.
+  if (_sflTabs("refreshDefaultsFromPresets")) window.PolarisAssetTabs.refreshDefaultsFromPresets(_sflCache);
   return _sflCache;
+}
+
+/** window.PolarisAssetTabs, but only when it carries the method we need. */
+function _sflTabs(method) {
+  var t = window.PolarisAssetTabs;
+  return t && typeof t[method] === "function" ? t : null;
+}
+
+/** The active view tab's base filter, or null (no tab strip = no base). */
+function _sflActiveBase() {
+  return _sflTabs("activeDefault") ? window.PolarisAssetTabs.activeDefault() : null;
 }
 
 /** The live table state, in the shape the server stores. */
@@ -111,10 +135,22 @@ function _sflCanDelete(f) {
   return f.isOwner || permAtLeast("assets", "fullwrite");
 }
 
-function _sflRowHtml(f) {
+function _sflRowHtml(f, base) {
   var badge = f.visibility === "public"
     ? '<span class="sfl-badge" title="Shared with everyone">Public</span>' : "";
   var owner = f.isOwner ? "" : '<span class="sfl-owner">' + escapeHtml(f.ownerName) + "</span>";
+  // Base filter toggle — only where the tab strip exists (assets.html), since a
+  // base belongs to a tab.
+  var isBase = !!(base && base.id === f.id);
+  var star = _sflTabs("setDefaultFilter")
+    ? '<button type="button" class="sfl-star' + (isBase ? " active" : "") + '" data-sfl-default="' +
+      escapeHtml(f.id) + '" aria-pressed="' + (isBase ? "true" : "false") + '" title="' +
+      (isBase
+        ? "This tab's base filter — click to remove it"
+        : "Use as this tab's base filter, the view Reset Filter returns to") +
+      '" aria-label="' + (isBase ? "Remove " : "Use ") + escapeHtml(f.name) +
+      ' as this tab\'s base filter">&#9733;</button>'
+    : "";
   // Open-in-new-tab only exists where the tab strip does (assets.html).
   var newTab = window.PolarisAssetTabs
     ? '<button type="button" class="sfl-newtab" data-sfl-newtab="' + escapeHtml(f.id) +
@@ -126,20 +162,34 @@ function _sflRowHtml(f) {
     ? '<button type="button" class="sfl-del" data-sfl-del="' + escapeHtml(f.id) +
       '" title="Delete this saved filter" aria-label="Delete ' + escapeHtml(f.name) + '">&times;</button>'
     : "";
-  return '<div class="sfl-row">' +
+  return '<div class="sfl-row' + (isBase ? " sfl-row-base" : "") + '">' +
     '<button type="button" class="sfl-load" data-sfl-load="' + escapeHtml(f.id) + '" title="' +
       escapeHtml(_sflDescribeState(f.state)) + '">' +
       '<span class="sfl-name">' + escapeHtml(f.name) + "</span>" + badge + owner +
-    "</button>" + newTab + del +
+    "</button>" + star + newTab + del +
   "</div>";
 }
 
 function _sflRenderMenu(list, error) {
   var menu = document.getElementById("saved-filters-menu");
   if (!menu) return;
+  // Read the base at render time — the menu is rebuilt on every open, so it is
+  // always the base of the tab the operator is actually looking at.
+  var base = _sflActiveBase();
   var html =
     '<button type="button" data-sfl-act="save">Save current filters&hellip;</button>' +
-    '<button type="button" data-sfl-act="clear">Clear active filters</button>' +
+    (base
+      ? '<button type="button" data-sfl-act="reset" title="' +
+          escapeHtml(_sflDescribeState(base.state)) + '">Reset to base filter &ldquo;' +
+          escapeHtml(base.name || "base") + '&rdquo;</button>'
+      : "") +
+    '<button type="button" data-sfl-act="clear">' +
+      (base ? "Clear all filters" : "Clear active filters") + "</button>" +
+    // The ★ can only unpin a base whose preset is still listed; a base whose
+    // preset was deleted still resets, so removing it needs a way in here.
+    (base
+      ? '<button type="button" data-sfl-act="unbase">Remove base filter from this tab</button>'
+      : "") +
     '<div class="dropdown-divider"></div>';
 
   if (error) {
@@ -152,11 +202,12 @@ function _sflRenderMenu(list, error) {
     if (!mine.length && !shared.length) {
       html += '<div class="sfl-empty">No saved filters yet</div>';
     }
+    var row = function (f) { return _sflRowHtml(f, base); };
     if (mine.length) {
-      html += '<div class="dropdown-heading">My filters</div>' + mine.map(_sflRowHtml).join("");
+      html += '<div class="dropdown-heading">My filters</div>' + mine.map(row).join("");
     }
     if (shared.length) {
-      html += '<div class="dropdown-heading">Shared filters</div>' + shared.map(_sflRowHtml).join("");
+      html += '<div class="dropdown-heading">Shared filters</div>' + shared.map(row).join("");
     }
   }
   menu.innerHTML = html;
@@ -182,6 +233,31 @@ function _sflApply(filter) {
   // the tab, so this only stamps the provenance on top.
   if (window.PolarisAssetTabs) window.PolarisAssetTabs.noteFilterLoaded(filter);
   showToast('Applied filter "' + filter.name + '"');
+}
+
+/** Clear every live column filter. The tab's base (if any) stays configured. */
+function _sflClearAll() {
+  if (!_assetsSF) return;
+  _assetsSF.clearFilters();
+  assetsApplyFilterState();
+}
+
+/** Pin / unpin a preset as the active tab's base filter (the row's ★). */
+function _sflToggleBase(id) {
+  if (!_sflTabs("setDefaultFilter")) return;
+  var base = _sflActiveBase();
+  if (base && base.id === id) {
+    if (window.PolarisAssetTabs.clearDefaultFilter()) {
+      showToast("Base filter removed from this tab");
+    }
+    return;
+  }
+  var f = _sflCache.find(function (x) { return x.id === id; });
+  if (!f) return;
+  // Setting a base applies it — see setDefaultFilter's note on why.
+  if (window.PolarisAssetTabs.setDefaultFilter(f)) {
+    showToast('This tab now resets to "' + f.name + '"');
+  }
 }
 
 /** Load a preset into a NEW view tab, leaving the current one untouched. */
@@ -328,12 +404,24 @@ document.addEventListener("DOMContentLoaded", function () {
     var act = e.target.closest("[data-sfl-act]");
     if (act) {
       menu.classList.remove("open");
-      if (act.getAttribute("data-sfl-act") === "save") {
+      var which = act.getAttribute("data-sfl-act");
+      if (which === "save") {
         _sflOpenSaveModal();
-      } else if (_assetsSF) {
-        _assetsSF.clearFilters();
-        assetsApplyFilterState();
+      } else if (which === "reset") {
+        if (_sflTabs("resetToDefault")) window.PolarisAssetTabs.resetToDefault();
+      } else if (which === "unbase") {
+        if (_sflTabs("clearDefaultFilter") && window.PolarisAssetTabs.clearDefaultFilter()) {
+          showToast("Base filter removed from this tab");
+        }
+      } else {
+        _sflClearAll();
       }
+      return;
+    }
+    var star = e.target.closest("[data-sfl-default]");
+    if (star) {
+      menu.classList.remove("open");
+      _sflToggleBase(star.getAttribute("data-sfl-default"));
       return;
     }
     var newTab = e.target.closest("[data-sfl-newtab]");

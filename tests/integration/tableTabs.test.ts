@@ -3,6 +3,7 @@
  *
  * The /api/v1/me/table-tabs surface (Assets page tab strip):
  *   - empty layout before anything is saved; full-replace round-trip after
+ *   - a tab's BASE filter round-trips, and its id/name drop without a snapshot
  *   - tabs are STRICTLY per user — two users never see each other's
  *   - a readonly caller gets tabs (they only need read on the scope's key)
  *   - unknown scope + malformed tab payloads are rejected
@@ -106,6 +107,29 @@ d("table tabs", () => {
     await put(admin, layout([{ id: "t9", name: "Only one", state: {} }], "t9"));
     const after = await admin.agent.get("/api/v1/me/table-tabs?scope=assets");
     expect(after.body.tabs.map((t: any) => t.id)).toEqual(["t9"]);
+  });
+
+  it("round-trips a tab's base filter, and drops a label with no snapshot", async () => {
+    const saved = await put(admin, layout([
+      { id: "t1", name: "Firewalls", state: STATE, defaultFilterId: "f1", defaultFilterName: "Edge firewalls", defaultState: STATE },
+      // A label with nothing to reset to is normalized away rather than 400-ing
+      // the whole strip — see sanitizeTabs.
+      { id: "t2", name: "Orphan", state: {}, defaultFilterId: "f9", defaultFilterName: "Deleted" },
+    ], "t1"));
+    expect(saved.status).toBe(200);
+    expect(saved.body.tabs[0].defaultFilterId).toBe("f1");
+    expect(saved.body.tabs[0].defaultState).toEqual(STATE);
+    expect(saved.body.tabs[1].defaultState).toBeNull();
+    expect(saved.body.tabs[1].defaultFilterId).toBeNull();
+
+    const reread = await admin.agent.get("/api/v1/me/table-tabs?scope=assets");
+    expect(reread.body.tabs[0].defaultFilterName).toBe("Edge firewalls");
+
+    // A base state is held to the same shape rules as the tab's own.
+    const bad = await put(admin, layout([
+      { id: "t1", name: "x", state: {}, defaultState: { sfFilters: { hostname: { op: "nope" } } } },
+    ], "t1"));
+    expect(bad.status).toBe(400);
   });
 
   it("keeps each user's tabs to themselves, and gives a readonly caller tabs of their own", async () => {

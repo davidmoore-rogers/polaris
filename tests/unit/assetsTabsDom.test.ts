@@ -5,9 +5,9 @@
  * Same eval-into-happy-dom idiom as assetsFiltersDom.test.ts. This is the net
  * for the wiring no server test can see: seeding the first tab from the live
  * table, switching tabs applying that tab's state, rename, close, the
- * open-a-preset-in-a-new-tab entry point, and — the subtle one — the
- * re-entrancy guard that stops applying a tab from writing the table state back
- * into the tab the operator just left.
+ * open-a-preset-in-a-new-tab entry point, the base ("default") filter a tab
+ * resets to, and — the subtle one — the re-entrancy guard that stops applying a
+ * tab from writing the table state back into the tab the operator just left.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -34,6 +34,7 @@ let liveFilters: Record<string, unknown>;
 let liveSort: { key: string | null; dir: string | null };
 let appliedStates: unknown[];
 let refreshes: number;
+let repaints: number;
 let confirmAnswer: boolean;
 
 /** Boot a fresh module instance against a fresh DOM. */
@@ -69,6 +70,10 @@ async function boot(opts?: { hashSeeded?: boolean }) {
     refreshes += 1;
     tabsApi().syncFromTable();
   };
+  // assets.js's page-controls painter — the module asks for a repaint when a
+  // base filter changes without the query changing, since that row carries the
+  // Clear Filters / Reset Filter label.
+  (win as unknown as Record<string, unknown>)._renderAssetsPageControls = () => { repaints += 1; };
 
   (0, eval)(SRC);
   await tabsApi().init(opts || {});
@@ -81,6 +86,11 @@ const tabsApi = () => (g.window as any).PolarisAssetTabs as {
   syncFromTable: () => void;
   openInNewTab: (p: unknown) => boolean;
   noteFilterLoaded: (p: unknown) => void;
+  setDefaultFilter: (p: unknown) => boolean;
+  clearDefaultFilter: () => boolean;
+  activeDefault: () => { id: string | null; name: string | null; state: any } | null;
+  resetToDefault: () => boolean;
+  refreshDefaultsFromPresets: (list: unknown) => void;
   activeTabName: () => string;
   _debugState: () => { tabs: any[]; activeId: string; persisted: boolean };
 };
@@ -104,6 +114,7 @@ beforeEach(() => {
   liveSort = { key: null, dir: null };
   appliedStates = [];
   refreshes = 0;
+  repaints = 0;
   confirmAnswer = true;
 });
 
@@ -279,5 +290,142 @@ describe("saved-filter entry points", () => {
     tabsApi().noteFilterLoaded({ id: "f8", name: "Something else", state: { sfFilters: {} } });
     expect(tabEls()[0]!.querySelector(".table-tab-name")!.textContent).toBe("Down switches");
     expect(tabsApi()._debugState().tabs[0].savedFilterId).toBe("f8");
+  });
+});
+
+describe("base (default) filter", () => {
+  beforeEach(() => {
+    getResponse = {
+      version: 1,
+      activeId: "t1",
+      tabs: [
+        { id: "t1", name: "All assets", state: { sfFilters: {}, sortKey: null, sortDir: null } },
+        { id: "t2", name: "Scratch", state: { sfFilters: {}, sortKey: null, sortDir: null } },
+      ],
+    };
+  });
+
+  const PRESET = {
+    id: "f7",
+    name: "Down switches",
+    state: { sfFilters: { assetType: ["switch"], _monitor: ["Down"] }, sortKey: "hostname", sortDir: "asc" },
+  };
+
+  it("marking a base applies it, marks the tab, and persists the triple", async () => {
+    await boot();
+    expect(tabsApi().activeDefault()).toBeNull();
+
+    expect(tabsApi().setDefaultFilter(PRESET)).toBe(true);
+    expect(liveFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    expect(refreshes).toBe(1);
+    expect(repaints).toBe(1);                             // the Clear→Reset relabel
+    expect(tabEls()[0]!.querySelector(".table-tab-base")).toBeTruthy();
+    expect(tabEls()[1]!.querySelector(".table-tab-base")).toBeFalsy();
+
+    const base = tabsApi().activeDefault()!;
+    expect(base.id).toBe("f7");
+    expect(base.name).toBe("Down switches");
+    expect(base.state.sfFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+
+    await flushSave();
+    const last = saved[saved.length - 1] as any;
+    expect(last.tabs[0].defaultFilterId).toBe("f7");
+    expect(last.tabs[0].defaultFilterName).toBe("Down switches");
+    expect(last.tabs[0].defaultState.sfFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    expect(last.tabs[1].defaultState).toBeNull();
+  });
+
+  it("narrowing inside the base and resetting returns to the base, not to nothing", async () => {
+    await boot();
+    tabsApi().setDefaultFilter(PRESET);
+    // The operator filters further on top of the base — the whole point.
+    liveFilters = { assetType: ["switch"], _monitor: ["Down"], hostname: "nsh" };
+    (g.assetsApplyFilterState as () => void)();
+    expect(tabsApi()._debugState().tabs[0].state.sfFilters.hostname).toBe("nsh");
+
+    expect(tabsApi().resetToDefault()).toBe(true);
+    expect(liveFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    // Reset drives the table through assetsApplyFilterState, so the tab is
+    // mirrored back too — a reload must not bring the narrowing back.
+    expect(tabsApi()._debugState().tabs[0].state.sfFilters.hostname).toBeUndefined();
+  });
+
+  it("the base snapshot is detached from the preset object it came from", async () => {
+    await boot();
+    const preset = JSON.parse(JSON.stringify(PRESET));
+    tabsApi().setDefaultFilter(preset);
+    preset.state.sfFilters.hostname = "mutated";          // menu cache churn / next open
+    expect(tabsApi().activeDefault()!.state.sfFilters.hostname).toBeUndefined();
+    expect(tabsApi().resetToDefault()).toBe(true);
+    expect(liveFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+  });
+
+  it("a base belongs to ONE tab — switching tabs changes the answer", async () => {
+    await boot();
+    tabsApi().setDefaultFilter(PRESET);
+    fire(tabEls()[1], "click");
+    expect(tabsApi().activeDefault()).toBeNull();
+    expect(tabsApi().resetToDefault()).toBe(false);
+    fire(tabEls()[0], "click");
+    expect(tabsApi().activeDefault()!.id).toBe("f7");
+  });
+
+  it("clearing the base leaves the view on screen alone", async () => {
+    await boot();
+    tabsApi().setDefaultFilter(PRESET);
+    repaints = 0;
+    expect(tabsApi().clearDefaultFilter()).toBe(true);
+    expect(tabsApi().activeDefault()).toBeNull();
+    expect(tabEls()[0]!.querySelector(".table-tab-base")).toBeFalsy();
+    expect(repaints).toBe(1);
+    // The filters the operator is looking at are still there — they asked to
+    // stop having a way back, not to lose the view.
+    expect(liveFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    expect(tabsApi().clearDefaultFilter()).toBe(false);   // nothing left to clear
+  });
+
+  it("a restored tab carries its base, and an edited preset re-syncs into it", async () => {
+    getResponse = {
+      version: 1,
+      activeId: "t1",
+      tabs: [{
+        id: "t1",
+        name: "Down switches",
+        state: { sfFilters: { assetType: ["switch"], hostname: "nsh" }, sortKey: null, sortDir: null },
+        defaultFilterId: "f7",
+        defaultFilterName: "Down switches",
+        defaultState: { sfFilters: { assetType: ["switch"] }, sortKey: null, sortDir: null },
+      }],
+    };
+    await boot();
+    expect(tabEls()[0]!.querySelector(".table-tab-base")).toBeTruthy();
+    expect(tabsApi().activeDefault()!.state.sfFilters).toEqual({ assetType: ["switch"] });
+
+    // Its owner edited + renamed the preset.
+    tabsApi().refreshDefaultsFromPresets([
+      { id: "f7", name: "Down switches (edge)", state: { sfFilters: { assetType: ["switch"], _monitor: ["Down"] } } },
+    ]);
+    const base = tabsApi().activeDefault()!;
+    expect(base.name).toBe("Down switches (edge)");
+    expect(base.state.sfFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    // The narrowing on top of it is untouched by a re-sync.
+    expect(tabsApi()._debugState().tabs[0].state.sfFilters.hostname).toBe("nsh");
+  });
+
+  it("a preset that has gone leaves the snapshot alone rather than orphaning the tab", async () => {
+    await boot();
+    tabsApi().setDefaultFilter(PRESET);
+    tabsApi().refreshDefaultsFromPresets([{ id: "someone-elses", name: "Other", state: { sfFilters: {} } }]);
+    expect(tabsApi().activeDefault()!.state.sfFilters).toEqual({ assetType: ["switch"], _monitor: ["Down"] });
+    expect(tabsApi().resetToDefault()).toBe(true);
+  });
+
+  it("closing a tab sitting exactly on its base does not ask", async () => {
+    await boot();
+    tabsApi().setDefaultFilter(PRESET);
+    confirmAnswer = false;                                 // any prompt = the close is refused
+    fire(doc.querySelector('[data-tab-close="t1"]'), "click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(tabEls()).toHaveLength(1);
   });
 });
