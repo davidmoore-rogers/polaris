@@ -597,6 +597,15 @@ export const SCOPE_FIELD_OPS: Record<string, readonly string[]> = {
   // a device whose interface stream is never collected reports no interfaces
   // at all, so a positive rule never selects it.
   interfaceName: STRING_OPS,
+  // "Broadcast SSID" — matched against the SSIDs the device is currently
+  // broadcasting (AssetApVap.ssid), so it selects ACCESS POINTS: "every AP
+  // carrying GUEST". The second relation-backed field, and it follows
+  // interfaceName exactly — multi-valued (a positive operator is satisfied
+  // by ANY SSID, a negative one must hold for every one), resolved in SQL by
+  // scopeRelationIndex at fleet scale and by the joined relation on the
+  // single-asset paths. Same consequence, too: an AP whose radios have not
+  // been discovered reports no SSIDs, so a positive rule never selects it.
+  ssid: STRING_OPS,
   status: ["equals", "notEquals"],
   assetId: ["equals", "notEquals"],
 };
@@ -758,11 +767,27 @@ export function conditionFields(cond: ScopeConditionGroup): Set<string> {
   return out;
 }
 
-/** Does this tree ask about the interface inventory? The one condition field
- *  backed by a RELATION rather than a column, so every loader decides the join
- *  (or the prefetch) in one place instead of each spelling the field name. */
+/**
+ * The condition fields backed by a RELATION rather than a column, mapped to
+ * the Asset relation and column each one reads. Every loader decides its join
+ * (or its prefetch) from this table instead of spelling field names itself —
+ * which is what kept the fleet-scale SQL path and the single-asset in-memory
+ * path answering the same question when the second such field arrived.
+ */
+export const RELATION_CONDITION_FIELDS: Record<string, { relation: "interfaces" | "apVaps"; column: "ifName" | "ssid" }> = {
+  interfaceName: { relation: "interfaces", column: "ifName" },
+  ssid:          { relation: "apVaps",     column: "ssid" },
+};
+export const RELATION_CONDITION_FIELD_NAMES = Object.keys(RELATION_CONDITION_FIELDS);
+
+/** Does this tree ask about the interface inventory? */
 export function conditionNeedsInterfaces(cond: ScopeConditionGroup | null | undefined): boolean {
   return !!cond && conditionFields(cond).has("interfaceName");
+}
+
+/** Does this tree ask about the broadcast-SSID inventory? */
+export function conditionNeedsApVaps(cond: ScopeConditionGroup | null | undefined): boolean {
+  return !!cond && conditionFields(cond).has("ssid");
 }
 
 /**
@@ -793,13 +818,18 @@ export interface ScopeConditionAsset {
    *  2000 assets this relation is an order of magnitude larger than the row it
    *  hangs off, which is why only the SINGLE-asset paths read it this way. */
   interfaces?: { ifName: string }[];
-  /** The fleet-scale alternative: `interfaceLeafKey(leaf)` -> did this asset
-   *  satisfy that leaf, resolved in SQL by decorateInterfaceLeafHits rather
-   *  than by shipping the relation. Stamped onto the row so every existing
-   *  call site (scopeMatchesAsset, the carve-out peer predicates, the contact
-   *  preview) keeps working with no extra parameter to thread. A key that is
-   *  ABSENT was never prefetched and means unknown, not false. */
-  interfaceLeafHits?: ReadonlyMap<string, boolean>;
+  /** Current-state broadcast-SSID inventory, for the `ssid` field. Joined on
+   *  the same terms as `interfaces` above — only when a tree asks for it,
+   *  and only on the SINGLE-asset paths. */
+  apVaps?: { ssid: string | null }[];
+  /** The fleet-scale alternative for EVERY relation-backed field:
+   *  `relationLeafKey(leaf)` -> did this asset satisfy that leaf, resolved in
+   *  SQL by decorateRelationLeafHits rather than by shipping the relation.
+   *  Stamped onto the row so every existing call site (scopeMatchesAsset, the
+   *  carve-out peer predicates, the contact preview) keeps working with no
+   *  extra parameter to thread. A key that is ABSENT was never prefetched and
+   *  means unknown, not false. */
+  relationLeafHits?: ReadonlyMap<string, boolean>;
 }
 
 /** The asset value a string-op rule compares against, lower-cased. */
@@ -867,11 +897,20 @@ export function positiveStringOp(operator: string): string {
 }
 
 /**
- * Prefetch/lookup key for one `interfaceName` leaf — the positive operator plus
- * the value, so `equals port9` and `notEquals port9` share one entry.
- * `scopeInterfaceIndex.ts` builds the map; `matchScopeRule` reads it.
+ * Prefetch/lookup key for one relation-backed leaf — the FIELD plus the
+ * positive operator plus the value, so `equals port9` and `notEquals port9`
+ * share one entry (both are answered by the same query, inverted) while
+ * `interfaceName equals GUEST` and `ssid equals GUEST` never collide now that
+ * two relations share one map. `scopeRelationIndex.ts` builds the map;
+ * `matchScopeRule` reads it.
  */
-export function interfaceLeafKey(rule: ScopeConditionRule): string {
+export function relationLeafKey(rule: ScopeConditionRule): string {
+  return rule.field + "|" + leafOpValueKey(rule);
+}
+
+/** The operator+value half of the key — the part both halves of a negative
+ *  pair share. Separate only so the field can be prefixed above. */
+function leafOpValueKey(rule: ScopeConditionRule): string {
   return positiveStringOp(rule.operator) + "\u0000" + rule.value.toLowerCase();
 }
 
@@ -905,6 +944,18 @@ function interfaceNames(asset: ScopeConditionAsset): string[] {
   return out;
 }
 
+/** Every SSID the asset is currently broadcasting, lower-cased. One SSID is
+ *  commonly broadcast by several VAPs (one per radio), so this deduplicates —
+ *  otherwise a negative operator has to hold against the same name twice,
+ *  which is harmless, and a positive one short-circuits anyway. */
+function broadcastSsids(asset: ScopeConditionAsset): string[] {
+  const out = new Set<string>();
+  for (const v of asset.apVaps ?? []) {
+    if (v.ssid) out.add(v.ssid.toLowerCase());
+  }
+  return Array.from(out);
+}
+
 function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): boolean {
   const v = rule.value.toLowerCase();
   const str = (raw: string | null | undefined): string => (raw ?? "").toLowerCase();
@@ -934,24 +985,27 @@ function matchScopeRule(rule: ScopeConditionRule, asset: ScopeConditionAsset): b
       return rule.operator === "notInCidr" ? !inside : inside;
     }
     case "fortigate": return matchMultiValue(rule, fortigateNames(asset), v);
-    case "interfaceName": {
-      // Two ways in, one predicate. A fleet-scale loader resolves each leaf in
-      // SQL and stamps the verdict onto the row (decorateInterfaceLeafHits), so
-      // 2000 devices worth of port names never reach this process; the
-      // single-asset paths join the relation and compare it here. Both answer
-      // "does ANY interface satisfy the positive form", inverted for a negative
-      // operator, and both read an empty inventory the same way.
+    case "interfaceName":
+    case "ssid": {
+      // Two ways in, one predicate, for both relation-backed fields. A
+      // fleet-scale loader resolves each leaf in SQL and stamps the verdict
+      // onto the row (decorateRelationLeafHits), so 2000 devices worth of port
+      // names never reach this process; the single-asset paths join the
+      // relation and compare it here. Both answer "does ANY value satisfy the
+      // positive form", inverted for a negative operator, and both read an
+      // empty inventory the same way.
       //
       // has() rather than get() is the load-bearing part: a leaf the decoration
       // did not prefetch is UNKNOWN, not false, and falls through to the
       // relation instead of silently answering no.
-      const pre = asset.interfaceLeafHits;
-      const key = interfaceLeafKey(rule);
+      const pre = asset.relationLeafHits;
+      const key = relationLeafKey(rule);
       if (pre && pre.has(key)) {
         const hit = pre.get(key) === true;
         return isNegativeStringOp(rule.operator) ? !hit : hit;
       }
-      return matchMultiValue(rule, interfaceNames(asset), v);
+      const values = rule.field === "ssid" ? broadcastSsids(asset) : interfaceNames(asset);
+      return matchMultiValue(rule, values, v);
     }
     default: { // manufacturer / model / hostname / os (+ the device-filter
       // extras: osVersion / department / location) — string ops
@@ -3162,6 +3216,7 @@ const SCOPE_FIELD_META: Record<string, { label: string; optionsFrom: string | nu
   tag: { label: "Tag", optionsFrom: "tags" },
   subnet: { label: "Subnet / IP", optionsFrom: "subnets" },
   interfaceName: { label: "Device interface", optionsFrom: "interfaceNames" },
+  ssid: { label: "Broadcast SSID", optionsFrom: "ssids" },
   status: {
     label: "Lifecycle status",
     optionsFrom: null,

@@ -5681,6 +5681,7 @@ function _tagValueOptions(schema) {
       case "manufacturers":  return plain(o.manufacturers);
       case "models":         return plain(o.models);
       case "interfaceNames": return plain(o.interfaceNames);
+      case "ssids":          return plain(o.ssids);
       case "tags":           return plain(o.tags);
       case "subnets":
         return (o.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });

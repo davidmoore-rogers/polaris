@@ -208,6 +208,10 @@ export async function listScopeOptions(): Promise<{
   /** Distinct interface names the MONITORED fleet currently reports, for the
    *  condition builder's "Device interface" picker. Capped — see the query. */
   interfaceNames: string[];
+  /** Distinct SSIDs the MONITORED fleet is currently broadcasting, for the
+   *  "Broadcast SSID" picker. Same monitored-only rule: an SSID only
+   *  unmonitored APs carry is a choice that cannot produce an alert. */
+  ssids: string[];
   subnets: { id: string; name: string; cidr: string }[];
   regions: string[];
   /** How deep region NESTING goes right now (1 = nothing is nested), plus the
@@ -239,7 +243,7 @@ export async function listScopeOptions(): Promise<{
   // event and change triggers fire on them. The subnet list is IPAM, not
   // inventory, so it is unfiltered by the same reasoning.
   const monitoredOnly = { monitored: true } as const;
-  const [mfrRows, modelRows, ifNameRows, subnets, regions, regionLevelsOut, roles, tagRows] = await Promise.all([
+  const [mfrRows, modelRows, ifNameRows, ssidRows, subnets, regions, regionLevelsOut, roles, tagRows] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -265,6 +269,16 @@ export async function listScopeOptions(): Promise<{
       orderBy: { ifName: "asc" },
       take: INTERFACE_NAME_OPTION_CAP,
     }).catch(() => [] as { ifName: string }[]),
+    // The SSIDs the monitored fleet is currently broadcasting, for the
+    // "Broadcast SSID" condition field. Tiny next to the interface list — a
+    // site runs a handful of SSIDs across hundreds of APs — but grouped in
+    // the database for the same reason: the rows are per (AP, radio, VAP).
+    prisma.assetApVap.groupBy({
+      by: ["ssid"],
+      where: { asset: monitoredOnly, ssid: { not: null } },
+      orderBy: { ssid: "asc" },
+      take: INTERFACE_NAME_OPTION_CAP,
+    }).catch(() => [] as { ssid: string | null }[]),
     prisma.subnet.findMany({
       select: { id: true, name: true, cidr: true },
       where: { status: { not: "deprecated" } },
@@ -310,6 +324,7 @@ export async function listScopeOptions(): Promise<{
     manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
     models: modelRows.map((r) => r.model).filter((m): m is string => !!m && m.trim() !== ""),
     interfaceNames: ifNameRows.map((r) => r.ifName).filter((n) => !!n && n.trim() !== ""),
+    ssids: ssidRows.map((r) => r.ssid).filter((n): n is string => !!n && n.trim() !== ""),
     subnets,
     // Bare names — how User/Role/GroupMapping.regionTags store them. The
     // `region:` prefix exists only on ASSET tags.

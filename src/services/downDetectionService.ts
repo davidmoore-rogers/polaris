@@ -55,7 +55,7 @@ import {
   type Trigger,
   type RuleScope,
 } from "./notificationTypes.js";
-import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
+import { decorateRelationLeafHits } from "./scopeRelationIndex.js";
 import {
   recordDownDetectionBuild,
   setDownDetectionAssets,
@@ -148,7 +148,7 @@ let lastRuleCountWasZero: boolean | null = null;
 const DOWN_SCOPE_SELECT = {
   id: true,
   // NOTE: `interfaces` is deliberately absent even though the condition tree can
-  // read it — decorateInterfaceLeafHits resolves those leaves in SQL instead.
+  // read it — decorateRelationLeafHits resolves those leaves in SQL instead.
   // See scopeInterfaceIndex.ts.
   hostname: true,
   assetType: true,
@@ -296,7 +296,7 @@ async function buildDownDetectionIndex(): Promise<DownDetectionIndex> {
   // than joined onto DOWN_SCOPE_SELECT. Which asset each automation covers
   // decides what "down" MEANS for it (business rule 36), so an unresolved leaf
   // would leave devices reading passive.
-  await decorateInterfaceLeafHits(assets, rules.map((r) => r.scope?.condition));
+  await decorateRelationLeafHits(assets, rules.map((r) => r.scope?.condition));
 
   const byAsset = new Map<string, DownWinner>();
   const conflicts: DownConflict[] = [];

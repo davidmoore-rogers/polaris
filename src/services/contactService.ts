@@ -51,6 +51,7 @@ import {
 } from "./tagAssignmentService.js";
 import {
   deviceFilterConditionSchema,
+  conditionNeedsApVaps,
   conditionNeedsInterfaces,
   evaluateScopeCondition,
   scopeConditionStats,
@@ -822,6 +823,7 @@ export async function resolveContactsForAsset(assetId: string): Promise<ContactR
   // rows do. Conditional all the same: most fleets have no contact filtering by
   // interface, and this is the alert fan-out path.
   const needsInterfaces = filtered.some((f) => conditionNeedsInterfaces(f.condition));
+  const needsApVaps = filtered.some((f) => conditionNeedsApVaps(f.condition));
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
     // `tags` on top of the flat-criteria select: the condition tree has a `tag`
@@ -830,6 +832,7 @@ export async function resolveContactsForAsset(assetId: string): Promise<ContactR
       ...SINGLE_ASSET_CANDIDATE_SELECT,
       tags: true,
       ...(needsInterfaces ? { interfaces: { select: { ifName: true } } } : {}),
+      ...(needsApVaps ? { apVaps: { select: { ssid: true } } } : {}),
     },
   });
   if (!asset) return byPin;

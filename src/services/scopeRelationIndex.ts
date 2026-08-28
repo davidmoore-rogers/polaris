@@ -1,31 +1,36 @@
 /**
- * src/services/scopeInterfaceIndex.ts — the SQL half of the condition tree's
- * `interfaceName` ("Device interface") field.
+ * src/services/scopeRelationIndex.ts — the SQL half of the condition tree's
+ * RELATION-backed fields: `interfaceName` ("Device interface", AssetInterface)
+ * and `ssid` ("Broadcast SSID", AssetApVap).
  *
  * The device-filter condition tree is evaluated in memory (an OR / NONE /
  * notAll group makes any narrowing WHERE unsound, so there is no safe superset
- * to ask the database for). Every other field it reads is a scalar column that
- * rides the asset row for free. `interfaceName` is the exception: it reads
- * AssetInterface, which at 2000 monitored devices is tens of thousands of rows —
- * an order of magnitude bigger than the fleet itself — and the notification
- * engine re-resolves every rule's scope on a 60s tick.
+ * to ask the database for). Almost every field it reads is a scalar column that
+ * rides the asset row for free. These two are the exceptions: `interfaceName`
+ * reads AssetInterface, which at 2000 monitored devices is tens of thousands of
+ * rows — an order of magnitude bigger than the fleet itself — and the
+ * notification engine re-resolves every rule's scope on a 60s tick.
  *
  * So instead of joining the relation, a fleet-scale loader calls
- * `decorateInterfaceLeafHits(rows, trees)`: one GROUP BY per DISTINCT leaf,
- * each returning only the ids of the assets holding a matching interface, then
- * the verdict is stamped onto each row as `interfaceLeafHits`. Port names never
- * reach this process, and because the answer rides the asset row there is no
- * context to thread through `scopeMatchesAsset` or the carve-out predicates.
+ * `decorateRelationLeafHits(rows, trees)`: one GROUP BY per DISTINCT leaf, each
+ * returning only the ids of the assets holding a matching value, then the
+ * verdict is stamped onto each row as `relationLeafHits`. Port names and SSIDs
+ * never reach this process, and because the answer rides the asset row there is
+ * no context to thread through `scopeMatchesAsset` or the carve-out predicates.
  *
  * Both halves of a negative pair share one query: `notEquals port9` is answered
  * by "which assets HAVE an interface equal to port9", inverted — that is what
- * `positiveStringOp` / `interfaceLeafKey` exist for, and it is why the
+ * `positiveStringOp` / `relationLeafKey` exist for, and it is why the
  * prefetched and the in-memory paths in `matchScopeRule` cannot disagree.
+ *
+ * Which relation and column each field reads is declared ONCE, in
+ * `RELATION_CONDITION_FIELDS` in notificationTypes.ts, so this module and the
+ * single-asset joins cannot come to disagree about what `ssid` means.
  *
  * Callers: notificationEngine.loadScopeAssets (engine tick + the builder
  * preview + mass pinning, via loadScopeAssetIds) plus its carve-out pass,
  * contactService's condition preview, downDetectionService's index build. The
- * SINGLE-asset paths deliberately do not use this — they join `interfaces` on
+ * SINGLE-asset paths deliberately do not use this — they join the relation on
  * the one row instead, which is cheaper than a second round trip.
  */
 
@@ -33,29 +38,30 @@ import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { compileWildcard } from "../utils/wildcard.js";
 import {
-  interfaceLeafKey,
+  RELATION_CONDITION_FIELDS,
+  relationLeafKey,
   positiveStringOp,
   type ScopeConditionGroup,
   type ScopeConditionRule,
 } from "./notificationTypes.js";
 
 /** The row shape decoration needs: an id to key on, and somewhere to stamp. */
-export interface InterfaceDecoratable {
+export interface RelationDecoratable {
   id: string;
-  interfaceLeafHits?: ReadonlyMap<string, boolean>;
+  relationLeafHits?: ReadonlyMap<string, boolean>;
 }
 
 type MaybeTree = ScopeConditionGroup | null | undefined;
 
-/** Every `interfaceName` leaf across the given trees, deduped by prefetch key. */
-function interfaceLeaves(trees: readonly MaybeTree[]): Map<string, ScopeConditionRule> {
+/** Every relation-backed leaf across the given trees, deduped by prefetch key. */
+function relationLeaves(trees: readonly MaybeTree[]): Map<string, ScopeConditionRule> {
   const out = new Map<string, ScopeConditionRule>();
   const walk = (g: ScopeConditionGroup): void => {
     for (const c of g.children) {
       if ("op" in c) walk(c as ScopeConditionGroup);
-      else if ((c as ScopeConditionRule).field === "interfaceName") {
+      else if (RELATION_CONDITION_FIELDS[(c as ScopeConditionRule).field]) {
         const rule = c as ScopeConditionRule;
-        const key = interfaceLeafKey(rule);
+        const key = relationLeafKey(rule);
         if (!out.has(key)) out.set(key, rule);
       }
     }
@@ -65,8 +71,8 @@ function interfaceLeaves(trees: readonly MaybeTree[]): Map<string, ScopeConditio
 }
 
 /**
- * The ifName filter for one leaf, or null when the operator cannot be expressed
- * in SQL and the names have to be tested here.
+ * The string filter for one leaf, or null when the operator cannot be expressed
+ * in SQL and the values have to be tested here.
  *
  * Only `matches` (shell wildcard) lands in the null branch, and only the wider
  * DEVICE_FILTER vocabulary offers it — an automations rule cannot produce one,
@@ -74,7 +80,7 @@ function interfaceLeaves(trees: readonly MaybeTree[]): Map<string, ScopeConditio
  * prefix still narrows the read ("PLV*-61F-?" scans the PLV names, not the
  * table), which is the shape the flat criteria builder's patterns actually have.
  */
-function ifNameWhere(rule: ScopeConditionRule): Prisma.StringFilter | null {
+function valueWhere(rule: ScopeConditionRule): Prisma.StringFilter | null {
   const mode = "insensitive" as const;
   switch (positiveStringOp(rule.operator)) {
     case "equals": return { equals: rule.value, mode };
@@ -93,18 +99,19 @@ function wildcardPrefix(pattern: string): string {
 
 /** The ids, among `assetIds`, of the assets satisfying one leaf positively. */
 async function assetIdsForLeaf(rule: ScopeConditionRule, assetIds: string[]): Promise<Set<string>> {
+  const spec = RELATION_CONDITION_FIELDS[rule.field];
+  if (!spec) return new Set();
   const scope = { assetId: { in: assetIds } };
-  const where = ifNameWhere(rule);
+  const where = valueWhere(rule);
 
   if (where) {
     // groupBy, not findMany+distinct: this has to be a real GROUP BY in the
     // database. A client-side dedupe would ship every matching row, which for a
     // broad leaf ("contains port") is the whole table — the exact cost this
     // module exists to avoid.
-    const rows = await prisma.assetInterface.groupBy({
-      by: ["assetId"],
-      where: { ...scope, ifName: where },
-    });
+    const rows = spec.relation === "interfaces"
+      ? await prisma.assetInterface.groupBy({ by: ["assetId"], where: { ...scope, ifName: where } })
+      : await prisma.assetApVap.groupBy({ by: ["assetId"], where: { ...scope, ssid: where } });
     return new Set(rows.map((r) => r.assetId));
   }
 
@@ -117,32 +124,38 @@ async function assetIdsForLeaf(rule: ScopeConditionRule, assetIds: string[]): Pr
   // evaluator — compileWildcard produces a case-SENSITIVE regex.
   try { re = compileWildcard(rule.value.toLowerCase()); } catch { return new Set(); }
   const prefix = wildcardPrefix(rule.value);
-  const rows = await prisma.assetInterface.findMany({
-    where: { ...scope, ...(prefix ? { ifName: { startsWith: prefix, mode: "insensitive" as const } } : {}) },
-    select: { assetId: true, ifName: true },
-  });
+  const prefixWhere = prefix ? { startsWith: prefix, mode: "insensitive" as const } : undefined;
+  const rows: { assetId: string; value: string | null }[] = spec.relation === "interfaces"
+    ? (await prisma.assetInterface.findMany({
+        where: { ...scope, ...(prefixWhere ? { ifName: prefixWhere } : {}) },
+        select: { assetId: true, ifName: true },
+      })).map((r) => ({ assetId: r.assetId, value: r.ifName }))
+    : (await prisma.assetApVap.findMany({
+        where: { ...scope, ...(prefixWhere ? { ssid: prefixWhere } : {}) },
+        select: { assetId: true, ssid: true },
+      })).map((r) => ({ assetId: r.assetId, value: r.ssid }));
   const out = new Set<string>();
   for (const r of rows) {
-    if (re.test(r.ifName.toLowerCase())) out.add(r.assetId);
+    if (r.value && re.test(r.value.toLowerCase())) out.add(r.assetId);
   }
   return out;
 }
 
 /**
- * Resolve the `interfaceName` leaves of `trees` for `rows` and stamp the
- * verdicts onto them. A no-op — no queries at all — when no tree asks about an
- * interface, so every caller can call it unconditionally.
+ * Resolve the relation-backed leaves of `trees` for `rows` and stamp the
+ * verdicts onto them. A no-op — no queries at all — when no tree asks about a
+ * relation, so every caller can call it unconditionally.
  *
  * Decoration MERGES: the engine decorates a rule's own scope first and its
  * carve-out peers' scopes second, and the second pass must not drop the first
  * pass's answers.
  */
-export async function decorateInterfaceLeafHits(
-  rows: InterfaceDecoratable[],
+export async function decorateRelationLeafHits(
+  rows: RelationDecoratable[],
   trees: readonly MaybeTree[],
 ): Promise<void> {
   if (rows.length === 0) return;
-  const leaves = interfaceLeaves(trees);
+  const leaves = relationLeaves(trees);
   if (leaves.size === 0) return;
 
   const assetIds = rows.map((r) => r.id);
@@ -153,8 +166,8 @@ export async function decorateInterfaceLeafHits(
   );
 
   for (const row of rows) {
-    const map = new Map<string, boolean>(row.interfaceLeafHits ?? []);
+    const map = new Map<string, boolean>(row.relationLeafHits ?? []);
     for (const [key, ids] of resolved) map.set(key, ids.has(row.id));
-    row.interfaceLeafHits = map;
+    row.relationLeafHits = map;
   }
 }

@@ -74,7 +74,7 @@ import {
   type DeviceFilterAsset,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
-import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
+import { decorateRelationLeafHits } from "./scopeRelationIndex.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { buildComposedEmail, scopeRegionTagsOf } from "./notificationRecipientService.js";
@@ -305,7 +305,7 @@ async function loadScopeAssets(scope: RuleScope, opts?: { monitoredOnly?: boolea
     // id list) and never joined onto SCOPE_SELECT — at 2000 assets the interface
     // inventory is an order of magnitude larger than the fleet, and this runs
     // per rule per 60s tick. No interface leaf ⇒ no query.
-    await decorateInterfaceLeafHits(rows, [scope.condition]);
+    await decorateRelationLeafHits(rows, [scope.condition]);
     rows = rows.filter((a) => evaluateScopeCondition(scope.condition!, a));
   }
   return rows;
@@ -1191,7 +1191,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     // covering nothing (positive operator) or everything (negative one) — and a
     // wrong answer here either duplicates an alert or silences one.
     if (shadowable) {
-      await decorateInterfaceLeafHits(
+      await decorateRelationLeafHits(
         assets,
         (shadowIndex!.bySig.get(sig!) ?? []).map((m) => m.rule.scope?.condition),
       );
@@ -2923,7 +2923,7 @@ async function computeCarveOut(
   // draft does not, and carveOutPeerCovers reads the verdict off the row. The
   // rows arrive already decorated for the DRAFT's own leaves; this merges the
   // peers' on top.
-  await decorateInterfaceLeafHits(scopeAssets, peers.map((p) => p.scope?.condition));
+  await decorateRelationLeafHits(scopeAssets, peers.map((p) => p.scope?.condition));
 
   return carveOutAggregate(scopeRank(input.scope), scopeAssets, peers);
 }

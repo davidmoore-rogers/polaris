@@ -1377,7 +1377,7 @@ async function openAutomationWizard(existing, opts) {
   }
   // Scope-picker option lists (distinct manufacturers/models + IPAM subnets) —
   // refreshed every open, they're one cheap query each.
-  var _awScopeOptions = { manufacturers: [], models: [], interfaceNames: [], subnets: [], regions: [], tagCatalog: [] };
+  var _awScopeOptions = { manufacturers: [], models: [], interfaceNames: [], ssids: [], subnets: [], regions: [], tagCatalog: [] };
   try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
   if (_awScopeOptions && Array.isArray(_awScopeOptions.roles)) _ruleScopeRoles = _awScopeOptions.roles;
   try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
@@ -1845,6 +1845,7 @@ async function openAutomationWizard(existing, opts) {
       { field: "tag", label: "Tag", ops: ["has", "notHas"], optionsFrom: "tags" },
       { field: "subnet", label: "Subnet / IP", ops: ["inCidr", "notInCidr"], optionsFrom: "subnets" },
       { field: "interfaceName", label: "Device interface", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "interfaceNames" },
+      { field: "ssid", label: "Broadcast SSID", ops: ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"], optionsFrom: "ssids" },
       { field: "status", label: "Lifecycle status", ops: ["equals", "notEquals"], optionsFrom: null, values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
       // Asset ID intentionally omitted — a raw id targets one device with no
       // precedence meaning; use hostname. Saved rules using it still evaluate.
@@ -2098,6 +2099,7 @@ async function openAutomationWizard(existing, opts) {
       case "manufacturers": return (_awScopeOptions.manufacturers || []).map(function (m) { return { value: m, label: m }; });
       case "models": return (_awScopeOptions.models || []).map(function (m) { return { value: m, label: m }; });
       case "interfaceNames": return (_awScopeOptions.interfaceNames || []).map(function (n) { return { value: n, label: n }; });
+      case "ssids":         return (_awScopeOptions.ssids || []).map(function (n) { return { value: n, label: n }; });
       case "tags": return (_ruleTagList || []).map(function (t) { return { value: t, label: t }; });
       case "subnets": return (_awScopeOptions.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
       default: return [];

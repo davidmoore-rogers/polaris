@@ -40,7 +40,7 @@ import {
   type ScopeConditionAsset,
   type ScopeConditionGroup,
 } from "./notificationTypes.js";
-import { decorateInterfaceLeafHits } from "./scopeInterfaceIndex.js";
+import { decorateRelationLeafHits } from "./scopeRelationIndex.js";
 
 /**
  * The scalar columns the condition evaluator reads. Covers the DEVICE_FILTER
@@ -66,7 +66,7 @@ const DEVICE_FILTER_SCALAR_SELECT = {
 /**
  * DEVICE_FILTER_SCALAR_SELECT plus whichever relations the given trees ask
  * about. `interfaceName` is absent on purpose — it is prefetched in SQL by
- * `decorateInterfaceLeafHits`, not joined (see the header).
+ * `decorateRelationLeafHits`, not joined (see the header).
  *
  * Exported because the SINGLE-asset paths (a tag or contact tested against one
  * triggering / just-written asset) select the same fields and must not
@@ -89,6 +89,12 @@ export function deviceFilterSelect(
       ? { learnedLocation: true, fortigateSightings: { select: { fortigateDevice: true } } }
       : {}),
     ...(opts?.needsInterfaces ? { interfaces: { select: { ifName: true } } } : {}),
+    // The second relation-backed field. Derived from the tree rather than
+    // from an opts flag the way `interfaces` is: every caller that reaches
+    // here already handed us the conditions, and one more hand-passed flag is
+    // one more place for a caller to forget it and get a silently
+    // never-matching filter.
+    ...(fields.has("ssid") ? { apVaps: { select: { ssid: true } } } : {}),
   };
 }
 
@@ -123,7 +129,7 @@ export async function resolveDeviceFilterAssetIds(
     ...(opts?.where ? { where: opts.where } : {}),
     select: deviceFilterSelect([cond]),
   });
-  await decorateInterfaceLeafHits(rows, [cond]);
+  await decorateRelationLeafHits(rows, [cond]);
   const out = new Set<string>();
   for (const row of rows) {
     if (evaluateScopeCondition(cond, row as ScopeConditionAsset)) out.add(row.id);

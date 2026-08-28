@@ -103,6 +103,7 @@
         case "manufacturers": return plain(opts.manufacturers);
         case "models": return plain(opts.models);
         case "interfaceNames": return plain(opts.interfaceNames);
+        case "ssids":          return plain(opts.ssids);
         case "tags": return plain(opts.tags);
         case "subnets":
           return (opts.subnets || []).map(function (sn) { return { value: sn.cidr, label: sn.name + " — " + sn.cidr }; });
