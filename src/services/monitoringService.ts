@@ -91,7 +91,7 @@ import {
 // from monitoringService; implementations live in utils/fortiswitchCmdb.ts.
 export { parseFortiosMemberList, buildFortiswitchTrunkMembers, findFortiswitchUplinkPorts };
 import { fgRequest, type FortiGateConfig } from "./fortigateService.js";
-import { fetchVcenterQuickStats } from "./vcenterService.js";
+import { fetchVcenterQuickStats, fetchVcenterHostSnapshot } from "./vcenterService.js";
 import {
   fmgProxyRest,
   resolveDeviceMgmtIpViaFmg,
@@ -189,6 +189,18 @@ export interface ProbeResult {
    * (lastRebootAt + device.reboot Event) from it.
    */
   uptimeSec?: number;
+  /**
+   * "This was not a measurement." Set when the transport could not ask the
+   * thing that answers FOR the asset — today only the vCenter probe, when the
+   * vCenter server itself is unreachable. `recordProbeResult` writes no sample
+   * and moves no counter for a skipped probe; it only bumps `lastMonitorAt` so
+   * the cadence keeps its spacing instead of retrying on every tick.
+   *
+   * Deliberately NOT a failure: a device behind an unreachable hypervisor
+   * manager is a device Polaris has no opinion about, and counting it would
+   * declare an entire virtual fleet down the moment vCenter hiccups.
+   */
+  skipped?: boolean;
 }
 
 /**
@@ -802,14 +814,19 @@ function defaultPollingForSource(
     return stream === "responseTime" ? "icmp" : null;
   }
   if (source === "vcenter") {
-    // Response time: ICMP against the guest/host IP. CPU/memory: the
-    // hypervisor-view quickStats stream — one batched vCenter call per
-    // integration per tick serves every monitored VM, no in-guest
-    // credential needed. ESXi hosts have no quickStats row (the collector
-    // returns a soft error for them); the hostMonitor class block routes
-    // their cpuMemory at SNMP when the operator wants host telemetry.
-    if (stream === "responseTime") return "icmp";
-    if (stream === "cpuMemory") return "vcenter";
+    // Everything vCenter can answer for, it answers for. Response time
+    // (power / connection state), CPU/memory, interfaces and storage all come
+    // out of ONE batched fetch per integration per tick — no credential on the
+    // device, no SNMP to enable on ESXi, and for a VM no reachable guest IP.
+    // ICMP was the response-time default until 2026-08 and was the wrong
+    // question twice over: it needs an IP the guest may not expose to Polaris,
+    // and it answers "did a packet come back" when the operator is asking
+    // "is this VM running".
+    //
+    // Temperature and LLDP stay null: ESXi numeric sensors are not collected
+    // yet, and neither role publishes LLDP.
+    if (stream === "responseTime" || stream === "cpuMemory"
+        || stream === "interfaces" || stream === "storage") return "vcenter";
     return null;
   }
   // manual
@@ -1732,6 +1749,14 @@ export async function probeAsset(
       return await probeFortinetController(asset, integration as any, start, timeoutMs);
     }
 
+    // vCenter probes ask the vCenter SERVER about the asset, so they need no
+    // asset IP at all — a VM whose guest exposes no address to Polaris, and an
+    // ESXi host added to vCenter by a name that never resolved, are both still
+    // probeable. Dispatches before the IP guard for exactly that reason.
+    if (polling === "vcenter") {
+      return await probeVcenter(assetId, start);
+    }
+
     // AD-discovered Windows hosts often have no IP yet (only dnsName/hostname),
     // and WinRM/SSH resolve FQDNs fine — fall back so the probe can still run
     // when the polling method is one that doesn't need an IPv4 literal. "http"
@@ -2184,17 +2209,29 @@ async function fetchFortinetControllerInventory(
   return fetchPromise;
 }
 
-// ─── vCenter quickStats warm cache ─────────────────────────────────────────
+// ─── vCenter warm caches ───────────────────────────────────────────────────
 //
-// The "vcenter" cpuMemory polling method reads per-VM CPU/RAM from the
-// vCenter server's batched SOAP quickStats fetch — ONE upstream call per
-// vCenter integration per 30s tick serves every monitored VM (the
-// controller-inventory cache pattern above: TTL + promise-singleton
-// in-flight guard so N heavy workers waking on the same tick coalesce
-// into one call). Entries are keyed by BOTH externalId forms the sync
-// uses (instanceUuid, and `${integrationId}:${moref}` for VMs whose
-// detail call couldn't produce a uuid) so the per-asset lookup always
-// matches the asset's vcenter-vm AssetSource externalId.
+// The "vcenter" polling method reads a monitored VM's or ESXi host's state
+// from the vCenter SERVER rather than from the device itself: ONE batched SOAP
+// fetch per vCenter integration per 30s tick serves every asset that
+// integration discovered, so the per-asset cost is a Map lookup. Two caches,
+// because the two managed-object types are two different property fetches:
+//
+//   VirtualMachine → fetchVcenterQuickStats     CPU/RAM, power state, uptime,
+//                                               guest filesystems, guest vNICs
+//   HostSystem     → fetchVcenterHostSnapshot   CPU/RAM, connection state,
+//                                               uptime, pNICs + VMkernel NICs,
+//                                               and the datastore inventory a
+//                                               host's storage figures come from
+//
+// Both follow the controller-inventory cache pattern above (TTL +
+// promise-singleton in-flight guard, so N workers waking on the same tick
+// coalesce into one upstream call). Entries are keyed by the SAME externalId
+// forms the AssetSource rows carry.
+//
+// WHY THE VM CACHE IS KEYED TWICE: the sync writes `instanceUuid` when the
+// detail call produced one and `${integrationId}:${moref}` when it didn't, so
+// both forms have to hit.
 
 interface VcenterQuickStatsCacheEntry {
   fetchedAt: number;
@@ -2202,9 +2239,19 @@ interface VcenterQuickStatsCacheEntry {
   stats: Map<string, import("./vcenterService.js").VcenterVmQuickStats>;
 }
 
+interface VcenterHostCacheEntry {
+  fetchedAt: number;
+  fetchDurationMs: number;
+  hosts: Map<string, import("./vcenterService.js").VcenterHostStats>;
+  /** Datastores mounted by each host moref — the host's storage stream. */
+  datastoresByHostMoref: Map<string, import("./vcenterService.js").DiscoveredVcenterDatastore[]>;
+}
+
 const VCENTER_QUICKSTATS_CACHE_TTL_MS = 30_000;
 const vcenterQuickStatsCache = new Map<string, VcenterQuickStatsCacheEntry>();
 const inflightVcenterQuickStats = new Map<string, Promise<VcenterQuickStatsCacheEntry>>();
+const vcenterHostCache = new Map<string, VcenterHostCacheEntry>();
+const inflightVcenterHost = new Map<string, Promise<VcenterHostCacheEntry>>();
 
 async function fetchVcenterQuickStatsCached(
   integration: { id: string; config: Record<string, unknown> },
@@ -2241,41 +2288,199 @@ async function fetchVcenterQuickStatsCached(
   return fetchPromise;
 }
 
+async function fetchVcenterHostSnapshotCached(
+  integration: { id: string; config: Record<string, unknown> },
+): Promise<VcenterHostCacheEntry> {
+  const cached = vcenterHostCache.get(integration.id);
+  if (cached && Date.now() - cached.fetchedAt < VCENTER_QUICKSTATS_CACHE_TTL_MS) {
+    return cached;
+  }
+  const inflight = inflightVcenterHost.get(integration.id);
+  if (inflight) return inflight;
+
+  const fetchPromise = (async (): Promise<VcenterHostCacheEntry> => {
+    const fetchStartedAt = performance.now();
+    try {
+      const snap = await fetchVcenterHostSnapshot(integration.config as unknown as import("./vcenterService.js").VcenterConfig);
+      const hosts = new Map<string, import("./vcenterService.js").VcenterHostStats>();
+      for (const h of snap.hosts) hosts.set(`${integration.id}:${h.moref}`, h);
+      const datastoresByHostMoref = new Map<string, import("./vcenterService.js").DiscoveredVcenterDatastore[]>();
+      for (const ds of snap.datastores) {
+        for (const hostMoref of ds.hostMorefs) {
+          const list = datastoresByHostMoref.get(hostMoref);
+          if (list) list.push(ds);
+          else datastoresByHostMoref.set(hostMoref, [ds]);
+        }
+      }
+      const entry: VcenterHostCacheEntry = {
+        fetchedAt: Date.now(),
+        fetchDurationMs: Math.max(0, Math.round(performance.now() - fetchStartedAt)),
+        hosts,
+        datastoresByHostMoref,
+      };
+      vcenterHostCache.set(integration.id, entry);
+      return entry;
+    } finally {
+      inflightVcenterHost.delete(integration.id);
+    }
+  })();
+
+  inflightVcenterHost.set(integration.id, fetchPromise);
+  return fetchPromise;
+}
+
 /**
- * Hypervisor-view CPU/RAM telemetry for a vCenter VM. Resolves the vCenter
- * integration through the asset's vcenter-vm AssetSource row — NOT through
- * discoveredByIntegration, because a VM that AD/Entra discovered first
- * keeps the directory integration there even after a vCenter sync merges
- * into it. Reads the warm quickStats cache (one upstream call per
- * integration per tick), so the per-asset cost is a Map lookup.
+ * One asset's current reading from vCenter, whatever role it plays.
+ *
+ * The four outcomes are deliberately distinct because the PROBE treats them
+ * differently, and that distinction is the whole safety story for making
+ * "vcenter" the response-time default:
+ *
+ *   vm / host   — vCenter answered ABOUT this asset. Its own fields decide
+ *                 up/down.
+ *   absent      — vCenter answered, and this asset was not in the answer (VM
+ *                 deleted at source, or the polling method is configured on an
+ *                 asset that carries no vCenter source). A real finding: the
+ *                 probe FAILS and says why.
+ *   unreachable — Polaris could not ask (vCenter down, credential rejected,
+ *                 integration disabled). That is a fact about vCenter, not
+ *                 about the device, so the probe is SKIPPED rather than
+ *                 counted: one vCenter outage must not declare every VM and
+ *                 host in the fleet down at the same instant.
+ */
+type VcenterReading =
+  | { kind: "vm"; row: import("./vcenterService.js").VcenterVmQuickStats; fetchDurationMs: number }
+  | {
+      kind: "host";
+      row: import("./vcenterService.js").VcenterHostStats;
+      datastores: import("./vcenterService.js").DiscoveredVcenterDatastore[];
+      fetchDurationMs: number;
+    }
+  | { kind: "absent"; error: string }
+  | { kind: "unreachable"; error: string };
+
+/**
+ * Resolve an asset's vCenter reading through its AssetSource row — NOT through
+ * discoveredByIntegration, because a VM that AD/Entra discovered first keeps
+ * the directory integration there even after a vCenter sync merges into it.
+ */
+async function readVcenterAsset(assetId: string): Promise<VcenterReading> {
+  const source = await prisma.assetSource.findFirst({
+    where: { assetId, sourceKind: { in: ["vcenter-vm", "vcenter-host"] } },
+    select: {
+      externalId: true,
+      sourceKind: true,
+      integration: { select: { id: true, type: true, config: true, enabled: true } },
+    },
+    // A vcenter-vm row wins if an asset somehow carries both.
+    orderBy: { sourceKind: "asc" },
+  });
+  if (!source) {
+    return { kind: "absent", error: "vCenter polling requires a vCenter-discovered VM or ESXi host (no vCenter source on file)" };
+  }
+  if (!source.integration || source.integration.type !== "vcenter") {
+    return { kind: "absent", error: "The asset's vCenter source is not linked to a vCenter integration" };
+  }
+  if (source.integration.enabled === false) {
+    return { kind: "unreachable", error: "The linked vCenter integration is disabled" };
+  }
+  const integration = { id: source.integration.id, config: (source.integration.config ?? {}) as Record<string, unknown> };
+
+  if (source.sourceKind === "vcenter-vm") {
+    let entry: VcenterQuickStatsCacheEntry;
+    try {
+      entry = await fetchVcenterQuickStatsCached(integration);
+    } catch (err: any) {
+      return { kind: "unreachable", error: err?.message || "vCenter quickStats fetch failed" };
+    }
+    const row = entry.stats.get(source.externalId);
+    if (!row) return { kind: "absent", error: "VM not present in the vCenter inventory (removed or renamed?)" };
+    return { kind: "vm", row, fetchDurationMs: entry.fetchDurationMs };
+  }
+
+  let entry: VcenterHostCacheEntry;
+  try {
+    entry = await fetchVcenterHostSnapshotCached(integration);
+  } catch (err: any) {
+    return { kind: "unreachable", error: err?.message || "vCenter host property fetch failed" };
+  }
+  const row = entry.hosts.get(source.externalId);
+  if (!row) return { kind: "absent", error: "ESXi host not present in the vCenter inventory (removed from vCenter?)" };
+  return { kind: "host", row, datastores: entry.datastoresByHostMoref.get(row.moref) ?? [], fetchDurationMs: entry.fetchDurationMs };
+}
+
+/** vCenter's own word for "powered on", across the REST (upper-snake) and SOAP (camel) spellings. */
+function vcenterPoweredOn(state: string | null): boolean {
+  return state === "poweredOn" || state === "POWERED_ON";
+}
+
+/**
+ * Response-time probe against the vCenter server's view of the asset.
+ *
+ * The RTT reported is the UPSTREAM fetch duration — the vCenter round trip
+ * shared by every asset on that integration this tick, not a measurement of
+ * the device. It is charted as a response time because it is the latency of
+ * the thing actually being asked; an operator wanting the guest's own network
+ * latency points the Response Time stream at ICMP instead.
+ */
+async function probeVcenter(assetId: string, start: number): Promise<ProbeResult> {
+  const reading = await readVcenterAsset(assetId);
+  if (reading.kind === "unreachable") {
+    // Not a measurement. See the VcenterReading doc comment.
+    logger.debug({ assetId, reason: reading.error }, "vCenter probe skipped — could not reach vCenter");
+    return { success: false, responseTimeMs: 0, skipped: true, error: reading.error };
+  }
+  if (reading.kind === "absent") {
+    return { success: false, responseTimeMs: Math.max(0, Math.round(performance.now() - start)), error: reading.error };
+  }
+  if (reading.kind === "vm") {
+    // A VM's power state IS the whole signal. Absent (rather than "poweredOff")
+    // means the property did not come back, which is no reading — never a down
+    // verdict pinned on a VM that is probably running.
+    if (reading.row.powerState === null) {
+      return { success: false, responseTimeMs: 0, skipped: true, error: "vCenter reported no power state for this VM" };
+    }
+    if (!vcenterPoweredOn(reading.row.powerState)) {
+      return { success: false, responseTimeMs: reading.fetchDurationMs, error: `VM is ${reading.row.powerState}` };
+    }
+    const ok: ProbeResult = { success: true, responseTimeMs: reading.fetchDurationMs };
+    if (reading.row.uptimeSec !== null) ok.uptimeSec = reading.row.uptimeSec;
+    return ok;
+  }
+  const state = reading.row.connectionState;
+  if (state !== "connected") {
+    return { success: false, responseTimeMs: reading.fetchDurationMs, error: `ESXi host is ${state || "not connected"} in vCenter` };
+  }
+  // A host has a SECOND independent signal, so an absent power state is not a
+  // gap: vCenter said the host is connected, which it could not do about a
+  // host that is off. Only an explicit non-poweredOn value fails here.
+  if (reading.row.powerState !== null && !vcenterPoweredOn(reading.row.powerState)) {
+    return { success: false, responseTimeMs: reading.fetchDurationMs, error: `ESXi host is ${reading.row.powerState}` };
+  }
+  const ok: ProbeResult = { success: true, responseTimeMs: reading.fetchDurationMs };
+  if (reading.row.uptimeSec !== null) ok.uptimeSec = reading.row.uptimeSec;
+  return ok;
+}
+
+/**
+ * Hypervisor-view CPU/RAM telemetry for a vCenter VM or ESXi host. Reads the
+ * warm cache, so the per-asset cost is a Map lookup.
+ *
+ * A VM reports GUEST memory usage (what the guest thinks it is using) against
+ * its configured RAM; a host reports consumed host memory against installed
+ * RAM. Both are absolute bytes — the UI derives the percentage.
  */
 async function collectTelemetryVcenter(assetId: string): Promise<CollectionResult<TelemetrySample>> {
-  const vmSource = await prisma.assetSource.findFirst({
-    where: { assetId, sourceKind: "vcenter-vm" },
-    select: { externalId: true, integration: { select: { id: true, type: true, config: true, enabled: true } } },
-  });
-  if (!vmSource) {
-    return { supported: true, error: "No vCenter source on file for this asset — vCenter polling requires a vCenter-discovered VM" };
+  const reading = await readVcenterAsset(assetId);
+  if (reading.kind === "absent" || reading.kind === "unreachable") {
+    return { supported: true, error: reading.error };
   }
-  if (!vmSource.integration || vmSource.integration.type !== "vcenter") {
-    return { supported: true, error: "The asset's vCenter source is not linked to a vCenter integration" };
-  }
-  if (vmSource.integration.enabled === false) {
-    return { supported: true, error: "The linked vCenter integration is disabled" };
-  }
-  try {
-    const { stats } = await fetchVcenterQuickStatsCached({
-      id: vmSource.integration.id,
-      config: (vmSource.integration.config ?? {}) as Record<string, unknown>,
-    });
-    const row = stats.get(vmSource.externalId);
-    if (!row) {
-      return { supported: true, error: "VM not present in the vCenter quickStats inventory (removed or renamed?)" };
-    }
-    if (row.powerState && row.powerState !== "poweredOn" && row.powerState !== "POWERED_ON") {
+  const MIB = 1024 * 1024;
+  if (reading.kind === "vm") {
+    const row = reading.row;
+    if (!vcenterPoweredOn(row.powerState)) {
       return { supported: true, error: `VM is not powered on (${row.powerState})` };
     }
-    const MIB = 1024 * 1024;
     const cpuPct =
       row.cpuUsageMhz !== null && row.cpuMaxMhz !== null && row.cpuMaxMhz > 0
         ? Math.min(100, Math.max(0, (row.cpuUsageMhz / row.cpuMaxMhz) * 100))
@@ -2289,9 +2494,124 @@ async function collectTelemetryVcenter(assetId: string): Promise<CollectionResul
         memTotalBytes: row.memTotalMB      !== null ? row.memTotalMB * MIB      : null,
       },
     };
-  } catch (err: any) {
-    return { supported: true, error: err?.message || "vCenter quickStats fetch failed" };
   }
+  const host = reading.row;
+  if (host.connectionState !== "connected") {
+    return { supported: true, error: `ESXi host is ${host.connectionState || "not connected"} in vCenter` };
+  }
+  const cpuPct =
+    host.cpuUsageMhz !== null && host.cpuTotalMhz !== null && host.cpuTotalMhz > 0
+      ? Math.min(100, Math.max(0, (host.cpuUsageMhz / host.cpuTotalMhz) * 100))
+      : null;
+  return {
+    supported: true,
+    data: {
+      cpuPct,
+      memUsedBytes:  host.memUsageBytes,
+      memTotalBytes: host.memTotalBytes,
+    },
+  };
+}
+
+/**
+ * Interfaces + storage for a vCenter-polled asset, from the same warm cache.
+ *
+ * The null-vs-empty contract from vcenterService is load-bearing here. A VM
+ * whose Tools are absent reports `guestDisks: null` / `guestNics: null`, which
+ * becomes an EMPTY array — and `recordSystemInfoResult` skips an empty
+ * interface list rather than wiping the inventory, exactly as it does for a
+ * FortiOS token that answered 200 with no results. Storage is a time series,
+ * so an empty list simply records nothing for this tick.
+ *
+ * ESXi interface semantics:
+ *   pNIC — `speedMb` is present only while the link is UP; ESXi omits
+ *          linkSpeed on a down port, which is what operStatus reads.
+ *   vmk  — a VMkernel port rides a portgroup, not an uplink, so it publishes
+ *          no link state of its own. operStatus stays null rather than
+ *          claiming "up".
+ */
+function buildVcenterSystemInfo(reading: VcenterReading): SystemInfoSample {
+  const interfaces: InterfaceSample[] = [];
+  const storage: StorageSample[] = [];
+
+  if (reading.kind === "vm") {
+    for (const nic of reading.row.guestNics ?? []) {
+      interfaces.push({
+        ifName:     nic.label,
+        operStatus: nic.connected === null ? null : nic.connected ? "up" : "down",
+        macAddress: nic.macAddress,
+        ipAddress:  nic.ipAddress,
+      });
+    }
+    for (const fs of reading.row.guestDisks ?? []) {
+      storage.push({
+        mountPath:  fs.path,
+        totalBytes: fs.capacityBytes,
+        usedBytes:  fs.capacityBytes !== null && fs.freeBytes !== null ? fs.capacityBytes - fs.freeBytes : null,
+      });
+    }
+    return { interfaces, storage };
+  }
+
+  if (reading.kind === "host") {
+    for (const pnic of reading.row.pnics ?? []) {
+      interfaces.push({
+        ifName:     pnic.device,
+        operStatus: pnic.speedMb !== null ? "up" : "down",
+        speedBps:   pnic.speedMb !== null ? pnic.speedMb * 1_000_000 : null,
+        macAddress: pnic.macAddress,
+        ifType:     "physical",
+      });
+    }
+    for (const vmk of reading.row.vnics ?? []) {
+      interfaces.push({
+        ifName:      vmk.device,
+        macAddress:  vmk.macAddress,
+        ipAddress:   vmk.ipAddress,
+      });
+    }
+    // A host's storage is the datastores it has mounted. Host-local volumes
+    // backing no datastore (the ESXi boot bank) are not reported — nothing
+    // acts on their free space.
+    //
+    // A SHARED datastore is therefore reported once per host that mounts it,
+    // with the same numbers. That is deliberate: "how full is the storage this
+    // host is running on" is the question being asked, and answering it only
+    // on whichever host happened to be listed first would make the tab lie on
+    // every other host. The cost is that a fleet-wide rule on a full shared
+    // datastore fires once per mounting host — scope such a rule to one host,
+    // or read the datastore table on the Virtualization section, which is
+    // per-datastore by construction.
+    for (const ds of reading.datastores) {
+      storage.push({
+        mountPath:  ds.name,
+        totalBytes: ds.capacityBytes,
+        usedBytes:  ds.capacityBytes !== null && ds.freeBytes !== null ? ds.capacityBytes - ds.freeBytes : null,
+      });
+    }
+    return { interfaces, storage };
+  }
+
+  return { interfaces, storage };
+}
+
+/**
+ * System-info (interfaces + storage) for a vCenter-polled asset. Each stream is
+ * gated on its OWN resolved polling method, matching the independence rule the
+ * SNMP path already follows.
+ */
+async function collectSystemInfoVcenter(
+  assetId: string,
+  effective: { interfacesPolling: string | null; storagePolling: string | null },
+): Promise<CollectionResult<SystemInfoSample>> {
+  const reading = await readVcenterAsset(assetId);
+  if (reading.kind === "absent" || reading.kind === "unreachable") {
+    return { supported: true, error: reading.error };
+  }
+  const data = buildVcenterSystemInfo(reading);
+  if (effective.interfacesPolling !== "vcenter") data.interfaces = [];
+  if (effective.storagePolling    !== "vcenter") data.storage = [];
+  return { supported: true, data };
 }
 
 // ─── Wireless-station signal overlay ──────────────────────────────────────
@@ -4015,6 +4335,28 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
   if (polling === "agent") return { supported: false };
   const sysInfoTimeout = effective.systemInfoTimeoutMs;
 
+  // vCenter: the pinned subset is filtered out of the same warm-cache reading
+  // the full pass uses, so the fast cadence costs a Map lookup and gives pinned
+  // vNICs / guest mounts per-minute resolution. No asset IP needed.
+  if (polling === "vcenter") {
+    const vcReading = await readVcenterAsset(assetId);
+    if (vcReading.kind === "absent" || vcReading.kind === "unreachable") {
+      return { supported: true, error: vcReading.error };
+    }
+    const vcFull = buildVcenterSystemInfo(vcReading);
+    const wantIfVc = new Set(wantedIfaces);
+    const wantStVc = new Set(wantedStorage);
+    return {
+      supported: true,
+      data: {
+        interfaces: wantedIfaces.length ? vcFull.interfaces.filter((i) => wantIfVc.has(i.ifName)) : [],
+        storage: (wantedStorage.length && effective.storagePolling === "vcenter")
+          ? vcFull.storage.filter((s) => wantStVc.has(s.mountPath))
+          : [],
+      },
+    };
+  }
+
   const targetIp =
     asset.ipAddress ||
     ((polling === "winrm" || polling === "ssh") ? (asset.dnsName || asset.hostname) : null);
@@ -4430,6 +4772,16 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
   // LLDP samples on its own schedule. Periodic puller stays out of the way.
   if (interfacesPolling === "agent") return { supported: false };
   const sysInfoTimeout = effective.systemInfoTimeoutMs;
+
+  // vCenter serves interfaces + storage out of the per-integration warm cache
+  // and needs no asset IP — same reason the probe dispatches early. Dispatches
+  // when EITHER stream is on the method: one reading answers both, so an
+  // operator who routes interfaces elsewhere (or off) and leaves storage on
+  // vCenter still gets their mounts, and the branch gates each stream on its
+  // own resolved method.
+  if (interfacesPolling === "vcenter" || effective.storagePolling === "vcenter") {
+    return await collectSystemInfoVcenter(assetId, effective);
+  }
 
   const targetIp =
     asset.ipAddress ||
@@ -9803,6 +10155,15 @@ export async function recordProbeResult(
       }
     : loaded;
 
+  // A skipped probe is not a reading. No sample, no counter movement, no
+  // state transition — just the cadence anchor, so the next tick is spaced
+  // normally rather than re-firing immediately for every asset behind a
+  // hypervisor manager that is currently unreachable.
+  if (result.skipped) {
+    await prisma.asset.update({ where: { id: assetId }, data: { lastMonitorAt: new Date() } });
+    return;
+  }
+
   // Resolve effective settings through the hierarchy. NOTE the down threshold
   // is NOT read from here any more — `failureThreshold` on the settings tiers
   // is dormant (see the deprecation note on MonitorTierSettings). This resolver
@@ -10104,6 +10465,13 @@ export async function runProbeFor(assetId: string, labels: WorkItemLabels): Prom
     const result = await probeAsset(assetId, probeOut);
     const probeMs = Date.now() - probeStart;
     await recordProbeResult(assetId, result, probeOut.snapshot ?? null);
+    // A skipped probe measured nothing, so it is charted nowhere and counted
+    // as neither outcome — the cadence ran cleanly, it simply had nothing to
+    // ask. See ProbeResult.skipped.
+    if (result.skipped) {
+      recordWorkOutcome("probe", "success", labels);
+      return "success";
+    }
     if (result.success) {
       recordProbe(labels.transport, probeMs / 1000, "success");
       recordWorkOutcome("probe", "success", labels);

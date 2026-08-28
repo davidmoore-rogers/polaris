@@ -176,6 +176,22 @@ const FORTI_POLLING_DEFAULT = {
   processesPolling:    "disabled" as const,
   eventLogPolling:     "disabled" as const,
 };
+// vCenter answers for four streams from ONE batched fetch per integration per
+// tick, so all four default to it — including response time, which was ICMP
+// until 2026-08. ICMP was the wrong question twice over on this source: it
+// needs a guest IP Polaris may not have, and it reports whether a packet came
+// back rather than whether the VM is running. Temperature and LLDP have no
+// vCenter source at all.
+const VCENTER_POLLING_DEFAULT = {
+  responseTimePolling: "vcenter" as const,
+  cpuMemoryPolling:    "vcenter" as const,
+  temperaturePolling:  null,
+  interfacesPolling:   "vcenter" as const,
+  lldpPolling:         null,
+  storagePolling:      "vcenter" as const,
+  processesPolling:    "disabled" as const,
+  eventLogPolling:     "disabled" as const,
+};
 
 beforeEach(() => {
   invalidateMonitorSettingsCache();
@@ -261,6 +277,39 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
     });
     // FortiManager source: REST API for every stream.
     expect(out).toEqual({ ...TUNED_TIER, ...FORTI_POLLING_DEFAULT });
+  });
+
+  it("vCenter source defaults every stream vCenter can answer to the vcenter method", async () => {
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: { monitorSettings: TUNED_TIER },
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const vm = await resolveMonitorSettings({
+      assetType:                 "server",       // vCenter VMs are typed "server"
+      discoveredByIntegrationId: "vc-1",
+      discoveredByIntegrationType: "vcenter",
+      monitorIntervalSec:        null,
+      cpuMemoryIntervalSec:   null,
+      temperatureIntervalSec: null,
+      systemInfoIntervalSec:     null,
+      probeTimeoutMs:            null,
+    });
+    expect(vm).toEqual({ ...TUNED_TIER, ...VCENTER_POLLING_DEFAULT });
+
+    // ESXi hosts take the same defaults — the host fetch answers the same four
+    // streams, so a host needs no SNMP community to be monitored.
+    const host = await resolveMonitorSettings({
+      assetType:                 "hypervisor",
+      discoveredByIntegrationId: "vc-1",
+      discoveredByIntegrationType: "vcenter",
+      monitorIntervalSec:        null,
+      cpuMemoryIntervalSec:   null,
+      temperatureIntervalSec: null,
+      systemInfoIntervalSec:     null,
+      probeTimeoutMs:            null,
+    });
+    expect(host).toEqual({ ...TUNED_TIER, ...VCENTER_POLLING_DEFAULT });
   });
 
   it("reads from fortiswitchMonitor.streams when assetType=switch (Phase 2 per-class)", async () => {

@@ -97,8 +97,10 @@ import {
 import { readProbeOutages, serializeOutages } from "../../services/probeOutageService.js";
 import {
   type PollingMethod,
+  type Stream,
   assetSourceKindFromIntegrationType,
   isFortinetIntegrationType,
+  isMethodValidForStream,
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
@@ -226,7 +228,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -3263,27 +3265,30 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
           `${pollingMethodLabel(value)} polling is not supported for ${sourceKind} assets (field: ${name})`,
         );
       }
-      // "vcenter" reads the vCenter server's batched quickStats, so it's
-      // cpuMemory-only AND requires a vcenter-vm AssetSource to resolve
-      // the integration through. The matrix allows the method on the
-      // directory source kinds (merged VMs); this is the precise check.
-      // (UpdateAssetSchema's polling enum currently excludes "vcenter", so
-      // through THIS route the rejection happens at the schema — this guard
-      // is defense in depth for the monitor-settings pathway shape.)
+      // "vcenter" reads the vCenter server's batched per-integration fetch, so
+      // it covers only the streams that fetch can answer (VCENTER_STREAMS:
+      // responseTime / cpuMemory / interfaces / storage) AND requires a vCenter
+      // AssetSource to resolve the integration through. The matrix allows the
+      // method on the directory source kinds (merged VMs); this is the precise
+      // check.
       // NOTE: the "http" polling method was retired (2026-08) — the HTTP check
       // it performed is now a manufacturer custom widget, so there is no
       // per-stream guard for it here any more. The schema enum rejects the
       // value outright.
       if (value === "vcenter") {
-        if (name !== "cpuMemoryPolling") {
-          throw new AppError(400, `vCenter polling only applies to the CPU/Memory stream (field: ${name})`);
+        const stream = name.replace(/Polling$/, "") as Stream;
+        if (!isMethodValidForStream(stream, "vcenter")) {
+          throw new AppError(400, `vCenter polling does not apply to the ${stream} stream (field: ${name})`);
         }
-        const vmSource = await prisma.assetSource.findFirst({
-          where: { assetId: id, sourceKind: "vcenter-vm" },
+        // Either role: a VM's stats come from the VirtualMachine fetch, an ESXi
+        // host's from the HostSystem fetch. Both resolve the integration the
+        // same way.
+        const vcSource = await prisma.assetSource.findFirst({
+          where: { assetId: id, sourceKind: { in: ["vcenter-vm", "vcenter-host"] } },
           select: { id: true },
         });
-        if (!vmSource) {
-          throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM (no vcenter-vm source on file)");
+        if (!vcSource) {
+          throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM or ESXi host (no vCenter source on file)");
         }
       }
     }

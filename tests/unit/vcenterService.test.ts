@@ -188,6 +188,17 @@ const QUICKSTATS_XML =
   `<propSet><name>summary.quickStats.guestMemoryUsage</name><val xsi:type="xsd:int">2048</val></propSet>` +
   `<propSet><name>summary.quickStats.overallCpuUsage</name><val xsi:type="xsd:int">450</val></propSet>` +
   `<propSet><name>summary.runtime.maxCpuUsage</name><val xsi:type="xsd:int">4400</val></propSet>` +
+  `<propSet><name>summary.quickStats.uptimeSeconds</name><val xsi:type="xsd:int">86400</val></propSet>` +
+  `<propSet><name>guest.disk</name><val xsi:type="ArrayOfGuestDiskInfo">` +
+  `<GuestDiskInfo><diskPath>/</diskPath><capacity>100</capacity><freeSpace>40</freeSpace></GuestDiskInfo>` +
+  `<GuestDiskInfo><diskPath>/var</diskPath><capacity>50</capacity></GuestDiskInfo>` +
+  `</val></propSet>` +
+  `<propSet><name>guest.net</name><val xsi:type="ArrayOfGuestNicInfo">` +
+  `<GuestNicInfo><network>VM Network</network><macAddress>00:50:56:aa:bb:cc</macAddress><connected>true</connected>` +
+  `<deviceConfigId>4000</deviceConfigId><ipAddress>fe80::1</ipAddress><ipAddress>10.1.2.3</ipAddress></GuestNicInfo>` +
+  `<GuestNicInfo><network>DMZ</network><macAddress>00:50:56:dd:ee:ff</macAddress><connected>false</connected>` +
+  `<deviceConfigId>4001</deviceConfigId></GuestNicInfo>` +
+  `</val></propSet>` +
   `</objects><objects>` +
   `<obj type="VirtualMachine">vm-43</obj>` +
   `<propSet><name>runtime.powerState</name><val xsi:type="VirtualMachinePowerState">poweredOff</val></propSet>` +
@@ -211,7 +222,7 @@ describe("SOAP quickStats parsing", () => {
   it("maps a full block to quickStats and degrades absent fields to null", () => {
     const blocks = extractObjectBlocks(QUICKSTATS_XML);
     const full = parseQuickStatsBlock(blocks[0]);
-    expect(full).toEqual({
+    expect(full).toMatchObject({
       moref: "vm-42",
       instanceUuid: "50aa-bb",
       cpuUsageMhz: 450,
@@ -220,11 +231,126 @@ describe("SOAP quickStats parsing", () => {
       hostMemUsageMB: null,
       memTotalMB: 8192,
       powerState: "poweredOn",
+      uptimeSec: 86400,
     });
     const sparse = parseQuickStatsBlock(blocks[1]);
     expect(sparse?.moref).toBe("vm-43");
     expect(sparse?.cpuUsageMhz).toBeNull();
     expect(sparse?.instanceUuid).toBeNull();
+  });
+
+  it("parses guest filesystems, and a missing capacity/free degrades to null", () => {
+    const block = extractObjectBlocks(QUICKSTATS_XML)[0];
+    expect(parseGuestDisks(block)).toEqual([
+      { path: "/",    capacityBytes: 100, freeBytes: 40 },
+      { path: "/var", capacityBytes: 50,  freeBytes: null },
+    ]);
+  });
+
+  it("names a vNIC from its device key, not its portgroup, and picks the IPv4", () => {
+    const block = extractObjectBlocks(QUICKSTATS_XML)[0];
+    const nics = parseGuestNics(block);
+    // Key 4000 is adapter 1 by VMware convention. Two NICs on one portgroup
+    // would collide if the portgroup were the identity.
+    expect(nics?.[0]).toEqual({
+      deviceConfigId: 4000,
+      label: "Network adapter 1",
+      network: "VM Network",
+      macAddress: "00:50:56:aa:bb:cc",
+      connected: true,
+      ipAddress: "10.1.2.3",
+    });
+    expect(nics?.[1]).toMatchObject({ label: "Network adapter 2", connected: false, ipAddress: null });
+  });
+
+  it("absent Tools reads as null, never as an empty inventory", () => {
+    // The VM that reported nothing but its power state. `null` is what stops
+    // recordSystemInfoResult from wiping a guest's interface inventory and
+    // stops the storage stream from claiming the guest has no mounts.
+    const sparse = extractObjectBlocks(QUICKSTATS_XML)[1];
+    expect(parseGuestDisks(sparse)).toBeNull();
+    expect(parseGuestNics(sparse)).toBeNull();
+  });
+});
+
+// ─── ESXi host stats ────────────────────────────────────────────────────────
+
+const HOST_XML =
+  `<returnval><objects>` +
+  `<obj type="HostSystem">host-11</obj>` +
+  `<propSet><name>name</name><val xsi:type="xsd:string">esx01.corp.local</val></propSet>` +
+  `<propSet><name>runtime.connectionState</name><val xsi:type="HostSystemConnectionState">connected</val></propSet>` +
+  `<propSet><name>runtime.powerState</name><val xsi:type="HostSystemPowerState">poweredOn</val></propSet>` +
+  `<propSet><name>runtime.inMaintenanceMode</name><val xsi:type="xsd:boolean">false</val></propSet>` +
+  `<propSet><name>summary.quickStats.overallCpuUsage</name><val xsi:type="xsd:int">12000</val></propSet>` +
+  `<propSet><name>summary.quickStats.overallMemoryUsage</name><val xsi:type="xsd:int">131072</val></propSet>` +
+  `<propSet><name>summary.quickStats.uptime</name><val xsi:type="xsd:int">604800</val></propSet>` +
+  `<propSet><name>summary.hardware.cpuMhz</name><val xsi:type="xsd:int">2400</val></propSet>` +
+  `<propSet><name>summary.hardware.numCpuCores</name><val xsi:type="xsd:short">20</val></propSet>` +
+  `<propSet><name>summary.hardware.memorySize</name><val xsi:type="xsd:long">274877906944</val></propSet>` +
+  `<propSet><name>config.network.pnic</name><val xsi:type="ArrayOfPhysicalNic">` +
+  `<PhysicalNic><key>key-vim.host.PhysicalNic-vmnic0</key><device>vmnic0</device><driver>ixgben</driver>` +
+  `<linkSpeed><speedMb>10000</speedMb><duplex>true</duplex></linkSpeed>` +
+  `<validLinkSpecification><speedMb>1000</speedMb><duplex>true</duplex></validLinkSpecification>` +
+  `<spec><linkSpeed><speedMb>1000</speedMb><duplex>true</duplex></linkSpeed></spec>` +
+  `<mac>3c:ec:ef:11:22:33</mac></PhysicalNic>` +
+  `<PhysicalNic><key>key-vim.host.PhysicalNic-vmnic3</key><device>vmnic3</device><driver>ixgben</driver>` +
+  `<validLinkSpecification><speedMb>10000</speedMb><duplex>true</duplex></validLinkSpecification>` +
+  `<spec/><mac>3c:ec:ef:11:22:36</mac></PhysicalNic>` +
+  `</val></propSet>` +
+  `<propSet><name>config.network.vnic</name><val xsi:type="ArrayOfHostVirtualNic">` +
+  `<HostVirtualNic><device>vmk0</device><portgroup>Management Network</portgroup>` +
+  `<spec><ip><dhcp>false</dhcp><ipAddress>10.1.1.11</ipAddress><subnetMask>255.255.255.0</subnetMask></ip>` +
+  `<mac>3c:ec:ef:11:22:33</mac><mtu>1500</mtu></spec></HostVirtualNic>` +
+  `</val></propSet>` +
+  `</objects><objects>` +
+  `<obj type="HostSystem">host-12</obj>` +
+  `<propSet><name>name</name><val xsi:type="xsd:string">esx02.corp.local</val></propSet>` +
+  `<propSet><name>runtime.connectionState</name><val xsi:type="HostSystemConnectionState">notResponding</val></propSet>` +
+  `</objects></returnval>`;
+
+describe("SOAP ESXi host parsing", () => {
+  it("reads a down pNIC as down instead of borrowing a supported speed", () => {
+    // vmnic3 publishes no <linkSpeed> — the link is down. Both
+    // validLinkSpecification and spec carry <speedMb> elements of their own,
+    // so a whole-entry match would report 10 Gb on a dark port.
+    const block = extractObjectBlocks(HOST_XML)[0];
+    const pnics = parseHostPnics(block);
+    expect(pnics).toEqual([
+      { device: "vmnic0", macAddress: "3c:ec:ef:11:22:33", speedMb: 10000, duplex: true, driver: "ixgben" },
+      { device: "vmnic3", macAddress: "3c:ec:ef:11:22:36", speedMb: null,  duplex: null, driver: "ixgben" },
+    ]);
+  });
+
+  it("reads VMkernel ports with their management address", () => {
+    const block = extractObjectBlocks(HOST_XML)[0];
+    expect(parseHostVnics(block)).toEqual([
+      { device: "vmk0", portgroup: "Management Network", macAddress: "3c:ec:ef:11:22:33", ipAddress: "10.1.1.11", mtu: 1500 },
+    ]);
+  });
+
+  it("derives total CPU from cores × clock and normalises memory to bytes", () => {
+    const host = parseHostStatsBlock(extractObjectBlocks(HOST_XML)[0]);
+    expect(host).toMatchObject({
+      moref: "host-11",
+      name: "esx01.corp.local",
+      connectionState: "connected",
+      powerState: "poweredOn",
+      inMaintenanceMode: false,
+      uptimeSec: 604800,
+      cpuUsageMhz: 12000,
+      cpuTotalMhz: 48000,
+      memUsageBytes: 131072 * 1024 * 1024,
+      memTotalBytes: 274877906944,
+    });
+  });
+
+  it("a disconnected host publishes no config, so its NIC lists are null", () => {
+    const host = parseHostStatsBlock(extractObjectBlocks(HOST_XML)[1]);
+    expect(host?.connectionState).toBe("notResponding");
+    expect(host?.pnics).toBeNull();
+    expect(host?.vnics).toBeNull();
+    expect(host?.cpuTotalMhz).toBeNull();
   });
 });
 

@@ -98,7 +98,6 @@ export interface DiscoveredVcenterVm {
   memUsedBytes: number | null;
   nicMacs: Array<{ mac: string; connected: boolean }>;
   disks: VcenterVmDisk[];
-  guestFilesystems: VcenterGuestFilesystem[] | null; // null = Tools absent/off
 }
 
 export interface VcenterDatastoreBacking {
@@ -496,7 +495,7 @@ async function soapLogout(config: VcenterConfig, session: SoapSession): Promise<
 async function retrieveAllProperties(
   config: VcenterConfig,
   session: SoapSession,
-  objType: "VirtualMachine" | "Datastore",
+  objType: "VirtualMachine" | "Datastore" | "HostSystem",
   pathSet: string[],
   signal?: AbortSignal,
 ): Promise<string[]> {
@@ -592,6 +591,31 @@ export interface VcenterVmQuickStats {
   hostMemUsageMB: number | null;
   memTotalMB: number | null;
   powerState: string | null;
+  /** Guest uptime in whole seconds (VMware Tools); null when Tools is absent. */
+  uptimeSec: number | null;
+  /**
+   * Guest filesystems as VMware Tools reports them. `null` means Tools did not
+   * answer (absent / not running / VM powered off) — deliberately NOT `[]`,
+   * which would claim the guest genuinely has no mounts. Every consumer must
+   * treat null as "no reading", never as a wipe.
+   */
+  guestDisks: VcenterGuestFilesystem[] | null;
+  /** Guest vNICs as Tools reports them. Same null-vs-empty contract as `guestDisks`. */
+  guestNics: VcenterGuestNic[] | null;
+}
+
+/** One guest-visible vNIC from `guest.net` (GuestNicInfo). */
+export interface VcenterGuestNic {
+  /** Hardware device key — 4000 + adapter index by VMware convention. */
+  deviceConfigId: number | null;
+  /** "Network adapter 1" derived from deviceConfigId; falls back to the portgroup. */
+  label: string;
+  /** Portgroup the adapter is attached to; null when the guest can't see it. */
+  network: string | null;
+  macAddress: string | null;
+  connected: boolean | null;
+  /** First IPv4 the guest reports on this adapter. */
+  ipAddress: string | null;
 }
 
 const QUICKSTATS_PATHS = [
@@ -601,8 +625,85 @@ const QUICKSTATS_PATHS = [
   "summary.quickStats.overallCpuUsage",
   "summary.quickStats.guestMemoryUsage",
   "summary.quickStats.hostMemoryUsage",
+  "summary.quickStats.uptimeSeconds",
   "summary.runtime.maxCpuUsage",
+  // Guest-reported inventory. Both ride the SAME batched fetch the CPU/RAM
+  // figures come from — the monitor loop needs no per-VM call to fill the
+  // System tab's interface + storage tables.
+  "guest.disk",
+  "guest.net",
 ];
+
+/**
+ * Guest filesystems out of a `guest.disk` propSet value (ArrayOfGuestDiskInfo).
+ * Returns null when the property is absent — VMware Tools did not answer, which
+ * is not the same claim as "this guest has no mounts". Exported for tests.
+ */
+export function parseGuestDisks(block: string): VcenterGuestFilesystem[] | null {
+  const xml = parsePropXml(block, "guest.disk");
+  if (xml === null) return null;
+  const out: VcenterGuestFilesystem[] = [];
+  const re = /<GuestDiskInfo>([\s\S]*?)<\/GuestDiskInfo>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const entry = m[1];
+    const path = entry.match(/<diskPath>([^<]*)<\/diskPath>/)?.[1];
+    if (!path) continue;
+    const cap = Number(entry.match(/<capacity>([^<]+)<\/capacity>/)?.[1]);
+    const free = Number(entry.match(/<freeSpace>([^<]+)<\/freeSpace>/)?.[1]);
+    out.push({
+      path,
+      capacityBytes: Number.isFinite(cap) ? cap : null,
+      freeBytes: Number.isFinite(free) ? free : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Guest vNICs out of a `guest.net` propSet value (ArrayOfGuestNicInfo). Same
+ * null-vs-empty contract as parseGuestDisks. Exported for tests.
+ *
+ * The adapter LABEL is derived from `deviceConfigId`: VMware numbers virtual
+ * ethernet devices from key 4000, so 4000 is "Network adapter 1". The portgroup
+ * name is deliberately not the identity — two adapters on the same portgroup
+ * would collide in AssetInterface's (asset, ifName) key.
+ */
+export function parseGuestNics(block: string): VcenterGuestNic[] | null {
+  const xml = parsePropXml(block, "guest.net");
+  if (xml === null) return null;
+  const out: VcenterGuestNic[] = [];
+  const re = /<GuestNicInfo>([\s\S]*?)<\/GuestNicInfo>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const entry = m[1];
+    const keyRaw = Number(entry.match(/<deviceConfigId>(-?\d+)<\/deviceConfigId>/)?.[1]);
+    const deviceConfigId = Number.isFinite(keyRaw) ? keyRaw : null;
+    const network = entry.match(/<network>([^<]*)<\/network>/)?.[1] || null;
+    const label =
+      deviceConfigId !== null && deviceConfigId >= 4000
+        ? `Network adapter ${deviceConfigId - 4000 + 1}`
+        : network || (deviceConfigId !== null ? `vNIC ${deviceConfigId}` : "vNIC");
+    // Every <ipAddress> in the block — the bare guest-reported list and the
+    // ipConfig entries both use that tag. First IPv4 wins.
+    let ipAddress: string | null = null;
+    const ipRe = /<ipAddress>([^<]+)<\/ipAddress>/g;
+    let ipm: RegExpExecArray | null;
+    while ((ipm = ipRe.exec(entry)) !== null) {
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ipm[1])) { ipAddress = ipm[1]; break; }
+    }
+    const connectedRaw = entry.match(/<connected>([^<]+)<\/connected>/)?.[1];
+    out.push({
+      deviceConfigId,
+      label,
+      network,
+      macAddress: entry.match(/<macAddress>([^<]+)<\/macAddress>/)?.[1] || null,
+      connected: connectedRaw === undefined ? null : connectedRaw === "true" || connectedRaw === "1",
+      ipAddress,
+    });
+  }
+  return out;
+}
 
 /** Parse one RetrievePropertiesEx object block into quickStats. Exported for tests. */
 export function parseQuickStatsBlock(block: string): VcenterVmQuickStats | null {
@@ -617,6 +718,9 @@ export function parseQuickStatsBlock(block: string): VcenterVmQuickStats | null 
     hostMemUsageMB: parsePropNumber(block, "summary.quickStats.hostMemoryUsage"),
     memTotalMB: parsePropNumber(block, "config.hardware.memoryMB"),
     powerState: parsePropValue(block, "runtime.powerState"),
+    uptimeSec: parsePropNumber(block, "summary.quickStats.uptimeSeconds"),
+    guestDisks: parseGuestDisks(block),
+    guestNics: parseGuestNics(block),
   };
 }
 
@@ -725,6 +829,191 @@ async function fetchDatastoresSoap(
       if (parsed) out.push(parsed);
     }
     return out;
+  } finally {
+    await soapLogout(config, session);
+  }
+}
+
+// ─── SOAP: ESXi host stats ─────────────────────────────────────────────────
+//
+// The monitoring counterpart to the VM quickStats fetch above: ONE batched
+// RetrievePropertiesEx over HostSystem serves every ESXi host in the vCenter.
+// It carries CPU/RAM usage, uptime, connection/power state, and the physical +
+// VMkernel NIC inventory — everything the "vcenter" polling method needs to
+// drive an ESXi host's response-time, cpuMemory and interfaces streams without
+// SNMP enabled on the host itself.
+//
+// Host STORAGE rides the datastore fetch (fetchVcenterHostSnapshot pairs the
+// two in one SOAP session): a host's mounted datastores are the capacity
+// figures an operator acts on, and the Datastore managed object already
+// publishes the host-mount list. Host-local volumes backing no datastore (the
+// ESXi boot bank) are deliberately not reported.
+
+export interface VcenterHostPnic {
+  device: string;              // "vmnic0"
+  macAddress: string | null;
+  /** Live negotiated speed. NULL means the link is DOWN — ESXi omits linkSpeed entirely. */
+  speedMb: number | null;
+  duplex: boolean | null;
+  driver: string | null;
+}
+
+export interface VcenterHostVnic {
+  device: string;              // "vmk0"
+  portgroup: string | null;
+  macAddress: string | null;
+  ipAddress: string | null;
+  mtu: number | null;
+}
+
+export interface VcenterHostStats {
+  moref: string;
+  name: string | null;
+  connectionState: string | null;   // connected | notResponding | disconnected
+  powerState: string | null;        // poweredOn | poweredOff | standBy
+  inMaintenanceMode: boolean | null;
+  uptimeSec: number | null;
+  cpuUsageMhz: number | null;
+  /** cpuMhz × numCpuCores — the denominator for a usage percentage. */
+  cpuTotalMhz: number | null;
+  memUsageBytes: number | null;
+  memTotalBytes: number | null;
+  /**
+   * Physical + VMkernel NICs. `null` means the property was absent — a
+   * disconnected host publishes no config — and must never be read as "this
+   * host has no interfaces".
+   */
+  pnics: VcenterHostPnic[] | null;
+  vnics: VcenterHostVnic[] | null;
+}
+
+const HOST_STATS_PATHS = [
+  "name",
+  "runtime.connectionState",
+  "runtime.powerState",
+  "runtime.inMaintenanceMode",
+  "summary.quickStats.overallCpuUsage",
+  "summary.quickStats.overallMemoryUsage",
+  "summary.quickStats.uptime",
+  "summary.hardware.cpuMhz",
+  "summary.hardware.numCpuCores",
+  "summary.hardware.memorySize",
+  "config.network.pnic",
+  "config.network.vnic",
+];
+
+/**
+ * Physical NICs out of a `config.network.pnic` propSet value. Exported for tests.
+ *
+ * The live `<linkSpeed>` is read from the entry PREFIX only. VIM emits
+ * PhysicalNic properties in declaration order — linkSpeed, then
+ * validLinkSpecification, then spec — and the latter two carry `<speedMb>`
+ * elements of their own (the speeds the NIC *supports* / is *configured* for).
+ * A down link omits linkSpeed entirely, so a whole-entry match would report a
+ * supported speed as though the port were up.
+ */
+export function parseHostPnics(block: string): VcenterHostPnic[] | null {
+  const xml = parsePropXml(block, "config.network.pnic");
+  if (xml === null) return null;
+  const out: VcenterHostPnic[] = [];
+  const re = /<PhysicalNic>([\s\S]*?)<\/PhysicalNic>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const entry = m[1];
+    const device = entry.match(/<device>([^<]+)<\/device>/)?.[1];
+    if (!device) continue;
+    const head = entry.split(/<validLinkSpecification>|<spec>/)[0];
+    const link = head.match(/<linkSpeed>([\s\S]*?)<\/linkSpeed>/)?.[1] ?? "";
+    const speed = Number(link.match(/<speedMb>(\d+)<\/speedMb>/)?.[1]);
+    const duplexRaw = link.match(/<duplex>([^<]+)<\/duplex>/)?.[1];
+    out.push({
+      device,
+      macAddress: entry.match(/<mac>([^<]+)<\/mac>/)?.[1] || null,
+      speedMb: Number.isFinite(speed) ? speed : null,
+      duplex: duplexRaw === undefined ? null : duplexRaw === "true" || duplexRaw === "1",
+      driver: entry.match(/<driver>([^<]+)<\/driver>/)?.[1] || null,
+    });
+  }
+  return out;
+}
+
+/** VMkernel NICs out of a `config.network.vnic` propSet value. Exported for tests. */
+export function parseHostVnics(block: string): VcenterHostVnic[] | null {
+  const xml = parsePropXml(block, "config.network.vnic");
+  if (xml === null) return null;
+  const out: VcenterHostVnic[] = [];
+  const re = /<HostVirtualNic>([\s\S]*?)<\/HostVirtualNic>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const entry = m[1];
+    const device = entry.match(/<device>([^<]+)<\/device>/)?.[1];
+    if (!device) continue;
+    const mtu = Number(entry.match(/<mtu>(\d+)<\/mtu>/)?.[1]);
+    out.push({
+      device,
+      portgroup: entry.match(/<portgroup>([^<]*)<\/portgroup>/)?.[1] || null,
+      macAddress: entry.match(/<mac>([^<]+)<\/mac>/)?.[1] || null,
+      ipAddress: entry.match(/<ipAddress>([^<]+)<\/ipAddress>/)?.[1] || null,
+      mtu: Number.isFinite(mtu) ? mtu : null,
+    });
+  }
+  return out;
+}
+
+/** Parse one HostSystem object block into host stats. Exported for tests. */
+export function parseHostStatsBlock(block: string): VcenterHostStats | null {
+  const moref = parseObjRef(block);
+  if (!moref) return null;
+  const cpuMhz = parsePropNumber(block, "summary.hardware.cpuMhz");
+  const cores = parsePropNumber(block, "summary.hardware.numCpuCores");
+  const memUsageMB = parsePropNumber(block, "summary.quickStats.overallMemoryUsage");
+  const maintRaw = parsePropValue(block, "runtime.inMaintenanceMode");
+  return {
+    moref,
+    name: parsePropValue(block, "name"),
+    connectionState: parsePropValue(block, "runtime.connectionState"),
+    powerState: parsePropValue(block, "runtime.powerState"),
+    inMaintenanceMode: maintRaw === null ? null : maintRaw === "true" || maintRaw === "1",
+    uptimeSec: parsePropNumber(block, "summary.quickStats.uptime"),
+    cpuUsageMhz: parsePropNumber(block, "summary.quickStats.overallCpuUsage"),
+    cpuTotalMhz: cpuMhz !== null && cores !== null ? cpuMhz * cores : null,
+    memUsageBytes: memUsageMB !== null ? memUsageMB * 1024 * 1024 : null,
+    memTotalBytes: parsePropNumber(block, "summary.hardware.memorySize"),
+    pnics: parseHostPnics(block),
+    vnics: parseHostVnics(block),
+  };
+}
+
+export interface VcenterHostSnapshot {
+  hosts: VcenterHostStats[];
+  datastores: DiscoveredVcenterDatastore[];
+}
+
+/**
+ * ONE SOAP session, two batched property fetches: every ESXi host's stats plus
+ * the datastore inventory their storage figures come from. Used by the
+ * monitoring warm cache — one upstream round trip per vCenter integration per
+ * tick serves every monitored host.
+ */
+export async function fetchVcenterHostSnapshot(
+  config: VcenterConfig,
+  signal?: AbortSignal,
+): Promise<VcenterHostSnapshot> {
+  const session = await soapLogin(config, signal);
+  try {
+    const hostBlocks = await retrieveAllProperties(config, session, "HostSystem", HOST_STATS_PATHS, signal);
+    const hosts: VcenterHostStats[] = [];
+    for (const b of hostBlocks) {
+      const parsed = parseHostStatsBlock(b);
+      if (parsed) hosts.push(parsed);
+    }
+    const dsBlocks = await retrieveAllProperties(config, session, "Datastore", DATASTORE_PATHS, signal);
+    const datastores: DiscoveredVcenterDatastore[] = [];
+    for (const b of dsBlocks) {
+      const parsed = parseDatastoreBlock(b);
+      if (parsed) datastores.push(parsed);
+    }
+    return { hosts, datastores };
   } finally {
     await soapLogout(config, session);
   }
@@ -966,7 +1255,6 @@ export function parseVmDetail(
     memUsedBytes: null,
     nicMacs,
     disks,
-    guestFilesystems: null,
   };
 }
 
@@ -1148,22 +1436,6 @@ export async function discoverInventory(
             vm.guestOsFullName = typeof identity?.full_name?.default_message === "string"
               ? identity.full_name.default_message
               : typeof identity?.full_name === "string" ? identity.full_name : null;
-          } catch { /* null */ }
-          try {
-            const filesystems = await session.request<Record<string, any>>(
-              "GET",
-              `/api/vcenter/vm/${row.vm}/guest/local-filesystem`,
-              { signal },
-            );
-            const parsed: VcenterGuestFilesystem[] = [];
-            for (const [path, fs] of Object.entries(filesystems || {})) {
-              parsed.push({
-                path,
-                capacityBytes: typeof fs?.capacity === "number" ? fs.capacity : null,
-                freeBytes: typeof fs?.free_space === "number" ? fs.free_space : null,
-              });
-            }
-            vm.guestFilesystems = parsed;
           } catch { /* null */ }
         }
         return vm;

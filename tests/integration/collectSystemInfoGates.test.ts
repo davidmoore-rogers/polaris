@@ -112,4 +112,17 @@ d("collectSystemInfo — dispatch gates", () => {
     await seedAsset({ interfacesPolling: "ssh" });
     expect(await collectSystemInfo(assetId)).toEqual({ supported: false });
   });
+
+  it("vcenter interfaces dispatch BEFORE the IP guard, and want a vCenter source", async () => {
+    // The vCenter branch asks the vCenter SERVER, so an asset with no IP is
+    // still collectable — it must not fall into the "Asset has no IP address"
+    // guard the transport-coupled paths share. With no vCenter AssetSource on
+    // file it is a soft error naming the missing link, never silence.
+    await seedAsset({ interfacesPolling: "vcenter", ipAddress: null });
+    const out = await collectSystemInfo(assetId);
+    expect(out.supported).toBe(true);
+    expect(out.data).toBeUndefined();
+    expect(out.error).toMatch(/vCenter/i);
+    expect(out.error).not.toMatch(/IP address/i);
+  });
 });

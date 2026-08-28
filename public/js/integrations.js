@@ -28,11 +28,11 @@ var _POLLING_LABELS = {
 // _POLLING_LABELS map still includes "agent" so the value renders
 // correctly on any surface that displays raw values (audit logs, the
 // asset-list status pill, etc.).
-// "vcenter" (hypervisor-view CPU/RAM from the vCenter server's batched
-// quickStats) appears on the directory sources too — a VM those integrations
+// "vcenter" reads the asset's state from the vCenter SERVER rather than from
+// the device. It appears on the directory sources too — a VM those integrations
 // discovered first can be vCenter-merged; the backend enforces the actual
-// requirement (a vcenter-vm source on the asset) at save time. The stream
-// gate below limits the method to CPU/Memory.
+// requirement (a vCenter source on the asset) at save time. The stream gate
+// below limits the method to the four streams that fetch can answer.
 // The "http" method was RETIRED (2026-08): the HTTP GET health check it ran is
 // now a manufacturer custom widget, keyed by manufacturer + optional model
 // rather than by credential. Mirrors src/utils/pollingCompatibility.ts.
@@ -57,6 +57,12 @@ var _STREAM_METHODS = {
   eventLog:  ["agent", "ssh", "winrm", "rest_api", "disabled"],
 };
 
+// Streams the "vcenter" method can serve — mirrors VCENTER_STREAMS in
+// src/utils/pollingCompatibility.ts. Response time is the VM's power state /
+// the host's connection state; interfaces are guest vNICs / host pNICs +
+// VMkernel ports; storage is guest filesystems / host-mounted datastores.
+var _VCENTER_STREAMS = ["responseTime", "cpuMemory", "interfaces", "storage"];
+
 // Source-default polling for one stream. Mirrors defaultPollingForSource() in
 // src/services/monitoringService.ts. Used to label the "Inherit" option.
 function _polarisSourceDefaultPolling(source, stream) {
@@ -74,9 +80,11 @@ function _polarisSourceDefaultPolling(source, stream) {
     return "rest_api";
   }
   if (source === "vcenter") {
-    // Hypervisor-view CPU/RAM out of the box; response time via ICMP.
-    if (stream === "responseTime") return "icmp";
-    if (stream === "cpuMemory") return "vcenter";
+    // Everything vCenter can answer for, it answers for out of the box —
+    // response time (power / connection state), CPU/RAM, interfaces and
+    // storage. Temperature and LLDP have no vCenter source.
+    if (stream === "responseTime" || stream === "cpuMemory"
+        || stream === "interfaces" || stream === "storage") return "vcenter";
     return null;
   }
   if (stream === "responseTime") return "icmp";
@@ -91,9 +99,9 @@ function _streamAllowedMethods(source, stream) {
   if (restrict) {
     allowed = allowed.filter(function (m) { return restrict.indexOf(m) !== -1; });
   }
-  // "vcenter" is cpuMemory-only — mirrors the method-level guard in
-  // isMethodValidForStream (pollingCompatibility.ts).
-  if (stream !== "cpuMemory") {
+  // "vcenter" covers only the streams the vCenter server publishes — mirrors
+  // VCENTER_STREAMS / isMethodValidForStream (pollingCompatibility.ts).
+  if (_VCENTER_STREAMS.indexOf(stream) === -1) {
     allowed = allowed.filter(function (m) { return m !== "vcenter"; });
   }
   return allowed;
@@ -3487,8 +3495,11 @@ function monitorSettingsFormHTML(s, opts) {
           _agentDeployHTML("f-mon-vm-deploy-", "virtual machine", vmCfg.agentDeploy || null, credentials) +
         '</section>';
     }
-    // vCenter ESXi hosts — addAsMonitored only (no agent, no agent-fed pins;
-    // datastore capacity renders on the asset's Virtualization section).
+    // vCenter ESXi hosts — addAsMonitored only. No agent (ESXi runs no
+    // third-party binary) and no auto-monitor pin cards: the host's interfaces
+    // and mounted datastores arrive from the "vcenter" polling method on the
+    // stream subtabs above, and operators pin the ones they want to alert on
+    // from the asset's System tab or through Mass Pinning.
     if (klass === "hosts" || klass === "hypervisor") {
       return '<section style="margin-bottom:1.25rem">' + autoMonitoringHeader() +
         _classAddAsMonitoredHTML("f-mon-host-", "ESXi host", hostCfg.addAsMonitored === true) + '</section>';

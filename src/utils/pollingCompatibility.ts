@@ -21,8 +21,8 @@
  *                                                                 hosts — the Connected Machine agent is a cloud
  *                                                                 control-plane link, not a Polaris transport)
  *   vCenter           → ICMP, SNMP, WinRM, SSH, Agent,           (VMs are guest OSes → the directory-set methods
- *                       vCenter                                   apply; ESXi hosts answer SNMP/SSH; "vcenter" is
- *                                                                 the hypervisor-view cpuMemory stream — see below)
+ *                       vCenter                                   apply; ESXi hosts also answer SNMP/SSH; "vcenter"
+ *                                                                 is the DEFAULT for both roles — see below)
  *   Manual            → any                                       (operator-chosen)
  *
  * ── The retired "http" method (2026-08) ──────────────────────────────────────
@@ -54,20 +54,31 @@
  * because Fortinet appliances can't run third-party binaries. See the
  * "Polaris Agent" section in CLAUDE.md.
  *
- * The "vcenter" method is cpuMemory-only (enforced in isMethodValidForStream):
- * per-minute CPU/RAM figures come from the vCenter server's batched
- * quickStats fetch (one SOAP call per integration per tick, warm-cached in
- * monitoringService) rather than from the asset itself. It applies to any
- * asset carrying a vcenter-vm AssetSource — INCLUDING assets discovered by
- * AD/Entra/Windows Server that a vCenter sync later merged into (their
- * discoveredByIntegration still points at the directory integration). The
- * matrix therefore allows "vcenter" on those source kinds too; the hard
- * requirement — a vcenter-vm AssetSource row to resolve the integration
- * through — is enforced where it's cheap: the per-asset PUT validation in
- * assets.ts (one lookup) and the collector itself (soft error when the VM
- * isn't in the quickStats cache). Threading a per-asset "has vcenter
- * source" flag through the hot-loop resolver was rejected — it would cost
- * an AssetSource lookup per asset per tick.
+ * The "vcenter" method covers FOUR streams (enforced in isMethodValidForStream
+ * via VCENTER_STREAMS): responseTime, cpuMemory, interfaces and storage. All
+ * four are served from ONE batched SOAP fetch per integration per tick,
+ * warm-cached in monitoringService — the asset itself is never contacted. It
+ * is the source default for every stream it covers, which is what lets a
+ * vCenter fleet be monitored with no credential on the guest, no SNMP enabled
+ * on ESXi, and no reachable guest IP.
+ *
+ * It applies to any asset carrying a vcenter-vm OR vcenter-host AssetSource —
+ * INCLUDING assets discovered by AD/Entra/Windows Server that a vCenter sync
+ * later merged into (their discoveredByIntegration still points at the
+ * directory integration). The matrix therefore allows "vcenter" on those
+ * source kinds too; the hard requirement — a vCenter AssetSource row to
+ * resolve the integration through — is enforced where it's cheap: the
+ * per-asset PUT validation in assets.ts (one lookup) and the collectors
+ * themselves (soft error when the asset isn't in the cached inventory).
+ * Threading a per-asset "has vcenter source" flag through the hot-loop
+ * resolver was rejected — it would cost an AssetSource lookup per asset per
+ * tick.
+ *
+ * One consequence worth knowing: the response-time probe reports the UPSTREAM
+ * fetch duration, i.e. the vCenter round trip shared by every asset on that
+ * integration, not a measurement of the device. And when vCenter itself cannot
+ * be reached the probe is SKIPPED rather than failed (ProbeResult.skipped), so
+ * one vCenter outage never declares a whole virtual fleet down.
  *
  * Locked with the user during the design exchange; see CLAUDE.md
  * "Polling-method compatibility matrix".
@@ -180,14 +191,21 @@ export function isPollingMethodCompatible(source: AssetSourceKind, method: Polli
  * still apply). Used by the resolver, the monitorSettings routes, and the UI
  * to gate the cross-transport streams (processes / eventLog).
  *
- * The "vcenter" method is valid ONLY for cpuMemory — it reads the vCenter
- * server's batched VM quickStats, which carry no response-time, interface,
- * storage, process, or log data. (Expressed as a method-level guard rather
- * than a cpuMemory STREAM_METHODS entry so the unrestricted streams keep
- * allowing every other method.)
+ * The "vcenter" method is valid for the four streams the vCenter server can
+ * actually answer: responseTime (VM power state / ESXi connection state),
+ * cpuMemory, interfaces (guest vNICs / host pNICs + VMkernel ports) and
+ * storage (guest filesystems / host-mounted datastores). It is NOT valid for
+ * temperature, LLDP, processes or event log — vCenter publishes nothing for
+ * those. (Expressed as a method-level guard rather than per-stream
+ * STREAM_METHODS entries so the unrestricted streams keep allowing every other
+ * method.)
  */
+export const VCENTER_STREAMS: ReadonlySet<Stream> = new Set<Stream>([
+  "responseTime", "cpuMemory", "interfaces", "storage",
+]);
+
 export function isMethodValidForStream(stream: Stream, method: PollingMethod): boolean {
-  if (method === "vcenter") return stream === "cpuMemory";
+  if (method === "vcenter") return VCENTER_STREAMS.has(stream);
   const allowed = STREAM_METHODS[stream];
   return allowed ? allowed.has(method) : true;
 }

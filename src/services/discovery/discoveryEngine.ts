@@ -8856,7 +8856,6 @@ async function syncVcenterDevices(
         datastoreMoref: d.datastoreMoref,
         datastoreName: d.datastoreName ?? (d.datastoreMoref ? datastoreByMoref.get(d.datastoreMoref)?.name ?? null : null),
       })),
-      guestFilesystems: vm.guestFilesystems,
     };
 
     // vNIC MAC entries, connected-first so the primary MAC is stable.

@@ -135,14 +135,16 @@ describe("isPollingMethod type guard", () => {
 
 describe("per-stream method restrictions (cross-transport streams)", () => {
   it("original six streams impose no per-stream restriction beyond the vcenter stream-scoped rule", () => {
+    const vcenterStreams = ["responseTime", "cpuMemory", "interfaces", "storage"];
     (["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"] as const).forEach((s) => {
       allPollingMethods().forEach((m) => {
-        const expected = m === "vcenter" ? s === "cpuMemory" : true;
+        const expected = m === "vcenter" ? vcenterStreams.includes(s) : true;
         expect(isMethodValidForStream(s, m), `${s}/${m}`).toBe(expected);
       });
     });
     expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods());
-    expect(methodsForStream("responseTime")).toEqual(allPollingMethods().filter((m) => m !== "vcenter"));
+    expect(methodsForStream("responseTime")).toEqual(allPollingMethods());
+    expect(methodsForStream("temperature")).toEqual(allPollingMethods().filter((m) => m !== "vcenter"));
   });
 
   // The "http" polling method was RETIRED in 2026-08 — the HTTP check it ran is
@@ -160,9 +162,18 @@ describe("per-stream method restrictions (cross-transport streams)", () => {
       });
   });
 
-  it("vcenter is a cpuMemory-only method (quickStats carry no other stream's data)", () => {
-    expect(isMethodValidForStream("cpuMemory", "vcenter")).toBe(true);
-    (["responseTime", "temperature", "interfaces", "lldp", "storage", "processes", "eventLog"] as const).forEach((s) => {
+  // vCenter answers for four streams and only four. The line is what the
+  // vCenter SERVER publishes about a VM or an ESXi host, not what the device
+  // could be asked directly: power/connection state, CPU + RAM, the guest's
+  // vNICs / the host's pNICs + VMkernel ports, and the guest's filesystems /
+  // the host's mounted datastores. It publishes no hardware sensor readings
+  // and no LLDP, and it is not a transport into the guest, so processes and
+  // event log stay out.
+  it("vcenter serves exactly its four streams", () => {
+    (["responseTime", "cpuMemory", "interfaces", "storage"] as const).forEach((s) => {
+      expect(isMethodValidForStream(s, "vcenter"), s).toBe(true);
+    });
+    (["temperature", "lldp", "processes", "eventLog"] as const).forEach((s) => {
       expect(isMethodValidForStream(s, "vcenter"), s).toBe(false);
     });
   });

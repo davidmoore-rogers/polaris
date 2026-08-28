@@ -9314,8 +9314,14 @@ function _fmtBytes(n) {
 // ─── Virtualization section (vCenter VMs + ESXi hosts) ─────────────────────
 // Renders the General-tab Virtualization block from GET /assets/:id/
 // virtualization. VM role: host link / cluster / power / Tools / vCPU+RAM /
-// disks (datastore + backing array) / guest filesystems. Host role: cluster +
-// connection state / datastores table / VMs-on-host list.
+// disks (datastore + backing array). Host role: cluster + connection state /
+// datastores table / VMs-on-host list.
+//
+// GUEST FILESYSTEMS ARE NOT HERE. They are a monitored reading, not an
+// inventory fact: the "vcenter" storage stream samples them every system-info
+// pass, so they belong in the System tab's Storage table with the history,
+// pinning and alerting every other device's mounts get. A second static copy
+// on the General tab could only ever be a stale duplicate of that.
 
 function _vcPowerBadge(state) {
   var s = String(state || "").toUpperCase();
@@ -9374,23 +9380,7 @@ function _assetVirtualizationHTML(res) {
       '</tbody></table></div>';
     }
 
-    var fsHtml = "";
-    if (Array.isArray(v.guestFilesystems) && v.guestFilesystems.length > 0) {
-      fsHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
-        '<thead><tr><th style="' + thStyle + '">Guest Filesystem</th><th style="' + thStyle + '">Capacity</th><th style="' + thStyle + '">Free</th><th style="' + thStyle + '">Usage</th></tr></thead><tbody>' +
-        v.guestFilesystems.map(function (f) {
-          var used = (f.capacityBytes != null && f.freeBytes != null) ? f.capacityBytes - f.freeBytes : null;
-          return '<tr>' +
-            '<td style="' + tdStyle + '" class="mono">' + escapeHtml(f.path) + '</td>' +
-            '<td style="' + tdStyle + '">' + _fmtBytes(f.capacityBytes) + '</td>' +
-            '<td style="' + tdStyle + '">' + _fmtBytes(f.freeBytes) + '</td>' +
-            '<td style="' + tdStyle + '"><div style="display:flex;align-items:center;gap:6px">' + _vcUsageBar(used, f.capacityBytes) + '</div></td>' +
-          '</tr>';
-        }).join("") +
-      '</tbody></table></div>';
-    }
-
-    return header + rows + disksHtml + fsHtml;
+    return header + rows + disksHtml;
   }
 
   if (v.role === "host") {
