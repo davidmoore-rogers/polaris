@@ -17,7 +17,7 @@ interface Ladder { severity?: string; severityBands?: Array<Record<string, unkno
 let make: (s: Record<string, unknown>) => {
   triggerSentence: (tr: Record<string, unknown> | null, opts?: Ladder) => string;
   triggerFormula: (tr: Record<string, unknown> | null, opts?: Ladder) => { lines: string[]; note: string };
-  resetSentence: (reset: Record<string, unknown> | null, tr: Record<string, unknown> | null, cooldownSec?: number) => string;
+  resetSentence: (reset: Record<string, unknown> | null, tr: Record<string, unknown> | null) => string;
   humanDuration: (sec: number) => string;
   compactDuration: (sec: number) => string;
   leafUnit: (metric: string, df?: Record<string, string>) => string;
@@ -388,10 +388,20 @@ describe("makeAutomationSentences", () => {
   it("auto reset inverts the trigger comparator for the hysteresis clear line", () => {
     const s = make(SCHEMA as never);
     const tr = { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 };
-    const out = s.resetSentence({ mode: "auto", clearThreshold: 80, sustainSec: 60 }, tr, 300);
+    const out = s.resetSentence({ mode: "auto", clearThreshold: 80, sustainSec: 60 }, tr);
     expect(out).toContain("is at or below 80 %");
     expect(out).toContain("stays there for <strong>1 minute</strong>");
-    expect(out).toContain("re-fire within <strong>5 minutes</strong>");
+  });
+
+  it("says nothing about a re-notify cooldown, retired from the builder", () => {
+    // The sentence is the ONE phrasing the list and the editor share, so a
+    // leftover clause here would re-advertise a control that no longer exists
+    // on either surface. A stored value (an API caller may still set one) is
+    // deliberately not described: nothing can edit it from the UI.
+    const s = make(SCHEMA as never);
+    const tr = { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 };
+    const out = s.resetSentence({ mode: "auto", clearThreshold: 80 }, tr);
+    expect(out).not.toMatch(/re-fire|cooldown/i);
   });
 
   it("an event reset says which event clears it, and that it is the same subject", () => {

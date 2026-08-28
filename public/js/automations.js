@@ -424,7 +424,7 @@ var _rulesPage = 1;
     var s = sentences();
     if (!s) return "";
     try {
-      return plainText(s.resetSentence(r.reset, r.trigger, r.cooldownSec));
+      return plainText(s.resetSentence(r.reset, r.trigger));
     } catch (_e) {
       return "";
     }

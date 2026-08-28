@@ -400,7 +400,14 @@
       trigger: scrubTriggerTree(clone(src.trigger), cat, deps, blanked),
       scope: scoped.scope,
       reset: src.reset ? clone(src.reset) : null,
-      cooldownSec: src.cooldownSec == null ? null : src.cooldownSec,
+      // Always null. Re-notify cooldown was retired from the builder in
+      // 2026-08 and cleared fleet-wide by clearNotificationCooldowns, so a
+      // fresh export has none to carry — and this same function is what
+      // parseImportFile re-strips an INCOMING file through, which is the half
+      // that matters: a pre-cutover .automation.json would otherwise import a
+      // suppression no screen can show and no control can edit, reopening on
+      // one install exactly what the migration closed on every other.
+      cooldownSec: null,
       messageTemplate: src.messageTemplate == null ? null : src.messageTemplate,
       requireAckNote: src.requireAckNote === true,
       // (A) ALWAYS explicit, and never empty — see withAuditEvent.

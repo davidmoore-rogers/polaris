@@ -1001,7 +1001,7 @@ function makeAutomationSentences(s) {
     return "";
   }
 
-  function resetSentence(reset, tr, cooldownSec) {
+  function resetSentence(reset, tr) {
     var out;
     reset = reset || { mode: "manual" };
     if (reset.mode === "manual") {
@@ -1034,7 +1034,6 @@ function makeAutomationSentences(s) {
       out += ".";
       out += resetCaveat(tr, reset);
     }
-    if (cooldownSec > 0) out += " Won’t re-fire within <strong>" + humanDuration(cooldownSec) + "</strong> of the last alert.";
     return out;
   }
 
@@ -3858,7 +3857,7 @@ async function openAutomationWizard(existing, opts) {
             (isTriggerPerDimension(tr)
               ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">This automation alerts per ' + escapeHtml(perDimensionNoun(tr)) + '. A reset condition on the same ' + escapeHtml(perDimensionNoun(tr)) + ' clears each alert on its own; one on anything else (CPU, memory, device status) is read for the whole device, so it clears all of them together.</p>'
               : "") +
-            '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — set a re-notify cooldown on the next step.</p>' +
+            '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — separate them, by moving the reset threshold away from the trigger or making the reset hold for a few polls.</p>' +
           '</div>';
       }
 
@@ -4037,7 +4036,7 @@ async function openAutomationWizard(existing, opts) {
     var el = document.getElementById("aw-reset-sentence");
     if (!el) return;
     collectStep4();
-    el.innerHTML = resetSentence(draft.reset, draft.trigger, draft.cooldownSec);
+    el.innerHTML = resetSentence(draft.reset, draft.trigger);
   }
 
   // ── Step 5: Actions + escalation + summary ─────────────────────────────
@@ -4074,12 +4073,16 @@ async function openAutomationWizard(existing, opts) {
   }
 
   /**
-   * "Repeat this notification until it's handled".
+   * "Repeat this notification".
    *
-   * Three things the copy has to state because none of them can be inferred:
+   * The label says what the control does and stops there — the two fields it
+   * reveals already read "until Acknowledged / Cleared only", so "until it's
+   * handled" in the label was answering, less precisely, a question the row
+   * below it already answers.
+   *
+   * Two things the copy still has to state because neither can be inferred:
    * reminders re-send NOTIFICATIONS only (API calls and scripts run once, at
-   * the first fire); cooldown limits how often a NEW alert fires and does not
-   * limit reminders; and reminders cannot be exercised from the Test-delivery
+   * the first fire), and they cannot be exercised from the Test-delivery
    * button, because a test Notification carries ruleId null on purpose so the
    * sweep can't enlist it.
    */
@@ -4089,7 +4092,7 @@ async function openAutomationWizard(existing, opts) {
     return '' +
       '<label style="display:block;margin:0.6rem 0 0;font-weight:400">' +
         '<input type="checkbox" id="aw-repeat-on"' + (r ? " checked" : "") + '> ' +
-        'Repeat this notification until it’s handled' +
+        'Repeat this notification' +
       '</label>' +
       '<div id="aw-repeat-fields" style="margin:4px 0 0 1.4rem"' + (r ? "" : ' hidden') + '>' +
         '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
@@ -4111,7 +4114,6 @@ async function openAutomationWizard(existing, opts) {
         '<p id="aw-repeat-note" style="font-size:0.78rem;color:var(--color-text-tertiary);margin:4px 0 0"></p>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0">' +
           'Reminders re-send the notifications only — API calls and scripts run once, when the alert first fires. ' +
-          'Cooldown limits how often a <em>new</em> alert fires; it does not limit reminders. ' +
           'The Test delivery button can’t exercise reminders.' +
         '</p>' +
       '</div>';
@@ -4212,15 +4214,6 @@ async function openAutomationWizard(existing, opts) {
           'Require a note when acknowledging' +
         '</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Acknowledging asks what the problem was and what the fix was, and won’t go through empty. Escalation still stops on acknowledge.</p>' +
-        // Cooldown is a property of FIRING, not of recovery: it decides how
-        // often this automation is allowed to raise a NEW alert. It sat on the
-        // reset step until 2026-08, where it read as part of how an alert
-        // clears — which is the one thing it does not do.
-        '<div style="margin:0.6rem 0 0">' +
-          '<label style="display:block;font-weight:400">Re-notify cooldown (minutes, optional)</label>' +
-          '<input type="number" id="aw-cooldown-min" class="input" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active" style="width:14rem;margin-top:2px">' +
-          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0">How long this automation waits before raising a <em>new</em> alert about the same device after the last one. It doesn’t shorten or extend an alert that is already up, and it doesn’t limit reminders or escalation.</p>' +
-        '</div>' +
         repeatControlHtml() +
       '</div>';
 
@@ -6511,10 +6504,11 @@ async function openAutomationWizard(existing, opts) {
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
     var ackNoteEl = panel.querySelector("#aw-require-ack-note");
     if (ackNoteEl) draft.requireAckNote = ackNoteEl.checked;
-    // Cooldown lives on this card — it governs how often a NEW alert fires.
-    var cd = panel.querySelector("#aw-cooldown-min");
-    if (cd) draft.cooldownSec = cd.value !== "" && !isNaN(Number(cd.value)) ? Number(cd.value) * 60 : null;
-    // Repeat-until-handled, also a property of the alert record.
+    // Re-notify cooldown was retired in 2026-08 (see the fromRule note): the
+    // draft always carries null, so saving through the wizard clears one an
+    // older rule still stored.
+    draft.cooldownSec = null;
+    // Repeat, also a property of the alert record.
     var repOn = panel.querySelector("#aw-repeat-on");
     if (repOn) {
       if (!repOn.checked) {
@@ -6884,7 +6878,7 @@ async function openAutomationWizard(existing, opts) {
       '<dt>Name</dt><dd>' + escapeHtml(draft.name || "…") + ' <span class="badge badge-level-' + escapeHtml(draft.severity || "warning") + '">' + escapeHtml((draft.severity || "warning").toUpperCase()) + '</span>' + (draft.enabled === false ? ' <span class="badge">disabled</span>' : "") + '</dd>' +
       '<dt>Devices</dt><dd>' + escapeHtml(scopeSummaryText(draft.scope)) + '</dd>' +
       '<dt>Trigger</dt><dd>' + triggerSentence(draft.trigger, draftLadder()) + '</dd>' +
-      '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger, draft.cooldownSec) + '</dd>' +
+      '<dt>Reset</dt><dd>' + resetSentence(draft.reset, draft.trigger) + '</dd>' +
       msgRow +
       ackNoteRow +
       repeatRow +
@@ -7003,7 +6997,10 @@ async function openAutomationWizard(existing, opts) {
       scope: isTriggerScoped(draft.trigger) ? draft.scope : {},
       reset: draft.reset,
       actions: draft.actions,
-      cooldownSec: draft.cooldownSec,
+      // Always null: the control is gone and clearNotificationCooldowns has
+      // emptied the column. Sent explicitly rather than omitted so a rule
+      // edited through the wizard clears a value an API caller re-set.
+      cooldownSec: null,
       messageTemplate: draft.messageTemplate,
       requireAckNote: draft.requireAckNote === true,
       channels: ["in_app"],
@@ -7084,7 +7081,13 @@ function _awDraftFromRule(r) {
     trigger: JSON.parse(JSON.stringify(r.trigger || { type: "asset_metric" })),
     scope: JSON.parse(JSON.stringify(r.scope || {})),
     reset: r.reset ? JSON.parse(JSON.stringify(r.reset)) : null,
-    cooldownSec: r.cooldownSec != null ? r.cooldownSec : null,
+    // Re-notify cooldown was retired from the builder in 2026-08 and cleared
+    // fleet-wide by the clearNotificationCooldowns one-shot. The column and
+    // the engine check survive (dormant — the failureThreshold precedent), so
+    // an API caller can still set one; the wizard just never reads it back,
+    // which is what stops a value nothing on screen states from surviving an
+    // edit.
+    cooldownSec: null,
     messageTemplate: r.messageTemplate != null ? r.messageTemplate : null,
     requireAckNote: r.requireAckNote === true,
     actions: JSON.parse(JSON.stringify(Array.isArray(r.actions) ? r.actions : [])),

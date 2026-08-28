@@ -802,6 +802,25 @@ describe("checkDependencies", () => {
   });
 });
 
+describe("retired re-notify cooldown", () => {
+  it("drops cooldownSec from the portable shape, in BOTH directions", () => {
+    // stripForExport is what parseImportFile re-strips an INCOMING file
+    // through, so this one assertion covers the half that matters: a
+    // pre-cutover .automation.json must not import a suppression the builder
+    // has no control for and clearNotificationCooldowns already cleared
+    // everywhere else.
+    const out = P.stripForExport({
+      name: "Old export",
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 },
+      scope: { allAssets: true },
+      actions: [{ type: "event" }],
+      cooldownSec: 600,
+    }, {});
+    expect(out.rule.cooldownSec).toBeNull();
+  });
+});
+
 // ─── The code editor ────────────────────────────────────────────────────────
 
 describe("forCodeView", () => {

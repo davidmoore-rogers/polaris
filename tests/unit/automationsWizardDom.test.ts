@@ -2221,24 +2221,37 @@ describe("trigger filter rows", () => {
         .map((r) => (r as unknown as { value: string }).value);
       expect(modes).toEqual(["event", "timed", "manual"]);
       expect(doc.querySelector("#aw-reset-ev-action")).toBeTruthy();
-      // Cooldown moved to the Actions step: it governs how often a NEW alert
-      // fires, which is not a fact about how this one clears.
+      // Re-notify cooldown is gone from the builder entirely (2026-08).
       expect(doc.querySelector("#aw-cooldown-min")).toBeFalsy();
     });
 
-    it("the re-notify cooldown lives on the Actions step and round-trips from there", async () => {
+    it("offers no re-notify cooldown on any step, and clears a stored one on save", async () => {
+      // The control was retired in 2026-08 and clearNotificationCooldowns
+      // empties the column. A rule that somehow still carries one (an API
+      // caller, or a restore from before the migration) must not keep it
+      // invisibly: an edit through the builder writes null, so what governs
+      // this automation is only ever what the wizard actually showed.
       await openOnStep4(metricRule({ cooldownSec: 900 }));
       expect(doc.querySelector("#aw-step-4 #aw-cooldown-min")).toBeFalsy();
       (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
-      const cd = doc.querySelector("#aw-step-5 #aw-cooldown-min") as unknown as { value: string } | null;
-      expect(cd).toBeTruthy();
-      expect(cd!.value).toBe("15"); // stored seconds, shown as minutes
-      cd!.value = "30";
+      expect(doc.querySelector("#aw-step-5 #aw-cooldown-min")).toBeFalsy();
       (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 30));
       expect(toastErrors).toEqual([]);
-      expect((savedPayloads[0] as Record<string, any>).cooldownSec).toBe(1800);
+      expect((savedPayloads[0] as Record<string, any>).cooldownSec).toBeNull();
+    });
+
+    it("labels the repeat checkbox without restating what the fields below say", async () => {
+      // "until it's handled" duplicated — less precisely — the "until
+      // Acknowledged / Cleared only" select the checkbox reveals.
+      await openOnStep4(metricRule({}));
+      (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+      const box = doc.querySelector("#aw-step-5 #aw-repeat-on");
+      expect(box).toBeTruthy();
+      const label = (box as unknown as { parentElement: { textContent: string } }).parentElement.textContent.trim();
+      expect(label).toBe("Repeat this notification");
     });
 
     it("a NEW event automation whose action has a known counterpart starts on the event reset", async () => {

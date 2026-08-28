@@ -835,6 +835,10 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/migrateContactFilterShape.js",
       "./jobs/migrateTagFilterShape.js",
+      // Clears NotificationRule.cooldownSec fleet-wide — the "Re-notify
+      // cooldown" control was retired from the wizard, and a value nothing on
+      // screen states must not keep governing when an automation may re-fire.
+      "./jobs/clearNotificationCooldowns.js",
       "./jobs/seedBaselineAutomations.js",
       // Seals previously-plaintext secrets in Credential / Integration /
       // NotificationChannel config + Setting values. Not marker-guarded: the
