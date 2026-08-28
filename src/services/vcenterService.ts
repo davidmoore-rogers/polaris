@@ -124,6 +124,20 @@ export interface VcenterDiscoveryResult {
   hosts: DiscoveredVcenterHost[];
   vms: DiscoveredVcenterVm[];
   datastores: DiscoveredVcenterDatastore[];
+  /**
+   * Every VM moref the per-host listing returned, BEFORE the name filter and
+   * before the per-VM detail fan-out. `vms` is the survivors of both; this is
+   * the raw "vCenter still has this VM" set, and it's what keeps a filter
+   * change or a single failed detail call from reading as a deleted VM in the
+   * disappearance sweep (syncVcenterDevices).
+   */
+  presentVmMorefs: string[];
+  /**
+   * False when any per-host VM list call failed (each is caught + logged so one
+   * unreachable host can't fail the run). A partial inventory can't distinguish
+   * "deleted" from "not asked", so the sweep refuses to act on it.
+   */
+  inventoryComplete: boolean;
 }
 
 export type VcenterDiscoveryProgressCallback = (
@@ -764,6 +778,56 @@ export function backingLabelFor(backing: VcenterDatastoreBacking | null): string
 // ─── Pure helpers (exported for tests + syncVcenterDevices) ─────────────────
 
 /**
+ * May this run's inventory be read as "everything vCenter still has"?
+ *
+ * Absence from a discovery read is only evidence of deletion when the read was
+ * whole. Two answers must never be treated as a deleted fleet:
+ *   - an incomplete inventory (a per-host VM list failed and was logged rather
+ *     than failing the run), and
+ *   - an empty one (zero hosts AND zero VMs is a credential/permission answer
+ *     far more often than a genuinely emptied vCenter — business rule 35's
+ *     shrunken-read guard, same reasoning).
+ *
+ * Returns the reason string when the sweep must be skipped, or null when the
+ * inventory is trustworthy.
+ */
+export function vcenterSweepBlockedReason(
+  result: Pick<VcenterDiscoveryResult, "hosts" | "vms" | "inventoryComplete">,
+): string | null {
+  if (!result.inventoryComplete) return "the inventory read was incomplete (a per-host VM list failed)";
+  if (result.hosts.length === 0 && result.vms.length === 0) return "the inventory came back empty";
+  return null;
+}
+
+/**
+ * Split stale vcenter AssetSource rows (externalId no longer in the current
+ * inventory) into the ones that really vanished and the ones that are still in
+ * vCenter but dropped out of `result.vms` for an innocent reason — excluded by
+ * `vmInclude`/`vmExclude`, or a per-VM detail call that failed this cycle.
+ *
+ * `presentVmMorefs` is the RAW per-host listing, taken before the name filter
+ * and before the detail fan-out, so a filter change reads as "still there"
+ * rather than as a deletion — the same call the FortiGate roster sweep makes.
+ * Host rows are never retained this way: the host list either arrives whole or
+ * throws, so a missing host moref really is a removed host.
+ */
+export function partitionStaleVcenterSources<T extends { sourceKind: string; observed: unknown }>(
+  rows: T[],
+  presentVmMorefs: Iterable<string>,
+): { retained: T[]; gone: T[] } {
+  const present = presentVmMorefs instanceof Set ? presentVmMorefs : new Set(presentVmMorefs);
+  const retained: T[] = [];
+  const gone: T[] = [];
+  for (const row of rows) {
+    const moref = (row.observed as { moref?: unknown } | null)?.moref;
+    if (row.sourceKind === "vcenter-vm" && typeof moref === "string" && present.has(moref)) retained.push(row);
+    else gone.push(row);
+  }
+  return { retained, gone };
+}
+
+
+/**
  * VM externalId for the AssetSource identity key. instanceUuid survives
  * vMotion and host moves and is unique per vCenter; when the detail call
  * couldn't produce one, fall back to the integration-scoped moref (morefs
@@ -1025,6 +1089,7 @@ export async function discoverInventory(
     // 4000-item global list cap).
     type VmListRow = { vm: string; name: string; power_state?: string; hostMoref: string };
     const vmRows: VmListRow[] = [];
+    let vmListFailures = 0;
     for (const host of hosts) {
       if (signal?.aborted) throw new AppError(499, "Aborted");
       log("discover.device.start", "info", `vCenter: listing VMs on ${host.name}`);
@@ -1038,6 +1103,10 @@ export async function discoverInventory(
         log("discover.device.complete", "info", `vCenter: ${host.name} — ${rows.length} VM(s)`);
       } catch (err: any) {
         if (signal?.aborted) throw err;
+        // The run continues without this host's VMs — which makes the
+        // inventory incomplete, and an incomplete inventory must never be read
+        // as "these VMs were deleted".
+        vmListFailures += 1;
         log("discover.device.skip", "error", `vCenter: VM list failed for ${host.name} — ${err?.message}`);
       }
     }
@@ -1139,7 +1208,14 @@ export async function discoverInventory(
       logger.debug({ err: err?.message }, "vcenter: host DNS resolution unavailable");
     }
 
-    return { clusters, hosts, vms, datastores };
+    return {
+      clusters,
+      hosts,
+      vms,
+      datastores,
+      presentVmMorefs: vmRows.map((r) => r.vm),
+      inventoryComplete: vmListFailures === 0,
+    };
   } finally {
     await session.logout();
   }

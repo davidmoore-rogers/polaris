@@ -3,8 +3,9 @@
  *
  * Pure helpers of the vCenter discovery service: external-id selection,
  * cluster mapping, the vMotion-safe dependency-edge builder, VM name
- * filtering, NAA vendor identification, SOAP response parsing, and the
- * REST VM-detail parser.
+ * filtering, NAA vendor identification, SOAP response parsing, the REST
+ * VM-detail parser, and the two decisions behind the disappearance sweep
+ * (is this inventory trustworthy, and which stale rows really vanished).
  */
 
 import { describe, it, expect } from "vitest";
@@ -22,8 +23,15 @@ import {
   parseObjRef,
   parsePropValue,
   parseQuickStatsBlock,
+  parseGuestDisks,
+  parseGuestNics,
+  parseHostPnics,
+  parseHostVnics,
+  parseHostStatsBlock,
   parseDatastoreBlock,
   parseVmDetail,
+  vcenterSweepBlockedReason,
+  partitionStaleVcenterSources,
 } from "../../src/services/vcenterService.js";
 
 const INTG = "11111111-2222-3333-4444-555555555555";
@@ -325,5 +333,72 @@ describe("parseVmDetail", () => {
     expect(vm.instanceUuid).toBeNull();
     expect(vm.nicMacs).toEqual([]);
     expect(vm.disks).toEqual([]);
+  });
+});
+
+
+// ─── disappearance sweep ────────────────────────────────────────────────────
+
+describe("vcenterSweepBlockedReason", () => {
+  const full = { hosts: [{}] as any[], vms: [{}] as any[], inventoryComplete: true };
+
+  it("allows the sweep on a complete, non-empty inventory", () => {
+    expect(vcenterSweepBlockedReason(full as any)).toBeNull();
+  });
+
+  it("blocks on a partial read — a failed per-host VM list looks exactly like a deleted fleet", () => {
+    expect(vcenterSweepBlockedReason({ ...full, inventoryComplete: false } as any)).toMatch(/incomplete/);
+  });
+
+  it("blocks on an empty read — zero hosts and zero VMs is usually a permission answer", () => {
+    expect(vcenterSweepBlockedReason({ hosts: [], vms: [], inventoryComplete: true } as any)).toMatch(/empty/);
+  });
+
+  it("allows a vCenter with hosts but genuinely no VMs", () => {
+    expect(vcenterSweepBlockedReason({ hosts: [{}], vms: [], inventoryComplete: true } as any)).toBeNull();
+  });
+});
+
+describe("partitionStaleVcenterSources", () => {
+  const vmRow = (externalId: string, moref: string | null) => ({
+    externalId,
+    sourceKind: "vcenter-vm",
+    observed: moref === null ? {} : { moref },
+  });
+
+  it("treats a VM absent from the raw listing as gone", () => {
+    const rows = [vmRow("uuid-a", "vm-1")];
+    const { retained, gone } = partitionStaleVcenterSources(rows, ["vm-2"]);
+    expect(retained).toEqual([]);
+    expect(gone).toEqual(rows);
+  });
+
+  it("retains a VM still in the raw listing — filtered out, not deleted", () => {
+    const rows = [vmRow("uuid-a", "vm-1")];
+    const { retained, gone } = partitionStaleVcenterSources(rows, ["vm-1"]);
+    expect(retained).toEqual(rows);
+    expect(gone).toEqual([]);
+  });
+
+  it("never retains a host row — the host list arrives whole or throws", () => {
+    const rows = [{ externalId: `${INTG}:host-9`, sourceKind: "vcenter-host", observed: { moref: "host-9" } }];
+    const { retained, gone } = partitionStaleVcenterSources(rows, ["host-9"]);
+    expect(retained).toEqual([]);
+    expect(gone).toEqual(rows);
+  });
+
+  it("treats a row with no recorded moref as gone (nothing to match it against)", () => {
+    const rows = [vmRow("uuid-a", null)];
+    const { gone } = partitionStaleVcenterSources(rows, ["vm-1"]);
+    expect(gone).toEqual(rows);
+  });
+
+  it("splits a mixed batch", () => {
+    const kept = vmRow("uuid-a", "vm-1");
+    const deleted = vmRow("uuid-b", "vm-2");
+    const host = { externalId: `${INTG}:host-1`, sourceKind: "vcenter-host", observed: { moref: "host-1" } };
+    const { retained, gone } = partitionStaleVcenterSources([kept, deleted, host], new Set(["vm-1"]));
+    expect(retained).toEqual([kept]);
+    expect(gone).toEqual([deleted, host]);
   });
 });

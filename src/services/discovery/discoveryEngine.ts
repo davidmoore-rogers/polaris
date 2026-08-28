@@ -715,7 +715,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     let discoveryResult: DiscoveryResult;
 
     // Accumulate per-device sync totals for the completion log
-    const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[], decommissionedSwitches: [] as string[], decommissionedAps: [] as string[] };
+    const syncTotals = { created: [] as string[], updated: [] as string[], skipped: [] as string[], deprecated: [] as string[], decommissionedSwitches: [] as string[], decommissionedAps: [] as string[], decommissionedAssets: [] as string[] };
 
     // Phase 7.7's device-write budget for this ENTIRE run. In FMG mode the sync
     // below runs once per managed FortiGate, so a ceiling held inside the phase
@@ -760,6 +760,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
         syncTotals.created.push(...r.created);
         syncTotals.updated.push(...r.updated);
         syncTotals.skipped.push(...r.skipped);
+        syncTotals.decommissionedAssets.push(...r.decommissioned);
       }
     } else if (integration.type === "azurearc") {
       // Azure Arc discovery produces assets only — Arc-enabled machines. No
@@ -983,7 +984,8 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
       const deprecatedSuffix = assetsOnly ? "" : `, ${syncTotals.deprecated.length} deprecated`;
       const decomSwSuffix = syncTotals.decommissionedSwitches.length > 0 ? `, ${syncTotals.decommissionedSwitches.length} FortiSwitch(es) decommissioned` : "";
       const decomApSuffix = syncTotals.decommissionedAps.length      > 0 ? `, ${syncTotals.decommissionedAps.length} FortiAP(s) decommissioned`      : "";
-      logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}` });
+      const decomAssetSuffix = syncTotals.decommissionedAssets.length > 0 ? `, ${syncTotals.decommissionedAssets.length} asset(s) decommissioned` : "";
+      logEvent({ action: "integration.discover.completed", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, message: `${label} ${kindLabel} completed for "${integrationName}" — ${syncTotals.created.length} created, ${syncTotals.updated.length} updated, ${syncTotals.skipped.length} skipped${deprecatedSuffix}${decomSwSuffix}${decomApSuffix}${decomAssetSuffix}` });
       // Record overall duration sample for slow-run detection. Aborts and
       // errors are intentionally not recorded — a failed run would poison
       // the rolling average used to compute the "slow" threshold. Scoped
@@ -8552,7 +8554,7 @@ async function syncVcenterDevices(
   integrationConfig: Record<string, unknown> | null,
   result: vcenter.VcenterDiscoveryResult,
   actor?: string,
-): Promise<{ created: string[]; updated: string[]; skipped: string[] }> {
+): Promise<{ created: string[]; updated: string[]; skipped: string[]; decommissioned: string[] }> {
   const syncLog = (level: "info" | "error" | "warning", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
@@ -9152,28 +9154,131 @@ async function syncVcenterDevices(
     syncLog("error", `Failed to persist datastores: ${err.message || "Unknown error"}`);
   }
 
-  // Stale AssetSource sweep — rows from THIS integration whose externalId no
-  // longer appears in the inventory (VM deleted / filtered out, host removed).
-  // The asset row itself is untouched; decommissionStaleAssets owns aging.
+  // ── Pass E — stale AssetSource sweep + the assets that lose their last one ─
+  //
+  // Rows from THIS integration whose externalId no longer appears in the
+  // inventory (VM deleted, host removed from vCenter). An asset that keeps ANY
+  // other source row — a directory record, an Arc row, a reporting Polaris
+  // Agent, the `manual` row of an operator-created asset — is still claimed by
+  // something and is left exactly as it is; only an asset whose LAST source was
+  // the vanished vCenter identity is decommissioned. Aging out on inactivity
+  // (months) stays with decommissionStaleAssets; this is the evidence-based
+  // path, and it is deliberately narrow because absence from a discovery read
+  // has three innocent causes:
+  //
+  //   1. A partial run. Each per-host VM list failure is caught and logged so
+  //      one unreachable ESXi host can't fail the whole run — which means an
+  //      incomplete inventory looks exactly like a deleted fleet.
+  //      `result.inventoryComplete` is false in that case and BOTH the sweep
+  //      and the decommission are skipped: deleting the sources alone would
+  //      leave the next (complete) run with nothing left to notice.
+  //   2. An empty read. Zero hosts AND zero VMs against a fleet that had
+  //      vcenter sources is a credential/permission answer far more often than
+  //      a genuinely emptied vCenter (business rule 35's shrunken-read guard,
+  //      same reasoning).
+  //   3. A filter change. `config.vmInclude`/`vmExclude` drops VMs before the
+  //      detail fan-out, so a filtered-out VM is absent from `result.vms` while
+  //      still very much existing — the FortiGate roster sweep makes the same
+  //      call (flipping a filter must not decommission). `presentVmMorefs` is
+  //      the raw pre-filter listing, so those rows are RETAINED rather than
+  //      swept, which also means re-widening the filter re-matches the same
+  //      asset instead of orphaning its identity.
+  const decommissioned: string[] = [];
   try {
-    const sweep = await prisma.assetSource.deleteMany({
-      where: {
-        integrationId,
-        OR: [
-          { sourceKind: "vcenter-vm",   externalId: { notIn: currentVmExternalIds } },
-          { sourceKind: "vcenter-host", externalId: { notIn: currentHostExternalIds } },
-        ],
-      },
-    });
-    if (sweep.count > 0) {
-      syncLog("info", `Swept ${sweep.count} stale vcenter AssetSource row(s) no longer present in the inventory.`);
+    const blockedReason = vcenter.vcenterSweepBlockedReason(result);
+    if (blockedReason) {
+      const priorCount = vcenterSources.filter((src: any) => src.integrationId === integrationId).length;
+      if (priorCount > 0) {
+        syncLog(
+          "warning",
+          `Stale-source sweep skipped — ${blockedReason}. ${priorCount} existing vcenter source row(s) left untouched rather than reading a partial answer as deleted devices.`,
+        );
+      }
+    } else {
+      const staleRows = await prisma.assetSource.findMany({
+        where: {
+          integrationId,
+          OR: [
+            { sourceKind: "vcenter-vm",   externalId: { notIn: currentVmExternalIds } },
+            { sourceKind: "vcenter-host", externalId: { notIn: currentHostExternalIds } },
+          ],
+        },
+        select: { id: true, assetId: true, sourceKind: true, externalId: true, observed: true },
+      });
+
+      // Cause 3 — the VM is still in vCenter, just filtered out (or its detail
+      // call failed this cycle). Keep the row; that is not a disappearance.
+      const { retained, gone } = vcenter.partitionStaleVcenterSources(staleRows, result.presentVmMorefs);
+
+      if (gone.length > 0) {
+        await prisma.assetSource.deleteMany({ where: { id: { in: gone.map((r) => r.id) } } });
+        syncLog("info", `Swept ${gone.length} stale vcenter AssetSource row(s) no longer present in the inventory.`);
+      }
+      if (retained.length > 0) {
+        syncLog("info", `Retained ${retained.length} vcenter source row(s) for VM(s) still in vCenter but excluded by the name filter (or whose detail read failed this cycle).`);
+      }
+
+      // Which of those assets are now unclaimed? Read AFTER the delete, so
+      // "remaining" is literally what still points at the asset.
+      const orphanCandidateIds = [...new Set(gone.map((r) => r.assetId))];
+      if (orphanCandidateIds.length > 0) {
+        const remaining = await prisma.assetSource.findMany({
+          where: { assetId: { in: orphanCandidateIds } },
+          select: { assetId: true },
+        });
+        const stillClaimed = new Set(remaining.map((r) => r.assetId));
+        const orphanIds = orphanCandidateIds.filter((id) => !stillClaimed.has(id));
+        const keptCount = orphanCandidateIds.length - orphanIds.length;
+        if (keptCount > 0) {
+          syncLog("info", `${keptCount} asset(s) left vCenter but are still claimed by another discovery source — left active.`);
+        }
+
+        if (orphanIds.length > 0) {
+          const orphans = await prisma.asset.findMany({
+            // Maintenance-window assets ARE judged here, on the FortiGate
+            // roster sweep's reasoning: absence from the inventory is
+            // configuration truth, not a reachability signal — and
+            // releaseAssetsForDecommission force-closes the window first so the
+            // 30s maintenance reconcile can't re-flip the status back.
+            where: { id: { in: orphanIds }, status: { not: "decommissioned" } },
+            select: { id: true, hostname: true, ipAddress: true, assetType: true },
+          });
+          if (orphans.length > 0) {
+            const ids = orphans.map((a: any) => a.id);
+            await releaseAssetsForDecommission(ids, {
+              at: now,
+              actor,
+              statusChangedBy: integrationName,
+              reason: `no longer present in "${integrationName}"`,
+            });
+            await prisma.asset.updateMany({
+              where: { id: { in: ids } },
+              data: { status: "decommissioned", statusChangedAt: now, statusChangedBy: integrationName },
+            });
+            for (const a of orphans) {
+              const name = a.hostname || a.ipAddress || a.id;
+              decommissioned.push(name);
+              logEvent({
+                action: "asset.vcenter.decommissioned",
+                resourceType: "asset",
+                resourceId: a.id,
+                resourceName: name,
+                actor,
+                message: `${a.assetType === "hypervisor" ? "ESXi host" : "VM"} "${name}" decommissioned — no longer present in "${integrationName}", and no other discovery source claims it`,
+                details: { reason: "missing-from-vcenter-inventory", integrationId, integrationName },
+              });
+            }
+            syncLog("info", `Decommissioned ${orphans.length} asset(s) that vanished from vCenter with no other source claiming them.`);
+          }
+        }
+      }
     }
   } catch (err: any) {
     syncLog("error", `Failed to sweep stale vcenter AssetSource rows: ${err.message || "Unknown error"}`);
   }
 
-  syncLog("info", `vCenter sync: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped (${result.hosts.length} host(s), ${result.vms.length} VM(s), ${result.datastores.length} datastore(s))`);
-  return { created, updated, skipped };
+  syncLog("info", `vCenter sync: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped, ${decommissioned.length} decommissioned (${result.hosts.length} host(s), ${result.vms.length} VM(s), ${result.datastores.length} datastore(s))`);
+  return { created, updated, skipped, decommissioned };
 }
 
 export async function hasActiveDiscoveries(): Promise<boolean> {
