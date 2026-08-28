@@ -71,11 +71,13 @@ interface DeliveryRow {
 /**
  * Per-drain-pass render memo.
  *
- * A composed email now fans out one delivery row per recipient
- * (notificationRecipientService.planComposedEmails), so one alert routed to a
- * region can be a dozen rows rendering the SAME body — and the charts are built
- * here, at delivery time, not at fire time. Without this, that alert would
- * query and rasterize the identical last-hour graphs once per recipient.
+ * One alert can still produce several delivery rows rendering the SAME body —
+ * a rule routed to two email channels, an escalation tier re-sending it, a
+ * retry of a row that failed earlier in the pass — and the charts are built
+ * here, at delivery time, not at fire time. Without this, those rows would each
+ * query and rasterize the identical last-hour graphs. (Until the acknowledge
+ * link stopped naming a person, a composed email also fanned out one row per
+ * recipient, which is what forced this memo; business rule 25.)
  *
  * Scoped to ONE drain pass and deliberately never module-level: an escalation
  * email at T+90min must re-render against the current hour rather than replay
