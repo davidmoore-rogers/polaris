@@ -39,7 +39,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 ## cross-cutting/five-state-monitor-machine
 
-**What it is:** Asset.monitorStatus ∈ {up, warning, recovering, down, unknown} driven by consecutiveFailures/consecutiveSuccesses counters (see "Five-state monitor machine" in CLAUDE.md).
+**What it is:** Asset.monitorStatus ∈ {up, warning, recovering, down, unknown, passive} driven by the `consecutiveFailures` **leaky bucket** — a miss adds one, an answer takes one back, floored at 0 (business rule 30). `consecutiveSuccesses` is still written but no longer decides anything: draining the bucket to 0 IS the recovery, and it takes exactly as many answers as it took misses.
 
 **Writers** (files that mutate or emit this state):
 - `src/services/monitoringService.ts` — runProbeFor() updates Asset.monitorStatus/consecutiveFailures/consecutiveSuccesses after each probe result, stamps Asset.monitorStatusChangedAt whenever monitorStatus changes value (any-to-any, not just up↔down), emits monitor.status_changed Event on transitions INTO up/warning/down (not recovering/unknown, never per-poll), fires propagateAfterStatusChange() — but only on the confirmed up/down edge, NOT on the warning edge — to push the change into descendant dependencySuppressed state. **Reboot detection:** the SNMP probe (probeSnmp) now keeps the sysUpTime TimeTicks it already reads as its reachability OID and returns it as ProbeResult.uptimeSec; recordProbeResult stamps it onto the AssetMonitorSample (uptimeSec) + Asset.lastUptimeSec via the probe-patch buffer, and when the reading drops vs. the cached lastUptimeSec (>60s tolerance) sets Asset.lastRebootAt and emits a `device.reboot` Event (level warning). Non-SNMP probes carry no uptime — the probePatchBuffer flush COALESCEs lastUptimeSec/lastRebootAt so they're preserved, not nulled.
@@ -65,8 +65,8 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **Invariants:**
 - State machine accepts only {up, warning, recovering, down, unknown}; no other string values permitted.
-- Transition to "down" happens when consecutiveFailures ≥ failureThreshold; to "up" when consecutiveSuccesses ≥ failureThreshold (same threshold both directions).
-- "recovering" is the transient mid-recovery state (was-down, now succeeding). Exits to "up" once the success threshold is crossed.
+- The LEVEL decides and the current probe only breaks the tie below the threshold: `cf ≥ threshold` → down whatever this probe did; `cf > 0` → recovering on an answer / warning on a miss; `cf = 0` → up. A success must NEVER win outright — that would clear a down alert on one answered packet out of an hour's worth of misses.
+- "recovering" no longer means "was down" — it means answering with misses still outstanding, which is reachable straight out of "warning". It exits to "up" when the bucket reaches 0.
 - "warning" is mid-degradation (was-up, now accumulating failures but below threshold). Exits to "down" when threshold crossed, back to "up" on success.
 - monitor.status_changed Event is edge-triggered: it fires on the transition INTO up / warning / down (so an operator sees the first successful poll, the first warning, and the first down — plus recovery, which is a →up edge). It never fires per-poll (up→up etc. are suppressed by previousStatus===nextStatus) and never fires for the intermediate "recovering"/"unknown" states. Level is "info" for →up, "warning" for →warning and →down. propagateAfterStatusChange() and triggerRetryAfterStatusChange() are decoupled from the event: they fire from a SEPARATE guard gated to the confirmed up/down edge only (a "warning" edge logs an event but does NOT propagate suppression or kick the retry job) — dependency suppression still follows the confirmed-down edge, never the flap.
 - monitorStatusChangedAt is stamped on EVERY transition (any-to-any), independent of the Event audit trail. The column is the source for the Dashboard's "how long has this been warning/down" duration. Backfill from the Event log seeds it from the latest monitor.status_changed Event still within the 7-day window; older outages render "—".
@@ -75,9 +75,9 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 
 **When changing this:**
 - Verify every state assignment matches the rules above (no bypass paths).
-- Check assets.js intermittency-bar replay logic (`_intermittencyStates`) replays the five-state machine forward correctly (must use the same failureThreshold in BOTH directions) — in particular that the down→recovering→up run still renders blue, since that is the only surface showing it per-sample.
+- Check assets.js intermittency-bar replay logic (`_intermittencyStates`) mirrors the bucket exactly — it is a hand-copy of recordProbeResult and the strip is the one surface that would visibly disagree with the pill. `tests/unit/monitorStatusStateMachine.test.ts` carries a PARITY block that reads monitoringService.ts itself, because that file's stub silently pinned the old run-length machine through the rewrite that replaced it — in particular that the down→recovering→up run still renders blue, since that is the only surface showing it per-sample.
 - Confirm monitor.status_changed Event audit trail only has →up / →warning / →down transitions (never →recovering, →unknown, or same-state per-poll repeats = bug).
-- Test manual /probe-now against a down asset — should advance consecutiveSuccesses and possibly transition to recovering within one call.
+- Test manual /probe-now against a down asset — should DECREMENT consecutiveFailures by one, and transition to recovering only once the bucket falls under the threshold.
 - Check Map topology endpoint colors match asset list Status pills (monitorStatusToHealth must be consistent).
 - Verify clamp logic in db.ts doesn't interfere: disable should reset, but re-enable (flip to active) should not auto-resume monitoring.
 - If touching the cadence dispatch (runMonitorPass / publishDueWork): mirror EVERY change in BOTH `src/services/monitoringService.ts` AND `src/jobs/monitorAssets.ts` — they're parallel implementations and must stay in lock-step.

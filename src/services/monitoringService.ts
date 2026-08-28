@@ -10247,61 +10247,77 @@ export async function recordProbeResult(
 
   const now = new Date();
   const previousStatus = asset.monitorStatus ?? "unknown";
-  // Counter update: success path zeroes failures + bumps successes; failure
-  // path zeroes successes + bumps failures. Either path resets the opposite
-  // counter so the in-flight transition is unambiguous.
-  const newCf = result.success ? 0                                        : (asset.consecutiveFailures  ?? 0) + 1;
+  // Counter update. `consecutiveFailures` is a LEAKY BUCKET, not a run length:
+  // a miss adds one, a success TAKES ONE BACK (floored at 0). It stopped being
+  // a literal consecutive count in 2026-08 — see business rule 30.
+  //
+  // The run-length version forgot an outage the instant one packet answered, so
+  // a device alternating miss/answer/miss/answer sat at cf=1 forever and never
+  // reached ANY verdict, while a device that had already missed threshold-1
+  // times was handed a clean slate by a single lucky poll. The bucket keeps the
+  // debt: three misses then one answer is still two misses outstanding, and the
+  // next miss lands on 3 rather than on 1.
+  //
+  // It also makes recovery symmetric for free — walking 3 → 2 → 1 → 0 takes
+  // exactly `threshold` successes, which is the same number of confirmations
+  // the run-length machine spent `consecutiveSuccesses` to count. That is why
+  // the state machine below no longer consults `newCs`.
+  const newCf = result.success
+    ? Math.max(0, (asset.consecutiveFailures ?? 0) - 1)
+    : (asset.consecutiveFailures ?? 0) + 1;
+  // Still maintained and still written: it is a true fact about the device, it
+  // is charted, and the probe-patch overlay carries it. It simply no longer
+  // decides anything.
   const newCs = result.success ? (asset.consecutiveSuccesses ?? 0) + 1     : 0;
 
-  // Six-state machine. See CLAUDE.md "Monitor Settings Hierarchy" /
-  // "Monitor status state machine" for the table.
+  // Six-state machine, now a pure function of the leaky bucket above and the
+  // outcome of THIS probe. `previousStatus` no longer participates: the bucket
+  // already carries every bit of history the verdict needs, and reading the
+  // prior state as well was what made the old machine need eight arrows.
   //
-  //   passive           — no down-detection automation covers this asset, so
-  //                       Polaris renders NO verdict. Still polled, still
-  //                       sampled, still charted; the counters below still
-  //                       advance, they are simply never compared.
+  //   passive                     — no down-detection automation covers this
+  //                                 asset, so Polaris renders NO verdict. Still
+  //                                 polled, sampled and charted; the bucket
+  //                                 still moves, it is simply never compared.
   //
-  //   unknown / down + success → recovering (until cs ≥ threshold → up)
-  //   recovering        + success → up if cs ≥ threshold else stay recovering
-  //   recovering        + failure → down if cf ≥ threshold else stay recovering
-  //   up                + failure → warning (cf=1, count toward down)
-  //   warning           + success → up if cs ≥ threshold else stay warning
-  //   warning           + failure → down if cf ≥ threshold else stay warning
-  //   unknown           + failure → warning (treat as fresh up that just failed)
+  //   cf ≥ threshold              → down        (red)
+  //   cf > 0, this probe missed   → warning     (amber — "Missed N")
+  //   cf > 0, this probe answered → recovering  (answering, misses outstanding)
+  //   cf = 0                      → up          (green — the debt is paid off)
   //
-  // Down hosts that fail again stay down; the down→recovering arrow is the
-  // only exit from down and requires at least one success. The previous name
-  // for this state was "pending"; the migrateMonitorStatusRename startup job
-  // bumps any leftover "pending" rows to "recovering".
+  // THE BUCKET LEVEL DECIDES; the outcome of this one probe only breaks the tie
+  // below the threshold. Letting a success win outright would mean a device
+  // dark for an hour (cf=60) reads `recovering` — and clears its down alert,
+  // since the alert tests `monitorStatus == down` — on ONE answered packet out
+  // of sixty. It has to pay the debt back down under the threshold first.
+  //
+  // Two consequences worth stating, because both are deliberate:
+  //
+  //   • `recovering` no longer means "was down". It means "answering with
+  //     misses still outstanding", which is reachable straight out of warning —
+  //     a device that missed twice and then answered is at cf=1 and is visibly
+  //     climbing back rather than sitting in amber pretending nothing changed.
+  //   • Down is sticky in exactly one direction: it holds until the bucket
+  //     drains below the threshold, which takes as many answers as it took
+  //     misses to get there. That is the same "recover for N polls" shape the
+  //     reset step asks for, falling out of the counter for free.
+  //
+  // The previous name for `recovering` was "pending"; the
+  // migrateMonitorStatusRename startup job bumps any leftover rows.
   let nextStatus: MonitorStatus;
   if (threshold === null) {
-    // PASSIVE. Note the counters are still advanced above: consecutiveFailures
-    // is itself an automatable asset_state field, it is what lets a surface say
-    // "passive and answering" vs "passive and dark", and keeping the run warm
-    // means an asset that LATER gains coverage converges on its very next probe
-    // instead of restarting from zero.
+    // PASSIVE. Note the bucket still moves above: consecutiveFailures is itself
+    // an automatable asset_state field, it is what lets a surface say "passive
+    // and answering" vs "passive and dark", and keeping it warm means an asset
+    // that LATER gains coverage converges on its very next probe instead of
+    // restarting from zero.
     nextStatus = "passive";
-  } else if (result.success) {
-    if (previousStatus === "up") {
-      nextStatus = "up";
-    } else if (previousStatus === "warning" || previousStatus === "recovering") {
-      nextStatus = newCs >= threshold ? "up" : previousStatus;
-    } else {
-      // unknown / down / passive → start the recovery counter at recovering.
-      nextStatus = newCs >= threshold ? "up" : "recovering";
-    }
+  } else if (newCf >= threshold) {
+    nextStatus = "down";
+  } else if (newCf > 0) {
+    nextStatus = result.success ? "recovering" : "warning";
   } else {
-    if (newCf >= threshold) {
-      nextStatus = "down";
-    } else if (previousStatus === "up" || previousStatus === "unknown" || previousStatus === "passive") {
-      // Leaving passive is like leaving unknown: there was no prior verdict.
-      nextStatus = "warning";
-    } else if (previousStatus === "warning" || previousStatus === "recovering" || previousStatus === "down") {
-      // Stay in the current state and let the counter march toward "down".
-      nextStatus = previousStatus as "warning" | "recovering" | "down";
-    } else {
-      nextStatus = "warning";
-    }
+    nextStatus = "up";
   }
 
   // Buffer the sample row — the periodic flush in sampleWriteBuffer will

@@ -2714,7 +2714,12 @@ export const FIELD_META: Record<string, { label: string; kind: "enum" | "bool" |
   // counters keep advancing, they are simply never compared to a threshold.
   monitorStatus: { label: "Monitor status", kind: "enum", values: ["up", "warning", "recovering", "down", "passive", "unknown"] },
   status: { label: "Lifecycle status", kind: "enum", values: ["active", "maintenance", "decommissioned", "storage", "disabled", "quarantined"] },
-  consecutiveFailures: { label: "Consecutive probe failures", kind: "number" },
+  // Not a run length since the leaky-bucket change (business rule 30): a miss
+  // adds one, an answer takes one back. The KEY is unchanged because stored
+  // automations reference it, but the label had to stop saying "consecutive" —
+  // a rule reading `>= 5` now fires on five misses outstanding, which a flapping
+  // device can reach without ever missing five in a row.
+  consecutiveFailures: { label: "Missed polls outstanding", kind: "number" },
   dependencySuppressed: { label: "Dependency-suppressed", kind: "bool", values: ["true", "false"] },
   quarantined: { label: "Quarantined", kind: "bool", values: ["true", "false"] },
   ifOperStatus: { label: "Interface oper status", kind: "dynamic" },

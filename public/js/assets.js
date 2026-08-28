@@ -223,11 +223,28 @@ var _CHART_FAIL_COLOR = "#d32f2f";
 // alert email and the device page draw one outage the same way.
 var _CHART_DEP_COLOR = "#9aa0a6";
 
+// The response-time series is drawn in the UP green rather than the theme
+// accent, so the one chart that is ABOUT reachability speaks the same four
+// colors as the Status pill and the Last-30-min strip: green up, amber missed,
+// purple paying it back, red down. Every other chart (CPU, memory, interface
+// counters) keeps its own series color — those are about a reading, not a
+// verdict, and recoloring them would make green mean two different things.
+// A token, not a hex, so all three themes get their own success green.
+var _CHART_UP_COLOR = "var(--color-success)";
+
+// A poll that ANSWERED while missed polls are still outstanding. Same meaning
+// and same hue as the purple cell on the Last-30-min strip: the device is
+// answering, it just has not paid the debt off yet. Kept a flat hex for the
+// same reason the fail/dep colors are — it must read on all three themes.
+var _CHART_RECOVER_COLOR = "#ab47bc";
+
 // The stroke/dot color for one plot point. `ok:false` points carry `dep:true`
-// when the miss was explained. Single decider so a dive can never come out
-// half grey and half red.
+// when the miss was explained; `ok:true` points carry `rec:true` when misses
+// were still outstanding at that probe. Single decider so a dive can never
+// come out half grey and half red, and so the climb back out cannot come out
+// half green and half purple.
 function _chartPointColor(p, seriesColor) {
-  if (p.ok) return seriesColor;
+  if (p.ok) return p.rec ? _CHART_RECOVER_COLOR : seriesColor;
   return p.dep ? _CHART_DEP_COLOR : _CHART_FAIL_COLOR;
 }
 
@@ -10923,61 +10940,54 @@ function assetMonitoringViewHTML(a) {
 }
 
 /**
- * Replays the five-state monitor machine over a probe-sample stream and
- * returns one display state per sample, in order.
+ * Replays the monitor state machine over a probe-sample stream and returns one
+ * display state per sample, in order, each carrying the missed-poll count as it
+ * stood after that probe.
  *
- * Failures stay LITERAL — a failed probe is yellow, and red once it is the
- * Nth consecutive failure (N = failureThreshold, the same count the pill uses
- * to declare down). Successes come from the machine, which is what makes
- * "recovering" visible: the only exit from `down` is a success, and the pill
- * reads Recovering until N consecutive successes have confirmed the device,
- * so those cells are blue rather than green. Worked examples at threshold 3:
- * one missed poll → green, yellow, green (a blip never smears); a device
- * going down and coming back → green, yellow, yellow, red, blue, blue, green.
+ * This is a MIRROR of recordProbeResult in src/services/monitoringService.ts,
+ * and the two are only useful if they agree cell-for-cell with the pill above
+ * the strip. The rule, in full (business rule 30):
  *
- * A failure DURING recovery is yellow, not blue — the bar's failure vocabulary
- * is unchanged — but the machine still holds `recovering`, so the successes
- * after that blip stay blue until the run of N is complete, matching the pill.
+ *   cf = miss ? cf + 1 : max(0, cf - 1)          ← leaky bucket, not a run
+ *   cf >= threshold                  → down       (red)
+ *   cf > 0  and this probe missed    → warning    (amber, "Missed N")
+ *   cf > 0  and this probe answered  → recovering (purple, paying the debt)
+ *   cf == 0                          → up         (green)
  *
- * The pre-window state is assumed `up`: only an outage visible in the sample
- * stream produces recovering cells. Seeding `unknown` instead would paint the
- * first cells of every bar blue, since the machine's unknown→success arrow is
- * the same one down uses.
+ * The level decides; this probe's outcome only breaks the tie below the
+ * threshold. Worked examples at threshold 3 — one missed poll is green, amber,
+ * green (a blip still never smears); a device going down and coming back is
+ * green, amber, amber, RED, purple, purple, green, because paying three misses
+ * back takes three answers.
+ *
+ * A failure during the climb back out re-fills the bucket, so it can go red
+ * again on the way home. That is the point: the old run-length machine reset
+ * the counter to zero on any single success, so an alternating device never
+ * reached a verdict in either direction.
+ *
+ * The pre-window state is assumed fully recovered (cf = 0): only an outage
+ * visible in the sample stream produces amber, red or purple cells.
  *
  * `threshold === null` is the PASSIVE case (business rule 36): no automation
- * defines Down for this device, so a failed poll is amber and never escalates
- * to red — rendering red would assert a verdict Polaris deliberately never
- * reaches — and with no `down` there is nothing to recover from, so successes
- * are plain green.
+ * defines Down for this device, so nothing may go red — that would assert a
+ * verdict Polaris deliberately never reaches — but the bucket still runs, so a
+ * passive device quietly accumulating misses still reads as one. `Infinity` is
+ * how "never red" is spelled without a second loop.
  */
 function _intermittencyStates(samples, threshold) {
-  if (threshold === null) {
-    return (samples || []).map(function (s) {
-      return { timestamp: s.timestamp, status: s.success ? "up" : "warning" };
-    });
-  }
-  var thr = (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
+  var thr = threshold === null ? Infinity
+    : (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
   var cf = 0;
-  var cs = 0;
-  var st = "up";
   return (samples || []).map(function (s) {
-    var display;
-    if (s.success) {
-      cf = 0;
-      cs += 1;
-      if (st === "down") st = (cs >= thr) ? "up" : "recovering";
-      else if (st === "recovering" || st === "warning") st = (cs >= thr) ? "up" : st;
-      else st = "up";
-      display = (st === "recovering") ? "recovering" : "up";
-    } else {
-      cs = 0;
-      cf += 1;
-      if (cf >= thr) st = "down";
-      else if (st === "up") st = "warning";
-      // else stay put (warning / recovering / down) and let cf march on.
-      display = (cf >= thr) ? "down" : "warning";
-    }
-    return { timestamp: s.timestamp, status: display };
+    // Mirrors recordProbeResult exactly: a miss adds one, a success takes one
+    // back, floored at 0 — and the LEVEL decides the color, with this probe's
+    // outcome only breaking the tie below the threshold. If these two ever
+    // disagree the bar is telling the operator a different story than the pill.
+    cf = s.success ? Math.max(0, cf - 1) : cf + 1;
+    var display = cf >= thr ? "down"
+      : cf > 0 ? (s.success ? "recovering" : "warning")
+      : "up";
+    return { timestamp: s.timestamp, status: display, missed: cf, success: !!s.success };
   });
 }
 
@@ -11038,9 +11048,16 @@ async function _renderIntermittencyBar(assetId, effP) {
   // visual vocabulary as the pill above it. This bar only ever emits
   // up / recovering / warning / down per sample; unknown remains the
   // fallback color.
+  //
+  // `recovering` is PURPLE here, not the pill's blue: on this strip it means
+  // "this probe answered while misses are still outstanding", and the operator
+  // reads the bar as a running tally — amber climbing, purple paying it back.
+  // Deliberately the magenta-leaning purple 400 rather than the muted lavender
+  // #9575cd that means MAINTENANCE elsewhere in the product; the strip never
+  // renders a maintenance cell, but the two must not be confusable at a glance.
   var colors = {
     up:         "rgba(0,200,83,0.65)",
-    recovering: "rgba(79,195,247,0.75)",
+    recovering: "rgba(171,71,188,0.80)",
     warning:    "rgba(255,193,7,0.75)",
     down:       "rgba(211,47,47,0.75)",
     unknown:    "rgba(117,117,117,0.45)",
@@ -11048,10 +11065,21 @@ async function _renderIntermittencyBar(assetId, effP) {
   // Each cell flexes to 1fr so the bar always fills the column regardless
   // of how many samples landed in the hour. Tooltip carries the timestamp +
   // status so an operator can hover to inspect a specific dip.
+  // Tooltip states the RUNNING COUNT, not just the state name: the strip's job
+  // is letting an operator follow a flapping device probe by probe, and "Missed"
+  // on four cells in a row does not say whether the device is climbing toward
+  // Down or paying its way back out. Each cell reports where the bucket stood
+  // AFTER that probe, plus the direction it moved.
   var cellHTML = states.map(function (st) {
     var ts = new Date(st.timestamp).toLocaleTimeString();
     var color = colors[st.status] || colors.unknown;
-    return '<div title="' + escapeHtml(ts + " · " + monitorStatusLabel(st.status)) + '" style="flex:1;background:' + color + '"></div>';
+    var n = st.missed || 0;
+    var what;
+    if (!st.success)   what = "Missed " + n + " (+1)";
+    else if (n > 0)    what = "Received — " + n + " missed outstanding (−1)";
+    else               what = "Received — recovered";
+    if (st.status === "down") what += " · Down";
+    return '<div title="' + escapeHtml(ts + " · " + what) + '" style="flex:1;background:' + color + '"></div>';
   }).join("");
   slot.innerHTML =
     '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-primary)">' +
@@ -11313,9 +11341,22 @@ function _renderMonitorChart(container, data, transitions) {
   // fades from blue into red (and back) so an outage reads as the line diving
   // to zero rather than the old full-height vertical failure lines.
   var linePts = [];
+  // Pre-window state is assumed fully recovered, matching _intermittencyStates:
+  // a chart that opens mid-outage still starts its count at the first miss it
+  // can actually see, rather than inventing a debt it has no samples for.
+  var _lpCf = 0;
   samples.forEach(function (s) {
-    if (ptHasResponse(s)) linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true });
-    else if (ptIsFailure(s)) linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false, dep: ptIsDependency(s) });
+    // Same leaky bucket the state machine and the Last-30-min strip run
+    // (business rule 30): a miss adds one, an answer takes one back. Only
+    // `> 0` is needed here — the threshold decides red vs amber, and failed
+    // polls are already drawn as an outage, so the chart never has to know it.
+    if (ptHasResponse(s)) {
+      _lpCf = Math.max(0, _lpCf - 1);
+      linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true, rec: _lpCf > 0 });
+    } else if (ptIsFailure(s)) {
+      _lpCf += 1;
+      linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false, dep: ptIsDependency(s) });
+    }
   });
 
   function fmtTooltipTs(ts) {
@@ -11412,7 +11453,7 @@ function _renderMonitorChart(container, data, transitions) {
     }).join("");
 
   var clipId = _chartClipId("monitor");
-  var line = _failureAwareSeriesSVG(linePts, "var(--color-accent)", clipId);
+  var line = _failureAwareSeriesSVG(linePts, _CHART_UP_COLOR, clipId);
   var svg =
     '<svg width="100%" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
       _chartClipDefs(clipId, padL, padT, innerW, innerH) +
@@ -11426,8 +11467,11 @@ function _renderMonitorChart(container, data, transitions) {
       xTitle +
       '<g ' + _chartClipAttr(clipId) + '>' +
         line.segments +
-        oks.map(function (s) {
-          return '<circle cx="' + xFor(s.timestamp) + '" cy="' + yFor(s.responseTimeMs) + '" r="1.5" fill="var(--color-accent)"/>';
+        // Drawn from linePts, not `oks`: same points, but these carry the
+        // `rec` flag, so a dot on the climb back out is purple like its segment
+        // instead of a green dot sitting on a purple line.
+        linePts.filter(function (p) { return p.ok; }).map(function (p) {
+          return '<circle cx="' + p.x + '" cy="' + p.y + '" r="1.5" fill="' + _chartPointColor(p, _CHART_UP_COLOR) + '"/>';
         }).join("") +
         _failureDotsSVG(linePts) +
         hitTargets +

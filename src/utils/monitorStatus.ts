@@ -61,8 +61,14 @@ export function monitorStatusLabel(status: string | null | undefined): string {
  * "up" is positive evidence the device is reachable, and that has always been
  * the gate. A PASSIVE device has no verdict to consult — but it is still being
  * polled, and its charts are supposed to keep filling, so falling back to the
- * raw signal we do have (its last probe succeeded) keeps the data flowing
- * without pointing full SNMP walks at a passive host that is currently dark.
+ * raw signal we do have keeps the data flowing without pointing full SNMP walks
+ * at a passive host that is currently dark.
+ *
+ * That raw signal is `consecutiveFailures === 0`, which since the leaky-bucket
+ * change (business rule 30) reads "no missed polls outstanding" rather than
+ * "the last probe succeeded" — a strictly stronger claim, and the right one
+ * here: a device three misses deep that has answered once is still not somewhere
+ * to point a full walk.
  *
  * Shared by the cursor pass (monitoringService.loadMonitorPassCandidates) and
  * the pg-boss publisher (jobs/monitorAssets) — two implementations that are
