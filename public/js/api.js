@@ -892,6 +892,10 @@ const api = {
     // {metric, dimension, scope} → the values the draft's own devices report
     // (sensor classes, interfaces, mounts …) for the builder's dimension picker.
     dimensionValues: (body) => request("POST", "/automations/dimension-values", body),
+    // {metric, scope} → how often those devices take that reading
+    // ({stream, mode, min, max, timeoutMs, assetCount}). The wizard counts its
+    // hold + window fields in polls and converts through this.
+    pollCadence: (body) => request("POST", "/automations/poll-cadence", body),
     preview: (body)    => request("POST", "/automations/preview", body),
     // Fires ONE action of a draft for real (creates a test-flagged alert and
     // dispatches immediately) — the wizard's Summary-step test buttons.

@@ -6,6 +6,8 @@
  *   GET  /schema   automationManagement:read       (builder vocabulary)
  *   POST /dimension-values  automationManagement:read  (values the draft's
  *        devices report for a metric dimension — the sensor-class picker)
+ *   POST /poll-cadence      automationManagement:read  (how often those devices
+ *        take the reading — the wizard counts its holds in polls)
  *   POST /preview  automationManagement:fullwrite  (dry-run a draft)
  *   POST / PUT/:id / DELETE/:id   automationManagement:fullwrite  (CRUD)
  *
@@ -23,6 +25,7 @@ import { listRules, createRule, updateRule, deleteRule, listScopeOptions } from 
 import { previewDownDetectionRemoval } from "../../services/downDetectionService.js";
 import { previewRule } from "../../services/notificationEngine.js";
 import { listDimensionValues, dimensionPickerMeta } from "../../services/notificationDimensionService.js";
+import { resolveScopeCadence } from "../../services/notificationCadenceService.js";
 import { listRecipientUsers } from "../../services/notificationRecipientService.js";
 import { listStateProbes } from "../../services/manufacturerProfileService.js";
 import { runTestDelivery } from "../../services/automationTestService.js";
@@ -146,6 +149,28 @@ notificationRulesRouter.post("/dimension-values", requirePermission("automationM
   try {
     const { metric, dimension, scope, narrow } = dimensionValuesSchema.parse(req.body);
     res.json(await listDimensionValues(metric, dimension, scope, narrow ?? {}));
+  } catch (err) { next(err); }
+});
+
+/**
+ * How often the draft's OWN devices take the reading it watches. The wizard
+ * counts its hold and window fields in POLLS, so it needs the cadence to
+ * convert to the seconds that are actually stored — and to SAY which cadence it
+ * converted at, since a scope spanning two integrations has a range rather than
+ * a number. Same read-level gate and same POST-carries-the-scope shape as
+ * /dimension-values; the down-detection caption reads it too.
+ */
+const pollCadenceSchema = z.object({
+  // Absent for a device-status trigger built before a metric is chosen — the
+  // service falls back to the probe cadence, which every monitored asset has.
+  metric: z.string().min(1).max(100).optional(),
+  scope: scopeSchema.default({}),
+});
+
+notificationRulesRouter.post("/poll-cadence", requirePermission("automationManagement", "read"), async (req, res, next) => {
+  try {
+    const { metric, scope } = pollCadenceSchema.parse(req.body);
+    res.json(await resolveScopeCadence(scope, metric ?? null));
   } catch (err) { next(err); }
 });
 

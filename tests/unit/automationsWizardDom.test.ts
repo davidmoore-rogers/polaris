@@ -83,6 +83,9 @@ beforeAll(() => {
         subnets: [{ id: "s1", name: "Mgmt", cidr: "10.20.0.0/24" }],
       }),
       preview: async () => ({ supported: true, totalEvaluated: 3, matches: [] }),
+      // The cadence the poll-counted hold + window fields convert through.
+      // 120s with a spread, so a caption that quietly assumed 60 is visible.
+      pollCadence: async () => ({ stream: "cpuMemory", mode: 120, min: 60, max: 300, timeoutMs: 5000, assetCount: 7 }),
       dimensionValues: async (body: { dimension: string }) => ({
         values: body.dimension === "sensorClass"
           ? [{ value: "temperature", assetCount: 2 }, { value: "fan", assetCount: 2 }]
@@ -280,12 +283,18 @@ describe("automation wizard DOM render", () => {
     expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
     expect((doc.querySelector("#aw-bn-decrease") as unknown as { checked: boolean }).checked).toBe(false);
 
-    // "Sustained for" is per TIER: every added tier carries its own input, and
-    // the base tier's moves INSIDE the base condition group so it reads as that
-    // tier's setting rather than a rule-wide one sitting between the tiers.
-    expect(band.querySelector(".band-duration")).toBeTruthy();
-    expect(doc.querySelector("#aw-trig-root .scg-group > .aw-dur #tf-duration-min")).toBeTruthy();
-    (band.querySelector(".band-duration") as unknown as { value: string }).value = "5";
+    // ONE hold for the whole trigger (2026-08-28): no tier carries its own, and
+    // the trigger's stays where it renders — above the tiers, belonging to none
+    // of them — instead of being moved inside the base condition group.
+    expect(band.querySelector(".band-duration")).toBeNull();
+    expect(doc.querySelector("#aw-trig-root .scg-group .aw-dur")).toBeNull();
+    expect(doc.querySelector("#aw-trigger-fields > .aw-dur #tf-duration-min")).toBeTruthy();
+    // ...which is also what keeps the loss-only sustain field hidden here. While
+    // it was moved into the base severity group it was marked `.aw-collapse-part`,
+    // and expanding that group set `display: ""` on every part — so a CPU
+    // automation rendered a second "Sustained for" captioned about packet loss.
+    expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("none");
+    expect(doc.querySelectorAll("#aw-step-3 .aw-poll-input").length).toBe(2); // the hold + the hidden ratio sustain
   });
 
   it("step 4 shows the default-checked 'trigger no longer true' checkbox; step 6 lists affected devices", async () => {
@@ -837,13 +846,14 @@ describe("automation wizard DOM render", () => {
     };
     const trigBase = phraseFor(doc.querySelector("#aw-trig-root > .scg-group")!);
     const trigTiers = Array.from(doc.querySelectorAll("#aw-step-3 .aw-band")).map(phraseFor);
-    // The base states the 5 minutes from its own duration field. `serious`
-    // inherits nothing — an AGGREGATED trigger's minutes are its measurement
-    // WINDOW, not a hold (rule 19: tiers share the sampling), so a tier without
-    // its own hold shows none. `critical` overrides with 1 min. What matters for
-    // this test is that step 5 says the SAME three things.
+    // The base states the 5 minutes its own duration field holds. No tier shows
+    // a hold: an AGGREGATED trigger's period is its measurement WINDOW, not a
+    // hold (rule 19: tiers share the sampling), and since 2026-08-28 a tier
+    // cannot carry one of its own either — `critical` arrived with 60s and the
+    // step-3 round trip drops it, which is exactly why step 5 has to agree.
+    // What matters for this test is that both steps say the SAME three things.
     expect(trigBase).toBe("is at or above 70 for 5 min");
-    expect(trigTiers).toEqual(["is at or above 85", "is at or above 95 for 1 min"]);
+    expect(trigTiers).toEqual(["is at or above 85", "is at or above 95"]);
 
     // Step 5: the same phrases, from the draft rather than the DOM controls, and
     // visible without folding (there are no controls there to read them off).
@@ -1140,14 +1150,14 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(savedPayloads[0])).not.toThrow();
   });
 
-  it("per-tier sustain rides the payload; unticking per-severity actions strips them", async () => {
+  it("the trigger's single hold saves and per-tier holds are dropped; unticking per-severity actions strips them", async () => {
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
     const win = g.window as InstanceType<typeof Window>;
     const rule = {
       id: "r-sustain",
-      // cpuPct, not packet loss: per-tier sustain is the thing under test, and a
-      // windowed-ratio metric deliberately has no per-tier hold (business rule 29).
+      // cpuPct, not packet loss: the hold is the thing under test, and a
+      // windowed-ratio metric measures over a window instead (business rule 29).
       name: "High CPU",
       description: null,
       enabled: true,
@@ -1172,10 +1182,10 @@ describe("automation wizard DOM render", () => {
     }
     expect(toastErrors).toEqual([]);
     expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
-    // Every tier kept its own "Sustained for" through the step-3 round trip.
-    const durs = Array.from(doc.querySelectorAll("#aw-bands .band-duration")).map((el) => (el as unknown as { value: string }).value);
-    expect(durs).toEqual(["15", "0"]);
-    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("30");
+    // No tier has a hold field to keep: there is one, on the trigger, counted in
+    // POLLS — 1800s at the stubbed 120s cadence reads as 15 polls.
+    expect(doc.querySelector("#aw-bands .band-duration")).toBeNull();
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("15");
     // The stored rule carries per-band actions, so the toggle opens ON.
     const perSevCb = doc.querySelector("#aw-band-actions-multi") as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
     expect(perSevCb.checked).toBe(true);
@@ -1187,7 +1197,9 @@ describe("automation wizard DOM render", () => {
     expect(toastErrors).toEqual([]);
     const p = savedPayloads[0]! as Record<string, any>;
     expect(p.trigger.forDurationSec).toBe(1800);
-    expect(p.severityBands.map((b: any) => b.forDurationSec)).toEqual([900, 0]);
+    // The tiers' own holds are gone rather than flattened to a number the
+    // builder never showed: each band inherits the trigger's (resolveTierLadder).
+    expect(p.severityBands.map((b: any) => b.forDurationSec)).toEqual([undefined, undefined]);
     // Toggle off ⇒ bands save bare and the server runs the base actions at
     // every severity.
     expect(p.severityBands[0].actions).toEqual([]);
@@ -1401,18 +1413,18 @@ describe("automation wizard DOM render", () => {
     expect(agg.value).toBe("avg");
     expect(agg.textContent).toContain("median");
 
-    // A stored aggregation window renders as the duration (300s → 5 min) and the
-    // field is marked required.
+    // A stored aggregation window renders as the duration in POLLS (300s at the
+    // stubbed 120s cadence ≈ 3 readings) and the field is marked required.
     const dur = doc.querySelector("#tf-duration-min") as unknown as { value: string; placeholder: string; dispatchEvent: (e: unknown) => void };
-    expect(dur.value).toBe("5");
+    expect(dur.value).toBe("3");
     const star = () => (doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display;
     expect(star()).not.toBe("none");
 
-    // Switch to median + 10 minutes: the window follows the duration and no
-    // sustain clock is stacked on top of it.
+    // Switch to median + 5 readings: the window follows the duration (5 × the
+    // stubbed 120s cadence = 600s) and no sustain clock is stacked on top of it.
     agg.value = "median";
     agg.dispatchEvent(new win.Event("change", { bubbles: true }));
-    dur.value = "10";
+    dur.value = "5";
     dur.dispatchEvent(new win.Event("input", { bubbles: true }));
     expect(star()).not.toBe("none");
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
@@ -1426,7 +1438,7 @@ describe("automation wizard DOM render", () => {
     expect(() => ruleInputSchema.parse(saved)).not.toThrow();
 
     // Back on `latest` the same field is the optional sustain again — no
-    // asterisk, and the minutes land on forDurationSec instead of the window.
+    // asterisk, and the polls land on forDurationSec instead of the window.
     agg.value = "latest";
     agg.dispatchEvent(new win.Event("change", { bubbles: true }));
     expect(star()).toBe("none");
@@ -1458,7 +1470,8 @@ describe("automation wizard DOM render", () => {
       (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
     }
-    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("10");
+    // 600s at the stubbed 120s cadence = 5 readings.
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("5");
     expect((doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display).toBe("none");
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
@@ -1466,6 +1479,99 @@ describe("automation wizard DOM render", () => {
     const saved = savedPayloads[0]! as Record<string, any>;
     expect(saved.trigger.windowSec).toBe(0);
     expect(saved.trigger.forDurationSec).toBe(600);
+  });
+
+  it("counts the hold in polls, says which cadence it converted at, and stores that many polls' worth of seconds", async () => {
+    // The whole point of counting readings: the field is the number of polls,
+    // the caption is the wall clock, and what gets stored is still seconds.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-polls",
+      name: "High memory",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "memPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 88, forDurationSec: 600 },
+      scope: { allAssets: true },
+      reset: { mode: "auto" },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const label = doc.querySelector(".aw-dur label") as unknown as { textContent: string };
+    expect(label.textContent).toContain("polls");
+    expect(label.textContent).not.toContain("minutes");
+    const dur = doc.querySelector("#tf-duration-min") as unknown as
+      { value: string; dispatchEvent: (e: unknown) => void };
+    expect(dur.value).toBe("5");
+    // The caption names the wall clock, the cadence it used, WHICH cadence it is,
+    // and the spread behind it — none of which the count can say by itself.
+    const note = () => (doc.querySelector(".aw-dur .aw-poll-note") as unknown as { textContent: string }).textContent;
+    expect(note()).toContain("10m");
+    expect(note()).toContain("120s");
+    expect(note()).toContain("CPU/memory");
+    expect(note()).toContain("60s to 300s");
+
+    // Typing a different count re-reads immediately and saves as seconds.
+    dur.value = "3";
+    dur.dispatchEvent(new win.Event("input", { bubbles: true }));
+    expect(note()).toContain("6m");
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.trigger.forDurationSec).toBe(360);
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+  });
+
+  it("counts the auto-reset hold in polls too — recovery is judged on readings as well", async () => {
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    const win = g.window as InstanceType<typeof Window>;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-reset-polls",
+      name: "High memory",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "memPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 88, forDurationSec: 0 },
+      scope: { allAssets: true },
+      reset: { mode: "auto", sustainSec: 360 },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 3; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc.querySelector("#aw-step-4.visible")).toBeTruthy();
+    const sm = doc.querySelector("#aw-sustain-min") as unknown as
+      { value: string; dispatchEvent: (e: unknown) => void };
+    // 360s at the stubbed 120s cadence = 3 readings back under the line.
+    expect(sm.value).toBe("3");
+    sm.value = "6";
+    sm.dispatchEvent(new win.Event("input", { bubbles: true }));
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.reset.sustainSec).toBe(720);
+    expect(() => ruleInputSchema.parse(saved)).not.toThrow();
   });
 
   it("an aggregation with the period left at 0 is refused, not measured over a default lookback", async () => {
@@ -1499,7 +1605,7 @@ describe("automation wizard DOM render", () => {
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(savedPayloads).toHaveLength(0);
-    expect(toastErrors.join(" ")).toContain("Sustained for (minutes)");
+    expect(toastErrors.join(" ")).toContain("Measured over (polls)");
   });
 
   it("the formula block under the sentence moves the minutes when the aggregation changes", async () => {
@@ -1632,15 +1738,17 @@ describe("automation wizard DOM render", () => {
     expect(label.textContent).toContain("History");
     expect(label.textContent).not.toContain("Sustained");
     expect((doc.querySelector(".aw-dur .aw-dur-req") as unknown as { style: { display: string } }).style.display).toBe("");
-    // ...defaults rather than leaving a window the engine has to invent...
-    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("15");
+    // ...defaults rather than leaving a window the engine has to invent (the
+    // 15-minute default, counted at the stubbed 120s cadence ≈ 8 readings)...
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("8");
     // ...and the aggregation control is hidden, since a ratio has nothing to aggregate.
     expect((doc.querySelector('#aw-trig-root .tgl-agg[data-ratio="1"]') as unknown as { style: { display: string } }).style.display).toBe("none");
     // The ratio-only sustain field surfaces beside it (hidden for other metrics).
     expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("");
 
-    // An operator-typed 60 saves as the WINDOW; the untouched sustain stays 0.
-    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "60";
+    // An operator-typed 30 POLLS saves as the WINDOW (30 × the stubbed 120s
+    // cadence = 3600s); the untouched sustain stays 0.
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "30";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
@@ -1668,8 +1776,10 @@ describe("automation wizard DOM render", () => {
     // ...and appears with the History relabel.
     expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("");
 
-    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "60";
-    (doc.querySelector("#tf-sustain-min") as unknown as { value: string }).value = "10";
+    // Counted in readings: 30 polls of History and 5 of hold, at the stubbed
+    // 120s cadence → 3600s over 600s.
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "30";
+    (doc.querySelector("#tf-sustain-min") as unknown as { value: string }).value = "5";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
@@ -1678,11 +1788,11 @@ describe("automation wizard DOM render", () => {
     expect(saved.trigger.forDurationSec).toBe(600);
   });
 
-  it("a legacy loss rule's minutes read back as History alone, never doubled into sustain", async () => {
+  it("a legacy loss rule's stored period reads back as History alone, never doubled into sustain", async () => {
     // Pre-History loss rules stored their minutes on forDurationSec (windowSec
-    // 0). triggerDurationMinutes reads those back as the History the operator
-    // meant; the sustain field must NOT show the same minutes again, or one save
-    // would turn "measured over 10" into "measured over 10, then held 10".
+    // 0). triggerDurationSec reads those back as the History the operator
+    // meant; the sustain field must NOT show the same period again, or one save
+    // would turn "measured over 10 minutes" into "measured over 10, then held 10".
     doc.body.innerHTML = "";
     savedPayloads.length = 0;
     toastErrors.length = 0;
@@ -1698,7 +1808,8 @@ describe("automation wizard DOM render", () => {
     }
     // The stored rule renders from the model, so the fields prefill without a
     // metric re-pick (data-ratio rides the row markup).
-    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("10");
+    // 600s at the stubbed 120s cadence = 5 readings of History, and no hold.
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("5");
     expect((doc.querySelector("#tf-sustain-min") as unknown as { value: string }).value).toBe("0");
   });
 
@@ -1723,7 +1834,7 @@ describe("automation wizard DOM render", () => {
     expect(toastErrors.join(" ")).toContain("History");
   });
 
-  it("packet-loss severity tiers keep their own hold clocks (rule 19's per-tier sustain)", async () => {
+  it("packet-loss severity tiers carry no hold of their own — the trigger's History and sustain are shared", async () => {
     // "10% for 30 min = warning, 25% for 5 min = critical" is one automation:
     // tiers share the base's History window (the sampling) but each holds its
     // own sustain. The hold boxes were hidden while a ratio trigger had no
@@ -1745,23 +1856,23 @@ describe("automation wizard DOM render", () => {
       (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
       await new Promise((r) => setTimeout(r, 20));
     }
-    const bandDurWraps = () => Array.from(doc.querySelectorAll("#aw-bands .band-duration"))
-      .map((el) => ((el as unknown as { closest: (q: string) => { style: { display: string } } }).closest(".aw-dur")).style.display);
-    expect(bandDurWraps().length).toBeGreaterThan(0);
-    expect(bandDurWraps().every((d) => d !== "none")).toBe(true);
+    // No tier carries a duration field at all — before or after the switch to a
+    // windowed-ratio metric.
+    expect(doc.querySelectorAll("#aw-bands .band-duration").length).toBe(0);
     await pickMetric("probeLossPct");
-    // Still visible after switching to packet loss.
-    expect(bandDurWraps().every((d) => d !== "none")).toBe(true);
-    // Tiers share the History window; each tier's hold collects independently.
-    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "15";
-    (doc.querySelector("#aw-bands .band-duration") as unknown as { value: string }).value = "5";
+    expect(doc.querySelectorAll("#aw-bands .band-duration").length).toBe(0);
+    // Tiers share the History window AND the sustain: 10 polls of History at the
+    // stubbed 120s cadence is the 1200s window every tier is measured over.
+    // (8 would round-trip to the default 900s it already stands for — the field
+    // keeps the exact stored seconds while the count still represents them.)
+    (doc.querySelector("#tf-duration-min") as unknown as { value: string }).value = "10";
     (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
     const saved = savedPayloads[0]! as Record<string, any>;
     expect(saved.severityBands.map((b: any) => [b.threshold, b.severity])).toEqual([[20, "serious"], [30, "critical"]]);
-    expect(saved.trigger.windowSec).toBe(900);
-    expect(saved.severityBands.map((b: any) => b.forDurationSec)).toEqual([300, 0]);
+    expect(saved.trigger.windowSec).toBe(1200);
+    expect(saved.severityBands.map((b: any) => b.forDurationSec)).toEqual([undefined, undefined]);
   });
 });
 
@@ -2057,7 +2168,8 @@ describe("trigger filter rows", () => {
         },
       }));
       expect((doc.querySelector("#aw-reset-root .tgl-threshold") as unknown as { value: string }).value).toBe("60");
-      expect((doc.querySelector("#aw-crs-sustain-min") as unknown as { value: string }).value).toBe("10");
+      // Counted in readings too: 600s at the stubbed 120s cadence = 5.
+      expect((doc.querySelector("#aw-crs-sustain-min") as unknown as { value: string }).value).toBe("5");
       expect((doc.querySelector("#aw-reset-auto") as unknown as { checked: boolean }).checked).toBe(false);
     });
 

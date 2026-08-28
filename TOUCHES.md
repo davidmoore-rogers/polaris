@@ -1702,6 +1702,28 @@ Listed alphabetically.
 1. Adding a dimension → walk the lockstep list above, then add a `DIMENSION_SOURCES` entry + a case to `tests/unit/automationDimensionValues.test.ts`.
 2. Changing the window/caps → re-reason at 100 AND 2000 assets (default scope is every asset) and update the numbers quoted in ARCHITECTURE.md.
 3. New sibling narrowing → extend `DimensionNarrow`, the route's `narrow` schema, AND the client's `awDimNarrow`, or the client will keep asking for the unnarrowed list.
+## services/notificationCadenceService.ts
+
+**What it owns** — nothing persistent. Read-only lookup answering "how often do THESE devices take the reading this automation watches?", so the automations wizard can count its hold and window fields in POLLS while `forDurationSec` / `windowSec` / `reset.sustainSec` stay stored in SECONDS.
+
+**Public API** — `resolveScopeCadence(scope, metric)` → `{ stream, mode, min, max, timeoutMs, assetCount }`; `streamForMetric(metric)`; `summarizeIntervals(values)` (pure, unit-tested); `METRIC_STREAM`; `HOST_METRIC_INTERVAL_SEC`.
+
+**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/poll-cadence`, `automationManagement:read`). Client consumer: `public/js/automations-wizard.js` — `awCadence()` / `refreshCadence()` cache it per (metric, scope) the `_dimValues` way, `syncPollFields` paints every `.aw-poll-input` caption from it, and the down-detection caption (`syncDownDetection`) reads the SAME lookup rather than a second one.
+
+**Depends on** — `notificationEngine.loadScopeAssetIds` (monitored-only, the same loader the tick uses) and `monitoringService.resolveMonitorSettings` (the whole monitor-settings hierarchy).
+
+**Invariants**
+
+- **`METRIC_STREAM` mirrors the engine's metric dispatch.** Which table a reading is read from and which cadence produces it are two halves of one fact — a metric added to `resolveAssetMetricReadings` without an entry here silently counts its holds in the PROBE cadence, which is right for status metrics and wrong for everything else. The fallback is deliberate (every monitored asset has a probe interval) and is why the omission is silent.
+- **A fleet answer is a RANGE.** The cadence resolves per asset, so `mode` is what the wizard converts at and `min`/`max` are reported alongside it; every caption that falls back to 60s SAYS it is assuming. Never present one invented number as the fleet's.
+- **Seconds remain the stored unit.** This service exists to render and collect a count; nothing here changes what is persisted, and the engine never sees a poll count (business rule 36's `missedPolls` is the one place a count IS stored, and it is not this).
+- **Cost is per CLASS, not per asset** — `resolveMonitorSettings` memoizes on (integrationId, assetType). Keep the tight `select` and keep it that way: this is an interactive call on a fleet-wide default scope.
+
+**When changing this**
+
+1. New metric → add a `METRIC_STREAM` entry in the same change as the engine's reading resolver, plus a case in `tests/unit/notificationCadence.test.ts`.
+2. New cadence stream → add it to `STREAM_FIELDS` with the resolver field names, and to `CADENCE_STREAM_NOUN` in the wizard or the caption will read "poll interval" with no idea which.
+3. Changing what the wizard counts in polls → the fields are `.aw-poll-input` + `data-sec`; collection reads `pollFieldSec`, which trusts the stored seconds only while the visible count still represents them.
 ## services/deviceFilterService.ts
 
 **What it owns:** Resolving a device-filter CONDITION TREE against inventory — the shared half of the "which devices?" question. Three surfaces store the same tree over `DEVICE_FILTER_FIELD_OPS`: an automation's `scope.condition`, a `Contact.assetCondition`, and a `Tag.assetCondition`. Automations resolve theirs inside the engine (the tree rides a scope that also carries flat dimensions, and the read is shaped by the tick's own select); the other two want the plain answer — the SET of asset ids the tree covers. That answer lived privately in `contactService` until tags needed the identical thing, at which point a second copy would have been two places for the relation-join decisions to drift apart.

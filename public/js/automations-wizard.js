@@ -727,7 +727,7 @@ function makeAutomationSentences(s) {
   // The machine-readable twin of triggerSentence, rendered under it on step 3.
   //
   // It exists because the sentence reads loosest exactly where the semantics get
-  // subtle: the wizard has ONE "Sustained for (minutes)" field, and it means two
+  // subtle: the wizard has ONE poll-counted duration field, and it means two
   // different things (tgStampWindows). With an aggregation it is the MEASUREMENT
   // WINDOW — the value is reduced over the period, so a dip inside it averages
   // away. With `latest` it is a HOLD CLOCK — the newest sample must qualify at
@@ -1710,9 +1710,20 @@ async function openAutomationWizard(existing, opts) {
     if (!scopeEl) return "";
     var op = scopeEl.querySelector(".tgl-op");
     var val = scopeEl.querySelector(".tgl-threshold");
-    var mins = scopeEl.querySelector(".band-duration, #tf-duration-min");
+    // ONE hold, shared by every tier, so it is read from the trigger rather than
+    // from inside the block — and in minutes, because this phrase is prose (the
+    // field itself counts polls). Base block vs tier follows step 5's
+    // convention exactly, which is what keeps the two steps saying the same
+    // thing: the base states the period its field holds (a measurement WINDOW
+    // on an aggregated trigger), a tier states only a HOLD, which an aggregated
+    // trigger doesn't have.
+    var tr = draft.trigger || {};
+    var isBand = !!(scopeEl.classList && scopeEl.classList.contains("aw-band"));
+    var mins = isBand
+      ? Math.round((Number(tr.forDurationSec) || 0) / 60)
+      : triggerDurationMinutes(tr);
     if (!op && !val) return "";
-    return tierConditionPhrase(op ? op.value : "", val ? val.value : "", mins ? mins.value : 0);
+    return tierConditionPhrase(op ? op.value : "", val ? val.value : "", mins);
   }
 
   function collapseBtnHtml(key) {
@@ -2706,7 +2717,7 @@ async function openAutomationWizard(existing, opts) {
       // what they actually ask of the window.
       var aggControl = isFlag
         // These read as complete phrases now that no window box follows them —
-        // the period itself is the "Sustained for (minutes)" field below.
+        // the period itself is the poll-counted duration field below.
         ? '<select class="tgl-agg" style="width:auto;font-size:0.8rem">' + optLabeled(["latest", "max", "min"], leaf.aggregation || "latest", function (v) {
             return v === "latest" ? "current state" : v === "max" ? "at any point in the period" : "throughout the period";
           }) + '</select>'
@@ -2719,7 +2730,7 @@ async function openAutomationWizard(existing, opts) {
           '<span style="font-size:0.8rem">over the History window below, counting from the first successful probe</span>';
       }
       // No per-condition window input: an aggregation's measurement period IS
-      // the "Sustained for (minutes)" field below the tree (see tgStampWindows).
+      // the poll-counted duration field below the tree (see tgStampWindows).
       // Two time boxes meaning almost the same thing is what this removes.
       line2 =
         '<div class="tgl-line2" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0 0 22px;font-size:0.8rem;color:var(--color-text-tertiary)">' +
@@ -2886,39 +2897,243 @@ async function openAutomationWizard(existing, opts) {
     CB.wireDnD(panel, rootSelector, onChange, tgMeta.maxDepth || 3);
   }
 
-  // "Sustained for" is per SEVERITY TIER — the value must hold in that tier for
-  // its own duration before the alert takes that severity. Rendered identically
-  // for the base tier (moved inside the base condition group in multi mode by
-  // injectBaseSeverity) and for every added tier.
+  /**
+   * Every hold and window on the trigger and reset steps is counted in POLLS,
+   * not minutes (2026-08-28). A threshold can only be tested when a reading
+   * arrives, so "sustained for 3" has always meant three readings — minutes
+   * were a wall-clock spelling of that, and one that meant a different number
+   * of readings on a device polled every 5 minutes than on one polled every 30
+   * seconds. What is STORED is unchanged (seconds), so each field carries its
+   * seconds on `data-sec` and shows the poll count that value works out to at
+   * the cadence the matched devices actually use (awCadence, below). Editing the
+   * count rewrites data-sec; a cadence arriving later repaints the count and
+   * leaves the stored seconds alone, so an async answer can never silently
+   * change what a loaded automation would save.
+   *
+   * The hold is ONE field for the whole trigger — the per-severity-tier hold
+   * was removed with the same change. Rule 19 still lets a tier carry its own
+   * `forDurationSec` and the engine still honours one on an API-authored rule;
+   * the builder simply stops writing them, so every tier inherits the base
+   * (which is what resolveTierLadder already does for a band with none).
+   */
   var DUR_PLACEHOLDER_OPTIONAL = "0 = fire as soon as the value reaches this level";
   // Default History for a windowed-ratio trigger, and the floor the engine
-  // enforces on it. Mirrors PROBE_LOSS_DEFAULT/MIN_WINDOW_SEC server-side.
-  var RATIO_WINDOW_DEFAULT_MIN = 15;
-  var RATIO_WINDOW_MIN_MIN = 5;
-  var RATIO_WINDOW_MAX_MIN = 1440;
-  function durationFieldHtml(attr, mins) {
+  // enforces on it. Mirrors PROBE_LOSS_DEFAULT/MIN_WINDOW_SEC server-side —
+  // both in SECONDS here, because the floor is the engine's and doesn't move
+  // with the cadence the field is counted in.
+  var RATIO_WINDOW_DEFAULT_SEC = 900;
+  var RATIO_WINDOW_MIN_SEC = 300;
+  var RATIO_WINDOW_MAX_SEC = 86400;
+  /** Cadence when the server hasn't answered (yet, or at all). Every note that
+   *  falls back to it SAYS so rather than presenting it as this fleet's. */
+  var CADENCE_FALLBACK_SEC = 60;
+
+  function pollsFromSec(sec, intervalSec) {
+    var iv = intervalSec > 0 ? intervalSec : CADENCE_FALLBACK_SEC;
+    var n = Math.round((Number(sec) || 0) / iv);
+    return n > 0 ? n : 0;
+  }
+  function secFromPolls(polls, intervalSec) {
+    var iv = intervalSec > 0 ? intervalSec : CADENCE_FALLBACK_SEC;
+    var n = Math.round(Number(polls) || 0);
+    return n > 0 ? n * iv : 0;
+  }
+  /**
+   * One poll-counted field. `attr` carries the id/class the caller identifies it
+   * by; `sec` is the STORED value it round-trips. `zeroNote` is what the caption
+   * says at 0, where there is no duration to convert.
+   */
+  function pollFieldHtml(attr, sec, opts) {
+    opts = opts || {};
+    var iv = awCadence().sec;
+    return '<div class="form-group ' + (opts.wrapClass || "aw-dur") + '"' +
+        (opts.hidden ? ' style="margin:0.5rem 0 0;display:none"' : ' style="margin:0.5rem 0 0"') + '>' +
+      '<label style="font-size:0.8rem">' + escapeHtml(opts.label || "Sustained for (polls)") +
+        '<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
+      '<input type="number" ' + attr + ' class="aw-poll-input" data-sec="' + (Number(sec) || 0) + '" min="0" ' +
+        'value="' + pollsFromSec(sec, iv) + '" placeholder="' + escapeHtml(opts.placeholder || DUR_PLACEHOLDER_OPTIONAL) + '">' +
+      '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p>' +
+      '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
+  }
+  function durationFieldHtml(attr, sec) {
     // The asterisk is hidden until an aggregated condition makes the field
     // mandatory (syncDurationRequirement) — avg / median / min / max have no
     // period to measure over without it.
-    return '<div class="form-group aw-dur" style="margin:0.5rem 0 0">' +
-      '<label style="font-size:0.8rem">Sustained for (minutes)<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
-      '<input type="number" ' + attr + ' min="0" value="' + mins + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
-      '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
+    return pollFieldHtml(attr, sec, { label: "Sustained for (polls)" });
   }
   /**
    * The SECOND time field a windowed-ratio trigger gets (2026-08-20): the base
    * field above it is the History window (the measurement itself), this is the
-   * optional hold — the ratio must stay over the threshold for this long before
-   * the alert fires. Rendered for every device/host trigger but hidden unless a
-   * ratio condition is present (syncDurationRequirement toggles it live), the
-   * same rendered-not-omitted pattern as the tiers' hold boxes.
+   * optional hold — the ratio must stay over the threshold for this many polls
+   * before the alert fires. Rendered for every device/host trigger but hidden
+   * unless a ratio condition is present (syncDurationRequirement toggles it
+   * live), the same rendered-not-omitted pattern the base field takes.
    */
   function ratioSustainFieldHtml(tr) {
-    var show = triggerIsWindowedRatio(tr);
-    return '<div class="form-group aw-ratio-sustain" style="margin:0.5rem 0 0' + (show ? "" : ";display:none") + '">' +
-      '<label style="font-size:0.8rem">Sustained for (minutes)</label>' +
-      '<input type="number" id="tf-sustain-min" min="0" max="' + RATIO_WINDOW_MAX_MIN + '" value="' + triggerSustainMinutes(tr) + '" placeholder="' + DUR_PLACEHOLDER_OPTIONAL + '">' +
-      '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">Optional — how long the loss must stay over the threshold before the alert fires. Each reading still measures over the History window above.</p></div>';
+    return pollFieldHtml('id="tf-sustain-min"', triggerSustainSec(tr), {
+      wrapClass: "aw-ratio-sustain",
+      hidden: !triggerIsWindowedRatio(tr),
+      label: "Sustained for (polls)",
+    }).replace(
+      '<p class="aw-dur-note"',
+      '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">Optional — how long the loss must stay over the threshold before the alert fires. Each reading still measures over the History window above.</p><p class="aw-dur-note"',
+    );
+  }
+
+  // ── Poll cadence ──────────────────────────────────────────────────────────
+  // How often the draft's OWN devices take the reading it watches — the number
+  // every poll-counted field converts through, from POST /automations/poll-cadence.
+  // Cached per (metric, scope) the _dimValues way: the cadence is NOT one number
+  // for a fleet (it resolves per asset through the monitor-settings hierarchy),
+  // so the honest answer comes from the server and the caption says which number
+  // it is showing — and how wide the spread behind it is.
+  var _awCadence = null;            // { key, data } | null
+  var _awCadencePending = "";       // key currently in flight
+
+  /** The Polaris host samples itself on a fixed 30s tick (hostMetricsCollector). */
+  var HOST_METRIC_INTERVAL_SEC = 30;
+  var CADENCE_STREAM_NOUN = {
+    responseTime: "status-probe",
+    cpuMemory: "CPU/memory",
+    temperature: "hardware-sensor",
+    systemInfo: "interface/system",
+    storage: "storage",
+  };
+
+  /** The metric whose cadence the poll fields are counted in: the first metric
+   *  leaf of the trigger. A multi-condition trigger holds ONE clock over the
+   *  whole tree, so it is counted in the first condition's cadence and the
+   *  caption names which. */
+  function cadenceMetricOf(tr) {
+    if (!tr) return "";
+    var leaves = tr.type === "composite" ? (tgLeaves(tr) || []) : [tr];
+    for (var i = 0; i < leaves.length; i++) {
+      var l = leaves[i];
+      if (!l) continue;
+      if (l.type === "asset_state") { if (l.field) return l.field; continue; }
+      if (l.metric) return l.metric;
+    }
+    return "";
+  }
+  function cadenceKeyFor(tr) {
+    return (tr && tr.type === "host_metric" ? "host" : cadenceMetricOf(tr)) + "|" +
+      JSON.stringify(draft.scope || {});
+  }
+  /**
+   * What the fields convert at right now: `sec` is always usable (falling back
+   * to 60 with `known:false` so a caption can admit it), `min`/`max` bound the
+   * spread, `stream` names which collector's cadence it is.
+   */
+  function awCadence() {
+    var tr = draft.trigger || {};
+    if (tr.type === "host_metric" || tr.kind === "host") {
+      return { sec: HOST_METRIC_INTERVAL_SEC, known: true, min: HOST_METRIC_INTERVAL_SEC, max: HOST_METRIC_INTERVAL_SEC, host: true, stream: "", assetCount: 0 };
+    }
+    var d = _awCadence && _awCadence.key === cadenceKeyFor(tr) ? _awCadence.data : null;
+    if (d && d.mode > 0) {
+      return { sec: d.mode, known: true, min: d.min || d.mode, max: d.max || d.mode, host: false, stream: d.stream || "", assetCount: d.assetCount || 0, timeoutMs: d.timeoutMs || 0 };
+    }
+    return { sec: CADENCE_FALLBACK_SEC, known: false, min: 0, max: 0, host: false, stream: (d && d.stream) || "", assetCount: (d && d.assetCount) || 0 };
+  }
+  /** "≈ 5 min at the 60s CPU/memory poll interval these devices use." */
+  function cadenceNoteFor(polls) {
+    var c = awCadence();
+    var n = Math.max(0, Math.round(Number(polls) || 0));
+    // At 0 there is no duration to convert, and every field that accepts 0
+    // already says what 0 means in its own words (placeholder / inline text).
+    if (n === 0) return "";
+    // Formatted here rather than through PolarisMonitorDownAfter.human: this
+    // caption is the wizard's own and must read "10m" even where that shared
+    // file hasn't loaded (the down-detection caption below still uses it — that
+    // arithmetic is genuinely shared with the asset surfaces). The formatter in
+    // the sentences factory is out of scope from here, hence the local one.
+    var total = n * c.sec;
+    var human = total % 3600 === 0 ? (total / 3600) + "h" : total % 60 === 0 ? (total / 60) + "m" : total + "s";
+    var head = n + " poll" + (n === 1 ? "" : "s") + " ≈ " + human;
+    if (c.host) return head + " — the Polaris host samples itself every " + c.sec + "s.";
+    var noun = CADENCE_STREAM_NOUN[c.stream] ? CADENCE_STREAM_NOUN[c.stream] + " poll" : "poll";
+    if (!c.known) {
+      return head + " at an assumed " + c.sec + "s interval — this fleet’s actual cadence was unavailable.";
+    }
+    var out = head + " at the " + c.sec + "s " + noun + " interval these devices use";
+    if (c.max > c.min) out += " (range across the matched devices: " + c.min + "s to " + c.max + "s)";
+    return out + ".";
+  }
+  /** Repaint every poll field's caption, and — when the cadence itself moved —
+   *  the counts, from the seconds each field is holding. Never touches a field
+   *  the operator is typing in. */
+  function syncPollFields(panel, cadenceChanged) {
+    if (!panel) return;
+    var iv = awCadence().sec;
+    Array.prototype.forEach.call(panel.querySelectorAll(".aw-poll-input"), function (input) {
+      if (cadenceChanged && input !== document.activeElement) {
+        input.value = pollsFromSec(input.getAttribute("data-sec"), iv);
+      }
+      var note = input.parentNode && input.parentNode.querySelector(".aw-poll-note");
+      if (note) {
+        var wrap = input.parentNode;
+        note.style.display = wrap && wrap.style && wrap.style.display === "none" ? "none" : "";
+        note.textContent = cadenceNoteFor(input.value);
+      }
+    });
+  }
+  /**
+   * Seconds a poll field stands for — what collection stores. The stored value
+   * wins while the count on screen still represents it (so loading 300s at a
+   * 45s cadence and saving without touching the field can't drift it to 315),
+   * and the COUNT wins the moment the two disagree — which is what makes a
+   * value set any way other than typing (a repaint, a test, a future caller)
+   * mean what it appears to mean.
+   */
+  function pollFieldSec(input) {
+    if (!input) return 0;
+    if (input.value === "") return 0;
+    var iv = awCadence().sec;
+    var stored = Number(input.getAttribute("data-sec"));
+    var shown = Math.round(Number(input.value) || 0);
+    if (!isNaN(stored) && stored >= 0 && pollsFromSec(stored, iv) === shown) return Math.round(stored);
+    return secFromPolls(shown, iv);
+  }
+  function setPollFieldSec(input, sec) {
+    if (!input) return;
+    input.setAttribute("data-sec", String(Math.max(0, Math.round(Number(sec) || 0))));
+    if (input !== document.activeElement) input.value = pollsFromSec(sec, awCadence().sec);
+  }
+  /** An edit to the count IS the value: rewrite the seconds it stands for. */
+  function wirePollFields(panel) {
+    if (!panel || panel._awPollWired) return;
+    panel._awPollWired = true;
+    panel.addEventListener("input", function (e) {
+      var t = e.target;
+      if (!t || !t.classList || !t.classList.contains("aw-poll-input")) return;
+      t.setAttribute("data-sec", String(secFromPolls(t.value, awCadence().sec)));
+      syncPollFields(panel, false);
+    });
+  }
+  /**
+   * Fetch the cadence for the current (metric, scope) when it isn't already
+   * cached, then repaint. Never blocks authoring: a failed lookup leaves the
+   * fields converting at the fallback and saying so.
+   */
+  async function refreshCadence(panel) {
+    var tr = draft.trigger || {};
+    if (tr.type === "host_metric" || tr.kind === "host") { syncPollFields(panel, true); return; }
+    var key = cadenceKeyFor(tr);
+    if ((_awCadence && _awCadence.key === key) || _awCadencePending === key) { syncPollFields(panel, false); return; }
+    _awCadencePending = key;
+    var metric = cadenceMetricOf(tr);
+    try {
+      var data = await api.automations.pollCadence({ metric: metric || undefined, scope: draft.scope || {} });
+      _awCadence = { key: key, data: data };
+    } catch (_e) {
+      _awCadence = { key: key, data: { mode: 0, min: 0, max: 0, timeoutMs: 0, assetCount: 0, stream: "" } };
+    } finally {
+      if (_awCadencePending === key) _awCadencePending = "";
+    }
+    var live = document.getElementById("aw-step-3");
+    syncPollFields(panel, true);
+    if (live && live !== panel) syncPollFields(live, true);
+    syncDownDetection(live || panel);
   }
   /**
    * Show/hide the duration field's red asterisk + note for the BASE tree: with
@@ -2928,12 +3143,11 @@ async function openAutomationWizard(existing, opts) {
    * is never marked required.
    */
   // The devices a down-detection draft would govern, and how long its count
-  // actually takes on them. Cached per scope (the _dimValues idiom): the poll
-  // interval is NOT one number for a fleet — it resolves per asset through the
-  // monitor-settings hierarchy — so the honest answer comes from the server's
-  // preview, and the caption says which number it is showing.
-  var _awDownIntervals = null;      // { key, data } | null
-  var _awDownIntervalsPending = false;
+  // actually takes on them, read off the SAME cadence lookup the poll-counted
+  // fields convert through (awCadence) — the poll interval is not one number
+  // for a fleet, so the caption says which number it is showing and how wide
+  // the spread behind it is. Before that lookup existed this caption had no
+  // source at all and always fell back to "unavailable".
 
   /** Drop every missedPolls in a trigger tree (see the call site in collectStep3). */
   function stripMissedPolls(node) {
@@ -2968,21 +3182,21 @@ async function openAutomationWizard(existing, opts) {
       var derived = row.querySelector('.tgl-dd-derived');
       if (!missEl || !derived) return;
       var n = Number(missEl.value) > 0 ? Math.round(Number(missEl.value)) : 3;
-      var iv = _awDownIntervals && _awDownIntervals.data;
+      var cad = awCadence();
       var calc = window.PolarisMonitorDownAfter && window.PolarisMonitorDownAfter.calc;
       if (!calc) { derived.textContent = ''; return; }
-      var mode = iv && iv.mode > 0 ? iv.mode : 60;
-      var to   = iv && iv.timeoutMs > 0 ? iv.timeoutMs : 5000;
+      var mode = cad.sec;
+      var to   = cad.timeoutMs > 0 ? cad.timeoutMs : 5000;
       var c = calc(n, mode, to);
       var human = window.PolarisMonitorDownAfter.human(c.realSec);
-      if (!iv) {
+      if (!cad.known) {
         // Say so rather than presenting a guessed interval as this fleet's.
         derived.textContent = '≈ ' + human + ' at a ' + mode + 's poll interval — this fleet’s actual intervals were unavailable.';
-      } else if (iv.min === iv.max) {
+      } else if (cad.min === cad.max) {
         derived.textContent = '≈ ' + human + ' at the ' + mode + 's poll interval these devices use.';
       } else {
-        var lo = window.PolarisMonitorDownAfter.human(calc(n, iv.min, to).realSec);
-        var hi = window.PolarisMonitorDownAfter.human(calc(n, iv.max, to).realSec);
+        var lo = window.PolarisMonitorDownAfter.human(calc(n, cad.min, to).realSec);
+        var hi = window.PolarisMonitorDownAfter.human(calc(n, cad.max, to).realSec);
         derived.textContent = '≈ ' + human + ' at the ' + mode + 's interval most of these devices use' +
           ' (range across the matched devices: ' + lo + ' to ' + hi + ').';
       }
@@ -3015,37 +3229,55 @@ async function openAutomationWizard(existing, opts) {
     // is HISTORY, not a hold clock, and calling it "sustained for" is what let a
     // 60 here mean "measured over 15 minutes, held for 60".
     var ratio = !!(root && root.querySelector('.scr-row[data-ratio="1"]'));
+    var cadSec = awCadence().sec;
+    var minPolls = ratio ? Math.max(1, Math.ceil(RATIO_WINDOW_MIN_SEC / cadSec)) : 0;
+    var maxPolls = ratio ? Math.max(minPolls, Math.floor(RATIO_WINDOW_MAX_SEC / cadSec)) : 0;
     var label = wrap.querySelector("label");
     if (label) {
-      label.innerHTML = (ratio ? "History (minutes)" : "Sustained for (minutes)") +
+      // The unit is polls in every mode — what changes is what the polls are
+      // FOR: a measurement window for a ratio, a measurement period for an
+      // aggregate, a hold clock for `latest`.
+      label.innerHTML = (ratio ? "History (polls)" : aggregated ? "Measured over (polls)" : "Sustained for (polls)") +
         '<span class="aw-dur-req" style="' + (aggregated || ratio ? "" : "display:none;") + 'color:var(--color-danger);font-weight:700;margin-left:2px">*</span>';
       star = label.querySelector(".aw-dur-req");
     }
     if (star) star.style.display = aggregated || ratio ? "" : "none";
     if (note) {
-      note.style.display = aggregated || ratio ? "" : "none";
+      // One hold for the whole trigger: severity tiers no longer carry their
+      // own, so this is what every tier waits out before it takes its severity.
+      var tiersNote = multiSevOn(panel) && !ratio && !aggregated
+        ? " Applies to every severity level."
+        : "";
+      note.style.display = aggregated || ratio || tiersNote ? "" : "none";
       note.textContent = ratio
-        ? "Required — loss is failed probes / total probes over this period, counting from the device's first successful probe in it. " +
-          "A short window is more sensitive but coarser: at a 60-second poll interval " + RATIO_WINDOW_MIN_MIN +
-          " minutes is about " + RATIO_WINDOW_MIN_MIN + " probes, so loss can only read in steps of " +
-          Math.round(100 / RATIO_WINDOW_MIN_MIN) + "%."
-        : aggregated ? "Required — this is the period the value is measured over." : "";
+        ? "Required — loss is failed probes / total probes over this many polls, counting from the device's first successful probe in the window. " +
+          "A short window is more sensitive but coarser: over " + minPolls + " polls loss can only read in steps of " +
+          Math.round(100 / minPolls) + "%."
+        : aggregated ? "Required — this is the period the value is measured over." : tiersNote.trim();
     }
     if (input) {
-      input.placeholder = ratio ? "e.g. " + RATIO_WINDOW_DEFAULT_MIN : aggregated ? "e.g. 5" : DUR_PLACEHOLDER_OPTIONAL;
-      input.setAttribute("min", ratio ? String(RATIO_WINDOW_MIN_MIN) : "0");
-      if (ratio) input.setAttribute("max", String(RATIO_WINDOW_MAX_MIN));
+      input.placeholder = ratio ? "e.g. " + Math.max(1, Math.round(RATIO_WINDOW_DEFAULT_SEC / cadSec)) : aggregated ? "e.g. 5" : DUR_PLACEHOLDER_OPTIONAL;
+      input.setAttribute("min", ratio ? String(minPolls) : "0");
+      if (ratio) input.setAttribute("max", String(maxPolls));
       else input.removeAttribute("max");
       if (aggregated || ratio) input.setAttribute("required", "required");
       else input.removeAttribute("required");
       // An empty field on a fresh loss automation lands on the default rather
-      // than 0, which would save a window the engine has to invent.
-      if (ratio && (input.value === "" || Number(input.value) === 0)) input.value = String(RATIO_WINDOW_DEFAULT_MIN);
+      // than 0, which would save a window the engine has to invent. Set through
+      // the seconds the field really holds, so the count and the stored value
+      // can't disagree.
+      if (ratio && (input.value === "" || Number(input.value) === 0)) setPollFieldSec(input, RATIO_WINDOW_DEFAULT_SEC);
+      // The engine floors a loss window at 5 minutes whatever the cadence — a
+      // count below that floor would save a window it silently widens.
+      if (ratio && pollFieldSec(input) > 0 && pollFieldSec(input) < RATIO_WINDOW_MIN_SEC && input !== document.activeElement) {
+        setPollFieldSec(input, minPolls * cadSec);
+      }
     }
     // The ratio-only sustain field appears exactly when the History relabel
     // does — switching the metric to/from packet loss toggles both together.
     var sustainWrap = panel.querySelector(".aw-ratio-sustain");
     if (sustainWrap) sustainWrap.style.display = ratio ? "" : "none";
+    syncPollFields(panel, false);
   }
   function step3Html() {
     var cat = triggerCategoryOf(draft.trigger);
@@ -3079,7 +3311,7 @@ async function openAutomationWizard(existing, opts) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        durationFieldHtml('id="tf-duration-min"', triggerDurationMinutes(tr)) +
+        durationFieldHtml('id="tf-duration-min"', triggerDurationSec(tr)) +
         ratioSustainFieldHtml(tr);
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
@@ -3103,6 +3335,12 @@ async function openAutomationWizard(existing, opts) {
     refreshDimOptions(panel);
     syncDurationRequirement(panel);
     syncDownDetection(panel);
+    // Poll-counted fields: wire the edit→seconds hook once, then paint the
+    // captions from whatever cadence is already cached and go ask for this
+    // (metric, scope) if it isn't.
+    wirePollFields(panel);
+    syncPollFields(panel, false);
+    refreshCadence(panel);
   }
   function wireStep3() {
     var panel = document.getElementById("aw-step-3");
@@ -3131,7 +3369,7 @@ async function openAutomationWizard(existing, opts) {
     // syncBandsToBase runs AFTER syncSeverityMode so tiers built lazily on this
     // same event (first tick of the multi-severity checkbox, from a draft that
     // predates in-progress edits to the base condition) are corrected at once.
-    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); syncDownDetection(panel); });
+    panel.addEventListener("change", function () { refreshTriggerSentence(); syncSeverityMode(panel); syncBandsToBase(panel); refreshDimOptions(panel); syncDurationRequirement(panel); syncDownDetection(panel); refreshCadence(panel); });
     panel.querySelector("#aw-trigger-test").addEventListener("click", runTriggerPreview);
     renderTriggerFields();
     syncSeverityMode(panel);
@@ -3151,24 +3389,24 @@ async function openAutomationWizard(existing, opts) {
         var compiled = tgCompile(tgCollectGroup(root, kind));
         _tgFilterErrors = compiled.errors;
         var tree = compiled.tree;
+        // The fields are COUNTED in polls but STORE seconds (see pollFieldHtml):
+        // read the seconds each one stands for, so a cadence that arrives after
+        // the operator typed can't reinterpret what they meant.
         var dEl = panel.querySelector("#tf-duration-min");
-        var mins = dEl && dEl.value !== "" ? Number(dEl.value) : 0;
-        if (isNaN(mins) || mins < 0) mins = 0;
+        var holdSec = pollFieldSec(dEl);
         // One time knob: it's the window for an aggregated condition (which then
         // needs no sustain on top), the sustain clock for a `latest` one. A
         // windowed RATIO is the exception with two: the field above is its
         // History (→ windowSec via the stamp), and its own optional sustain
         // rides the dedicated #tf-sustain-min field (hidden for everything
         // else, so a non-ratio trigger can never pick a value up from it).
-        var aggregated = tgStampWindows(tree, mins * 60);
+        var aggregated = tgStampWindows(tree, holdSec);
         var ratio = !!root.querySelector('.scr-row[data-ratio="1"]');
         var sEl = panel.querySelector("#tf-sustain-min");
-        var sustainMins = ratio && sEl && sEl.value !== "" ? Number(sEl.value) : 0;
-        if (isNaN(sustainMins) || sustainMins < 0) sustainMins = 0;
-        if (sustainMins > RATIO_WINDOW_MAX_MIN) sustainMins = RATIO_WINDOW_MAX_MIN;
+        var sustainSec = ratio ? Math.min(pollFieldSec(sEl), RATIO_WINDOW_MAX_SEC) : 0;
         draft.trigger = tgCollapse({
           type: "composite", kind: kind, op: tree.op, children: tree.children,
-          forDurationSec: aggregated ? (ratio ? Math.round(sustainMins) * 60 : 0) : mins * 60,
+          forDurationSec: aggregated ? (ratio ? sustainSec : 0) : holdSec,
         });
         // A count only means something on a BARE trigger; the server rejects
         // one inside a multi-condition trigger. tgCollapse has already folded a
@@ -3248,28 +3486,34 @@ async function openAutomationWizard(existing, opts) {
     leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
     return win;
   }
-  /** Minutes to show in the duration field for a stored trigger: an aggregated
-   *  leaf's window, else the sustain (which is what `latest` triggers carry). */
-  function triggerDurationMinutes(tr) {
+  /** SECONDS the duration field stands for on a stored trigger: an aggregated
+   *  leaf's window, else the sustain (which is what `latest` triggers carry).
+   *  The field shows this divided by the cadence — seconds stay the stored unit. */
+  function triggerDurationSec(tr) {
     if (!tr) return 0;
     var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
     var win = 0;
     leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
-    return Math.round((win || Number(tr.forDurationSec) || 0) / 60);
+    return win || Number(tr.forDurationSec) || 0;
+  }
+  /** The same value in minutes, for the PROSE surfaces (sentences, folded tier
+   *  summaries) — those describe stored behaviour, so they keep wall clock. */
+  function triggerDurationMinutes(tr) {
+    return Math.round(triggerDurationSec(tr) / 60);
   }
   /**
-   * Minutes for the ratio sustain field — the stored hold, but ONLY when the
+   * Seconds for the ratio sustain field — the stored hold, but ONLY when the
    * trigger also stores a window. A legacy loss rule (windowSec 0) carries its
    * History in `forDurationSec` (the pre-History shape, which
-   * triggerDurationMinutes reads back as the window above): showing those same
-   * minutes here too would turn "measured over 60" into "measured over 60, then
-   * held another 60" on the next save.
+   * triggerDurationSec reads back as the window above): showing that same value
+   * here too would turn "measured over 60" into "measured over 60, then held
+   * another 60" on the next save.
    */
-  function triggerSustainMinutes(tr) {
+  function triggerSustainSec(tr) {
     if (!tr || !triggerIsWindowedRatio(tr)) return 0;
     var leaves = tr.type === "composite" ? tgLeaves(tr) : [tr];
     var hasWindow = leaves.some(function (l) { return tgLeafWindowedRatio(l) && Number(l.windowSec) > 0; });
-    return hasWindow ? Math.round((Number(tr.forDurationSec) || 0) / 60) : 0;
+    return hasWindow ? Number(tr.forDurationSec) || 0 : 0;
   }
   /** Metrics whose reading is meaningless without an id-valued dimension: the
    *  filter is optional in the schema, so leaving it blank silently watches
@@ -3312,17 +3556,22 @@ async function openAutomationWizard(existing, opts) {
     // engine would fall back to its own default lookback — so require the period
     // rather than quietly measuring something the operator never chose.
     if (tgLeafWindowedRatio(leaf)) {
-      var mins = Math.round((Number(leaf.windowSec) || 0) / 60);
-      if (!(mins >= RATIO_WINDOW_MIN_MIN)) {
-        return label + ": packet loss is measured over a period — set History to at least " + RATIO_WINDOW_MIN_MIN + " minutes.";
+      // The floor and ceiling are the ENGINE's, in seconds; the field counts
+      // polls, so the message names the poll count that satisfies them at this
+      // fleet's cadence rather than a number of minutes the field can't take.
+      var winSec = Number(leaf.windowSec) || 0;
+      var cadSec = awCadence().sec;
+      if (winSec < RATIO_WINDOW_MIN_SEC) {
+        return label + ": packet loss is measured over a period — set History to at least " +
+          Math.max(1, Math.ceil(RATIO_WINDOW_MIN_SEC / cadSec)) + " polls (" + Math.round(RATIO_WINDOW_MIN_SEC / 60) + " minutes).";
       }
-      if (mins > RATIO_WINDOW_MAX_MIN) {
-        return label + ": History can be at most " + RATIO_WINDOW_MAX_MIN + " minutes (24 hours).";
+      if (winSec > RATIO_WINDOW_MAX_SEC) {
+        return label + ": History can be at most " + Math.floor(RATIO_WINDOW_MAX_SEC / cadSec) + " polls (24 hours).";
       }
       return null;
     }
     if (tgLeafAggregated(leaf) && !(Number(leaf.windowSec) > 0)) {
-      return label + ': "' + leaf.aggregation + '" measures over a period — set "Sustained for (minutes)" to 1 or more.';
+      return label + ': "' + leaf.aggregation + '" measures over a period — set "Measured over (polls)" to 1 or more.';
     }
     return null;
   }
@@ -3570,7 +3819,13 @@ async function openAutomationWizard(existing, opts) {
 
       var unit = numeric ? leafUnit(tr.metric, tr.dimensionFilter) : "";
       var invOp = INV_CMP[tr.operator] || "<";
-      var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for <input type="number" id="aw-sustain-min" min="0" value="' + Math.round((reset.sustainSec || 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>';
+      // Counted in polls like every hold on the trigger step: recovery is
+      // judged on readings too, so "stay cleared for 3" means three readings
+      // back under the line. Seconds remain what is stored (data-sec).
+      var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for ' +
+        '<input type="number" id="aw-sustain-min" class="aw-poll-input" data-sec="' + (reset.sustainSec || 0) + '" min="0" value="' +
+        pollsFromSec(reset.sustainSec || 0, awCadence().sec) + '" style="width:80px"> polls (0 = reset immediately)' +
+        '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
       var autoExtras = "";
       if (numeric) {
         autoExtras =
@@ -3596,7 +3851,10 @@ async function openAutomationWizard(existing, opts) {
         condExtra =
           '<div style="margin:6px 0 0 24px">' +
             '<div id="aw-reset-root">' + tgGroupHtml(condTree, 0, kind) + '</div>' +
-            '<div style="font-size:0.85rem;margin-top:4px">Must stay true for <input type="number" id="aw-crs-sustain-min" min="0" value="' + Math.round((reset.mode === "condition" ? (reset.sustainSec || 0) : 0) / 60) + '" style="width:80px"> min (0 = reset immediately)</div>' +
+            '<div style="font-size:0.85rem;margin-top:4px">Must stay true for ' +
+              '<input type="number" id="aw-crs-sustain-min" class="aw-poll-input" data-sec="' + (reset.mode === "condition" ? (reset.sustainSec || 0) : 0) + '" min="0" value="' +
+              pollsFromSec(reset.mode === "condition" ? (reset.sustainSec || 0) : 0, awCadence().sec) + '" style="width:80px"> polls (0 = reset immediately)' +
+              '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>' +
             (isTriggerPerDimension(tr)
               ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">This automation alerts per ' + escapeHtml(perDimensionNoun(tr)) + '. A reset condition on the same ' + escapeHtml(perDimensionNoun(tr)) + ' clears each alert on its own; one on anything else (CPU, memory, device status) is read for the whole device, so it clears all of them together.</p>'
               : "") +
@@ -3654,6 +3912,12 @@ async function openAutomationWizard(existing, opts) {
       panel._rsWired = true;
       panel.addEventListener("input", function () { refreshResetSentence(); });
     }
+    // The reset holds are counted in polls too, at the trigger's own cadence —
+    // wire the edit→seconds hook and paint the captions. The cadence is
+    // normally already cached from step 3; asking again is a no-op when it is.
+    wirePollFields(panel);
+    syncPollFields(panel, false);
+    refreshCadence(panel);
     refreshResetSentence();
   }
   function collectStep4() {
@@ -3669,9 +3933,8 @@ async function openAutomationWizard(existing, opts) {
       var hyst = panel.querySelector("#aw-hyst-enable");
       var ct = panel.querySelector("#aw-clear-threshold");
       if (hyst && hyst.checked && ct && ct.value !== "" && !isNaN(Number(ct.value))) reset.clearThreshold = Number(ct.value);
-      var sm = panel.querySelector("#aw-sustain-min");
-      var sus = sm && sm.value !== "" ? Number(sm.value) : 0;
-      if (!isNaN(sus) && sus > 0) reset.sustainSec = sus * 60;
+      var sus = pollFieldSec(panel.querySelector("#aw-sustain-min"));
+      if (sus > 0) reset.sustainSec = sus;
     } else {
       var sel = panel.querySelector('input[name="aw-reset-mode"]:checked');
       if (!sel) return;
@@ -3709,9 +3972,8 @@ async function openAutomationWizard(existing, opts) {
           // trigger's own aggregation.
           tgStampWindows(reset.condition, triggerWindowSec(tr));
         }
-        var cs = panel.querySelector("#aw-crs-sustain-min");
-        var csus = cs && cs.value !== "" ? Number(cs.value) : 0;
-        if (!isNaN(csus) && csus > 0) reset.sustainSec = csus * 60;
+        var csus = pollFieldSec(panel.querySelector("#aw-crs-sustain-min"));
+        if (csus > 0) reset.sustainSec = csus;
       }
     }
     draft.reset = reset;
@@ -3745,7 +4007,7 @@ async function openAutomationWizard(existing, opts) {
       // Reset leaves are measured over the TRIGGER's window (collectStep4), so an
       // averaged reset condition under a trigger that reads the current value has
       // no period to average over. tgValidateLeaf's generic message points at
-      // "Sustained for (minutes)", which on this step doesn't exist — and on a
+      // "Measured over (polls)", which on this step doesn't exist — and on a
       // `latest` trigger that field is the sustain clock, not a window, so
       // setting it wouldn't help either. Say what actually fixes it.
       var win = triggerWindowSec(draft.trigger);
@@ -4443,10 +4705,12 @@ async function openAutomationWizard(existing, opts) {
     if (btnRow) btnRow.classList.add("scg-btnrow"); // pinned: the duration field moves in below the conditions
     var existingSev = header && header.querySelector(".scg-sev-wrap");
     var existingAdd = btnRow && btnRow.querySelector(".scg-add-sev");
-    // The base tier's "Sustained for" belongs WITH the base tier once every
-    // added tier has its own — otherwise it reads as a rule-wide setting sitting
-    // between the tiers. Moved (not re-created) so its value survives the swap.
-    // A ratio trigger's sustain field is the same kind of thing and rides along.
+    // The hold used to be moved INTO the base tier, back when every added tier
+    // had one of its own and a field sitting between the tiers read as a
+    // rule-wide setting. There is one hold now — the trigger's — so it stays
+    // where it is rendered, above the tiers, and belongs to none of them. The
+    // lookups survive to move it back OUT of a group left over from a render
+    // that predates this change.
     var durGroup = panel.querySelector("#tf-duration-min");
     durGroup = durGroup && durGroup.closest(".aw-dur");
     var sustainGroup = panel.querySelector(".aw-ratio-sustain");
@@ -4483,12 +4747,13 @@ async function openAutomationWizard(existing, opts) {
       });
       return;
     }
-    if (durGroup && btnRow && !root.contains(durGroup)) root.insertBefore(durGroup, btnRow);
-    if (sustainGroup && btnRow && !root.contains(sustainGroup)) root.insertBefore(sustainGroup, btnRow);
-    // The duration field and the +Condition row are moved in/marked on different
-    // ticks, so (re)mark whatever is currently there rather than assuming order.
+    var fieldsHost = panel.querySelector("#aw-trigger-fields");
+    if (fieldsHost && durGroup && root.contains(durGroup)) fieldsHost.appendChild(durGroup);
+    if (fieldsHost && sustainGroup && root.contains(sustainGroup)) fieldsHost.appendChild(sustainGroup);
+    // The +Condition row is moved in/marked on a different tick, so (re)mark
+    // whatever is currently there rather than assuming order.
     if (multi) {
-      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .aw-ratio-sustain, :scope > .scg-btnrow").forEach(function (el) {
+      root.querySelectorAll(":scope > .scg-children, :scope > .scg-btnrow").forEach(function (el) {
         el.classList.add("aw-collapse-part");
       });
     }
@@ -4690,12 +4955,12 @@ async function openAutomationWizard(existing, opts) {
       dimensionFilter: tr.dimensionFilter,
     };
     var panel = document.getElementById("aw-step-3");
-    // Sustained-for is PER TIER: a new tier inherits the base's current value
-    // (so adding one changes nothing until the operator edits it), an existing
-    // one shows its own, and a band saved before per-tier sustain existed shows
-    // the base value it was inheriting.
-    var baseDurMin = Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60);
-    var bandDurMin = band.forDurationSec != null ? Math.round(band.forDurationSec / 60) : baseDurMin;
+    // No per-tier hold (2026-08-28): the trigger carries ONE "sustained for",
+    // and every tier waits it out before taking its severity. A tier that
+    // already carries its own `forDurationSec` — API-authored, or saved by the
+    // builder before this change — keeps it on the row stash and round-trips,
+    // because the engine still honours it (rule 19); the builder just offers no
+    // control to set another one.
     var row = document.createElement("div");
     row.className = "aw-band scg-group";
     row.style.cssText = "border:1px solid var(--color-border);border-left:3px solid " + sevColor(sev0) + ";border-radius:6px;padding:0.55rem;margin:4px 0";
@@ -4721,10 +4986,9 @@ async function openAutomationWizard(existing, opts) {
       '<div class="aw-collapse-body">' +
       '<select class="scg-op" disabled style="width:100%;font-size:0.85rem;margin-bottom:2px"><option>All conditions must be met (AND)</option></select>' +
       '<div class="band-cond scg-children"></div>' +
-      // Severity tiers share the trigger's sampling (rule 19) — for a windowed
-      // ratio that means the History window — but each tier keeps its OWN hold
-      // clock on top, ratio triggers included (2026-08-20).
-      durationFieldHtml('class="band-duration"', bandDurMin) +
+      // Severity tiers share the trigger's sampling AND its hold (rule 19) —
+      // for a windowed ratio that means the History window. The hold lives once,
+      // on the trigger, so there is no per-tier duration field here.
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>' +
       '</div>';
     host.appendChild(row);
@@ -6410,20 +6674,15 @@ async function openAutomationWizard(existing, opts) {
       // by collectStep5 — so a step-3 re-collect can't strip them. Band-LEVEL
       // escalation isn't offered in the builder (per-action chains are), but
       // an API-authored one round-trips through the same stash.
-      // Per-tier sustained duration — the value must hold in THIS tier for this
-      // long before the alert takes its severity (0 = as soon as it reaches it).
-      var dEl = row.querySelector(".band-duration");
-      // Hidden for a windowed-ratio trigger (tiers share its History window), and
-      // a control the operator can't see must not contribute a value.
-      var dHidden = false;
-      var dWrap = dEl && dEl.parentNode;
-      while (dWrap && !(dWrap.classList && dWrap.classList.contains("aw-dur"))) dWrap = dWrap.parentNode;
-      if (dWrap && dWrap.style && dWrap.style.display === "none") dHidden = true;
-      var dMins = dEl && !dHidden && dEl.value !== "" ? Number(dEl.value) : 0;
+      // No per-tier hold to read or write: the trigger's single "sustained for"
+      // governs every tier, and a band that carries no `forDurationSec` inherits
+      // it (resolveTierLadder). A rule authored with per-tier holds — by the API,
+      // or by this builder before the change — LOSES them on the next save from
+      // here, deliberately: the wizard shows one hold, so saving several would
+      // leave the rule behaving in a way nothing on screen states.
       var band = {
         threshold: leaf.threshold != null && !isNaN(leaf.threshold) ? leaf.threshold : null,
         severity: row.querySelector(".band-severity").value,
-        forDurationSec: (isNaN(dMins) || dMins < 0 ? 0 : Math.round(dMins)) * 60,
         actions: row._bandActions || [],
       };
       if (row._bandEscalation) band.escalation = row._bandEscalation;
