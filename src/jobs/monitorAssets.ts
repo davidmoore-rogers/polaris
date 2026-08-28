@@ -204,11 +204,12 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const isManagedSwitchOrAp = a.assetType === "switch" || a.assetType === "access_point";
     // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
     // it delivers telemetry via the per-integration warm cache.
+    // ssh / winrm used to be excluded here because no collector existed;
+    // agentlessHostService supplies one now. Keep in lockstep with
+    // monitoringService.computeDueWork.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&
-      eff.cpuMemoryPolling !== "winrm" &&
-      eff.cpuMemoryPolling !== "ssh"   &&
       !(eff.cpuMemoryPolling === "rest_api" && isManagedSwitchOrAp);
     // systemInfo carries three streams (interfaces / lldp / storage). Treat
     // the cadence as runnable when ANY is enabled — collectSystemInfo gates
@@ -275,7 +276,12 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       const lldpTransport = eff.lldpPolling || "unknown";
       await publishMonitorJob("lldp", a.id, { transport: lldpTransport, assetType, verboseDebug });
     }
-    if (storage && isUp && enabled.has("storage") && eff.storagePolling === "snmp") {
+    // The dedicated storage cadence covers SNMP (hrStorageTable) and the
+    // agentless transports (df / Get-Volume). Agent hosts push on their own
+    // schedule and vCenter storage rides the system-info pass, so neither
+    // belongs on this queue. Keep in lockstep with computeDueWork.
+    if (storage && isUp && enabled.has("storage") &&
+        (eff.storagePolling === "snmp" || eff.storagePolling === "ssh" || eff.storagePolling === "winrm")) {
       const storageTransport = eff.storagePolling || "unknown";
       await publishMonitorJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
     }

@@ -2570,6 +2570,32 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/agentlessHostService.ts
+
+**What it owns:** CPU/memory, interfaces and storage read from a Linux or Windows host over SSH or WinRM with no Polaris Agent installed. The missing half of three streams that accepted `ssh`/`winrm` at every validator and then returned `{supported:false}` — which `runTelemetryFor` records as a SUCCESSFUL tick, so the misconfiguration was invisible.
+
+**Public API:** `collectHostSsh(host, credConfig, opts)`, `collectHostWinrm(conn, opts)`, and the pure parsers `parseLinuxCpuMem` / `parseLinuxInterfaces` / `parseLinuxStorage` / `parseWindowsCpuMem` / `parseWindowsInterfaces` / `parseWindowsStorage` / `parseWindowsLinkSpeed`, plus the command constants they pair with.
+
+**Cross-service deps:** `utils/remoteExec.ts` (`withSshClient` / `sshExec` / `winrmRunPowershell`), `utils/winrm.ts` for the connection shape. No prisma — it collects, the caller persists.
+
+**Used by:** `monitoringService` — `collectTelemetry` (cpuMemory), `collectSystemInfo` (interfaces + storage), `runStorageFor` (the dedicated storage cadence). Credentials resolve through the shared `resolveAgentlessCredConfig`.
+
+**Invariants:**
+- **Commands are shipped constants, never operator-editable.** Arbitrary remote commands are RCE-equivalent and would belong behind `automationScripts=fullwrite` with sha256 change auditing; the AutomationScript registry is the escape hatch. Nothing here interpolates caller input into a command line — if that changes, copy `isShellSafeProcessName`'s posture from the sibling service.
+- **One SSH connection per host per tick.** `collectHostSsh` runs every requested command inside a single `withSshClient`. At 2000 assets the TCP+auth handshake is the dominant cost, not the parsing, so a per-stream connection would be the entire expense. WinRM is stateless per call and batches one script per stream against the WinRS command-length ceiling.
+- **A failed command leaves its stream `undefined`, never `[]`.** `undefined` means "leave stored rows alone"; an empty array is a successful scrape that found nothing. Conflating them wipes a host's interface or mount inventory because one scrape timed out.
+- **CPU is a rate**, so `/proc/stat` is read twice a second apart in ONE command. A counter that went backwards (reboot between snapshots) or did not move yields `null` — a fabricated 0% or 100% is worse than no reading.
+- **Memory uses `MemAvailable`, not `MemFree`.** Page cache is not "used" in any sense an operator means, and MemFree makes every healthy Linux box look full.
+- **Windows MACs are normalised from dashes to colons.** Every other source in Polaris uses colons and the downstream identity joins assume it.
+- `Get-NetAdapter.LinkSpeed` is a **display string** ("1 Gbps"), not a number — always through `parseWindowsLinkSpeed`. A virtual or unplugged NIC reports no negotiated rate; leave `speedBps` null rather than 0, which renders as a broken link.
+
+**When changing this:**
+- Adding a stream here means flipping its entry in `src/utils/pollingCapability.ts` AND the `_collectorExists` mirror in `public/js/integrations.js` in the same commit, or the UI keeps hiding a method that now works.
+- It also means checking the queue gates: `canTelemetry` (lockstep pair in `monitoringService.computeDueWork` + `jobs/monitorAssets.ts`) and `runStorageFor`'s method test each dropped these transports before enqueueing until the collector existed.
+- Temperature and LLDP are deliberately absent: Linux hwmon is readable but `MSAcpi_ThermalZoneTemperature` is unimplemented on most real Windows hardware, and there is no shell equivalent for LLDP at all. Shipping either on one OS only would be worse than the current honest gap.
+
+---
+
 ## services/agentlessProcessService.ts
 
 **What it owns:** Agentless (SSH/WinRM) collection for the `processes` stream — full inventory, pinned-process CPU/RAM telemetry, and mapped-process connection discovery. The transport commands, the pure parsers, and the server-side mirror of the agent's connection direction heuristic (`buildConnectionRows`).

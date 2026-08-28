@@ -57,6 +57,8 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 // NOTE: agentlessProcessService imports back from this module with
 // `import type` only, so this pair can't cycle at runtime.
 import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
+import { collectHostSsh, collectHostWinrm } from "./agentlessHostService.js";
+import type { WinRmConnection } from "../utils/winrm.js";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { applyTransform } from "../utils/symbolTransforms.js";
@@ -1754,6 +1756,52 @@ async function resolveSnmpConfigForStream(
     return { cfg: await loadSnmpCredentialConfigForFortinetAsset(streamCred, integration) };
   }
   return { error: errorLabel };
+}
+
+/**
+ * Credential chain for an agentless SSH / WinRM collector: the stream's
+ * effective asset credential → the class-override credential → the AD bind
+ * fallback. Lifted out of `runProcessesFor`, which had the only copy, so the
+ * cpuMemory / interfaces / storage collectors resolve identically — three
+ * hand-copies of a four-step chain is how they drift.
+ */
+async function resolveAgentlessCredConfig(
+  streamCred: { type: string; config: unknown } | null | undefined,
+  classCredentialId: string | null,
+  method: "ssh" | "winrm",
+  integration: { type: string; config: unknown } | null | undefined,
+): Promise<Record<string, unknown> | null> {
+  if (streamCred?.type === method) return (streamCred.config as Record<string, unknown>) || {};
+  const classCred = await loadClassOverrideStreamCredential(classCredentialId, method);
+  if (classCred) return (classCred.config as Record<string, unknown>) || {};
+  const isAdSrc = assetSourceKindFromIntegrationType(integration?.type ?? null) === "activedirectory";
+  if (isAdSrc && integration) {
+    const cfg = (integration.config as Record<string, unknown>) || {};
+    const username = String(cfg.bindDn || "");
+    const password = String(cfg.bindPassword || "");
+    if (username && password) {
+      return method === "winrm"
+        ? { username, password, useHttps: true, port: 5986 }
+        : { username, password, port: 22 };
+    }
+  }
+  return null;
+}
+
+/** Project a resolved SSH/WinRM credential into the WinRM connection shape. */
+function winrmConnFrom(host: string, credConfig: Record<string, unknown>, timeoutMs: number): WinRmConnection {
+  return {
+    host,
+    username:  String(credConfig.username || ""),
+    password:  String(credConfig.password || ""),
+    useHttps:  credConfig.useHttps !== false,
+    port:      typeof credConfig.port === "number" ? credConfig.port : undefined,
+    verifyTls: credConfig.verifyTls === true,
+    // PowerShell cold-start plus the WinRS Receive poll loop realistically need
+    // more headroom than a stream's default timeout — same floor runProcessesFor
+    // applies.
+    timeoutMs: Math.max(timeoutMs, 30_000),
+  };
 }
 
 async function loadSnmpCredentialConfigForFortinetAsset(
@@ -4489,8 +4537,24 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
       );
       return { supported: true, data };
     }
-    // winrm / ssh / icmp don't yet deliver telemetry. WinRM via WMI
-    // Enumerate-over-WS-Management is tracked separately.
+    // Agentless CPU/memory over SSH (Linux /proc) or WinRM (CIM). These
+    // silently returned {supported:false} until 2026-08-28 — accepted at every
+    // validator, recorded as a healthy tick, collecting nothing.
+    if (polling === "ssh" || polling === "winrm") {
+      const cred = await resolveAgentlessCredConfig(
+        asset.cpuMemoryCredential ?? asset.monitorCredential,
+        effective.cpuMemoryCredentialId,
+        polling,
+        integration,
+      );
+      if (!cred) return { supported: true, error: `No ${polling === "ssh" ? "SSH" : "WinRM"} credential selected` };
+      const res = polling === "ssh"
+        ? await collectHostSsh(targetIp, cred, { telemetry: true, interfaces: false, storage: false, timeoutMs: telemetryTimeout })
+        : await collectHostWinrm(winrmConnFrom(targetIp, cred, telemetryTimeout), { telemetry: true, interfaces: false, storage: false, timeoutMs: telemetryTimeout });
+      if (!res.telemetry) return { supported: true, error: "Host returned no CPU/memory reading" };
+      return { supported: true, data: res.telemetry };
+    }
+    // icmp carries no payload.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "Telemetry collection failed" };
@@ -5218,7 +5282,35 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       });
       return { supported: true, data };
     }
-    // winrm / ssh / icmp — no interfaces / storage / IPsec / LLDP support yet.
+    // Agentless interfaces + storage over SSH (sysfs / df) or WinRM
+    // (Get-NetAdapter / Get-Volume). Both streams ride ONE connection, which is
+    // the whole point at fleet scale — the handshake dominates, not the parse.
+    // Storage is gated on its own resolved method, like every other path here.
+    if (interfacesPolling === "ssh" || interfacesPolling === "winrm") {
+      const method = interfacesPolling;
+      const cred = await resolveAgentlessCredConfig(
+        asset.interfacesCredential ?? asset.monitorCredential,
+        effective.interfacesCredentialId,
+        method,
+        integration,
+      );
+      if (!cred) return { supported: true, error: `No ${method === "ssh" ? "SSH" : "WinRM"} credential selected` };
+      const wantStorage = effective.storagePolling === method;
+      const opts = { telemetry: false, interfaces: true, storage: wantStorage, timeoutMs: sysInfoTimeout };
+      const res = method === "ssh"
+        ? await collectHostSsh(targetIp, cred, opts)
+        : await collectHostWinrm(winrmConnFrom(targetIp, cred, sysInfoTimeout), opts);
+      // `undefined` from a failed command means "leave stored rows alone";
+      // only an empty ARRAY is a successful scrape that found nothing.
+      return {
+        supported: true,
+        data: {
+          interfaces: res.interfaces ?? [],
+          storage: wantStorage ? (res.storage ?? []) : [],
+        },
+      };
+    }
+    // icmp — no payload to gather.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "System info collection failed" };
@@ -11505,6 +11597,37 @@ export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promi
  *
  * Stamps `Asset.lastStorageAt` on every successful pass.
  */
+/**
+ * Persist a dedicated storage-cadence scrape. Shared by the SNMP and the
+ * agentless (ssh/winrm) paths so both stamp cadence and advance the anchor
+ * identically.
+ *
+ * This cadence walks ALL mountpaths, so each row is stamped by whether its
+ * mountPath is operator-pinned: pinned → "fast" (full retention + rollups),
+ * unpinned → "slow" (24h, never rolled up).
+ */
+async function persistStorageOnly(
+  assetId: string,
+  storage: StorageSample[],
+  monitoredStorage: string[],
+): Promise<void> {
+  const now = new Date();
+  const pinnedStorage = new Set(monitoredStorage);
+  if (storage.length > 0) {
+    enqueueStorageSamples(
+      storage.map((s) => ({
+        assetId,
+        timestamp: now,
+        cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
+        mountPath:  s.mountPath,
+        totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+        usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+      })),
+    );
+  }
+  await prisma.asset.update({ where: { id: assetId }, data: { lastStorageAt: now } });
+}
+
 export async function runStorageFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("storage", labels);
   try {
@@ -11521,15 +11644,47 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
     });
     const storagePolling = effective.storagePolling;
-    if (storagePolling !== "snmp") {
-      // Storage walk is SNMP-only when enabled.
+    // SNMP walks the hrStorageTable; ssh/winrm read df / Get-Volume. Every
+    // other method either has no storage story (icmp, rest_api — FortiOS
+    // publishes no mountable storage) or delivers it elsewhere: the agent
+    // pushes on its own schedule, and vCenter storage rides the system-info
+    // pass out of the warm cache rather than this dedicated cadence.
+    if (storagePolling !== "snmp" && storagePolling !== "ssh" && storagePolling !== "winrm") {
       recordWorkOutcome("storage", "success", labels);
       return "success";
     }
-    const targetIp = asset.ipAddress;
+    const targetIp = asset.ipAddress
+      || ((storagePolling === "ssh" || storagePolling === "winrm") ? (asset.dnsName || asset.hostname) : null);
     if (!targetIp) {
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
+    }
+
+    if (storagePolling === "ssh" || storagePolling === "winrm") {
+      const cred = await resolveAgentlessCredConfig(
+        asset.interfacesCredential ?? asset.monitorCredential,
+        effective.interfacesCredentialId,
+        storagePolling,
+        asset.discoveredByIntegration ?? null,
+      );
+      if (!cred) {
+        recordWorkOutcome("storage", "failure", labels);
+        return "failure";
+      }
+      const opts = { telemetry: false, interfaces: false, storage: true, timeoutMs: effective.storageTimeoutMs };
+      const res = await (storagePolling === "ssh"
+        ? collectHostSsh(targetIp, cred, opts)
+        : collectHostWinrm(winrmConnFrom(targetIp, cred, effective.storageTimeoutMs), opts)
+      ).catch(() => undefined);
+      // undefined = the command failed; leave stored rows alone rather than
+      // wiping a host's mounts because one scrape timed out.
+      if (!res?.storage) {
+        recordWorkOutcome("storage", "failure", labels);
+        return "failure";
+      }
+      await persistStorageOnly(assetId, res.storage, asset.monitoredStorage || []);
+      recordWorkOutcome("storage", "success", labels);
+      return "success";
     }
     // Storage shares the interfaces credential at probe time — there's no
     // per-stream storage credential column. Per-stream interfaces credential
@@ -11554,24 +11709,7 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
     }
-    const now = new Date();
-    // This dedicated SNMP storage stream walks ALL mountpaths, so stamp each
-    // row by whether its mountPath is operator-pinned (monitoredStorage):
-    // pinned → "fast" (full retention + rollups), unpinned → "slow" (24h).
-    const pinnedStorage = new Set(asset.monitoredStorage ?? []);
-    if (storage.length > 0) {
-      enqueueStorageSamples(
-        storage.map((s) => ({
-          assetId,
-          timestamp: now,
-          cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
-          mountPath:  s.mountPath,
-          totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
-          usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
-        })),
-      );
-    }
-    await prisma.asset.update({ where: { id: assetId }, data: { lastStorageAt: now } });
+    await persistStorageOnly(assetId, storage, asset.monitoredStorage || []);
     recordWorkOutcome("storage", "success", labels);
     return "success";
   } catch (err) {
@@ -12109,11 +12247,12 @@ export async function computeDueWork(
     // switches only — APs are enqueued and dispatched.
     // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
     // it delivers telemetry via the per-integration warm cache.
+    // ssh / winrm used to be excluded here because no collector existed for
+    // them; agentlessHostService supplies one now, so they enqueue like any
+    // other transport. icmp still carries no payload.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&
-      eff.cpuMemoryPolling !== "winrm" &&
-      eff.cpuMemoryPolling !== "ssh"   &&
       !(eff.cpuMemoryPolling === "rest_api" && a.assetType === "switch");
     // systemInfo is supported for winrm/ssh paths; only exclude the REST API
     // + managed-switch/AP combination that has no direct endpoint. Treat the

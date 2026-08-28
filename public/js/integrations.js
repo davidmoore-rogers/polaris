@@ -162,10 +162,11 @@ function _collectorExists(source, stream, klass) {
     // The agent walks no LLDP neighbours.
     if (method === "agent") return stream !== "lldp";
     if (method === "ssh" || method === "winrm") {
-      // Agentless collection exists for the response-time probe and the
-      // processes stream only (agentlessProcessService); every other stream
-      // falls through to {supported:false} in its collector.
-      return stream === "responseTime" || stream === "processes";
+      // agentlessProcessService (processes) + agentlessHostService (cpuMemory /
+      // interfaces / storage). Temperature has no dependable Windows source and
+      // LLDP has none at all over a shell, so both stay agent/SNMP-only.
+      return stream === "responseTime" || stream === "processes" ||
+             stream === "cpuMemory" || stream === "interfaces" || stream === "storage";
     }
     if (method === "snmp") {
       // hrSWRunTable is declared-but-unimplemented; there is no event-log MIB.

@@ -146,17 +146,31 @@ export function collectorCapability(
     return OK;
   }
 
-  // SSH / WinRM. Today only the processes stream is implemented agentlessly
-  // (agentlessProcessService); the rest fall through to `{supported:false}` in
-  // their collectors, which is the silent no-op this table exists to expose.
+  // SSH / WinRM, served by agentlessProcessService (processes) and
+  // agentlessHostService (cpuMemory / interfaces / storage). What is left
+  // unimplemented is genuinely absent, not merely unwired.
   if (method === "ssh" || method === "winrm") {
-    if (stream === "responseTime") return OK;
-    if (stream === "processes") return OK;
-    if (stream === "eventLog") {
-      return no("The agentless event-log collector is not implemented — only the Polaris Agent delivers this stream today");
-    }
     const label = method === "ssh" ? "SSH" : "WinRM";
-    return no(`${label} collection for this stream is not implemented — it will silently gather nothing. Use the Polaris Agent, or SNMP where the device supports it.`);
+    switch (stream) {
+      case "responseTime":
+      case "processes":
+      case "cpuMemory":
+      case "interfaces":
+      case "storage":
+        return OK;
+      case "temperature":
+        // Linux hwmon is readable, but there is no dependable Windows
+        // equivalent (MSAcpi_ThermalZoneTemperature is unimplemented on most
+        // real hardware), so neither side is wired rather than shipping a
+        // stream that works on half a fleet.
+        return no(`${label} temperature collection is not implemented — host thermal sensors are only available via the Polaris Agent`);
+      case "lldp":
+        return no(`${label} cannot enumerate LLDP neighbours — use SNMP on a device that publishes LLDP-MIB`);
+      case "eventLog":
+        return no("The agentless event-log collector is not implemented — only the Polaris Agent delivers this stream today");
+      default:
+        return OK;
+    }
   }
 
   return OK;

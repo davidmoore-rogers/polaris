@@ -16,26 +16,25 @@ import type { Stream } from "../../src/utils/pollingCompatibility.js";
 const HEAVY: Stream[] = ["cpuMemory", "temperature", "interfaces", "lldp", "storage"];
 
 describe("collectorCapability — the silent no-ops", () => {
-  // The headline gap. An operator can set CPU/memory to SSH on a whole fleet,
-  // get no error, and never receive a sample — runTelemetryFor counts a
-  // {supported:false} stream as a SUCCESSFUL tick, and the queue publishers
-  // drop ssh/winrm before enqueueing, so nothing anywhere goes red.
-  it("SSH and WinRM deliver nothing beyond response time and processes", () => {
+  // agentlessHostService closed the cpuMemory / interfaces / storage half of
+  // this gap; temperature, LLDP and eventLog are still genuinely absent over a
+  // shell rather than merely unwired.
+  it("SSH and WinRM deliver the host streams, but not temperature, LLDP or eventLog", () => {
     for (const m of ["ssh", "winrm"] as const) {
-      expect(collectorExists("activedirectory", "responseTime", m), `${m}/responseTime`).toBe(true);
-      expect(collectorExists("activedirectory", "processes", m), `${m}/processes`).toBe(true);
-      for (const s of HEAVY) {
+      for (const s of ["responseTime", "processes", "cpuMemory", "interfaces", "storage"] as Stream[]) {
+        expect(collectorExists("activedirectory", s, m), `${m}/${s}`).toBe(true);
+      }
+      for (const s of ["temperature", "lldp", "eventLog"] as Stream[]) {
         expect(collectorExists("activedirectory", s, m), `${m}/${s}`).toBe(false);
       }
-      expect(collectorExists("activedirectory", "eventLog", m), `${m}/eventLog`).toBe(false);
     }
   });
 
   it("names a reason an operator can act on", () => {
-    const v = collectorCapability("activedirectory", "cpuMemory", "ssh");
+    const v = collectorCapability("activedirectory", "temperature", "ssh");
     expect(v.implemented).toBe(false);
     expect(v.reason).toMatch(/not implemented/i);
-    expect(v.reason).toMatch(/Agent|SNMP/);
+    expect(v.reason).toMatch(/Agent/);
   });
 
   // Advertised in the matrix header as "SNMP (hrSWRunTable)" and filtered to
