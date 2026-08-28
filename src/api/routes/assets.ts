@@ -229,7 +229,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter", "fortimanager"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -3312,6 +3312,24 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
         });
         if (!vcSource) {
           throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM or ESXi host (no vCenter source on file)");
+        }
+      }
+      // "fortimanager" reads FMG's own device roster — reachability and nothing
+      // else — so it covers response time only, and needs an actual
+      // FortiManager to ask. The source-kind check above already rejects it on
+      // a standalone FortiGate; this catches the stream half, plus the asset
+      // having a serial to join the roster on (the probe identifies a chassis
+      // by serial, never by name).
+      if (value === "fortimanager") {
+        const stream = name.replace(/Polling$/, "") as Stream;
+        if (!isMethodValidForStream(stream, "fortimanager")) {
+          throw new AppError(
+            400,
+            `FortiManager polling only applies to the response-time stream — FortiManager's database carries reachability, not metrics (field: ${name})`,
+          );
+        }
+        if (!existing.serialNumber) {
+          throw new AppError(400, "FortiManager polling identifies the device by serial number, and this asset has none recorded");
         }
       }
     }

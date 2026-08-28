@@ -95,7 +95,9 @@ import { fetchVcenterQuickStats, fetchVcenterHostSnapshot } from "./vcenterServi
 import {
   fmgProxyRest,
   resolveDeviceMgmtIpViaFmg,
+  fetchRosterConnectivity,
   type FortiManagerConfig,
+  type RosterDeviceStatus,
 } from "./fortimanagerService.js";
 import { logEvent, logEventsBatch, buildConnectionChangedEvent } from "./eventLogService.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
@@ -1876,6 +1878,16 @@ export async function probeAsset(
       return await probeFortinetController(asset, integration as any, start, timeoutMs);
     }
 
+    // Asks FortiManager's own device database instead of the device. Needs no
+    // asset IP (FMG is the target), so it dispatches before the IP guard —
+    // which also means it reaches a gate Polaris has no route to.
+    if (polling === "fortimanager") {
+      if (!integration) {
+        return finish(start, false, "FortiManager polling requires a FortiManager integration");
+      }
+      return await probeFortimanagerNative(asset, integration as any, start);
+    }
+
     // vCenter probes ask the vCenter SERVER about the asset, so they need no
     // asset IP at all — a VM whose guest exposes no address to Polaris, and an
     // ESXi host added to vCenter by a name that never resolved, are both still
@@ -2364,6 +2376,127 @@ interface VcenterQuickStatsCacheEntry {
   fetchedAt: number;
   fetchDurationMs: number;
   stats: Map<string, import("./vcenterService.js").VcenterVmQuickStats>;
+}
+
+// ─── FortiManager roster warm cache ────────────────────────────────────────
+//
+// Backs the "fortimanager" polling method: one NATIVE /dvmdb/adom/<adom>/device
+// read per integration per tick, serving every gate that integration manages.
+// Same TTL + promise-singleton shape as the controller-inventory and vCenter
+// caches above, and for the same reason — without the in-flight guard, N
+// workers waking on one 60s tick would each fire their own upstream call.
+//
+// Native reads are NOT in FMG's /sys/proxy/json concurrency-1 lane, so this is
+// genuinely cheap: ~187 gates cost one request rather than 187 serialized ones.
+interface FmgRosterCacheEntry {
+  fetchedAt: number;
+  fetchDurationMs: number;
+  /** Upper-cased serial → the chassis's reachability as FMG understands it. */
+  bySerial: Map<string, RosterDeviceStatus>;
+}
+
+const FMG_ROSTER_CACHE_TTL_MS = 30_000;
+const fmgRosterCache = new Map<string, FmgRosterCacheEntry>();
+const inflightFmgRoster = new Map<string, Promise<FmgRosterCacheEntry>>();
+
+async function fetchFmgRosterCached(
+  integration: { id: string; config: Record<string, unknown> },
+): Promise<FmgRosterCacheEntry> {
+  const cached = fmgRosterCache.get(integration.id);
+  if (cached && Date.now() - cached.fetchedAt < FMG_ROSTER_CACHE_TTL_MS) return cached;
+  const inflight = inflightFmgRoster.get(integration.id);
+  if (inflight) return inflight;
+
+  const p = (async (): Promise<FmgRosterCacheEntry> => {
+    const startedAt = performance.now();
+    try {
+      const rows = await fetchRosterConnectivity(
+        integration.config as unknown as FortiManagerConfig,
+        undefined,
+        integration.id,
+      );
+      const bySerial = new Map<string, RosterDeviceStatus>();
+      // A cluster primary appears at the top level AND inside ha_slave[]. The
+      // ha_slave row is the per-member one, so let it win — it is what carries
+      // a standby's own state, and for the primary the two agree.
+      for (const r of rows) {
+        const prev = bySerial.get(r.serial);
+        if (!prev || (!prev.haMember && r.haMember)) bySerial.set(r.serial, r);
+      }
+      const entry: FmgRosterCacheEntry = {
+        fetchedAt: Date.now(),
+        fetchDurationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        bySerial,
+      };
+      fmgRosterCache.set(integration.id, entry);
+      return entry;
+    } finally {
+      inflightFmgRoster.delete(integration.id);
+    }
+  })();
+
+  inflightFmgRoster.set(integration.id, p);
+  return p;
+}
+
+/**
+ * Response-time probe that asks FortiManager rather than the device.
+ *
+ * Needs no asset IP — dispatched before the IP guard in probeAsset, like the
+ * controller and vCenter probes — and identifies the chassis by SERIAL. Never
+ * by name: `fortinetTopology.deviceName` is FMG's device name, which is known
+ * to diverge from the gate's configured hostname on real fleets (the trap
+ * utils/fortinetParentKey.ts exists for), and a name mismatch here would read
+ * as "gone from FortiManager".
+ *
+ * FMG unreachable ⇒ SKIPPED, not failed. Identical reasoning to the vCenter
+ * probe (business rule 30): the thing that answers for the device is not the
+ * device, so one FortiManager outage must never declare a whole fleet down at
+ * the same instant. A gate that FMG answers about and reports disconnected IS
+ * a real failure.
+ *
+ * Carries no uptime — FMG's roster has none — so this method drives no reboot
+ * detection. That is called out in the matrix header.
+ */
+async function probeFortimanagerNative(
+  asset: { serialNumber: string | null; hostname: string | null },
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  start: number,
+): Promise<ProbeResult> {
+  if (integration.type !== "fortimanager") {
+    return finish(start, false, "FortiManager polling requires a FortiManager integration");
+  }
+  const serial = (asset.serialNumber || "").trim().toUpperCase();
+  if (!serial) {
+    return finish(start, false, "Cannot poll via FortiManager — asset has no serial number recorded");
+  }
+
+  let entry: FmgRosterCacheEntry;
+  try {
+    entry = await fetchFmgRosterCached(integration);
+  } catch (err: any) {
+    // Could not ASK. Not a measurement, so not a miss.
+    return { success: false, responseTimeMs: 0, skipped: true, error: err?.message || "FortiManager roster query failed" };
+  }
+
+  const row = entry.bySerial.get(serial);
+  if (!row) {
+    return {
+      success: false,
+      responseTimeMs: entry.fetchDurationMs,
+      error: "Not present in FortiManager's device roster",
+    };
+  }
+  if (!row.connected) {
+    return {
+      success: false,
+      responseTimeMs: entry.fetchDurationMs,
+      error: `FortiManager reports the device disconnected (${row.raw})`,
+    };
+  }
+  // The RTT is the shared upstream call's duration, not a measurement of the
+  // device — the same honesty the controller and vCenter probes apply.
+  return { success: true, responseTimeMs: entry.fetchDurationMs };
 }
 
 interface VcenterHostCacheEntry {

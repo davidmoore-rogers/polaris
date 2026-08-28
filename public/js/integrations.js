@@ -18,6 +18,7 @@ var _POLLING_LABELS = {
   disabled: "Disabled",
   agent:    "Polaris Agent",
   vcenter:  "vCenter",
+  fortimanager: "FortiManager",
 };
 
 // "agent" is intentionally NOT in any of these arrays — the Polaris Agent
@@ -37,7 +38,9 @@ var _POLLING_LABELS = {
 // now a manufacturer custom widget, keyed by manufacturer + optional model
 // rather than by credential. Mirrors src/utils/pollingCompatibility.ts.
 var _POLLING_COMPAT = {
-  fortimanager:    ["rest_api", "snmp", "ssh", "icmp", "disabled"],
+  // "fortimanager" (ask FMG's own device roster; response time only) is on this
+  // source and nowhere else — nothing else has a FortiManager to ask.
+  fortimanager:    ["rest_api", "snmp", "ssh", "icmp", "disabled", "fortimanager"],
   fortigate:       ["rest_api", "snmp", "ssh", "icmp", "disabled"],
   activedirectory: ["icmp", "winrm", "ssh", "disabled", "vcenter"],
   entraid:         ["icmp", "winrm", "ssh", "disabled", "vcenter"],
@@ -62,6 +65,11 @@ var _STREAM_METHODS = {
 // the host's connection state; interfaces are guest vNICs / host pNICs +
 // VMkernel ports; storage is guest filesystems / host-mounted datastores.
 var _VCENTER_STREAMS = ["responseTime", "cpuMemory", "interfaces", "storage"];
+
+// Streams the "fortimanager" method can serve — mirrors FORTIMANAGER_STREAMS in
+// src/utils/pollingCompatibility.ts. Response time only: FMG's device database
+// carries reachability, identity and firmware, and no metrics of any kind.
+var _FORTIMANAGER_STREAMS = ["responseTime"];
 
 // Source-default polling for one stream. Mirrors defaultPollingForSource() in
 // src/services/monitoringService.ts. Used to label the "Inherit" option.
@@ -148,6 +156,12 @@ function _streamAllowedMethods(source, stream) {
   // VCENTER_STREAMS / isMethodValidForStream (pollingCompatibility.ts).
   if (_VCENTER_STREAMS.indexOf(stream) === -1) {
     allowed = allowed.filter(function (m) { return m !== "vcenter"; });
+  }
+  // Same method-first gate for "fortimanager" — mirrors isMethodValidForStream.
+  // Note the dropdown labels cpuMemory as "telemetry" for legacy-default
+  // reasons, which is fine here: neither name is in the allowed stream list.
+  if (_FORTIMANAGER_STREAMS.indexOf(stream) === -1) {
+    allowed = allowed.filter(function (m) { return m !== "fortimanager"; });
   }
   return allowed;
 }

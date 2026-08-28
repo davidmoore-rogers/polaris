@@ -12,7 +12,7 @@
  * asset source, with the most permissive matrix (any method) since the
  * operator chooses the credential when adding the asset.
  *
- *   FortiManager      → REST API, SNMP, SSH, ICMP                (no WinRM — FortiOS doesn't run it; no Agent — appliance)
+ *   FortiManager      → REST API, SNMP, SSH, ICMP, FortiManager   (no WinRM — FortiOS doesn't run it; no Agent — appliance)
  *   FortiGate         → REST API, SNMP, SSH, ICMP                (same — FortiOS again)
  *   Active Directory  → ICMP, WinRM, SSH, Agent                  (no REST API — AD-bound hosts have no shared API)
  *   Entra ID / Intune → ICMP, WinRM, SSH, Agent                  (same — cloud-managed Windows / mobile)
@@ -80,11 +80,36 @@
  * be reached the probe is SKIPPED rather than failed (ProbeResult.skipped), so
  * one vCenter outage never declares a whole virtual fleet down.
  *
+ * ── The "fortimanager" method (2026-08-28) ───────────────────────────────────
+ * Asks FortiManager's own device database whether it still sees the chassis,
+ * instead of touching the device. Response-time ONLY (see FORTIMANAGER_STREAMS)
+ * and on the `fortimanager` source only — a standalone FortiGate has no FMG to
+ * ask.
+ *
+ * The point is cost. It reads `/dvmdb/adom/<adom>/device`, a NATIVE FMG call:
+ * outside the `/sys/proxy/json` concurrency-1 lane, and one request covers the
+ * entire managed fleet. A warm cache per integration per tick means ~187 gates
+ * cost one round trip, versus 187 serialized proxy calls or 187 direct dials.
+ * It also reaches a gate Polaris has no route to, since Polaris only has to
+ * reach FortiManager.
+ *
+ * What it trades away: the reading is FMG's, refreshed on FMG's check-in
+ * cadence rather than Polaris's, so it is lagged and second-hand — it says the
+ * gate is talking to its manager, not that it is serving traffic. It carries no
+ * uptime, so it drives no reboot detection. And FMG holds nothing else worth
+ * polling: no CPU, memory, temperature, interface counters or session count,
+ * and no live switch/AP status. That is why this is one stream and not a
+ * transport.
+ *
+ * NOT a source default — ICMP stays the default for response time. Repointing
+ * it would silently change how up/down is decided for every gate on every FMG
+ * install.
+ *
  * Locked with the user during the design exchange; see CLAUDE.md
  * "Polling-method compatibility matrix".
  */
 
-export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent" | "vcenter";
+export type PollingMethod = "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" | "disabled" | "agent" | "vcenter" | "fortimanager";
 
 /** Streams resolved independently by the four-tier monitor settings hierarchy. */
 export type Stream =
@@ -106,7 +131,7 @@ export type AssetSourceKind =
   | "azurearc"
   | "manual";
 
-const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"];
+const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter", "fortimanager"];
 
 // Each entry is the full set of valid methods for that source. A `Set` is
 // O(1) lookup which matters for the resolver running in the hot monitor
@@ -115,7 +140,10 @@ const ALL_METHODS: ReadonlyArray<PollingMethod> = ["rest_api", "snmp", "winrm", 
 // "agent" is allowed wherever Polaris can install software (everything
 // except the Fortinet appliance sources).
 const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>>> = {
-  fortimanager:    new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
+  // "fortimanager" (ask FMG's own database, response-time only) is on the FMG
+  // source and NOWHERE else — a standalone FortiGate has no FortiManager to
+  // ask, and neither does anything non-Fortinet.
+  fortimanager:    new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled", "fortimanager"]),
   fortigate:       new Set<PollingMethod>(["rest_api", "snmp", "ssh", "icmp", "disabled"]),
   // "vcenter" on the directory sources covers VMs those integrations
   // discovered FIRST that a vCenter sync merged into — see header note.
@@ -132,7 +160,13 @@ const COMPATIBILITY: Readonly<Record<AssetSourceKind, ReadonlySet<PollingMethod>
   // ssh / agent like the directory sources), ESXi hosts answer snmp/ssh, and
   // "vcenter" delivers the hypervisor-view cpuMemory stream for VMs.
   vcenter:         new Set<PollingMethod>(["icmp", "snmp", "winrm", "ssh", "disabled", "agent", "vcenter"]),
-  manual:          new Set<PollingMethod>(ALL_METHODS),
+  // Spelled out rather than `ALL_METHODS`. Manual is the most permissive set
+  // by design (the operator picks the credential), but "most permissive" is not
+  // "everything that exists": `fortimanager` reads a specific integration's
+  // device roster, and an orphan asset has no integration to read. Writing the
+  // list out means a future method has to be added here deliberately instead of
+  // being inherited by accident.
+  manual:          new Set<PollingMethod>(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]),
 };
 
 /**
@@ -204,8 +238,22 @@ export const VCENTER_STREAMS: ReadonlySet<Stream> = new Set<Stream>([
   "responseTime", "cpuMemory", "interfaces", "storage",
 ]);
 
+/**
+ * Streams the "fortimanager" method can serve: response time, and only that.
+ *
+ * FortiManager is a configuration manager, not a metrics store. Its device
+ * database carries reachability (`conn_status`, `ha_slave[].status`), identity
+ * and firmware — there is no CPU, memory, temperature, interface counter or
+ * session count in it anywhere, and no live switch/AP status either (those are
+ * FortiOS monitor endpoints, which is why they go through the proxy or direct).
+ * So the method answers exactly one question, "does FMG still see this chassis",
+ * and is scoped to the one stream that asks it.
+ */
+export const FORTIMANAGER_STREAMS: ReadonlySet<Stream> = new Set<Stream>(["responseTime"]);
+
 export function isMethodValidForStream(stream: Stream, method: PollingMethod): boolean {
   if (method === "vcenter") return VCENTER_STREAMS.has(stream);
+  if (method === "fortimanager") return FORTIMANAGER_STREAMS.has(stream);
   const allowed = STREAM_METHODS[stream];
   return allowed ? allowed.has(method) : true;
 }
@@ -263,5 +311,6 @@ export function pollingMethodLabel(method: PollingMethod): string {
     case "disabled": return "Disabled";
     case "agent":    return "Polaris Agent";
     case "vcenter":  return "vCenter";
+    case "fortimanager": return "FortiManager";
   }
 }

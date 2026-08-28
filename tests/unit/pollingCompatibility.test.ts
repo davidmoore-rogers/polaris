@@ -23,7 +23,9 @@ import {
 
 describe("compatibility matrix — locked values per asset source", () => {
   it("FortiManager: REST API + SNMP + SSH + ICMP + Disabled, no WinRM or Agent", () => {
-    expect(compatibleMethodsFor("fortimanager")).toEqual(["rest_api", "snmp", "ssh", "icmp", "disabled"]);
+    // "fortimanager" (ask FMG's own device roster) belongs to this source and
+    // no other — nothing else has a FortiManager to ask.
+    expect(compatibleMethodsFor("fortimanager")).toEqual(["rest_api", "snmp", "ssh", "icmp", "disabled", "fortimanager"]);
     expect(isPollingMethodCompatible("fortimanager", "winrm")).toBe(false);
     expect(isPollingMethodCompatible("fortimanager", "agent")).toBe(false);
     expect(isPollingMethodCompatible("fortimanager", "disabled")).toBe(true);
@@ -88,10 +90,14 @@ describe("compatibility matrix — locked values per asset source", () => {
     expect(isPollingMethodCompatible("fortimanager", "vcenter")).toBe(false);
     expect(isPollingMethodCompatible("fortigate", "vcenter")).toBe(false);
   });
-  it("Manual: every method valid", () => {
+  // Manual is the most permissive source — the operator picks the credential —
+  // but "most permissive" is not "everything that exists". `fortimanager` reads
+  // one integration's device roster, and an orphan asset has no integration to
+  // read, so it is the one method manual does NOT get.
+  it("Manual: every method except the ones that need a specific integration", () => {
     expect(compatibleMethodsFor("manual")).toEqual(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
     allPollingMethods().forEach((m) => {
-      expect(isPollingMethodCompatible("manual", m)).toBe(true);
+      expect(isPollingMethodCompatible("manual", m), m).toBe(m !== "fortimanager");
     });
   });
 });
@@ -123,7 +129,10 @@ describe("isPollingMethod type guard", () => {
   it("rejects non-method strings", () => {
     expect(isPollingMethod("rest")).toBe(false);          // legacy wire value, intentionally rejected
     expect(isPollingMethod("REST_API")).toBe(false);
-    expect(isPollingMethod("fortimanager")).toBe(false);  // integration type, not a polling method
+    // "fortimanager" WAS rejected here as an integration-type-not-a-method.
+    // Since 2026-08-28 it is both: the integration type, and a response-time
+    // polling method that reads that integration's device roster.
+    expect(isPollingMethod("fortimanager")).toBe(true);
     expect(isPollingMethod("")).toBe(false);
   });
   it("rejects non-strings", () => {
@@ -135,17 +144,37 @@ describe("isPollingMethod type guard", () => {
 });
 
 describe("per-stream method restrictions (cross-transport streams)", () => {
-  it("original six streams impose no per-stream restriction beyond the vcenter stream-scoped rule", () => {
+  it("original six streams impose no per-stream restriction beyond the method-scoped rules", () => {
     const vcenterStreams = ["responseTime", "cpuMemory", "interfaces", "storage"];
+    const fortimanagerStreams = ["responseTime"];
     (["responseTime", "cpuMemory", "temperature", "interfaces", "lldp", "storage"] as const).forEach((s) => {
       allPollingMethods().forEach((m) => {
-        const expected = m === "vcenter" ? vcenterStreams.includes(s) : true;
+        const expected =
+          m === "vcenter"      ? vcenterStreams.includes(s) :
+          m === "fortimanager" ? fortimanagerStreams.includes(s) :
+          true;
         expect(isMethodValidForStream(s, m), `${s}/${m}`).toBe(expected);
       });
     });
-    expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods());
+    // Response time is the only stream that admits every method — it is the one
+    // question every transport can answer.
     expect(methodsForStream("responseTime")).toEqual(allPollingMethods());
-    expect(methodsForStream("temperature")).toEqual(allPollingMethods().filter((m) => m !== "vcenter"));
+    expect(methodsForStream("cpuMemory")).toEqual(allPollingMethods().filter((m) => m !== "fortimanager"));
+    expect(methodsForStream("temperature")).toEqual(
+      allPollingMethods().filter((m) => m !== "vcenter" && m !== "fortimanager"),
+    );
+  });
+
+  // FortiManager is a configuration manager, not a metrics store: its device
+  // database has reachability, identity and firmware, and no CPU, memory,
+  // temperature, interface counter or session count anywhere. So the method
+  // answers one question and is scoped to the one stream that asks it.
+  it("fortimanager serves exactly the response-time stream", () => {
+    expect(isMethodValidForStream("responseTime", "fortimanager")).toBe(true);
+    (["cpuMemory", "temperature", "interfaces", "lldp", "storage", "processes", "eventLog"] as const)
+      .forEach((s) => {
+        expect(isMethodValidForStream(s, "fortimanager"), s).toBe(false);
+      });
   });
 
   // The "http" polling method was RETIRED in 2026-08 — the HTTP check it ran is
