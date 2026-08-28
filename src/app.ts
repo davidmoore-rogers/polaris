@@ -844,6 +844,11 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       // Deliberately not marker-guarded — retries the subnet (blockId, cidr)
       // unique index every boot until the data allows it. See its header.
       "./jobs/enforceSubnetUniqueIndex.js",
+      // Read-only advisory sweep: names stored polling methods that have no
+      // collector behind them, which otherwise report a healthy tick forever
+      // while collecting nothing. Not marker-guarded — the answer changes as
+      // collectors land and as operators edit settings. See its header.
+      "./jobs/auditPollingCapability.js",
     ]) await importJob(p);
   }
 

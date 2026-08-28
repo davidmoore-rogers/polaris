@@ -144,9 +144,52 @@ function _fmgFortiosRestUnavailable(integrationType) {
   return !typed && !hasStoredToken;
 }
 
+// ─── Collector capability (mirrors src/utils/pollingCapability.ts) ──────────
+//
+// Compatibility answers "is this method meaningful for this source"; capability
+// answers "has anyone written the collector". Only the second keeps a stream
+// from being configured into silence: a method with no collector validates,
+// persists, resolves, and then reports a healthy tick forever while gathering
+// nothing, because runTelemetryFor counts {supported:false} as success.
+//
+// Kept deliberately coarse — this decides what the dropdown OFFERS. The server
+// remains the authority and warns on anything that slips through (an API
+// caller, or a value stored before this existed).
+function _collectorExists(source, stream, klass) {
+  return function (method) {
+    if (method === "disabled" || method === "vcenter" || method === "fortimanager") return true;
+    if (method === "icmp")  return stream === "responseTime";
+    // The agent walks no LLDP neighbours.
+    if (method === "agent") return stream !== "lldp";
+    if (method === "ssh" || method === "winrm") {
+      // Agentless collection exists for the response-time probe and the
+      // processes stream only (agentlessProcessService); every other stream
+      // falls through to {supported:false} in its collector.
+      return stream === "responseTime" || stream === "processes";
+    }
+    if (method === "snmp") {
+      // hrSWRunTable is declared-but-unimplemented; there is no event-log MIB.
+      return stream !== "processes" && stream !== "eventLog";
+    }
+    if (method === "rest_api") {
+      var isFortinet = source === "fortimanager" || source === "fortigate";
+      if (!isFortinet) return stream === "responseTime";
+      if (stream === "responseTime") return true;
+      // A managed FortiSwitch/FortiAP isn't directly REST-able; only the AP's
+      // cpu/mem + temperature ride the parent gate's managed_ap row.
+      if (klass === "fortiswitch") return false;
+      if (klass === "fortiap")     return stream === "cpuMemory" || stream === "temperature";
+      // FortiOS exposes no mountable storage over REST (always empty), and the
+      // device-log collector is not implemented.
+      return stream !== "storage" && stream !== "eventLog";
+    }
+    return true;
+  };
+}
+
 // Methods offered for a stream = source-compatible methods intersected with the
 // stream's restriction (if any). Mirrors the resolver's combined gate.
-function _streamAllowedMethods(source, stream) {
+function _streamAllowedMethods(source, stream, klass) {
   var allowed = _POLLING_COMPAT[source] || _POLLING_COMPAT.manual;
   var restrict = _STREAM_METHODS[stream];
   if (restrict) {
@@ -163,6 +206,11 @@ function _streamAllowedMethods(source, stream) {
   if (_FORTIMANAGER_STREAMS.indexOf(stream) === -1) {
     allowed = allowed.filter(function (m) { return m !== "fortimanager"; });
   }
+  // Finally: drop anything with no collector behind it. Offering a method that
+  // silently gathers nothing is how a stream gets configured into permanent
+  // silence with every indicator green. The dropdown labels cpuMemory as
+  // "telemetry" for legacy-default reasons; normalize before asking.
+  allowed = allowed.filter(_collectorExists(source, stream === "telemetry" ? "cpuMemory" : stream, klass));
   return allowed;
 }
 
@@ -198,7 +246,7 @@ function _polarisSourceLabel(source, opts) {
 // validateStreamPollingMethod() applies the same filter on writes.
 function _polarisPollingDropdownHTML(id, source, stream, currentValue, opts) {
   opts = opts || {};
-  var allowed = _streamAllowedMethods(source, stream);
+  var allowed = _streamAllowedMethods(source, stream, opts.klass);
   if (stream !== "responseTime") {
     allowed = allowed.filter(function (m) { return m !== "icmp"; });
   }

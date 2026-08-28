@@ -105,6 +105,8 @@ import {
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
+import { collectorCapability } from "../../utils/pollingCapability.js";
+import { logger } from "../../utils/logger.js";
 import {
   buildInferredNeighborsForAsset,
   dedupeInferredNeighbors,
@@ -3331,6 +3333,24 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
         if (!existing.serialNumber) {
           throw new AppError(400, "FortiManager polling identifies the device by serial number, and this asset has none recorded");
         }
+      }
+      const stream = name.replace(/Polling$/, "") as Stream;
+      // ICMP carries no payload, so it can only answer a response-time probe.
+      // The integration-tier and class-override validators have always refused
+      // this; the per-asset path never did, so `PUT /assets/:id` accepted it,
+      // the resolver adopted it, and the stream then fell into its
+      // `{supported:false}` branch forever.
+      if (value === "icmp" && stream !== "responseTime") {
+        throw new AppError(400, `ICMP polling is only valid for the response-time stream (field: ${name})`);
+      }
+      // Warn — don't refuse — when no collector exists. Refusing would break an
+      // operator merely re-saving an asset that already holds the value.
+      const cap = collectorCapability(sourceKind, stream, value, { assetType: existing.assetType });
+      if (!cap.implemented) {
+        logger.warn(
+          { assetId: id, sourceKind, stream, method: value, reason: cap.reason },
+          `Asset update accepted a polling method with no collector — this stream will silently collect nothing: ${cap.reason}`,
+        );
       }
     }
   }
