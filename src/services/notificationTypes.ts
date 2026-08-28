@@ -1232,7 +1232,7 @@ export const escalationSchema = z
 // ruleInputSchema folds old POST bodies into v2, so pre-rename API clients and
 // the pre-wizard UI keep working against the alias paths.
 
-export const RESET_MODES = ["manual", "auto", "timed", "condition"] as const;
+export const RESET_MODES = ["manual", "auto", "timed", "condition", "event"] as const;
 export type ResetMode = (typeof RESET_MODES)[number];
 
 /**
@@ -1250,6 +1250,50 @@ export const TRIGGER_TYPES_WITH_RESET_CONDITIONS = ["asset_metric", "asset_state
 export function triggerTypeAllowsResetCondition(type: string): boolean {
   return (TRIGGER_TYPES_WITH_RESET_CONDITIONS as readonly string[]).includes(type);
 }
+
+/**
+ * The mirror image: trigger types a reset EVENT can be attached to — the two
+ * that fire on an instant. An event automation has no reading to recover, but
+ * it usually has a counterpart event that says the thing came back
+ * (`agent.disconnected` → `agent.connected`), and that is a far better answer
+ * than "clear it in four hours and hope".
+ *
+ * Deliberately the COMPLEMENT of TRIGGER_TYPES_WITH_RESET_CONDITIONS rather
+ * than an addition to it: a continuous trigger already recovers on its own
+ * reading, and letting an unrelated Event clear a live threshold alert would
+ * hide a device that is still over the line.
+ */
+export const TRIGGER_TYPES_WITH_RESET_EVENT = ["event", "change"] as const;
+
+export function triggerTypeAllowsResetEvent(type: string): boolean {
+  return (TRIGGER_TYPES_WITH_RESET_EVENT as readonly string[]).includes(type);
+}
+
+/**
+ * Known recovery counterparts, keyed by the TRIGGER's action pattern. Published
+ * in the builder catalog so the wizard can prefill the reset pattern instead of
+ * asking an operator to remember which verb Polaris writes on the way back up.
+ *
+ * A suggestion only — every entry is editable, and a pattern that isn't in the
+ * map leaves the field blank. Each pair is a real `logEvent` call site.
+ */
+export const RESET_EVENT_SUGGESTIONS: Record<string, string> = {
+  "agent.disconnected": "agent.connected",
+  "agent.upgrade_failed": "agent.upgrade_succeeded",
+  "agent.install_failed": "agent.installed",
+  "agent.uninstall_failed": "agent.uninstalled",
+  "agent.build.failed": "agent.build.completed",
+  "integration.discover.error": "integration.discover.completed",
+};
+
+export const resetEventSchema = z
+  .object({
+    // Glob over Event.action, same vocabulary as the event trigger.
+    actionPattern: z.string().min(1).max(200),
+    // Optional narrowing, mirroring the event trigger's own field.
+    resourceType: z.string().max(60).optional().nullable(),
+  })
+  .strict();
 
 export const resetSchema = z
   .object({
@@ -1270,6 +1314,12 @@ export const resetSchema = z
     // kind by validateRuleV2; the wizard seeds it with the trigger INVERTED so
     // the starting point is what the automatic reset would have done.
     condition: triggerConditionGroupSchema.optional().nullable(),
+    // event only (event/change triggers) — clear when the counterpart Event
+    // arrives for the SAME subject the alert is about. Same-subject is not
+    // configurable: one agent reconnecting says nothing about another, and the
+    // subject key is the one the alert already stores (assetId, else the
+    // resource label).
+    resetEvent: resetEventSchema.optional().nullable(),
   })
   .strict();
 
@@ -1845,6 +1895,18 @@ export function normalizeReset(
       return { mode: "condition", condition: reset.condition ?? null, sustainSec: reset.sustainSec ?? null };
     }
     if (reset.mode === "timed") return { mode: "timed", afterSec: reset.afterSec ?? null };
+    if (reset.mode === "event") {
+      // A missing pattern is kept as a null resetEvent rather than quietly
+      // rewritten to "manual": the caller asked for a mode, and validateRuleV2
+      // is where they get told it needs a pattern. Silently storing a different
+      // reset than the one that was posted is the worse failure.
+      return {
+        mode: "event",
+        resetEvent: reset.resetEvent?.actionPattern
+          ? { actionPattern: reset.resetEvent.actionPattern, resourceType: reset.resetEvent.resourceType ?? null }
+          : null,
+      };
+    }
     return { mode: "manual" };
   }
   const mode: ResetMode = clearBehavior === "auto" || clearBehavior === "timed" ? clearBehavior : "manual";
@@ -1909,9 +1971,9 @@ export function legacyMirrorOfV2(
   actions: AutomationAction[],
 ): { clearBehavior: (typeof CLEAR_BEHAVIORS)[number]; clearAfterSec: number | null; targets: DeliveryTarget[] } {
   return {
-    // "condition" has no legacy representation — "auto" is the closest
-    // semantic (clears without operator action) for pre-wizard readers.
-    clearBehavior: reset.mode === "condition" ? "auto" : reset.mode,
+    // "condition" and "event" have no legacy representation — "auto" is the
+    // closest semantic (clears without operator action) for pre-wizard readers.
+    clearBehavior: reset.mode === "condition" || reset.mode === "event" ? "auto" : reset.mode,
     clearAfterSec: reset.mode === "timed" ? (reset.afterSec ?? null) : null,
     targets: actionsToTargets(actions),
   };
@@ -2077,6 +2139,20 @@ function validateRuleV2(
   validateMissedPolls(trigger, ctx);
   if (reset.mode === "timed" && reset.afterSec == null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "afterSec"], message: "timed reset requires afterSec" });
+  }
+  if (reset.mode === "event") {
+    // The counterpart-Event reset is the answer for the two trigger types that
+    // fire on an instant, and only those — see TRIGGER_TYPES_WITH_RESET_EVENT.
+    if (!reset.resetEvent?.actionPattern?.trim()) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reset", "resetEvent", "actionPattern"], message: "an event reset requires the action pattern of the event that clears it" });
+    }
+    if (trigger && !triggerTypeAllowsResetEvent(trigger.type)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reset", "resetEvent"],
+        message: `resetting on an audit event only applies to event and change triggers — a ${trigger.type} trigger recovers on its own reading`,
+      });
+    }
   }
   if (reset.mode === "condition") {
     // A custom reset tree needs a trigger with a CONTINUOUS condition to
@@ -2954,13 +3030,14 @@ export function buildSchemaCatalog() {
     resetModeMeta: {
       auto: { label: "Automatically", help: "Clears when the condition recovers — optionally with a separate clear threshold (hysteresis) and a recovered-for duration." },
       condition: { label: "When custom conditions are met", help: "Clears when a separate AND/OR condition tree becomes true. Starts as the trigger inverted — edit it to recover on a different value, a different metric, or several at once. While the alert is active these conditions are the only recovery authority, so set a re-notify cooldown if the trigger and reset conditions can both be true at once." },
+      event: { label: "When a matching event arrives", help: "Clears when the counterpart audit event is written for the same device or resource — the reconnect that answers the disconnect. The alert stays up until it happens, so a device that never comes back keeps its alert." },
       timed: { label: "After a fixed time", help: "Clears after the configured duration, even without a recovery reading." },
       manual: { label: "Manually only", help: "Stays active until someone clears it." },
     },
     // Which reset modes make sense per trigger type (event/change have no
     // continuous condition to auto-clear, hence no "auto" and no "condition"
-    // — see TRIGGER_TYPES_WITH_RESET_CONDITIONS) + the wizard's default per
-    // type. Order is the order the wizard renders the non-auto radios in, so
+    // — see TRIGGER_TYPES_WITH_RESET_CONDITIONS; they get "event" instead,
+    // which is the recovery they DO have) + the wizard's default per type. Order is the order the wizard renders the non-auto radios in, so
     // "condition" leads: unchecking "reset when the trigger is no longer true"
     // lands on the trigger-inverted tree, which is the customizable spelling of
     // the box that was just unchecked.
@@ -2968,10 +3045,13 @@ export function buildSchemaCatalog() {
       asset_metric: ["auto", "condition", "timed", "manual"],
       asset_state: ["auto", "condition", "timed", "manual"],
       host_metric: ["auto", "condition", "timed", "manual"],
-      event: ["timed", "manual"],
-      change: ["timed", "manual"],
+      event: ["event", "timed", "manual"],
+      change: ["event", "timed", "manual"],
       composite: ["auto", "condition", "timed", "manual"],
     },
+    // Trigger action pattern → the pattern that says it recovered, prefilled
+    // by the wizard when the operator picks the event reset.
+    resetEventSuggestions: RESET_EVENT_SUGGESTIONS,
     resetDefaults: {
       asset_metric: { mode: "auto", sustainSec: 0 },
       asset_state: { mode: "auto" },

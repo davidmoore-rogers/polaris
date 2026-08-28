@@ -394,6 +394,22 @@ describe("makeAutomationSentences", () => {
     expect(out).toContain("re-fire within <strong>5 minutes</strong>");
   });
 
+  it("an event reset says which event clears it, and that it is the same subject", () => {
+    const s = make(SCHEMA as never);
+    const out = s.resetSentence(
+      { mode: "event", resetEvent: { actionPattern: "agent.connected" } },
+      { type: "event", actionPattern: "agent.disconnected" },
+    );
+    expect(out).toContain("<strong>agent.connected</strong>");
+    expect(out).toContain("same device or resource");
+    // A resource-type narrowing shows up in the prose rather than staying silent.
+    const narrowed = s.resetSentence(
+      { mode: "event", resetEvent: { actionPattern: "integration.discover.completed", resourceType: "integration" } },
+      { type: "event", actionPattern: "integration.discover.error" },
+    );
+    expect(narrowed).toContain("<strong>integration</strong> resources");
+  });
+
   it("manual / timed / condition reset modes each phrase distinctly", () => {
     const s = make(SCHEMA as never);
     expect(s.resetSentence({ mode: "manual" }, null)).toContain("someone clears it manually");

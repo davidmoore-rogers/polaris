@@ -991,6 +991,11 @@ function makeAutomationSentences(s) {
       out = "Stays active until <strong>someone clears it manually</strong>.";
     } else if (reset.mode === "timed") {
       out = "Resets automatically after <strong>" + (reset.afterSec ? humanDuration(reset.afterSec) : "…") + "</strong>.";
+    } else if (reset.mode === "event") {
+      var rev = reset.resetEvent || {};
+      out = "Resets when an audit event matching <strong>" + escapeHtml(rev.actionPattern || "…") + "</strong>" +
+        (rev.resourceType ? " on <strong>" + escapeHtml(rev.resourceType) + "</strong> resources" : "") +
+        " occurs for the same device or resource.";
     } else if (reset.mode === "condition") {
       out = "Resets when <strong>" + escapeHtml(reset.condition ? tgTreePhrase(reset.condition) : "…") + "</strong>";
       if (reset.sustainSec > 0) out += " and stays that way for <strong>" + humanDuration(reset.sustainSec) + "</strong>";
@@ -3426,9 +3431,37 @@ async function openAutomationWizard(existing, opts) {
   // so the starting point is what the checkbox that was just unchecked did.
   // Event/change triggers have no continuous condition and keep the plain
   // timed/manual radios (TRIGGER_TYPES_WITH_RESET_CONDITIONS, server-side).
-  function defaultResetFor(triggerType) {
-    var d = (s.resetDefaults && s.resetDefaults[triggerType]) || { mode: "auto" };
+  /** The pattern that says the trigger's event recovered, when Polaris writes
+   *  one (server-published map — the wizard never guesses a verb). */
+  function resetEventSuggestion(tr) {
+    var map = (s && s.resetEventSuggestions) || {};
+    var pat = tr && tr.type === "event" ? String(tr.actionPattern || "").trim() : "";
+    return (pat && map[pat]) || "";
+  }
+  /** Takes the TRIGGER, not just its type: an event automation whose action has
+   *  a known counterpart (agent.disconnected → agent.connected) should start on
+   *  "clears when it comes back", which is the honest answer, rather than on a
+   *  four-hour timer that clears the alert whether or not anything recovered.
+   *  Only ever consulted for a draft that has made no reset choice yet. */
+  function defaultResetFor(tr) {
+    var type = tr && tr.type ? tr.type : String(tr || "");
+    var sug = resetEventSuggestion(tr);
+    if (sug) return { mode: "event", resetEvent: { actionPattern: sug, resourceType: null } };
+    var d = (s.resetDefaults && s.resetDefaults[type]) || { mode: "auto" };
     return JSON.parse(JSON.stringify(d));
+  }
+  /** The event-reset radio's fields. Prefilled from the suggestion map so
+   *  picking the radio already carries the counterpart pattern. */
+  function eventResetExtraHtml(reset, tr) {
+    var re = (reset && reset.resetEvent) || {};
+    var val = re.actionPattern || resetEventSuggestion(tr);
+    return '<div style="margin:6px 0 0 24px">' +
+      '<div class="form-group" style="margin:0"><label>Clearing event — action pattern (glob)</label>' +
+        '<input type="text" id="aw-reset-ev-action" value="' + escapeHtml(val) + '" placeholder="e.g. agent.connected"></div>' +
+      '<div class="form-group" style="margin:6px 0 0"><label>Resource type (optional)</label>' +
+        '<input type="text" id="aw-reset-ev-restype" value="' + escapeHtml(re.resourceType || "") + '" placeholder="e.g. asset"></div>' +
+      '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">The clearing event has to be about the <strong>same device or resource</strong> the alert is about — one agent reconnecting never clears another agent’s alert. Until it arrives the alert stays up, so something that never comes back keeps its alert.</p>' +
+    '</div>';
   }
   /** The dimensions a trigger reports per — [] when it alerts once per device.
    *  Composite is always per-device (its leaves fold ANY-dimension). */
@@ -3470,7 +3503,7 @@ async function openAutomationWizard(existing, opts) {
     var panel = document.getElementById("aw-step-4");
     var tr = draft.trigger || {};
     var modes = (s.resetModesByTriggerType && s.resetModesByTriggerType[tr.type]) || ["auto", "timed", "manual"];
-    if (!draft.reset || modes.indexOf(draft.reset.mode) === -1) draft.reset = defaultResetFor(tr.type);
+    if (!draft.reset || modes.indexOf(draft.reset.mode) === -1) draft.reset = defaultResetFor(tr);
     // A reset condition is written in the trigger's kind (device vs Polaris
     // host), so switching the trigger between the two on step 3 leaves a tree
     // the server would refuse. Drop it and re-seed from the new trigger rather
@@ -3486,15 +3519,13 @@ async function openAutomationWizard(existing, opts) {
     // hysteresis control below would be meaningless on one — it resets when the
     // flag flips back. (resetSentence makes the same exclusion.)
     var numeric = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
-    var cooldownHtml = '<div class="form-group" style="margin-top:0.75rem"><label>Re-notify cooldown (minutes, optional)</label><input type="number" id="aw-cooldown-min" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active"></div>';
-
     if (isEC) {
       // Event/change: no continuous condition — plain timed/manual radios.
       var radios = modes.map(function (m) {
-        return resetRadioHtml(m, reset, m === "timed" ? timedExtraHtml(reset) : "");
+        return resetRadioHtml(m, reset, m === "timed" ? timedExtraHtml(reset) : m === "event" ? eventResetExtraHtml(reset, tr) : "");
       }).join("");
       panel.innerHTML = '<h3 style="margin:0 0 0.25rem">How should its alerts reset?</h3>' +
-        '<div class="aw-sentence" id="aw-reset-sentence">…</div>' + radios + cooldownHtml;
+        '<div class="aw-sentence" id="aw-reset-sentence">…</div>' + radios;
     } else {
       var autoOn = reset.mode === "auto";
       // Non-auto modes in the server's own order, which puts "condition" first:
@@ -3536,7 +3567,7 @@ async function openAutomationWizard(existing, opts) {
             (isTriggerPerDimension(tr)
               ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">This automation alerts per ' + escapeHtml(perDimensionNoun(tr)) + '. A reset condition on the same ' + escapeHtml(perDimensionNoun(tr)) + ' clears each alert on its own; one on anything else (CPU, memory, device status) is read for the whole device, so it clears all of them together.</p>'
               : "") +
-            '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — set a re-notify cooldown below.</p>' +
+            '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:6px 0 0">If the trigger and reset conditions can both be true at once, the automation can clear and re-fire in a loop — set a re-notify cooldown on the next step.</p>' +
           '</div>';
       }
 
@@ -3550,8 +3581,7 @@ async function openAutomationWizard(existing, opts) {
         '<div class="form-group" style="margin-bottom:0.5rem"><label style="font-weight:600"><input type="checkbox" id="aw-reset-auto"' + (autoOn ? " checked" : "") + '> Reset when the trigger is no longer true</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 24px">The alert clears automatically once the condition recovers. Uncheck to write your own reset conditions, or to reset on a timer or by hand.</p></div>' +
         '<div id="aw-auto-extras" style="display:' + (autoOn ? "block" : "none") + ';margin:0 0 0.6rem 24px">' + autoExtras + '</div>' +
-        '<div id="aw-reset-custom" style="display:' + (autoOn ? "none" : "block") + '">' + customRadios + '</div>' +
-        cooldownHtml;
+        '<div id="aw-reset-custom" style="display:' + (autoOn ? "none" : "block") + '">' + customRadios + '</div>';
 
       var autoCb = panel.querySelector("#aw-reset-auto");
       autoCb.addEventListener("change", function () {
@@ -3614,7 +3644,14 @@ async function openAutomationWizard(existing, opts) {
       if (!sel) return;
       var mode = sel.value;
       reset = { mode: mode };
-      if (mode === "timed") {
+      if (mode === "event") {
+        var ea = panel.querySelector("#aw-reset-ev-action");
+        var er = panel.querySelector("#aw-reset-ev-restype");
+        reset.resetEvent = {
+          actionPattern: ea ? ea.value.trim() : "",
+          resourceType: er && er.value.trim() ? er.value.trim() : null,
+        };
+      } else if (mode === "timed") {
         var am = panel.querySelector("#aw-after-min");
         var mins = am && am.value !== "" ? Number(am.value) : 60;
         reset.afterSec = (isNaN(mins) || mins < 1 ? 60 : mins) * 60;
@@ -3645,13 +3682,18 @@ async function openAutomationWizard(existing, opts) {
       }
     }
     draft.reset = reset;
-    var cd = panel.querySelector("#aw-cooldown-min");
-    draft.cooldownSec = cd && cd.value !== "" && !isNaN(Number(cd.value)) ? Number(cd.value) * 60 : null;
   }
   function validateStep4() {
     var r = draft.reset || {};
     var tr = draft.trigger || {};
     if (r.mode === "timed" && (!r.afterSec || r.afterSec < 60)) return "Timed reset: enter the clear delay (1 minute or more).";
+    if (r.mode === "event") {
+      if (!r.resetEvent || !String(r.resetEvent.actionPattern || "").trim()) return "Event reset: enter the action pattern of the event that clears the alert (e.g. agent.connected).";
+      // The server refuses the same shape — a continuous trigger recovers on
+      // its own reading, and an unrelated Event clearing it would hide a device
+      // still over the line.
+      if (tr.type !== "event" && tr.type !== "change") return "Resetting on an audit event only applies to event and change triggers — a " + tr.type + " automation recovers on its own reading.";
+    }
     if (r.mode === "auto" && r.clearThreshold != null) {
       if (isNaN(r.clearThreshold)) return "Hysteresis: enter a numeric clear threshold.";
       var t = tr.threshold;
@@ -3875,6 +3917,15 @@ async function openAutomationWizard(existing, opts) {
           'Require a note when acknowledging' +
         '</label>' +
         '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0 1.4rem">Acknowledging asks what the problem was and what the fix was, and won’t go through empty. Escalation still stops on acknowledge.</p>' +
+        // Cooldown is a property of FIRING, not of recovery: it decides how
+        // often this automation is allowed to raise a NEW alert. It sat on the
+        // reset step until 2026-08, where it read as part of how an alert
+        // clears — which is the one thing it does not do.
+        '<div style="margin:0.6rem 0 0">' +
+          '<label style="display:block;font-weight:400">Re-notify cooldown (minutes, optional)</label>' +
+          '<input type="number" id="aw-cooldown-min" class="input" min="0" value="' + (draft.cooldownSec != null ? Math.round(draft.cooldownSec / 60) : "") + '" placeholder="blank = suppress repeats while active" style="width:14rem;margin-top:2px">' +
+          '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:2px 0 0">How long this automation waits before raising a <em>new</em> alert about the same device after the last one. It doesn’t shorten or extend an alert that is already up, and it doesn’t limit reminders or escalation.</p>' +
+        '</div>' +
         repeatControlHtml() +
       '</div>';
 
@@ -5240,7 +5291,7 @@ async function openAutomationWizard(existing, opts) {
       .map(function (t) {
         return {
           source: "tag", id: t.name, email: "", name: t.name,
-          description: "Every user tagged " + t.name + (t.category ? " · " + t.category : ""),
+          description: "Every user tagged " + t.name + (t.category ? " \u00b7 " + t.category : ""),
         };
       });
   }
@@ -6163,6 +6214,9 @@ async function openAutomationWizard(existing, opts) {
     if (msgEl) draft.messageTemplate = msgEl.value.trim() || null;
     var ackNoteEl = panel.querySelector("#aw-require-ack-note");
     if (ackNoteEl) draft.requireAckNote = ackNoteEl.checked;
+    // Cooldown lives on this card — it governs how often a NEW alert fires.
+    var cd = panel.querySelector("#aw-cooldown-min");
+    if (cd) draft.cooldownSec = cd.value !== "" && !isNaN(Number(cd.value)) ? Number(cd.value) * 60 : null;
     // Repeat-until-handled, also a property of the alert record.
     var repOn = panel.querySelector("#aw-repeat-on");
     if (repOn) {

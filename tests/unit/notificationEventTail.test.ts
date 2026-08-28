@@ -6,6 +6,9 @@
  *     cooldown is checked against recent Notification rows + an in-batch map
  *     (a single 1000-event batch self-dedupes). Keyed by assetId-or-
  *     resourceName so two integrations' failures never suppress each other.
+ *   - reset.mode=event: the counterpart Event ("agent.connected" answering
+ *     "agent.disconnected") clears the alert, scoped to the SAME subject, and
+ *     an event that both fires and clears a rule only ever fires it.
  *   - runEventRuleTimedClear: event/change rules with reset.mode=timed get
  *     their uncleared notifications cleared after afterSec — the regular timed
  *     sweeps walk NotificationRuleState rows, which the event tail never
@@ -176,5 +179,104 @@ describe("runEventRuleTimedClear", () => {
     await runEventRuleTimedClear(rules as never, new Date());
     expect(db.updateManyCalls).toHaveLength(1);
     expect(db.updateManyCalls[0].where.ruleId).toBe("r-change");
+  });
+});
+
+/**
+ * reset.mode = "event" — the counterpart Event clears the alert instead of a
+ * clock running out. See business rule 32's sibling case: an event automation
+ * has no reading to recover, but it usually has a recovery EVENT.
+ */
+describe("event-tail counterpart reset", () => {
+  const agentRule = (overrides: Record<string, unknown> = {}) =>
+    eventRule({
+      id: "r-agent",
+      name: "Agent disconnected",
+      trigger: { type: "event", actionPattern: "agent.disconnected" },
+      reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" } },
+      clearBehavior: "auto",
+      clearAfterSec: null,
+      cooldownSec: null,
+      ...overrides,
+    });
+  const agentEvent = (action: string, assetId: string, msAgo: number) => ({
+    id: `e-${action}-${assetId}-${msAgo}`,
+    timestamp: new Date(NOW - msAgo),
+    action,
+    resourceType: "asset",
+    resourceId: assetId,
+    resourceName: null,
+    level: "warning",
+    message: `${action} for ${assetId}`,
+    details: null,
+    actor: "system:agent-channel",
+  });
+
+  it("clears the alert for the SAME asset when the counterpart event arrives", async () => {
+    db.rules.push(agentRule());
+    db.events.push(agentEvent("agent.disconnected", "a-1", 120_000), agentEvent("agent.connected", "a-1", 60_000));
+    await evaluateAllNotificationRules();
+    // The disconnect genuinely happened: it is raised and delivered, then cleared.
+    expect(db.created).toHaveLength(1);
+    const clear = db.updateManyCalls.find((c) => c.data?.clearedBy === "system:event-reset");
+    expect(clear).toBeTruthy();
+    expect(clear.where.ruleId).toBe("r-agent");
+    expect(clear.where.assetId).toBe("a-1");
+    expect(clear.where.cleared).toBe(false);
+  });
+
+  it("one asset's recovery never clears another asset's alert", async () => {
+    db.rules.push(agentRule());
+    db.events.push(agentEvent("agent.connected", "a-2", 60_000));
+    await evaluateAllNotificationRules();
+    const clear = db.updateManyCalls.find((c) => c.data?.clearedBy === "system:event-reset");
+    expect(clear.where.assetId).toBe("a-2");
+  });
+
+  it("a system-scoped rule keys the clear on the resource label, not an assetId", async () => {
+    db.rules.push(agentRule({
+      id: "r-disc",
+      trigger: { type: "event", actionPattern: "integration.discover.error" },
+      reset: { mode: "event", resetEvent: { actionPattern: "integration.discover.completed" } },
+    }));
+    db.events.push({
+      ...discoverErrorEvent("FMG-1", 120_000),
+      action: "integration.discover.completed",
+      level: "info",
+    });
+    await evaluateAllNotificationRules();
+    const clear = db.updateManyCalls.find((c) => c.data?.clearedBy === "system:event-reset");
+    expect(clear.where.assetId).toBeNull();
+    expect(clear.where.assetHostname).toBe("FMG-1");
+  });
+
+  it("an event that both fires and would clear the rule only FIRES it", async () => {
+    // A glob wide enough to match its own recovery would otherwise clear the
+    // alert it just raised, every tick, forever.
+    db.rules.push(agentRule({ reset: { mode: "event", resetEvent: { actionPattern: "agent.*" } } }));
+    db.events.push(agentEvent("agent.disconnected", "a-1", 60_000));
+    await evaluateAllNotificationRules();
+    expect(db.created).toHaveLength(1);
+    expect(db.updateManyCalls.find((c) => c.data?.clearedBy === "system:event-reset")).toBeUndefined();
+  });
+
+  it("respects the reset event's optional resourceType narrowing", async () => {
+    db.rules.push(agentRule({ reset: { mode: "event", resetEvent: { actionPattern: "agent.connected", resourceType: "integration" } } }));
+    db.events.push(agentEvent("agent.connected", "a-1", 60_000)); // resourceType "asset"
+    await evaluateAllNotificationRules();
+    expect(db.updateManyCalls.find((c) => c.data?.clearedBy === "system:event-reset")).toBeUndefined();
+  });
+
+  it("runEventRuleTimedClear leaves event-reset rules alone", async () => {
+    await runEventRuleTimedClear([
+      {
+        id: "r-agent", name: "Agent disconnected", description: null, severity: "warning",
+        trigger: { type: "event", actionPattern: "agent.disconnected" }, scope: {},
+        reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" } },
+        actions: [], cooldownSec: null, messageTemplate: null, emailComposition: null,
+        escalation: null, severityBands: null, bandNotify: null,
+      },
+    ] as never, new Date());
+    expect(db.updateManyCalls).toHaveLength(0);
   });
 });

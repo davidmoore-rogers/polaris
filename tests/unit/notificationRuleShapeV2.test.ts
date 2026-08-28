@@ -411,8 +411,12 @@ describe("buildSchemaCatalog v2 additions", () => {
   it("exposes schemaVersion 2 + the wizard vocabulary", () => {
     const cat = buildSchemaCatalog();
     expect(cat.schemaVersion).toBe(2);
-    expect(cat.resetModes).toEqual(["manual", "auto", "timed", "condition"]);
-    expect(cat.resetModesByTriggerType.event).toEqual(["timed", "manual"]);
+    expect(cat.resetModes).toEqual(["manual", "auto", "timed", "condition", "event"]);
+    // event/change get "event" where the continuous triggers get "condition" —
+    // the recovery they actually have, leading for the same reason.
+    expect(cat.resetModesByTriggerType.event).toEqual(["event", "timed", "manual"]);
+    expect(cat.resetModesByTriggerType.change).toEqual(["event", "timed", "manual"]);
+    expect(cat.resetEventSuggestions["agent.disconnected"]).toBe("agent.connected");
     expect(cat.resetModesByTriggerType.composite).toEqual(["auto", "condition", "timed", "manual"]);
     // Every continuous trigger offers "condition", and it leads the non-auto
     // modes because that's the order the wizard renders the radios in.
@@ -529,6 +533,65 @@ describe("composite trigger schema", () => {
     expect(() =>
       ruleInputSchema.parse({ name: "x", trigger: compositeAnd, reset: { mode: "auto", clearThreshold: 80 } }),
     ).toThrow(/numeric metric triggers/);
+  });
+});
+
+/**
+ * event-mode reset — the counterpart Event that says the thing came back. The
+ * mirror image of condition-mode: allowed on exactly the two trigger types a
+ * condition reset is refused on.
+ */
+describe("event-mode reset", () => {
+  const evTrigger = { type: "event", actionPattern: "agent.disconnected" };
+
+  it("accepts a counterpart-event reset on an event trigger and strips mode-irrelevant fields", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: evTrigger,
+      reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" }, afterSec: 999, sustainSec: 60 },
+    });
+    expect(parsed.reset).toEqual({ mode: "event", resetEvent: { actionPattern: "agent.connected", resourceType: null } });
+  });
+
+  it("accepts it on a change trigger too", () => {
+    const parsed = ruleInputSchema.parse({
+      name: "x", trigger: { type: "change", changeType: "firmware_changed" },
+      reset: { mode: "event", resetEvent: { actionPattern: "asset.firmware.changed" } },
+    });
+    expect(parsed.reset.mode).toBe("event");
+  });
+
+  it("refuses it on a continuous trigger — that recovers on its own reading", () => {
+    expect(() =>
+      ruleInputSchema.parse({
+        name: "x",
+        trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 },
+        reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" } },
+      }),
+    ).toThrow(/only applies to event and change triggers/);
+  });
+
+  it("refuses an event reset with no pattern", () => {
+    expect(() =>
+      ruleInputSchema.parse({ name: "x", trigger: evTrigger, reset: { mode: "event" } }),
+    ).toThrow(/requires the action pattern/);
+  });
+
+  it("normalizeReset keeps a patternless event reset intact so validation can reject it", () => {
+    expect(normalizeReset({ mode: "event" } as any)).toEqual({ mode: "event", resetEvent: null });
+  });
+
+  it("legacyMirrorOfV2 projects event mode to clearBehavior=auto with no timer", () => {
+    const m = legacyMirrorOfV2({ mode: "event", resetEvent: { actionPattern: "agent.connected" } } as any, []);
+    expect(m.clearBehavior).toBe("auto");
+    expect(m.clearAfterSec).toBeNull();
+  });
+
+  it("survives the stored-row round trip through normalizeRuleToV2", () => {
+    const v2 = normalizeRuleToV2({
+      reset: { mode: "event", resetEvent: { actionPattern: "agent.connected", resourceType: "asset" } },
+      actions: [],
+    });
+    expect(v2.reset).toEqual({ mode: "event", resetEvent: { actionPattern: "agent.connected", resourceType: "asset" } });
   });
 });
 

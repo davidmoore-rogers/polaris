@@ -2077,7 +2077,7 @@ describe("trigger filter rows", () => {
       expect(cond2.textContent).not.toContain("alerts per");
     });
 
-    it("an event trigger still gets only timed/manual", async () => {
+    it("an event trigger gets the counterpart-event reset plus timed/manual — never the condition builder", async () => {
       // Built by DRIVING the trigger step to "event" rather than by opening a
       // stored event rule: the option-before bug means step 3 renders its fields
       // for the wrong category during open, so `#tf-action` doesn't exist and the
@@ -2101,12 +2101,68 @@ describe("trigger filter rows", () => {
       await new Promise((r) => setTimeout(r, 20));
 
       // No "reset when the trigger is no longer true" checkbox at all, and no
-      // condition builder — an instant has no condition to recover from.
+      // condition builder — an instant has no condition to recover from. It
+      // does get the counterpart EVENT, which is the recovery it has.
       expect(doc.querySelector("#aw-reset-auto")).toBeFalsy();
       expect(doc.querySelector("#aw-reset-root")).toBeFalsy();
       const modes = Array.from(doc.querySelectorAll('input[name="aw-reset-mode"]'))
         .map((r) => (r as unknown as { value: string }).value);
-      expect(modes).toEqual(["timed", "manual"]);
+      expect(modes).toEqual(["event", "timed", "manual"]);
+      expect(doc.querySelector("#aw-reset-ev-action")).toBeTruthy();
+      // Cooldown moved to the Actions step: it governs how often a NEW alert
+      // fires, which is not a fact about how this one clears.
+      expect(doc.querySelector("#aw-cooldown-min")).toBeFalsy();
+    });
+
+    it("the re-notify cooldown lives on the Actions step and round-trips from there", async () => {
+      await openOnStep4(metricRule({ cooldownSec: 900 }));
+      expect(doc.querySelector("#aw-step-4 #aw-cooldown-min")).toBeFalsy();
+      (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+      const cd = doc.querySelector("#aw-step-5 #aw-cooldown-min") as unknown as { value: string } | null;
+      expect(cd).toBeTruthy();
+      expect(cd!.value).toBe("15"); // stored seconds, shown as minutes
+      cd!.value = "30";
+      (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 30));
+      expect(toastErrors).toEqual([]);
+      expect((savedPayloads[0] as Record<string, any>).cooldownSec).toBe(1800);
+    });
+
+    it("a NEW event automation whose action has a known counterpart starts on the event reset", async () => {
+      // agent.disconnected → agent.connected: the reset an operator would have
+      // to know Polaris's own verb to write. A four-hour timer was the old
+      // default, and it cleared the alert whether or not the agent came back.
+      const win = g.window as InstanceType<typeof Window>;
+      doc.body.innerHTML = "";
+      savedPayloads.length = 0;
+      await (g.openAutomationWizard as (r?: unknown) => Promise<void>)();
+      const nameEl = doc.querySelector("#aw-name") as unknown as { value: string; dispatchEvent: (e: unknown) => void } | null;
+      if (nameEl) {
+        nameEl.value = "Agent disconnected";
+        nameEl.dispatchEvent(new win.Event("input", { bubbles: true }));
+      }
+      const typeSel = doc.querySelector("#aw-trigger-type") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      typeSel.value = "event";
+      typeSel.dispatchEvent(new win.Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      const action = doc.querySelector("#tf-action") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+      action.value = "agent.disconnected";
+      action.dispatchEvent(new win.Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      // A new draft walks the stepper one step at a time (later steps are locked
+      // until the ones before them validate), so this is Next, not a jump.
+      const next = doc.querySelector("#aw-next") as unknown as { click: () => void };
+      for (let i = 0; i < 3; i++) {
+        next.click();
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      const picked = doc.querySelector('input[name="aw-reset-mode"][value="event"]') as unknown as { checked: boolean };
+      expect(picked.checked).toBe(true);
+      expect((doc.querySelector("#aw-reset-ev-action") as unknown as { value: string }).value).toBe("agent.connected");
+      expect((doc.querySelector("#aw-reset-sentence") as unknown as { textContent: string }).textContent)
+        .toContain("agent.connected");
     });
   });
 

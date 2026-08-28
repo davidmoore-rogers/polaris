@@ -53,6 +53,7 @@
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsSeededAt';   -- widget set
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV2SeededAt'; -- event set
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV3SeededAt'; -- down detection
+ *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV4ResetEventSeededAt'; -- counterpart resets
  * then restart. (This resurrects that ENTIRE set, including rules you deleted.
  * For V3 that means re-deriving the thresholds from the settings tiers, which
  * are dormant but still stored — and it will NOT re-retire an Asset down rule
@@ -62,7 +63,7 @@
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
-import { ruleInputSchema } from "../services/notificationTypes.js";
+import { RESET_EVENT_SUGGESTIONS, ruleInputSchema } from "../services/notificationTypes.js";
 import { createRule, deleteRule } from "../services/notificationRuleService.js";
 import { prisma } from "../db.js";
 import { logEvent } from "../services/eventLogService.js";
@@ -73,6 +74,7 @@ import { invalidateDownDetectionCache } from "../services/downDetectionService.j
 const MARKER_KEY = "seedBaselineAutomationsSeededAt";
 const MARKER_KEY_V2 = "seedBaselineAutomationsV2SeededAt";
 const MARKER_KEY_V3 = "seedBaselineAutomationsV3SeededAt";
+const MARKER_KEY_V4 = "seedBaselineAutomationsV4ResetEventSeededAt";
 const SEED_ACTOR = "system:seed-baseline-automations";
 /** The name the pre-cutover baseline row carries — the only fingerprint the
  *  V3 retire step has, alongside createdBy. */
@@ -230,10 +232,10 @@ const EVENT_BASELINE_RULES: Record<string, unknown>[] = [
   {
     name: "Integration discovery failed",
     description:
-      "Fires when an integration's discovery run fails (integration.discover.error). One alert per integration per hour; auto-clears after 4 hours. Baseline example — edit or delete freely.",
+      "Fires when an integration's discovery run fails (integration.discover.error) and clears when that same integration completes a run. One alert per integration per hour. Baseline example — edit or delete freely.",
     severity: "serious",
     trigger: { type: "event", actionPattern: "integration.discover.error" },
-    reset: { mode: "timed", afterSec: 14400 },
+    reset: { mode: "event", resetEvent: { actionPattern: "integration.discover.completed" } },
     cooldownSec: 3600,
     messageTemplate: "{value}",
   },
@@ -280,20 +282,20 @@ const EVENT_BASELINE_RULES: Record<string, unknown>[] = [
   {
     name: "Agent disconnected",
     description:
-      "Fires when a Polaris Agent's WebSocket drops (agent.disconnected). Brief reconnects are absorbed by the 30-minute cooldown. Baseline example — edit or delete freely.",
+      "Fires when a Polaris Agent's WebSocket drops (agent.disconnected) and clears when that same agent reconnects (agent.connected) — an agent that never comes back keeps its alert. Brief reconnects are absorbed by the 30-minute cooldown. Baseline example — edit or delete freely.",
     severity: "warning",
     trigger: { type: "event", actionPattern: "agent.disconnected" },
-    reset: { mode: "timed", afterSec: 14400 },
+    reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" } },
     cooldownSec: 1800,
     messageTemplate: "{value}",
   },
   {
     name: "Agent upgrade failed",
     description:
-      "Fires when a Polaris Agent upgrade fails (agent.upgrade_failed). Baseline example — edit or delete freely.",
+      "Fires when a Polaris Agent upgrade fails (agent.upgrade_failed) and clears when that agent upgrades successfully (agent.upgrade_succeeded). Baseline example — edit or delete freely.",
     severity: "warning",
     trigger: { type: "event", actionPattern: "agent.upgrade_failed" },
-    reset: { mode: "timed", afterSec: 86400 },
+    reset: { mode: "event", resetEvent: { actionPattern: "agent.upgrade_succeeded" } },
     cooldownSec: 3600,
     messageTemplate: "{value}",
   },
@@ -581,6 +583,79 @@ async function retirePristineAssetDownRule(safeToRetire: boolean): Promise<boole
   return true;
 }
 
+/**
+ * V4 — repoint timed event automations at the event that says it recovered.
+ *
+ * The V1/V2 sets shipped before an event automation could reset on anything but
+ * a clock, so "Agent disconnected" cleared itself after four hours whether or
+ * not the agent ever came back — an alert that answers a question nobody asked.
+ * With the counterpart-Event reset in place, the honest reset for those rules is
+ * the reconnect.
+ *
+ * Deliberately narrow, because these are the operator's rows now, not ours:
+ *
+ *   - only rules whose trigger action pattern has a KNOWN counterpart
+ *     (RESET_EVENT_SUGGESTIONS — the same map the wizard prefills from),
+ *   - only rules still on a TIMED reset (a hand-picked manual reset is a
+ *     decision, not a default), and
+ *   - only rules the operator has never edited (`updatedAt === createdAt`, the
+ *     V3 retire-step's own test). An edited row keeps its timer and is left
+ *     alone entirely — silently changing when someone's tuned alert clears is
+ *     worse than leaving it on a clock.
+ *
+ * The legacy mirror is written in the same update (`clearBehavior: "auto"`,
+ * matching legacyMirrorOfV2 for a mode with no legacy spelling), so a
+ * pre-wizard reader sees "clears without operator action" rather than a stale
+ * four-hour timer.
+ */
+async function migrateEventResetsV4(): Promise<{ updated: number; skipped: boolean }> {
+  if (await hasRunMarker(MARKER_KEY_V4)) return { updated: 0, skipped: true };
+
+  const rows = await prisma.notificationRule.findMany({
+    select: { id: true, name: true, trigger: true, reset: true, clearBehavior: true, createdAt: true, updatedAt: true },
+  });
+  const repointed: { name: string; pattern: string }[] = [];
+  for (const row of rows) {
+    const trigger = row.trigger as { type?: string; actionPattern?: string } | null;
+    if (!trigger || trigger.type !== "event" || !trigger.actionPattern) continue;
+    const counterpart = RESET_EVENT_SUGGESTIONS[trigger.actionPattern];
+    if (!counterpart) continue;
+    // The stored v2 reset when there is one; the legacy column otherwise (a row
+    // that predates the v2 cutover and was never re-saved).
+    const mode = (row.reset as { mode?: string } | null)?.mode ?? row.clearBehavior;
+    if (mode !== "timed") continue;
+    if (row.updatedAt.getTime() !== row.createdAt.getTime()) continue;
+    try {
+      await prisma.notificationRule.update({
+        where: { id: row.id },
+        data: {
+          reset: { mode: "event", resetEvent: { actionPattern: counterpart, resourceType: null } },
+          clearBehavior: "auto",
+          clearAfterSec: null,
+        },
+      });
+      repointed.push({ name: row.name, pattern: counterpart });
+    } catch (err) {
+      logger.warn({ err, rule: row.name }, "Failed to repoint automation onto its counterpart event");
+    }
+  }
+
+  if (repointed.length > 0) {
+    await logEvent({
+      action: "automation.seed.v4_reset_event",
+      resourceType: "notification-rule",
+      actor: SEED_ACTOR,
+      level: "info",
+      message:
+        `${repointed.length} unedited baseline automation(s) now clear when the matching recovery event arrives ` +
+        `instead of on a timer: ${repointed.map((r) => `"${r.name}" → ${r.pattern}`).join(", ")}`,
+      details: { repointed },
+    }).catch(() => {});
+  }
+  await stampRunMarker(MARKER_KEY_V4, { updated: repointed.length });
+  return { updated: repointed.length, skipped: false };
+}
+
 export async function seedBaselineAutomations(): Promise<{ created: number; skipped: boolean }> {
   // Independent markers: a pre-V2 install has the first marker stamped and
   // still picks up the event set; a fresh install seeds both.
@@ -590,9 +665,13 @@ export async function seedBaselineAutomations(): Promise<{ created: number; skip
   // pristine one it retires — wasteful by a single create, but it keeps the
   // marker contract (a shipped set never changes) intact.
   const v3 = await seedDownDetectionV3();
+  // V4 runs after V2 so a fresh install's event rules are already seeded with
+  // the counterpart reset and this finds nothing to do — it exists for installs
+  // that stamped the V2 marker before the reset existed.
+  const v4 = await migrateEventResetsV4();
   return {
     created: v1.created + v2.created + v3.created,
-    skipped: v1.skipped && v2.skipped && v3.skipped,
+    skipped: v1.skipped && v2.skipped && v3.skipped && v4.skipped,
   };
 }
 

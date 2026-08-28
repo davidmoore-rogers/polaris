@@ -2356,6 +2356,57 @@ export async function runEventRuleTimedClear(rules: DbRule[], now = new Date()):
   return cleared;
 }
 
+/**
+ * One matched clearing event → the alerts it closes.
+ *
+ * Scoped to the SAME subject the alert is about: `agent.connected` for one
+ * asset says nothing about another asset's agent, so the clear is keyed on the
+ * identity the notification already stores (assetId when the event names an
+ * asset, else the resource label the alert was filed under). `triggeredAt <=`
+ * the clearing event keeps a batch that contains disconnect → reconnect →
+ * disconnect from clearing the SECOND outage with the FIRST reconnect.
+ */
+async function applyEventReset(
+  rule: DbRule,
+  hit: { assetId: string | null; subjectLabel: string; at: Date },
+): Promise<void> {
+  const where: Prisma.NotificationWhereInput = {
+    ruleId: rule.id,
+    cleared: false,
+    triggeredAt: { lte: hit.at },
+    ...(hit.assetId ? { assetId: hit.assetId } : { assetId: null, assetHostname: hit.subjectLabel || null }),
+  };
+  // Reset actions are per-alert (their delivery rows hang off a notification
+  // id), so select first when the rule has any — otherwise this stays the one
+  // bulk update it would be without them.
+  const doomed = rule.resetActions?.length
+    ? await prisma.notification.findMany({ where, select: { id: true, assetId: true, assetHostname: true }, take: 500 })
+    : [];
+  for (const n of doomed) {
+    await fireReset(
+      rule,
+      { assetId: n.assetId ?? "", hostname: n.assetHostname, tags: [], dimKey: "", dimLabel: "", value: null },
+      { notificationId: n.id },
+      "recovered",
+      hit.at,
+    );
+  }
+  const res = await prisma.notification.updateMany({
+    where,
+    data: { cleared: true, clearedBy: "system:event-reset", clearedAt: new Date() },
+  });
+  if (res.count > 0) {
+    await logEvent({
+      action: "notification.auto_cleared",
+      resourceType: "notification",
+      resourceName: rule.name,
+      actor: "system:notification-engine",
+      message: `Event reset: cleared ${res.count} alert(s) of "${rule.name}" — ${rule.reset.resetEvent?.actionPattern} occurred for ${hit.subjectLabel || "the same resource"}`,
+      details: { ruleId: rule.id, count: res.count, resetPattern: rule.reset.resetEvent?.actionPattern ?? null },
+    }).catch(() => {});
+  }
+}
+
 async function runEventTail(rules: DbRule[]): Promise<void> {
   const eventRules = rules.filter((r) => r.trigger.type === "event" || r.trigger.type === "change");
   if (eventRules.length === 0) return;
@@ -2412,12 +2463,38 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
     return [];
   });
 
+  // Reset matchers: the counterpart event that says the thing came back. Kept
+  // in the same pass as the trigger matchers because both read the same batch
+  // and the same cursor — a second query would either re-read events or race
+  // the cursor advance below.
+  const resetMatchers = eventRules.flatMap((r) =>
+    r.reset.mode === "event" && r.reset.resetEvent?.actionPattern
+      ? [{ rule: r, re: globToRegExp(r.reset.resetEvent.actionPattern), resourceType: r.reset.resetEvent.resourceType ?? null }]
+      : [],
+  );
+  const resetHits: { rule: DbRule; assetId: string | null; subjectLabel: string; at: Date }[] = [];
+
   const toCreate: Prisma.NotificationCreateManyInput[] = [];
   // Notifications from rules with actions get a client-generated id so we can
   // execute their actions after the batch insert (createMany returns no ids).
   // The fire-time template context rides along — api_call bodies render from it.
   const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string>; assetRegionTags: string[] }[] = [];
   for (const ev of events) {
+    // Which rules this same event FIRED — a rule whose trigger and reset globs
+    // both match one event (`agent.*` on both sides) would otherwise clear the
+    // alert it just raised, in the same tick, forever.
+    const firedThisEvent = new Set<string>();
+    const resetHitsBefore = resetHits.length;
+    for (const m of resetMatchers) {
+      if (!m.re.test(ev.action)) continue;
+      if (m.resourceType && ev.resourceType !== m.resourceType) continue;
+      resetHits.push({
+        rule: m.rule,
+        assetId: ev.resourceType === "asset" ? ev.resourceId ?? null : null,
+        subjectLabel: eventSubjectLabel(ev.resourceType, ev.resourceName),
+        at: ev.timestamp,
+      });
+    }
     for (const c of compiled) {
       if (!c.re.test(ev.action)) continue;
       if (c.trigger.type === "event") {
@@ -2425,6 +2502,12 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         if (c.trigger.minLevel && (LEVEL_RANK[ev.level] ?? 0) < (LEVEL_RANK[c.trigger.minLevel] ?? 0)) continue;
         if (c.trigger.detailsMatch && !detailsMatch(ev.details, c.trigger.detailsMatch)) continue;
       }
+      // Stamped as soon as the TRIGGER matches, ahead of the gate and the
+      // cooldown: "this event raises this automation" is a property of the two
+      // globs overlapping, and a cooldown-suppressed fire must block the reset
+      // exactly the same way — otherwise a wide glob clears the alert the
+      // cooldown was protecting.
+      firedThisEvent.add(c.rule.id);
       const assetId = ev.resourceType === "asset" ? ev.resourceId ?? null : null;
       // What this alert is ABOUT, as a label. A system-scoped Event (capacity,
       // backups, updates) names no resource because the resource IS this
@@ -2520,6 +2603,14 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
         ...(ruleWantsContext(c.rule) ? { templateCtx: ctx } : {}),
       });
     }
+    // Drop any reset hit THIS event also fired: an event cannot both raise and
+    // clear the same automation's alert. Bounded to the hits this iteration
+    // added, so an earlier event's hit for the same rule is untouched.
+    if (firedThisEvent.size > 0) {
+      for (let i = resetHits.length - 1; i >= resetHitsBefore; i--) {
+        if (firedThisEvent.has(resetHits[i].rule.id)) resetHits.splice(i, 1);
+      }
+    }
   }
 
   if (toCreate.length > 0) {
@@ -2535,6 +2626,25 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
       ruleEmailComposition: d.rule.emailComposition,
       actor: "system:notification-engine",
     });
+  }
+
+  // Applied AFTER the batch's own fires land: within one batch a disconnect
+  // and its reconnect can both arrive, and the disconnect alert genuinely
+  // happened — it is raised, delivered, then cleared, rather than swallowed.
+  //
+  // Deduped to the LAST hit per (rule, subject) first: a Polaris restart
+  // reconnects the whole agent fleet at once, and without this a subject that
+  // flapped twice inside one 1000-event batch would issue two updateManys for
+  // the same (already cleared) alert. The later hit's `at` is the safe one to
+  // keep — it can only ever clear MORE of what was already eligible.
+  const dedupedHits = new Map<string, (typeof resetHits)[number]>();
+  for (const hit of resetHits) dedupedHits.set(`${hit.rule.id}|${hit.assetId ?? hit.subjectLabel}`, hit);
+  for (const hit of dedupedHits.values()) {
+    try {
+      await applyEventReset(hit.rule, hit);
+    } catch (err) {
+      await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: `Event reset for "${hit.rule.name}" failed`, details: { ruleId: hit.rule.id, err: (err as Error)?.message } }).catch(() => {});
+    }
   }
 
   const newest = events[events.length - 1].timestamp.toISOString();

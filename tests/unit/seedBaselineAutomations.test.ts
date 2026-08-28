@@ -20,6 +20,9 @@ let fleetAssets: any[] = [];
 let existingAssetDownRule: any = null;
 /** Effective failureThreshold per assetType, as the settings tiers resolve it. */
 let thresholdByType: Record<string, number> = {};
+/** Rules already in the DB, as the V4 counterpart-reset pass sees them. */
+let existingRules: any[] = [];
+const ruleUpdates: { id: string; data: any }[] = [];
 
 vi.mock("../../src/db.js", () => ({
   prisma: {
@@ -31,7 +34,15 @@ vi.mock("../../src/db.js", () => ({
       }),
     },
     asset: { findMany: vi.fn(async () => fleetAssets) },
-    notificationRule: { findFirst: vi.fn(async () => existingAssetDownRule) },
+    notificationRule: {
+      findFirst: vi.fn(async () => existingAssetDownRule),
+      // The V4 pass reads every rule and repoints the ones still on a timer.
+      findMany: vi.fn(async () => existingRules),
+      update: vi.fn(async ({ where, data }: any) => {
+        ruleUpdates.push({ id: where.id, data });
+        return { id: where.id, ...data };
+      }),
+    },
   },
 }));
 
@@ -84,6 +95,8 @@ beforeEach(() => {
   fleetAssets = [];
   existingAssetDownRule = null;
   thresholdByType = {};
+  existingRules = [];
+  ruleUpdates.length = 0;
 });
 
 describe("seed bodies", () => {
@@ -93,12 +106,19 @@ describe("seed bodies", () => {
     }
   });
 
-  it("every V2 event rule is storm-proofed: timed reset + cooldown + a message template", () => {
+  it("every V2 event rule is storm-proofed: a real reset + cooldown + a message template", () => {
     for (const raw of EVENT_BASELINE_RULES) {
       const rule = ruleInputSchema.parse(raw);
       expect(rule.trigger.type, rule.name).toBe("event");
-      expect(rule.reset.mode, rule.name).toBe("timed");
-      expect(rule.reset.afterSec, rule.name).toBeGreaterThan(0);
+      // Either a clock or — better, where Polaris writes a counterpart event —
+      // the event that says the thing came back. Never "manual": an unattended
+      // event alert that only a human can clear is how the Alerts tab silts up.
+      expect(["timed", "event"], rule.name).toContain(rule.reset.mode);
+      if (rule.reset.mode === "event") {
+        expect(rule.reset.resetEvent?.actionPattern, rule.name).toBeTruthy();
+      } else {
+        expect(rule.reset.afterSec, rule.name).toBeGreaterThan(0);
+      }
       expect(rule.cooldownSec ?? 0, rule.name).toBeGreaterThan(0);
       expect(rule.messageTemplate, rule.name).toBeTruthy();
       expect(rule.actions, rule.name).toEqual([]); // in-app only out of the box
@@ -134,9 +154,68 @@ describe("marker gating (V2 reaches existing installs)", () => {
     settings.set("seedBaselineAutomationsSeededAt", { key: "x", value: {} });
     settings.set("seedBaselineAutomationsV2SeededAt", { key: "y", value: {} });
     settings.set("seedBaselineAutomationsV3SeededAt", { key: "z", value: {} });
+    settings.set("seedBaselineAutomationsV4ResetEventSeededAt", { key: "w", value: {} });
     const res = await seedBaselineAutomations();
     expect(res).toEqual({ created: 0, skipped: true });
     expect(createdRules).toEqual([]);
+  });
+});
+
+/**
+ * V4 — the counterpart-Event repoint for installs that seeded their event rules
+ * before an event automation could reset on anything but a clock.
+ */
+describe("V4 counterpart-event repoint", () => {
+  const seededMarkers = (): void => {
+    settings.set("seedBaselineAutomationsSeededAt", { key: "x", value: {} });
+    settings.set("seedBaselineAutomationsV2SeededAt", { key: "y", value: {} });
+    settings.set("seedBaselineAutomationsV3SeededAt", { key: "z", value: {} });
+  };
+  const t = new Date("2026-01-01T00:00:00Z");
+  const untouched = (over: Record<string, unknown>): any => ({
+    id: "r1", name: "Agent disconnected",
+    trigger: { type: "event", actionPattern: "agent.disconnected" },
+    reset: { mode: "timed", afterSec: 14400 }, clearBehavior: "timed",
+    createdAt: t, updatedAt: t, ...over,
+  });
+
+  it("repoints an untouched timed rule onto its counterpart and mirrors the legacy column", async () => {
+    seededMarkers();
+    existingRules = [untouched({})];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toHaveLength(1);
+    expect(ruleUpdates[0].data.reset).toEqual({ mode: "event", resetEvent: { actionPattern: "agent.connected", resourceType: null } });
+    // "event" has no legacy spelling — legacyMirrorOfV2 calls it "auto".
+    expect(ruleUpdates[0].data.clearBehavior).toBe("auto");
+    expect(ruleUpdates[0].data.clearAfterSec).toBeNull();
+    expect(loggedEvents.some((e) => e.action === "automation.seed.v4_reset_event")).toBe(true);
+  });
+
+  it("leaves an EDITED rule alone — its timer is the operator's decision", async () => {
+    seededMarkers();
+    existingRules = [untouched({ updatedAt: new Date("2026-03-01T00:00:00Z") })];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+  });
+
+  it("leaves a manual or already-event reset alone, and skips unknown patterns", async () => {
+    seededMarkers();
+    existingRules = [
+      untouched({ id: "m", reset: { mode: "manual" }, clearBehavior: "manual" }),
+      untouched({ id: "e", reset: { mode: "event", resetEvent: { actionPattern: "agent.connected" } }, clearBehavior: "auto" }),
+      untouched({ id: "u", trigger: { type: "event", actionPattern: "some.custom.thing" } }),
+      untouched({ id: "c", trigger: { type: "change", changeType: "firmware" } }),
+    ];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+  });
+
+  it("is seed-once: a stamped marker skips the pass entirely", async () => {
+    seededMarkers();
+    settings.set("seedBaselineAutomationsV4ResetEventSeededAt", { key: "w", value: {} });
+    existingRules = [untouched({})];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
   });
 });
 
