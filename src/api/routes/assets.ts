@@ -56,6 +56,7 @@ import {
   resolveMonitorSettings,
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
+import { getApRadioInventory } from "../../services/apRadioService.js";
 import { describeDownDetectionFor } from "../../services/downDetectionService.js";
 import { getArpEntryRetentionDays } from "../../services/sampleRetentionService.js";
 import { getCredential } from "../../services/credentialService.js";
@@ -1946,7 +1947,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
     });
     if (!asset) throw new AppError(404, "Asset not found");
 
-    const [latestTelemetry, interfaces, latestStorageMeta, latestHwMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, inferredNeighbors] = await Promise.all([
+    const [latestTelemetry, interfaces, latestStorageMeta, latestHwMeta, latestIpsecMeta, lldpNeighbors, wirelessStations, apRadios, inferredNeighbors] = await Promise.all([
       prisma.assetTelemetrySample.findFirst({
         where: { assetId: id },
         orderBy: { timestamp: "desc" },
@@ -2000,6 +2001,11 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
           },
         },
       }),
+      // The AP's radios with the SSIDs each one broadcasts nested inside —
+      // the two levels above the wireless stations below, so the Stations tab
+      // can render radio -> SSID -> station. Empty for every non-AP asset and
+      // for any AP a discovery cycle has not reached yet.
+      getApRadioInventory(id),
       // Peer-inferred neighbors synthesized from Asset.fortinetTopology
       // (managed FortiAPs reported via FortiGate, FortiSwitch FortiLink
       // uplinks, etc.). Real LLDP rows take precedence on collision —
@@ -2164,6 +2170,7 @@ router.get("/:id/system-info", requirePermission("assets", "read"), async (req, 
             }
           : null,
       })),
+      apRadios,
       wirelessStations: wirelessStations.map((w) => ({
         staMacAddr:     w.staMacAddr,
         staIpAddr:      w.staIpAddr,

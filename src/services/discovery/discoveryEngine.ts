@@ -73,6 +73,7 @@ import { createSubnetRowChecked } from "../subnetService.js";
 import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../monitoringService.js";
+import { persistApRadioInventory } from "../apRadioService.js";
 import { isFortiapStatusOnline } from "../../utils/fortiapMonitorRow.js";
 import * as autoMonitor from "../autoMonitorInterfacesService.js";
 import * as autoMonitorStorage from "../autoMonitorStorageService.js";
@@ -3938,6 +3939,21 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           await persistManagedApLldpNeighbors(apAssetId, ap.lldpNeighbors, new Date(now));
         } catch (err: any) {
           syncLog("error", `Failed to persist LLDP neighbors for FortiAP ${ap.name}: ${err?.message || "Unknown error"}`);
+        }
+      }
+      // Radio + broadcast-SSID inventory off the same managed_ap row. This is
+      // the REST half of the Stations tab's radio → SSID → station tree, and
+      // it is written from DISCOVERY rather than the monitor pass on purpose:
+      // system-info only runs for an AP whose interfaces stream is on SNMP,
+      // so hanging the tree off that path would leave it empty on exactly the
+      // APs that have SNMP disabled — which is most of them. Same two gates
+      // as the LLDP persist above: online (an offline WTP's row is stale) and
+      // field-present (absent = firmware said nothing, must not wipe).
+      if (apAssetId && apOnline && Array.isArray(ap.radios)) {
+        try {
+          await persistApRadioInventory(apAssetId, ap.radios, "fortios", new Date(now));
+        } catch (err: any) {
+          syncLog("error", `Failed to persist radios for FortiAP ${ap.name}: ${err?.message || "Unknown error"}`);
         }
       }
     } catch (err: any) {

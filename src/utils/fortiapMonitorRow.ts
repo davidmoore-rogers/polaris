@@ -25,6 +25,7 @@
  */
 
 import { extractApLldpAndMesh, parseApLldpNeighbors, type ApLldpNeighborSample } from "./fortiapLldp.js";
+import { deriveRadioBand } from "./fortiapRadioBand.js";
 
 const ALL_ZERO_MAC = /^0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}[:\-.]0{1,2}$/i;
 
@@ -188,6 +189,10 @@ export interface ParsedFortiapRow {
   // `lldp` array at all — consumers must treat absent as "unknown, don't
   // wipe" and `[]` as "scraped clean".
   lldpNeighbors?:     ApLldpNeighborSample[];
+  // Radio inventory + the SSIDs each radio broadcasts. Absent when the row
+  // carried no `radio` array — "unknown, do not wipe", the same contract as
+  // lldpNeighbors above.
+  radios?:            ApRadioSample[];
   // Telemetry snapshot.
   cpuPct?:             number;
   memFreeMb?:          number;
@@ -212,6 +217,7 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
   const lldpExt = extractApLldpAndMesh(row as Parameters<typeof extractApLldpAndMesh>[0]);
   const lldpNeighbors = parseApLldpNeighbors(row as Parameters<typeof parseApLldpNeighbors>[0]);
   const tel = parseFortiapTelemetrySnapshot(row);
+  const radios = parseFortiapRadios(row);
 
   const serial = str(row.serial) || str(row.wtp_id) || "";
   // model on the live row first, then wtp_profile (CMDB-side fallback),
@@ -255,11 +261,190 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     ...(lldpExt.parentApSerial ? { parentApSerial: lldpExt.parentApSerial } : {}),
     ...(apUplinkInterface ? { apUplinkInterface } : {}),
     ...(lldpNeighbors ? { lldpNeighbors } : {}),
+    ...(radios ? { radios } : {}),
     ...(tel.cpuPct !== undefined ? { cpuPct: tel.cpuPct } : {}),
     ...(tel.memFreeMb !== undefined ? { memFreeMb: tel.memFreeMb } : {}),
     ...(tel.memTotalMb !== undefined ? { memTotalMb: tel.memTotalMb } : {}),
     ...(tel.sensorTemperatures ? { sensorTemperatures: tel.sensorTemperatures } : {}),
   };
+}
+
+
+// ─── Radios + VAPs (the two levels above a wireless station) ────────────────
+
+/** One broadcast SSID on one radio, off the managed_ap row's `vaps` array. */
+export interface ApVapSample {
+  /** The VAP object's name — identity. Falls back to the SSID when a row
+   *  publishes only that; a VAP with neither is dropped, since there would be
+   *  nothing stable to key it on. */
+  vapName:     string;
+  ssid:        string | null;
+  /** The join key down to AssetWirelessStation.bssid. */
+  bssid:       string | null;
+  vlanId:      number | null;
+  clientCount: number | null;
+}
+
+/** One radio off the managed_ap row's `radio` array. */
+export interface ApRadioSample {
+  radioIndex:    number;
+  radioType:     string | null;
+  band:          string | null;
+  mode:          string | null;
+  channel:       number | null;
+  bandwidthMhz:  number | null;
+  txPowerPct:    number | null;
+  txPowerDbm:    number | null;
+  txPowerMinDbm: number | null;
+  txPowerMaxDbm: number | null;
+  txPowerMode:   string | null;
+  baseBssid:     string | null;
+  clientCount:   number | null;
+  countryCode:   string | null;
+  /** The SSIDs this radio is broadcasting. `undefined` means the row carried
+   *  no VAP list at all (unknown — the persist layer must leave stored rows
+   *  alone); `[]` means the radio was scraped and is broadcasting nothing. */
+  vaps?:         ApVapSample[];
+}
+
+/** First non-empty string among several spellings of one field. */
+function pickStr(row: Record<string, unknown>, keys: string[]): string {
+  for (const k of keys) {
+    const v = str(row[k]).trim();
+    if (v) return v;
+  }
+  return "";
+}
+
+/** First finite number among several spellings of one field. */
+function pickNum(row: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const k of keys) {
+    const n = num(row[k]);
+    if (n !== undefined) return n;
+  }
+  return undefined;
+}
+
+/**
+ * Channel width in MHz. FortiOS spells this several ways and sometimes as a
+ * label ("80MHz", "HT40", "20") rather than a number.
+ *
+ * The trap this exists to avoid: `bandwidth_rx` / `bandwidth_tx` on the same
+ * radio object are THROUGHPUT counters, not channel width. Reading them here
+ * would put a byte count in a MHz column and make every radio look like it
+ * was running an impossible width — so only width-named keys are consulted,
+ * and a value that doesn't reduce to one of the real 802.11 widths is dropped
+ * rather than stored.
+ */
+const CHANNEL_WIDTHS_MHZ = new Set([20, 40, 80, 160, 320]);
+function parseChannelWidthMhz(raw: unknown): number | undefined {
+  if (raw == null) return undefined;
+  const direct = num(raw);
+  if (direct !== undefined) return CHANNEL_WIDTHS_MHZ.has(direct) ? direct : undefined;
+  const s = String(raw).trim().toLowerCase();
+  if (!s) return undefined;
+  // "80mhz" / "ht40" / "vht80" / "40 mhz" all reduce to their digits.
+  const m = /(\d{2,3})/.exec(s);
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  return CHANNEL_WIDTHS_MHZ.has(n) ? n : undefined;
+}
+
+/** Normalize a source-declared band label onto the three stored values. */
+function normalizeRadioBandLabel(raw: string): "2.4GHz" | "5GHz" | "6GHz" | null {
+  const s = raw.toLowerCase().replace(/\s+/g, "");
+  if (!s) return null;
+  if (s.includes("2.4") || s === "2g") return "2.4GHz";
+  if (s.includes("6g") || s.includes("6e")) return "6GHz";
+  if (s.includes("5g") || s.startsWith("5")) return "5GHz";
+  return null;
+}
+
+/** Parse one entry of a radio's `vaps` array. */
+function parseApVap(raw: unknown): ApVapSample | null {
+  if (!raw || typeof raw !== "object") return null;
+  const v = raw as Record<string, unknown>;
+  const ssid    = pickStr(v, ["ssid", "SSID"]);
+  const vapName = pickStr(v, ["vap_name", "vap-name", "name", "vap"]) || ssid;
+  if (!vapName) return null;
+  return {
+    vapName,
+    ssid:        ssid || null,
+    bssid:       pickStr(v, ["bssid", "base_bssid", "mac"]).toUpperCase() || null,
+    vlanId:      pickNum(v, ["vlan_id", "vlan-id", "vlanid", "vlan"]) ?? null,
+    clientCount: pickNum(v, ["client_count", "num_clients", "sta_count", "clients"]) ?? null,
+  };
+}
+
+/**
+ * Parse the managed_ap row's `radio` array into one sample per radio, each
+ * carrying the SSIDs it broadcasts.
+ *
+ * Returns `undefined` when the row has no radio array at all — the field is
+ * absent on firmware that doesn't publish it and on a row fetched with a
+ * `format=` filter that didn't ask for it, and both mean "unknown", not "this
+ * AP has no radios". The persist layer leaves stored rows alone on undefined
+ * and full-replaces on an array, the same contract the LLDP and station
+ * tables already use.
+ *
+ * Field names vary across FortiOS releases (hyphen vs underscore, `oper_chan`
+ * vs `channel`), so every read goes through the multi-spelling pickers above
+ * — the same defensive shape as the IP and MAC pickers at the top of this
+ * file, for the same reason.
+ */
+export function parseFortiapRadios(row: Record<string, unknown>): ApRadioSample[] | undefined {
+  const raw = row.radio ?? row.radios ?? row["radio-list"];
+  if (!Array.isArray(raw)) return undefined;
+
+  const out: ApRadioSample[] = [];
+  raw.forEach((entry, i) => {
+    if (!entry || typeof entry !== "object") return;
+    const r = entry as Record<string, unknown>;
+    // radio-id is 1-based on FortiOS. Fall back to the array position when a
+    // row omits it entirely, so a radio is never dropped just for being
+    // unlabelled — but keep the source's own numbering wherever it exists,
+    // since that is what the station rows' radioId joins against.
+    const radioIndex = pickNum(r, ["radio-id", "radio_id", "radioId", "index"]) ?? i + 1;
+    if (!Number.isInteger(radioIndex)) return;
+
+    const radioType = pickStr(r, ["radio-type", "radio_type", "type", "wireless_mode", "wireless-mode"]);
+    const channel   = pickNum(r, ["oper_chan", "oper-chan", "operating_channel", "channel"]);
+    const declaredBand = pickStr(r, ["band", "freq_band", "frequency_band"]);
+
+    const vapsRaw = r.vaps ?? r.vap ?? r["vap-list"];
+    const vaps = Array.isArray(vapsRaw)
+      ? vapsRaw.map(parseApVap).filter((v): v is ApVapSample => v !== null)
+      : undefined;
+
+    out.push({
+      radioIndex,
+      radioType: radioType || null,
+      // The source's own band label wins; otherwise derive it from type +
+      // channel exactly as the station collector already does, so a radio and
+      // the stations on it can never disagree about which band they are on.
+      band: normalizeRadioBandLabel(declaredBand) ?? deriveRadioBand(radioType, channel ?? null),
+      mode: pickStr(r, ["mode", "oper_mode", "radio_mode"]) || null,
+      channel: channel ?? null,
+      bandwidthMhz: parseChannelWidthMhz(
+        r.oper_chan_bw ?? r["oper-chan-bw"] ?? r.chan_bw ?? r["chan-bw"]
+          ?? r.channel_bw ?? r["channel-bw"] ?? r.bandwidth_mhz ?? r.channel_bonding ?? r["channel-bonding"],
+      ) ?? null,
+      // `oper_txpower` is a PERCENTAGE of the radio's ceiling on FortiOS, not
+      // dBm. The dBm reading and the floor/ceiling come from the MIB instead,
+      // which is why they stay null here rather than being back-computed from
+      // a percentage against a maximum Polaris does not know.
+      txPowerPct: pickNum(r, ["oper_txpower", "oper-txpower", "txpower", "power_level", "power-level"]) ?? null,
+      txPowerDbm: pickNum(r, ["oper_txpower_dbm", "txpower_dbm", "tx_power_dbm"]) ?? null,
+      txPowerMinDbm: null,
+      txPowerMaxDbm: null,
+      txPowerMode: pickStr(r, ["txpower_mode", "txpower-mode", "power_mode", "auto_power_level"]) || null,
+      baseBssid: pickStr(r, ["base_bssid", "base-bssid", "bssid"]).toUpperCase() || null,
+      clientCount: pickNum(r, ["client_count", "num_clients", "sta_count", "clients"]) ?? null,
+      countryCode: pickStr(r, ["country_code", "country-code", "country"]) || null,
+      ...(vaps !== undefined ? { vaps } : {}),
+    });
+  });
+  return out;
 }
 
 /** Tightened `format=` query for /api/v2/monitor/wifi/managed_ap. Single
@@ -276,4 +461,9 @@ export const FORTIAP_MONITOR_FORMAT = [
   "lldp", "mesh_uplink", "parent_wtp_id", "wan_status",
   // Telemetry
   "cpu_usage", "mem_free", "mem_total", "sensors_temperatures",
+  // Radios + the SSIDs each one broadcasts (nested `vaps`). The one field
+  // here that materially grows the response, which is why it is worth being
+  // explicit: it is a per-AP array of a handful of objects, on a call already
+  // made once per controller.
+  "radio",
 ].join("|");

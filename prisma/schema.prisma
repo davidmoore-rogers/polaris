@@ -1075,6 +1075,10 @@ model Asset {
   // fapStationTable scrape.
   wirelessStations       AssetWirelessStation[]   @relation("AssetWirelessStationsOnAp")
   wirelessStationMatches AssetWirelessStation[]   @relation("AssetWirelessStationMatch")
+  // FortiAP radio + broadcast-SSID inventory (current-state, one row per
+  // radio / per VAP). The parents of the wireless stations above.
+  apRadios               AssetApRadio[]           @relation("AssetApRadios")
+  apVaps                 AssetApVap[]             @relation("AssetApVaps")
   // MCLAG ICL peers (when this asset is a FortiSwitch in an MCLAG pair) and
   // the back-link for the switch on the far end of each ICL leg.
   mclagPeers             AssetMclagPeer[]         @relation("AssetMclagPeers")
@@ -2238,6 +2242,114 @@ model AssetWirelessStation {
   @@index([matchedAssetId])
   @@index([staMacAddr])
   @@map("asset_wireless_stations")
+}
+
+// One row per radio on a FortiAP — the parent level of the Stations tab's
+// radio → SSID → station tree, and the answer to "what channel, how wide, at
+// what power". Current-state, plain table with a real FK (NOT a hypertable):
+// the same reasoning as AssetInterface, since every consumer wants what the
+// radio is doing NOW, not a timeline of it.
+//
+// TWO WRITERS, and they carry COMPLEMENTARY columns rather than competing:
+// the controller's /api/v2/monitor/wifi/managed_ap `radio[]` array (source
+// "fortios", written by discovery — reaches every managed AP including the
+// ones with SNMP disabled) and the AP's own FORTINET-FORTIAP-MIB
+// fapRadioTable (source "snmp"). So the upsert MERGES per column: a NULL from
+// a source that doesn't collect that column never erases a value the other
+// source established, while any real value wins. The consequence to know
+// about is that a column cannot be cleared back to NULL by a scrape — a
+// stored tx-power floor survives until some source reports a different one.
+// Radio IDENTITY is not merged: both sources enumerate every radio, so a
+// radioIndex absent from a scrape is a radio that is genuinely gone.
+model AssetApRadio {
+  id      String @id @default(uuid())
+  assetId String
+  asset   Asset  @relation("AssetApRadios", fields: [assetId], references: [id], onDelete: Cascade)
+
+  // fapRadioIndex / the controller's radio-id. The join key the AP's VAPs and
+  // its stations (AssetWirelessStation.radioId) both hang off.
+  radioIndex Int
+
+  // PHY / mode string as the source words it ("802.11ax-5G", "802.11n,g-only").
+  radioType String?
+  // "2.4GHz" | "5GHz" | "6GHz" — reported where the source says so, otherwise
+  // derived from type + channel by utils/fortiapRadioBand.
+  band      String?
+  // Operating mode: "ap" | "monitor" | "sniffer" | "disabled".
+  mode      String?
+
+  // Operating channel and channel width. `channel` is what the radio is
+  // actually on, which on a DFS-capable radio is not what was configured.
+  channel      Int?
+  bandwidthMhz Int?
+
+  // Transmit power. FortiOS reports `oper_txpower` as a PERCENTAGE of the
+  // radio's ceiling; the MIB reports dBm, and only the MIB carries the floor
+  // and ceiling. Kept as separate columns rather than one normalized number
+  // because converting between them needs a per-model maximum Polaris does
+  // not have — showing "70%" and "17 dBm" as what each source actually said
+  // beats inventing a conversion.
+  txPowerPct    Int?
+  txPowerDbm    Int?
+  txPowerMinDbm Int?
+  txPowerMaxDbm Int?
+  // "auto" (DARRP / auto-power) vs a fixed level, as the source words it.
+  txPowerMode   String?
+
+  // The radio's base BSSID, and the client count the CONTROLLER reports —
+  // which is a cross-check on the station table, not a replacement for
+  // counting it (the two disagree while a client is roaming).
+  baseBssid   String?
+  clientCount Int?
+  countryCode String?
+
+  source String // "fortios" | "snmp"
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, radioIndex])
+  @@index([assetId])
+  @@map("asset_ap_radios")
+}
+
+// One row per VAP (broadcast SSID) on a FortiAP radio — the middle level of
+// the radio → SSID → station tree, and the inventory behind the "Broadcast
+// SSID" device-filter condition field. Current-state, delete-replaced per
+// scrape, same merge-on-column contract as AssetApRadio above.
+//
+// IDENTITY is `vapName` (the FortiOS VAP object name, falling back to the
+// SSID when a source reports only that), NOT the SSID and not the BSSID: one
+// SSID is commonly broadcast by several VAPs, and a BSSID is absent on
+// sources that don't publish it. `bssid` is instead the JOIN KEY down to
+// AssetWirelessStation.bssid — the reliable way to say which SSID a station
+// is actually on, since a station's wlanId is only as trustworthy as the
+// source's VAP numbering.
+model AssetApVap {
+  id      String @id @default(uuid())
+  assetId String
+  asset   Asset  @relation("AssetApVaps", fields: [assetId], references: [id], onDelete: Cascade)
+
+  radioIndex Int
+  vapName    String
+
+  ssid        String?
+  bssid       String?
+  vlanId      Int?
+  clientCount Int?
+
+  source String // "fortios" | "snmp"
+
+  firstSeen DateTime @default(now())
+  lastSeen  DateTime @default(now())
+
+  @@unique([assetId, radioIndex, vapName])
+  @@index([assetId])
+  @@index([assetId, radioIndex])
+  // The "Broadcast SSID" filter's option list is one GROUP BY over this
+  // column across the monitored fleet.
+  @@index([ssid])
+  @@map("asset_ap_vaps")
 }
 
 // Slice 7 — time-series of custom-widget samples. Each row is one

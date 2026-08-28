@@ -1118,6 +1118,10 @@ export interface DiscoveredFortiAP {
   // drives the AP Profile row on the asset details General tab. Empty when
   // the firmware omits the field.
   profile: string;
+  // Radio inventory + the SSIDs each radio broadcasts, off the same
+  // managed_ap row. Absent when the firmware published no `radio` array —
+  // "unknown, do not wipe", the same contract as lldpNeighbors.
+  radios?: import("../utils/fortiapMonitorRow.js").ApRadioSample[];
   osVersion: string;
   // Wired uplink to the controller. peerSource records HOW we learned it:
   //   "lldp"            — from the AP's own LLDP table (system_description starts with "FortiSwitch-")
