@@ -738,6 +738,53 @@ describe("automation wizard DOM render", () => {
     expect(p.bandNotify.onResolved).toBe(false);
   });
 
+  it("a new automation seeds an audit Event on BOTH halves, and emptying the reset list unticks it", async () => {
+    // The fire actions have carried a default "Create an Event" row since the
+    // Event became an action; the reset list now does too, so a recovery is
+    // recorded the way the firing is. And a ticked "When this resets" over an
+    // empty list is a lie — collectStep5 saves an empty list as null, so the box
+    // would come back unticked on the next open anyway.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors = [];
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(null);
+    (doc.querySelector("#aw-name") as unknown as { value: string }).value = "reset-default";
+    const next = () => (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    next(); await new Promise((r) => setTimeout(r, 20));   // → devices
+    next(); await new Promise((r) => setTimeout(r, 20));   // → trigger
+    (doc.querySelector("#aw-trig-root .tgl-threshold") as unknown as { value: string }).value = "90";
+    next(); await new Promise((r) => setTimeout(r, 20));   // → reset
+    next(); await new Promise((r) => setTimeout(r, 20));   // → actions
+    expect(doc.querySelector("#aw-step-5.visible")).toBeTruthy();
+    expect(toastErrors).toEqual([]);
+
+    const typeOf = (row: Element) => (row.querySelector(".aw-action-type") as HTMLSelectElement | null)?.value;
+    // Fires: the default Event row.
+    expect(Array.from(doc.querySelectorAll("#aw-actions > .aw-action")).map(typeOf)).toEqual(["event"]);
+    // Resets: the same default, and the toggle on to match.
+    expect((doc.querySelector("#aw-reset-actions-on") as unknown as { checked: boolean }).checked).toBe(true);
+    const resetRows = Array.from(doc.querySelectorAll("#aw-reset-actions > .aw-action"));
+    expect(resetRows.map(typeOf)).toEqual(["event"]);
+    // It was never mirrorable, so the note must not read as "edited".
+    expect(doc.querySelector("#aw-reset-mirror-note")!.textContent).toContain("Add a Notify above");
+
+    // Removing the last row unticks the toggle and folds the list away.
+    (resetRows[0]!.querySelector(".aw-action-remove") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(doc.querySelector("#aw-reset-actions > .aw-action")).toBeFalsy();
+    expect((doc.querySelector("#aw-reset-actions-on") as unknown as { checked: boolean }).checked).toBe(false);
+    expect((doc.querySelector("#aw-reset-wrap") as unknown as { style: { display: string } }).style.display).toBe("none");
+
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    expect(p.resetActions).toBeNull();
+    expect(p.actions).toHaveLength(1);
+    expect(p.actions[0]).toMatchObject({ type: "event" });
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
   it("words a tier's condition identically on the trigger and actions steps", async () => {
     // The two severity surfaces used to phrase the same tier differently: step 3
     // said "is at or above 95 for 1 min" while step 5 said "(value is at or above

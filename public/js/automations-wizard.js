@@ -4091,12 +4091,34 @@ async function openAutomationWizard(existing, opts) {
     // Reset list: hydrate, then keep it following the trigger actions.
     var resetHost = panel.querySelector("#aw-reset-actions");
     var resetSeed = draft.resetActions === undefined
-      ? mirroredResetActions(draft.actions, [])            // brand-new automation
+      // Brand-new automation: the audit Event is present by default on BOTH
+      // halves, so a recovery is recorded the way the firing is (the draft's
+      // `actions` seeds the same row), plus whatever the trigger's Notify
+      // actions mirror in. It is an ordinary operator row — remove it and the
+      // mirror leaves it removed.
+      ? mirroredResetActions(draft.actions, [{ type: "event" }])
       : (draft.resetActions || []);                         // stored, or explicitly off
     renderResetRows(panel, resetSeed);
     panel.querySelector("#aw-reset-add").addEventListener("click", function () {
       foldActionRow(addActionRow(resetHost, null), false);
       refreshMirrorNote(panel);
+    });
+    // Removing the LAST reset action IS "no reset behavior", so say it on the
+    // toggle instead of leaving a ticked box over an empty list — collectStep5
+    // saves an empty list as null anyway, so the box would come back unticked
+    // on the next open. Delegated (rows come and go with the mirror); the
+    // timeout lets the row's own remove handler detach it first.
+    resetHost.addEventListener("click", function (e) {
+      if (!(e.target && e.target.classList && e.target.classList.contains("aw-action-remove"))) return;
+      setTimeout(function () {
+        if (resetHost.querySelector(".aw-action")) return;
+        var cb = panel.querySelector("#aw-reset-actions-on");
+        if (cb) cb.checked = false;
+        draft.resetOn = false;
+        var wrap = panel.querySelector("#aw-reset-wrap");
+        if (wrap) wrap.style.display = "none";
+        refreshMirrorNote(panel);
+      }, 0);
     });
     panel.querySelector("#aw-reset-actions-on").addEventListener("change", function () {
       draft.resetOn = this.checked;
@@ -4104,7 +4126,7 @@ async function openAutomationWizard(existing, opts) {
       // Turning it back on re-seeds from the trigger rather than leaving the
       // operator with an empty list they have to rebuild by hand.
       if (this.checked && !resetHost.querySelector(".aw-action")) {
-        renderResetRows(panel, mirroredResetActions(collectActionsFrom(host), []));
+        renderResetRows(panel, mirroredResetActions(collectActionsFrom(host), [{ type: "event" }]));
       }
       refreshMirrorNote(panel);
     });
@@ -6229,14 +6251,22 @@ async function openAutomationWizard(existing, opts) {
     if (!note || !host) return;
     var rows = Array.from(host.querySelectorAll(":scope > .aw-action"));
     var mirrored = rows.filter(function (r) { return !!r._mirrorOf; }).length;
+    // The note is about COVERAGE of the trigger's notify actions, not about the
+    // row count: the list also seeds a default audit Event, and a row that was
+    // never mirrorable must not read as "edited".
+    var triggerHost = panel.querySelector("#aw-actions");
+    var mirrorable = (triggerHost ? collectActionsFrom(triggerHost) : [])
+      .filter(function (a) { return a.type === "notify" && a.channelId; }).length;
     if (rows.length === 0) {
       note.textContent = "Nothing here yet — add an action, or add a Notify above and it will appear here.";
-    } else if (mirrored === rows.length) {
+    } else if (mirrorable === 0) {
+      note.textContent = "Add a Notify above and it will appear here too.";
+    } else if (mirrored === mirrorable) {
       note.textContent = "Following your notify actions above.";
     } else if (mirrored === 0) {
       note.textContent = "Edited — no longer following your notify actions.";
     } else {
-      note.textContent = mirrored + " of " + rows.length + " still following your notify actions.";
+      note.textContent = mirrored + " of " + mirrorable + " still following your notify actions.";
     }
   }
 
