@@ -2302,6 +2302,13 @@ async function fetchVcenterHostSnapshotCached(
     const fetchStartedAt = performance.now();
     try {
       const snap = await fetchVcenterHostSnapshot(integration.config as unknown as import("./vcenterService.js").VcenterConfig);
+      // The snapshot reports its two halves separately (discovery needs the
+      // datastore half even when host properties are refused). For monitoring
+      // the host half IS the reading, so a failure there has to THROW rather
+      // than cache an empty map — an empty map would read as "this host left
+      // the inventory", which fails the probe. Thrown, it becomes
+      // `unreachable` in readVcenterAsset, which skips instead.
+      if (snap.hostError) throw new AppError(502, snap.hostError);
       const hosts = new Map<string, import("./vcenterService.js").VcenterHostStats>();
       for (const h of snap.hosts) hosts.set(`${integration.id}:${h.moref}`, h);
       const datastoresByHostMoref = new Map<string, import("./vcenterService.js").DiscoveredVcenterDatastore[]>();
@@ -2348,7 +2355,7 @@ async function fetchVcenterHostSnapshotCached(
  *                 counted: one vCenter outage must not declare every VM and
  *                 host in the fleet down at the same instant.
  */
-type VcenterReading =
+export type VcenterReading =
   | { kind: "vm"; row: import("./vcenterService.js").VcenterVmQuickStats; fetchDurationMs: number }
   | {
       kind: "host";
@@ -2530,7 +2537,7 @@ async function collectTelemetryVcenter(assetId: string): Promise<CollectionResul
  *          no link state of its own. operStatus stays null rather than
  *          claiming "up".
  */
-function buildVcenterSystemInfo(reading: VcenterReading): SystemInfoSample {
+export function buildVcenterSystemInfo(reading: VcenterReading): SystemInfoSample {
   const interfaces: InterfaceSample[] = [];
   const storage: StorageSample[] = [];
 
@@ -2554,20 +2561,69 @@ function buildVcenterSystemInfo(reading: VcenterReading): SystemInfoSample {
   }
 
   if (reading.kind === "host") {
+    // Virtual networking becomes the PARENT layer over the physical ports,
+    // reusing exactly the shape a FortiSwitch trunk already draws
+    // (`ifType: "aggregate"` + `ifParent` on the members — see
+    // overlayFortiswitchTrunkMembers). The System tab's interface table nests
+    // on `ifParent` with no changes: a vSwitch collapses to show its uplinks
+    // and VMkernel ports beneath it.
+    //
+    // Uplinks are matched by DEVICE NAME, which is why the parsers read
+    // `spec.bridge.nicDevice` / `spec.backing.pnicSpec[].pnicDevice` rather
+    // than the `pnic[]` key arrays — the keys would need a mapping table and
+    // the names join directly.
+    const vswitches = reading.row.vswitches ?? [];
+    const uplinkParent = new Map<string, string>();
+    for (const vsw of vswitches) {
+      for (const uplink of vsw.uplinks) {
+        if (!uplinkParent.has(uplink)) uplinkParent.set(uplink, vsw.name);
+      }
+    }
+    // A VMkernel port rides a PORT GROUP, and the port group names both its
+    // vSwitch and its VLAN — so one name-to-name join gives a vmk both its
+    // parent and the VLAN tag it actually sits on. (`vmk.portgroup` is the
+    // port group NAME as the host publishes it, so no MoRef plumbing.)
+    const pgByName = new Map<string, import("./vcenterService.js").VcenterHostPortgroup>();
+    for (const pg of reading.row.portgroups ?? []) pgByName.set(pg.name, pg);
+
+    const pnicUp = new Map<string, boolean>();
     for (const pnic of reading.row.pnics ?? []) {
+      const up = pnic.speedMb !== null;
+      pnicUp.set(pnic.device, up);
       interfaces.push({
         ifName:     pnic.device,
-        operStatus: pnic.speedMb !== null ? "up" : "down",
+        operStatus: up ? "up" : "down",
         speedBps:   pnic.speedMb !== null ? pnic.speedMb * 1_000_000 : null,
         macAddress: pnic.macAddress,
         ifType:     "physical",
+        ifParent:   uplinkParent.get(pnic.device) ?? null,
       });
     }
     for (const vmk of reading.row.vnics ?? []) {
+      const pg = vmk.portgroup ? pgByName.get(vmk.portgroup) : undefined;
       interfaces.push({
         ifName:      vmk.device,
         macAddress:  vmk.macAddress,
         ipAddress:   vmk.ipAddress,
+        // A vmk publishes no link state of its own — see the note above the
+        // function — so operStatus stays absent rather than claiming "up".
+        vlanId:      pg?.vlanId ?? null,
+        ifParent:    pg?.vswitchName ?? null,
+      });
+    }
+    // Synthesize the switch rows LAST so the uplink states above are known.
+    // A vSwitch's own state is derived: it is up while any uplink is up, down
+    // when every uplink is dark, and NULL when it has no uplinks at all —
+    // an internal-only vSwitch is working exactly as configured and must not
+    // read as an outage.
+    for (const vsw of vswitches) {
+      const known = vsw.uplinks.filter((u) => pnicUp.has(u));
+      interfaces.push({
+        ifName:     vsw.name,
+        ifType:     "aggregate",
+        operStatus: known.length === 0 ? null : known.some((u) => pnicUp.get(u)) ? "up" : "down",
+        // Deliberately no speedBps: vCenter publishes no aggregate rate, and
+        // summing live uplinks would invent a figure the source never stated.
       });
     }
     // A host's storage is the datastores it has mounted. Host-local volumes

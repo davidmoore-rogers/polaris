@@ -9393,6 +9393,64 @@ function _assetVirtualizationHTML(res) {
         (v.powerState ? '<div class="detail-row"><span class="detail-label">Power State</span><span class="detail-value">' + _vcPowerBadge(v.powerState) + '</span></div>' : '') +
       '</div>';
 
+    // Virtual networking. INVENTORY only — which switches exist, what uplinks
+    // them, which port group carries which VLAN. The live half (uplink link
+    // state, the vmk's address, and the vSwitch nesting itself) is on the
+    // System tab's interface table, where the `vcenter` interfaces stream
+    // writes vSwitches as `aggregate` rows with the uplinks and VMkernel ports
+    // as their children — the same shape a FortiSwitch trunk draws. Teaming
+    // policy and port-group VLANs have no live half, so they live here.
+    var vsw = Array.isArray(v.vswitches) ? v.vswitches : [];
+    var pgs = Array.isArray(v.portgroups) ? v.portgroups : [];
+    var vswHtml = "";
+    if (vsw.length > 0) {
+      // Port groups are listed under the switch that carries them, so an
+      // operator reads one switch's whole story on one row block. A
+      // distributed switch has none here by construction: its port groups
+      // belong to the DVS object, not to this host.
+      var pgByVsw = {};
+      pgs.forEach(function (p) {
+        var k = p.vswitchName || "";
+        if (!pgByVsw[k]) pgByVsw[k] = [];
+        pgByVsw[k].push(p);
+      });
+      vswHtml = '<div style="margin-top:0.75rem;overflow-x:auto"><table style="' + tableStyle + '">' +
+        '<thead><tr><th style="' + thStyle + '">Virtual Switch</th><th style="' + thStyle + '">Uplinks</th><th style="' + thStyle + '">MTU</th><th style="' + thStyle + '">Ports</th><th style="' + thStyle + '">Teaming</th><th style="' + thStyle + '">Port Groups</th></tr></thead><tbody>' +
+        vsw.map(function (s) {
+          var kind = s.distributed
+            ? ' <span style="color:var(--color-text-tertiary);font-size:0.8em">(distributed)</span>'
+            : '';
+          var uplinks = Array.isArray(s.uplinks) && s.uplinks.length > 0
+            ? s.uplinks.map(function (u) { return '<span class="mono">' + escapeHtml(u) + '</span>'; }).join(", ")
+            : '<span style="color:var(--color-text-tertiary)">none (internal)</span>';
+          var ports = s.numPorts != null
+            ? (s.numPortsAvailable != null ? s.numPortsAvailable + " free of " + s.numPorts : String(s.numPorts))
+            : "—";
+          var mine = pgByVsw[s.name] || [];
+          var pgText = mine.length > 0
+            ? mine.map(function (p) {
+                // VLAN 0 is untagged and 4095 is VGT (the guest tags its own
+                // frames) — both are real answers, so spell them out rather
+                // than printing a number that reads like a VLAN id.
+                var vlan = p.vlanId == null ? "" :
+                  p.vlanId === 0 ? " (untagged)" :
+                  p.vlanId === 4095 ? " (VLAN trunk)" :
+                  " (VLAN " + p.vlanId + ")";
+                return escapeHtml(p.name) + vlan;
+              }).join("<br>")
+            : '<span style="color:var(--color-text-tertiary)">—</span>';
+          return '<tr>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(s.name) + kind + '</td>' +
+            '<td style="' + tdStyle + '">' + uplinks + '</td>' +
+            '<td style="' + tdStyle + '">' + (s.mtu != null ? s.mtu : "—") + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(ports) + '</td>' +
+            '<td style="' + tdStyle + '">' + escapeHtml(s.teamingPolicy || "—") + '</td>' +
+            '<td style="' + tdStyle + '">' + pgText + '</td>' +
+          '</tr>';
+        }).join("") +
+      '</tbody></table></div>';
+    }
+
     var dsRows = res.datastores || [];
     var dsHtml = "";
     if (dsRows.length > 0) {
@@ -9431,7 +9489,7 @@ function _assetVirtualizationHTML(res) {
       '</tbody></table></div>';
     }
 
-    return header + rowsHost + dsHtml + vmsHtml;
+    return header + rowsHost + vswHtml + dsHtml + vmsHtml;
   }
 
   return "";

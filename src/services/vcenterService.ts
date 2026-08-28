@@ -62,6 +62,11 @@ export interface DiscoveredVcenterHost {
   clusterName: string | null;
   datastoreMorefs: string[]; // filled from the SOAP datastore host-mount list
   resolvedIp: string | null; // DNS-resolved from `name` (REST exposes no mgmt IP)
+  // Virtual networking, merged in from the SOAP host fetch. `null` = the fetch
+  // failed or the host published no config; the General-tab section then
+  // renders nothing rather than claiming the host has no vSwitches.
+  vswitches: VcenterHostVswitch[] | null;
+  portgroups: VcenterHostPortgroup[] | null;
 }
 
 export interface VcenterVmDisk {
@@ -816,24 +821,6 @@ export function parseDatastoreBlock(block: string): DiscoveredVcenterDatastore |
   };
 }
 
-async function fetchDatastoresSoap(
-  config: VcenterConfig,
-  signal?: AbortSignal,
-): Promise<DiscoveredVcenterDatastore[]> {
-  const session = await soapLogin(config, signal);
-  try {
-    const blocks = await retrieveAllProperties(config, session, "Datastore", DATASTORE_PATHS, signal);
-    const out: DiscoveredVcenterDatastore[] = [];
-    for (const block of blocks) {
-      const parsed = parseDatastoreBlock(block);
-      if (parsed) out.push(parsed);
-    }
-    return out;
-  } finally {
-    await soapLogout(config, session);
-  }
-}
-
 // ─── SOAP: ESXi host stats ─────────────────────────────────────────────────
 //
 // The monitoring counterpart to the VM quickStats fetch above: ONE batched
@@ -866,6 +853,39 @@ export interface VcenterHostVnic {
   mtu: number | null;
 }
 
+/**
+ * One virtual switch as the HOST sees it. Covers both kinds behind one shape:
+ * a standard vSwitch (`config.network.vswitch`) and this host's membership in a
+ * distributed switch (`config.network.proxySwitch`). A DVS's own configuration
+ * — its port groups, their VLANs, how many hosts it spans — is NOT here: that
+ * is a per-vCenter object, not a host fact, and it needs its own container view.
+ */
+export interface VcenterHostVswitch {
+  name: string;                     // "vSwitch0", or the DVS name
+  distributed: boolean;
+  dvsUuid: string | null;           // distributed only
+  mtu: number | null;
+  numPorts: number | null;
+  numPortsAvailable: number | null; // standard only
+  /**
+   * Uplink pNIC DEVICE names ("vmnic0"). Read from the SPEC — `vswitch.pnic[]`
+   * and `proxySwitch.pnic[]` hold opaque keys
+   * (`key-vim.host.PhysicalNic-vmnic0`), while `spec.bridge.nicDevice[]` and
+   * `spec.backing.pnicSpec[].pnicDevice` carry the names directly, so the join
+   * onto the interface rows needs no key-mapping table.
+   */
+  uplinks: string[];
+  /** NIC-teaming policy ("loadbalance_srcid", "failover_explicit", …). Standard only. */
+  teamingPolicy: string | null;
+}
+
+/** One port group on a standard vSwitch. `vlanId` is raw: 0 = untagged, 4095 = VGT. */
+export interface VcenterHostPortgroup {
+  name: string;
+  vswitchName: string | null;
+  vlanId: number | null;
+}
+
 export interface VcenterHostStats {
   moref: string;
   name: string | null;
@@ -885,6 +905,12 @@ export interface VcenterHostStats {
    */
   pnics: VcenterHostPnic[] | null;
   vnics: VcenterHostVnic[] | null;
+  /**
+   * Virtual switches (standard + this host's DVS memberships) and the standard
+   * switches' port groups. Same null-vs-empty contract as the NIC lists.
+   */
+  vswitches: VcenterHostVswitch[] | null;
+  portgroups: VcenterHostPortgroup[] | null;
 }
 
 const HOST_STATS_PATHS = [
@@ -900,7 +926,28 @@ const HOST_STATS_PATHS = [
   "summary.hardware.memorySize",
   "config.network.pnic",
   "config.network.vnic",
+  "config.network.vswitch",
+  "config.network.proxySwitch",
+  "config.network.portgroup",
 ];
+
+/**
+ * Split one managed-object entry at its `<spec>`. VIM emits a data object's
+ * declared properties first and the spec last, and several scalars appear in
+ * BOTH (`numPorts`, `mtu`) — so scalars are read from the head and structural
+ * detail (bridge uplinks, teaming policy, port-group name/VLAN) from the spec.
+ * The same reason parseHostPnics reads `<linkSpeed>` from its prefix only.
+ */
+function splitAtSpec(entry: string): { head: string; spec: string } {
+  const i = entry.indexOf("<spec>");
+  return i === -1 ? { head: entry, spec: "" } : { head: entry.slice(0, i), spec: entry.slice(i) };
+}
+
+function intOrNull(s: string | undefined): number | null {
+  if (s === undefined) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
 
 /**
  * Physical NICs out of a `config.network.pnic` propSet value. Exported for tests.
@@ -960,6 +1007,99 @@ export function parseHostVnics(block: string): VcenterHostVnic[] | null {
   return out;
 }
 
+/** Standard vSwitches out of a `config.network.vswitch` propSet value. Exported for tests. */
+export function parseHostVswitches(block: string): VcenterHostVswitch[] | null {
+  const xml = parsePropXml(block, "config.network.vswitch");
+  if (xml === null) return null;
+  const out: VcenterHostVswitch[] = [];
+  const re = /<HostVirtualSwitch>([\s\S]*?)<\/HostVirtualSwitch>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const { head, spec } = splitAtSpec(m[1]);
+    const name = head.match(/<name>([^<]+)<\/name>/)?.[1];
+    if (!name) continue;
+    // Uplinks live on the bridge. A vSwitch with no uplinks (internal-only) has
+    // no bridge element at all, which is a legitimate state, not a parse miss.
+    const uplinks: string[] = [];
+    const nicRe = /<nicDevice>([^<]+)<\/nicDevice>/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = nicRe.exec(spec)) !== null) uplinks.push(nm[1]);
+    // Read the teaming policy from INSIDE <nicTeaming>: `spec.policy` is also
+    // an element named `policy`, and only the teaming one has a text value.
+    const teaming = spec.match(/<nicTeaming>([\s\S]*?)<\/nicTeaming>/)?.[1] ?? "";
+    out.push({
+      name,
+      distributed: false,
+      dvsUuid: null,
+      mtu: intOrNull(head.match(/<mtu>(\d+)<\/mtu>/)?.[1]),
+      numPorts: intOrNull(head.match(/<numPorts>(\d+)<\/numPorts>/)?.[1]),
+      numPortsAvailable: intOrNull(head.match(/<numPortsAvailable>(\d+)<\/numPortsAvailable>/)?.[1]),
+      uplinks,
+      teamingPolicy: teaming.match(/<policy>([^<]+)<\/policy>/)?.[1] || null,
+    });
+  }
+  return out;
+}
+
+/**
+ * This host's distributed-switch memberships out of a
+ * `config.network.proxySwitch` propSet value. Exported for tests.
+ *
+ * A proxy switch is the host's END of a DVS, so what it can tell us is the DVS
+ * name/uuid and which of THIS host's pNICs uplink to it — which is exactly what
+ * the interface nesting needs. Teaming and port groups belong to the DVS
+ * object itself and are deliberately left null here rather than guessed.
+ */
+export function parseHostProxySwitches(block: string): VcenterHostVswitch[] | null {
+  const xml = parsePropXml(block, "config.network.proxySwitch");
+  if (xml === null) return null;
+  const out: VcenterHostVswitch[] = [];
+  const re = /<HostProxySwitch>([\s\S]*?)<\/HostProxySwitch>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    const { head, spec } = splitAtSpec(m[1]);
+    const name = head.match(/<dvsName>([^<]*)<\/dvsName>/)?.[1];
+    if (!name) continue;
+    const uplinks: string[] = [];
+    const nicRe = /<pnicDevice>([^<]+)<\/pnicDevice>/g;
+    let nm: RegExpExecArray | null;
+    while ((nm = nicRe.exec(spec)) !== null) uplinks.push(nm[1]);
+    out.push({
+      name,
+      distributed: true,
+      dvsUuid: head.match(/<dvsUuid>([^<]*)<\/dvsUuid>/)?.[1] || null,
+      mtu: intOrNull(head.match(/<mtu>(\d+)<\/mtu>/)?.[1]),
+      numPorts: intOrNull(head.match(/<numPorts>(\d+)<\/numPorts>/)?.[1]),
+      numPortsAvailable: null,
+      uplinks,
+      teamingPolicy: null,
+    });
+  }
+  return out;
+}
+
+/** Port groups out of a `config.network.portgroup` propSet value. Exported for tests. */
+export function parseHostPortgroups(block: string): VcenterHostPortgroup[] | null {
+  const xml = parsePropXml(block, "config.network.portgroup");
+  if (xml === null) return null;
+  const out: VcenterHostPortgroup[] = [];
+  const re = /<HostPortGroup>([\s\S]*?)<\/HostPortGroup>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(xml)) !== null) {
+    // name / vlanId / vswitchName are spec fields; the head carries the opaque
+    // key, the port list and computedPolicy.
+    const { spec } = splitAtSpec(m[1]);
+    const name = spec.match(/<name>([^<]*)<\/name>/)?.[1];
+    if (!name) continue;
+    out.push({
+      name,
+      vswitchName: spec.match(/<vswitchName>([^<]*)<\/vswitchName>/)?.[1] || null,
+      vlanId: intOrNull(spec.match(/<vlanId>(-?\d+)<\/vlanId>/)?.[1]),
+    });
+  }
+  return out;
+}
+
 /** Parse one HostSystem object block into host stats. Exported for tests. */
 export function parseHostStatsBlock(block: string): VcenterHostStats | null {
   const moref = parseObjRef(block);
@@ -981,19 +1121,47 @@ export function parseHostStatsBlock(block: string): VcenterHostStats | null {
     memTotalBytes: parsePropNumber(block, "summary.hardware.memorySize"),
     pnics: parseHostPnics(block),
     vnics: parseHostVnics(block),
+    vswitches: mergeVswitchLists(parseHostVswitches(block), parseHostProxySwitches(block)),
+    portgroups: parseHostPortgroups(block),
   };
+}
+
+/**
+ * Standard + distributed switches as one list. `null` only when NEITHER
+ * property was published (a disconnected host) — a host with standard switches
+ * and no DVS, or the reverse, is a normal fleet and must not read as "unknown".
+ */
+function mergeVswitchLists(
+  standard: VcenterHostVswitch[] | null,
+  distributed: VcenterHostVswitch[] | null,
+): VcenterHostVswitch[] | null {
+  if (standard === null && distributed === null) return null;
+  return [...(standard ?? []), ...(distributed ?? [])];
 }
 
 export interface VcenterHostSnapshot {
   hosts: VcenterHostStats[];
   datastores: DiscoveredVcenterDatastore[];
+  /**
+   * Per-half failure. The two property fetches share a session but NOT a fate:
+   * a vCenter role that can read hosts but not datastores (or the reverse) is a
+   * real permission shape on this API, and collapsing both into one throw
+   * would let a host-property gap silently cost discovery its datastore
+   * backing detail. Callers decide which half they cannot proceed without.
+   */
+  hostError: string | null;
+  datastoreError: string | null;
 }
 
 /**
  * ONE SOAP session, two batched property fetches: every ESXi host's stats plus
- * the datastore inventory their storage figures come from. Used by the
- * monitoring warm cache — one upstream round trip per vCenter integration per
- * tick serves every monitored host.
+ * the datastore inventory their storage figures come from.
+ *
+ * Used by BOTH the monitoring warm cache (one upstream round trip per vCenter
+ * integration per tick serves every monitored host) and discovery's Phase 2 —
+ * sharing it is what makes the host's vSwitches free at discovery time and
+ * keeps exactly one parser for them. A failed LOGIN still throws: that is fatal
+ * to both halves and there is nothing to report per-half about.
  */
 export async function fetchVcenterHostSnapshot(
   config: VcenterConfig,
@@ -1001,19 +1169,33 @@ export async function fetchVcenterHostSnapshot(
 ): Promise<VcenterHostSnapshot> {
   const session = await soapLogin(config, signal);
   try {
-    const hostBlocks = await retrieveAllProperties(config, session, "HostSystem", HOST_STATS_PATHS, signal);
     const hosts: VcenterHostStats[] = [];
-    for (const b of hostBlocks) {
-      const parsed = parseHostStatsBlock(b);
-      if (parsed) hosts.push(parsed);
+    let hostError: string | null = null;
+    try {
+      const hostBlocks = await retrieveAllProperties(config, session, "HostSystem", HOST_STATS_PATHS, signal);
+      for (const b of hostBlocks) {
+        const parsed = parseHostStatsBlock(b);
+        if (parsed) hosts.push(parsed);
+      }
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      hostError = err?.message || "HostSystem property fetch failed";
     }
-    const dsBlocks = await retrieveAllProperties(config, session, "Datastore", DATASTORE_PATHS, signal);
+
     const datastores: DiscoveredVcenterDatastore[] = [];
-    for (const b of dsBlocks) {
-      const parsed = parseDatastoreBlock(b);
-      if (parsed) datastores.push(parsed);
+    let datastoreError: string | null = null;
+    try {
+      const dsBlocks = await retrieveAllProperties(config, session, "Datastore", DATASTORE_PATHS, signal);
+      for (const b of dsBlocks) {
+        const parsed = parseDatastoreBlock(b);
+        if (parsed) datastores.push(parsed);
+      }
+    } catch (err: any) {
+      if (signal?.aborted) throw err;
+      datastoreError = err?.message || "Datastore property fetch failed";
     }
-    return { hosts, datastores };
+
+    return { hosts, datastores, hostError, datastoreError };
   } finally {
     await soapLogout(config, session);
   }
@@ -1329,17 +1511,40 @@ export async function discoverInventory(
       powerState: h.power_state || "",
       clusterMoref: clusterByHost.get(h.host)?.moref ?? null,
       clusterName: clusterByHost.get(h.host)?.name ?? null,
+      vswitches: null,
+      portgroups: null,
       datastoreMorefs: [],
       resolvedIp: null,
     }));
     log("discover.vcenter.inventory", "info", `vCenter: ${hosts.length} ESXi host(s), ${clusters.length} cluster(s)`);
 
-    // Phase 2 — datastores. SOAP-primary (host mounts + backing + provisioned);
-    // REST fallback keeps capacity figures when /sdk is unreachable.
+    // Phase 2 — datastores + host virtual networking. SOAP-primary via the
+    // SAME fetch the monitor loop uses (`fetchVcenterHostSnapshot`: one session,
+    // HostSystem properties then Datastore properties), so the host's vSwitches
+    // and port groups ride along at no extra call cost and there is exactly one
+    // parser for them. REST fallback keeps capacity figures when /sdk is
+    // unreachable — vSwitches simply stay null there, which the General-tab
+    // section renders as absent rather than as "no vSwitches".
     let datastores: DiscoveredVcenterDatastore[] = [];
     try {
-      datastores = await fetchDatastoresSoap(config, signal);
-      log("discover.vcenter.datastores", "info", `vCenter: ${datastores.length} datastore(s) (with backing detail)`);
+      const snapshot = await fetchVcenterHostSnapshot(config, signal);
+      if (snapshot.datastoreError) throw new AppError(502, snapshot.datastoreError);
+      datastores = snapshot.datastores;
+      const netByMoref = new Map(snapshot.hosts.map((h) => [h.moref, h]));
+      let withNet = 0;
+      for (const host of hosts) {
+        const stats = netByMoref.get(host.moref);
+        if (!stats) continue;
+        host.vswitches = stats.vswitches;
+        host.portgroups = stats.portgroups;
+        if (stats.vswitches) withNet++;
+      }
+      if (snapshot.hostError) {
+        // Datastores arrived; only the virtual networking is missing. Log it
+        // and carry on — vSwitches stay null, which renders as absent.
+        log("discover.vcenter.hostnet", "error", `vCenter: host network config unavailable — ${snapshot.hostError}`);
+      }
+      log("discover.vcenter.datastores", "info", `vCenter: ${datastores.length} datastore(s) (with backing detail), virtual networking on ${withNet}/${hosts.length} host(s)`);
     } catch (err: any) {
       if (signal?.aborted) throw err;
       log("discover.vcenter.datastores", "error", `vCenter: SOAP datastore fetch failed — ${err?.message}; falling back to REST list`);

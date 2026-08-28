@@ -27,6 +27,9 @@ import {
   parseGuestNics,
   parseHostPnics,
   parseHostVnics,
+  parseHostVswitches,
+  parseHostProxySwitches,
+  parseHostPortgroups,
   parseHostStatsBlock,
   parseDatastoreBlock,
   parseVmDetail,
@@ -303,6 +306,39 @@ const HOST_XML =
   `<spec><ip><dhcp>false</dhcp><ipAddress>10.1.1.11</ipAddress><subnetMask>255.255.255.0</subnetMask></ip>` +
   `<mac>3c:ec:ef:11:22:33</mac><mtu>1500</mtu></spec></HostVirtualNic>` +
   `</val></propSet>` +
+  `<propSet><name>config.network.vswitch</name><val xsi:type="ArrayOfHostVirtualSwitch">` +
+  `<HostVirtualSwitch><name>vSwitch0</name><key>key-vim.host.VirtualSwitch-vSwitch0</key>` +
+  `<numPorts>128</numPorts><numPortsAvailable>102</numPortsAvailable><mtu>1500</mtu>` +
+  `<portgroup>key-vim.host.PortGroup-Management Network</portgroup>` +
+  `<pnic>key-vim.host.PhysicalNic-vmnic0</pnic><pnic>key-vim.host.PhysicalNic-vmnic3</pnic>` +
+  `<spec><numPorts>128</numPorts>` +
+  `<bridge xsi:type="HostVirtualSwitchBondBridge"><nicDevice>vmnic0</nicDevice><nicDevice>vmnic3</nicDevice></bridge>` +
+  `<policy><security><allowPromiscuous>false</allowPromiscuous></security>` +
+  `<nicTeaming><policy>loadbalance_srcid</policy><reversePolicy>true</reversePolicy>` +
+  `<nicOrder><activeNic>vmnic0</activeNic><standbyNic>vmnic3</standbyNic></nicOrder></nicTeaming>` +
+  `<shapingPolicy><enabled>false</enabled></shapingPolicy></policy><mtu>1500</mtu></spec>` +
+  `</HostVirtualSwitch>` +
+  `<HostVirtualSwitch><name>vSwitch-internal</name><numPorts>8</numPorts><mtu>1500</mtu>` +
+  `<spec><numPorts>8</numPorts><policy><nicTeaming><policy>failover_explicit</policy></nicTeaming></policy></spec>` +
+  `</HostVirtualSwitch>` +
+  `</val></propSet>` +
+  `<propSet><name>config.network.proxySwitch</name><val xsi:type="ArrayOfHostProxySwitch">` +
+  `<HostProxySwitch><dvsUuid>50 1e aa bb</dvsUuid><dvsName>DVS-Prod</dvsName>` +
+  `<numPorts>1792</numPorts><mtu>9000</mtu>` +
+  `<pnic>key-vim.host.PhysicalNic-vmnic1</pnic>` +
+  `<spec><backing xsi:type="DistributedVirtualSwitchHostMemberPnicBacking">` +
+  `<pnicSpec><pnicDevice>vmnic1</pnicDevice><uplinkPortKey>101</uplinkPortKey></pnicSpec>` +
+  `</backing></spec></HostProxySwitch>` +
+  `</val></propSet>` +
+  `<propSet><name>config.network.portgroup</name><val xsi:type="ArrayOfHostPortGroup">` +
+  `<HostPortGroup><key>key-vim.host.PortGroup-Management Network</key>` +
+  `<computedPolicy><nicTeaming><policy>loadbalance_srcid</policy></nicTeaming></computedPolicy>` +
+  `<spec><name>Management Network</name><vlanId>0</vlanId><vswitchName>vSwitch0</vswitchName></spec>` +
+  `</HostPortGroup>` +
+  `<HostPortGroup><key>key-vim.host.PortGroup-Trunk</key>` +
+  `<spec><name>Trunk</name><vlanId>4095</vlanId><vswitchName>vSwitch0</vswitchName></spec>` +
+  `</HostPortGroup>` +
+  `</val></propSet>` +
   `</objects><objects>` +
   `<obj type="HostSystem">host-12</obj>` +
   `<propSet><name>name</name><val xsi:type="xsd:string">esx02.corp.local</val></propSet>` +
@@ -350,7 +386,76 @@ describe("SOAP ESXi host parsing", () => {
     expect(host?.connectionState).toBe("notResponding");
     expect(host?.pnics).toBeNull();
     expect(host?.vnics).toBeNull();
+    expect(host?.vswitches).toBeNull();
+    expect(host?.portgroups).toBeNull();
     expect(host?.cpuTotalMhz).toBeNull();
+  });
+});
+
+// ─── ESXi virtual networking ────────────────────────────────────────────────
+
+describe("SOAP ESXi vSwitch / port-group parsing", () => {
+  it("takes uplinks from the bridge device names, not the opaque pnic keys", () => {
+    // `<pnic>` holds key-vim.host.PhysicalNic-vmnic0; only spec.bridge.nicDevice
+    // carries the name the interface rows join on.
+    const sw = parseHostVswitches(extractObjectBlocks(HOST_XML)[0]);
+    expect(sw?.[0]).toEqual({
+      name: "vSwitch0",
+      distributed: false,
+      dvsUuid: null,
+      mtu: 1500,
+      numPorts: 128,
+      numPortsAvailable: 102,
+      uplinks: ["vmnic0", "vmnic3"],
+      teamingPolicy: "loadbalance_srcid",
+    });
+  });
+
+  it("reads the teaming policy from inside nicTeaming, not from spec.policy", () => {
+    // `spec.policy` is ALSO an element named <policy>; only the teaming one has
+    // a text value, and relying on that is too subtle to leave untested.
+    const sw = parseHostVswitches(extractObjectBlocks(HOST_XML)[0]);
+    expect(sw?.[1]).toMatchObject({
+      name: "vSwitch-internal",
+      teamingPolicy: "failover_explicit",
+      // An internal-only vSwitch has no bridge at all. Empty uplinks is a
+      // legitimate configuration, not a parse miss — and it is what stops the
+      // interface layer from calling the switch "down".
+      uplinks: [],
+      numPortsAvailable: null,
+    });
+  });
+
+  it("reads a distributed switch's host end: name, uuid, and this host's uplinks", () => {
+    const dvs = parseHostProxySwitches(extractObjectBlocks(HOST_XML)[0]);
+    expect(dvs).toEqual([{
+      name: "DVS-Prod",
+      distributed: true,
+      dvsUuid: "50 1e aa bb",
+      mtu: 9000,
+      numPorts: 1792,
+      numPortsAvailable: null,
+      // Teaming belongs to the DVS object, not to the host's proxy switch —
+      // left null rather than guessed.
+      teamingPolicy: null,
+      uplinks: ["vmnic1"],
+    }]);
+  });
+
+  it("merges standard and distributed switches into one list", () => {
+    const host = parseHostStatsBlock(extractObjectBlocks(HOST_XML)[0]);
+    expect(host?.vswitches?.map((s) => s.name)).toEqual(["vSwitch0", "vSwitch-internal", "DVS-Prod"]);
+    expect(host?.vswitches?.filter((s) => s.distributed)).toHaveLength(1);
+  });
+
+  it("reads port groups from the spec, keeping the raw VLAN id", () => {
+    // The head carries the opaque key, the port list and computedPolicy — the
+    // name/vlanId/vswitchName only exist in the spec. 4095 is VGT, not a VLAN.
+    const pgs = parseHostPortgroups(extractObjectBlocks(HOST_XML)[0]);
+    expect(pgs).toEqual([
+      { name: "Management Network", vswitchName: "vSwitch0", vlanId: 0 },
+      { name: "Trunk",              vswitchName: "vSwitch0", vlanId: 4095 },
+    ]);
   });
 });
 

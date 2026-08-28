@@ -8643,6 +8643,13 @@ async function syncVcenterDevices(
     const externalId = vcenter.hostExternalId(host.moref, integrationId);
     currentHostExternalIds.push(externalId);
     const observed = buildVcenterHostObservedBlob(host, now);
+    const existing: any = assetByHostExternalId.get(externalId) ?? null;
+    // Virtual networking comes from the SOAP host fetch, which can fail on its
+    // own while the REST host list (everything else in this blob) succeeded —
+    // so `null` here means "not read this run", not "this host has no
+    // vSwitches". Carry the last known lists forward rather than blanking the
+    // General-tab section until the next 12h cycle.
+    const priorVirt = (existing?.virtualization ?? null) as Record<string, unknown> | null;
     const virtualization = {
       role: "host",
       vcenterIntegrationId: integrationId,
@@ -8653,10 +8660,10 @@ async function syncVcenterDevices(
       connectionState: host.connectionState || null,
       powerState: host.powerState || null,
       datastoreMorefs: host.datastoreMorefs,
+      vswitches:  host.vswitches  ?? priorVirt?.vswitches  ?? null,
+      portgroups: host.portgroups ?? priorVirt?.portgroups ?? null,
     };
     const connected = host.connectionState === "CONNECTED";
-
-    const existing: any = assetByHostExternalId.get(externalId) ?? null;
 
     if (!existing) {
       // Hostname collision with a non-vcenter asset → pending Conflict for
