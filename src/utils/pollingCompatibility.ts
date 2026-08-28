@@ -231,6 +231,27 @@ export function isPollingMethod(v: unknown): v is PollingMethod {
   return typeof v === "string" && (ALL_METHODS as ReadonlyArray<string>).includes(v);
 }
 
+/**
+ * Should a response-time probe be QUEUED for an asset whose resolved
+ * responseTimePolling is `method`?
+ *
+ * Only "don't poll" values are excluded. `"agent"` deliberately still queues:
+ * `probeAsset` returns a synthetic success for it so the probe counter keeps
+ * incrementing under transport="agent", and `recordProbeResult` early-returns
+ * before touching the DB — dropping it here would silently change that metric.
+ *
+ * Exists as a shared pure predicate because its two callers — `computeDueWork`
+ * in monitoringService and the pg-boss publisher in jobs/monitorAssets — are a
+ * REQUIRED LOCKSTEP PAIR (TOUCHES.md), and this gate was previously absent from
+ * both: every other stream checked its resolved method before publishing, the
+ * probe did not, and `"disabled"` therefore fell through probeAsset's dispatch
+ * to the unknown-method error and was recorded as a failed poll. An operator
+ * switching Response Time off manufactured an outage.
+ */
+export function responseTimeProbeShouldQueue(method: PollingMethod | string | null | undefined): boolean {
+  return !!method && method !== "disabled";
+}
+
 /** Operator-friendly label for a polling method. */
 export function pollingMethodLabel(method: PollingMethod): string {
   switch (method) {

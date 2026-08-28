@@ -174,6 +174,7 @@ import {
   isMethodValidForStream,
   assetSourceKindFromIntegrationType,
   isFortinetIntegrationType,
+  responseTimeProbeShouldQueue,
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
@@ -1729,6 +1730,22 @@ export async function probeAsset(
     const timeoutMs = effective.probeTimeoutMs;
     const polling   = effective.responseTimePolling;
     if (!polling) return finish(start, false, "No response-time polling method configured");
+
+    // "Disabled" means DO NOT POLL — it is not a transport, and it is not a
+    // failure. Without this branch the dispatch below falls all the way through
+    // to the unknown-method error, which `recordProbeResult` then writes as a
+    // failed sample that counts toward the covering automation's missedPolls —
+    // turning the operator's off-switch into a manufactured outage. The
+    // `skipped` contract is exactly right here for the same reason it is right
+    // for an unreachable vCenter: nothing was measured, so no sample, no counter
+    // movement, just the cadence anchor. The queue publishers gate on this too
+    // (computeDueWork + jobs/monitorAssets.ts), so in the steady state we never
+    // reach here — this stays as the correctness backstop for the
+    // operator-triggered /probe-now path and for a "disabled" already sitting in
+    // a JSON tier that no publisher gate can see.
+    if (polling === "disabled") {
+      return { success: false, responseTimeMs: 0, skipped: true };
+    }
 
     // Agent owns its own probe cadence and pushes samples directly via
     // POST /api/v1/agents/samples. The hot monitor loop must not call out
@@ -11909,7 +11926,11 @@ export async function computeDueWork(
     // KEEP IN LOCKSTEP with the pg-boss publisher in jobs/monitorAssets.ts —
     // both call the shared predicate for exactly that reason.
     const isUp = runsHeavyCadences(a);
-    if (probe      && enabled.has("probe"))                                      probes.push({ id: a.id, kind: "probe" });
+    // The probe gates on its resolved method the same way lldp / storage /
+    // processes below already do — "disabled" means don't poll, and queueing it
+    // anyway is what let an off-switch read as an outage.
+    const probeMethodOk = responseTimeProbeShouldQueue(eff.responseTimePolling);
+    if (probe      && enabled.has("probe") && probeMethodOk)                     probes.push({ id: a.id, kind: "probe" });
     if (telemetry  && canTelemetry  && enabled.has("telemetry")  && isUp)        telemetries.push({ id: a.id, kind: "telemetry" });
     if (systemInfo && canSystemInfo && enabled.has("systemInfo") && isUp)        systemInfos.push({ id: a.id, kind: "systemInfo" });
     // Fast-cadence pinned scrape rides the response-time cadence (default 60s).

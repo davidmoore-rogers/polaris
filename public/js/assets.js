@@ -5870,7 +5870,12 @@ function _wireAssetMonitorActions(a) {
           //     systemInfo: {…} }
           var parts = [];
           var failures = [];
+          // `skipped` means nothing was measured — the response-time stream is
+          // set to Disabled, or vCenter (which answers FOR the asset) was
+          // unreachable. Neither is a device failure, so it reports like the
+          // other streams' "n/a" rather than turning the toast red.
           if (r.success) parts.push("probe " + r.responseTimeMs + " ms");
+          else if (r.skipped) parts.push("probe n/a" + (r.error ? " (" + r.error + ")" : " (not polled)"));
           else failures.push("probe: " + (r.error || "unknown"));
 
           var tel = r.telemetry || {};

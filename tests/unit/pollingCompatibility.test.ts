@@ -18,6 +18,7 @@ import {
   assetSourceKindFromIntegrationType,
   isMethodValidForStream,
   methodsForStream,
+  responseTimeProbeShouldQueue,
 } from "../../src/utils/pollingCompatibility.js";
 
 describe("compatibility matrix — locked values per asset source", () => {
@@ -207,5 +208,34 @@ describe("pollingMethodLabel — UI strings", () => {
     expect(pollingMethodLabel("disabled")).toBe("Disabled");
     expect(pollingMethodLabel("agent")).toBe("Polaris Agent");
     expect(pollingMethodLabel("vcenter")).toBe("vCenter");
+  });
+});
+
+// The probe publishers gate on this. It exists because they previously did
+// not: every other stream checked its resolved method before queueing, the
+// response-time probe did not, and "disabled" therefore reached probeAsset's
+// dispatch, fell past every branch to the unknown-method error, and was
+// recorded as a FAILED poll — so switching Response Time off drove the asset
+// to Down. The two callers are a required lockstep pair, which is why this is
+// a shared predicate rather than the same condition inlined twice.
+describe("responseTimeProbeShouldQueue — the probe publishers' gate", () => {
+  it('excludes "disabled" — the operator off-switch must not manufacture an outage', () => {
+    expect(responseTimeProbeShouldQueue("disabled")).toBe(false);
+  });
+
+  it("excludes absent values (null / undefined / empty)", () => {
+    expect(responseTimeProbeShouldQueue(null)).toBe(false);
+    expect(responseTimeProbeShouldQueue(undefined)).toBe(false);
+    expect(responseTimeProbeShouldQueue("")).toBe(false);
+  });
+
+  // "agent" deliberately STILL queues: probeAsset returns a synthetic success
+  // so the probe counter keeps incrementing under transport="agent", and
+  // recordProbeResult early-returns before any DB write. Dropping it here would
+  // silently change that metric, which is not this fix's business.
+  it("keeps queueing every real transport, agent included", () => {
+    (["rest_api", "snmp", "winrm", "ssh", "icmp", "agent", "vcenter"] as const).forEach((m) => {
+      expect(responseTimeProbeShouldQueue(m), m).toBe(true);
+    });
   });
 });

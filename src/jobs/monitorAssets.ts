@@ -46,6 +46,7 @@ import {
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
 import { lossSamplerAppliesTo, lossSampleIsDue } from "../utils/lossSampler.js";
+import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
@@ -252,7 +253,10 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const telLabels = { transport: telTransport, assetType, verboseDebug };
     const ifLabels  = { transport: ifTransport,  assetType, verboseDebug };
 
-    if (probe && enabled.has("probe")) {
+    // Gates on the resolved method like every other stream below. Keep in
+    // lockstep with the matching push in monitoringService.computeDueWork —
+    // both call the shared predicate for exactly that reason.
+    if (probe && enabled.has("probe") && responseTimeProbeShouldQueue(eff.responseTimePolling)) {
       await publishMonitorJob("probe", a.id, labels);
     }
     if (telemetry && canTelemetry && isUp && enabled.has("telemetry")) {

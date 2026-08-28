@@ -81,6 +81,7 @@ This file complements [CLAUDE.md](CLAUDE.md) — CLAUDE.md is the narrative arch
 - Check Map topology endpoint colors match asset list Status pills (monitorStatusToHealth must be consistent).
 - Verify clamp logic in db.ts doesn't interfere: disable should reset, but re-enable (flip to active) should not auto-resume monitoring.
 - If touching the cadence dispatch (runMonitorPass / publishDueWork): mirror EVERY change in BOTH `src/services/monitoringService.ts` AND `src/jobs/monitorAssets.ts` — they're parallel implementations and must stay in lock-step.
+- **Every cadence's publisher gates on its own resolved polling method before queueing** — lldp and storage and processes each check theirs inline, and the response-time probe checks `responseTimeProbeShouldQueue(eff.responseTimePolling)` (`utils/pollingCompatibility.ts`) in BOTH publishers. The probe had no such gate until 2026-08-28, which is how `"disabled"` reached `probeAsset`, matched no dispatch branch, and got recorded as a missed poll — an operator switching Response Time off marched the asset to `down` (business rule 30). A shared predicate rather than a fourth inline condition precisely because these two files drift. Adding a new cadence means adding its gate to both.
 
 ---
 

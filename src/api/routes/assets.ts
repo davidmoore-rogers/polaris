@@ -1605,12 +1605,24 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     });
     const label = asset?.hostname || asset?.ipAddress || id;
     const ok = probe.success;
+    // A SKIPPED probe is not a failed one — nothing was measured. Two sources:
+    // the response-time stream is set to Disabled (the operator's own choice),
+    // and vCenter itself being unreachable. Rendering either as
+    // "failed: unknown" and stamping a warning Event told the operator their
+    // device was broken when Polaris had simply not asked.
+    const probeSkipped = probe.skipped === true;
     const streamSummary: string[] = [];
-    streamSummary.push(`probe ${ok ? probe.responseTimeMs + " ms" : "failed: " + (probe.error || "unknown")}`);
+    streamSummary.push(
+      `probe ${ok
+        ? probe.responseTimeMs + " ms"
+        : probeSkipped
+          ? "n/a" + (probe.error ? ` (${probe.error})` : " (not polled)")
+          : "failed: " + (probe.error || "unknown")}`,
+    );
     streamSummary.push(`telemetry ${telemetry.collected ? "ok" : (telemetry.supported ? "failed: " + (telemetry.error || "no data") : "n/a")}`);
     streamSummary.push(`hardware ${hardware.collected ? "ok" : (hwNoData ? "n/a (no sensors)" : (hardware.supported ? "failed: " + (hardware.error || "no data") : "n/a"))}`);
     streamSummary.push(`interfaces ${systemInfo.collected ? "ok" : (systemInfo.supported ? "failed: " + (systemInfo.error || "no data") : "n/a")}`);
-    const anyFail = !ok ||
+    const anyFail = (!ok && !probeSkipped) ||
       (telemetry.supported && !telemetry.collected) ||
       (hardware.supported  && !hardware.collected && !hwNoData) ||
       (systemInfo.supported && !systemInfo.collected);
