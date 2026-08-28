@@ -1771,7 +1771,11 @@ function renderCapacityAdvisorCard(advisor, pgConfigFile, dbConnectionMode) {
     '</div>' +
     coldStartNote +
     pgbouncerNote +
-    '<table class="ip-table advisor-table" style="margin-top:0.75rem;width:100%">' +
+    // Half-width card since the Maintenance reorder — the five fixed columns
+    // no longer fit at every viewport, so the table scrolls inside its own
+    // container rather than crushing the Setting column or the grid cell.
+    '<div style="overflow-x:auto;margin-top:0.75rem">' +
+    '<table class="ip-table advisor-table" style="width:100%;min-width:36rem">' +
       '<thead><tr>' +
         '<th>Setting</th>' +
         '<th style="width:8rem">Current</th>' +
@@ -1789,6 +1793,7 @@ function renderCapacityAdvisorCard(advisor, pgConfigFile, dbConnectionMode) {
           : "") +
       '</tbody>' +
     '</table>' +
+    '</div>' +
     pgConfigHint +
     '<div style="margin-top:0.85rem;display:flex;align-items:center;gap:0.75rem">' +
       stageBtn +
@@ -2257,10 +2262,10 @@ async function loadDatabaseInfo() {
     var dbConnectionMode = advisorResp && advisorResp.dbConnectionMode ? advisorResp.dbConnectionMode : "direct";
     _dbLoaded = true;
 
-    container.innerHTML =
-      renderCapacityAdvisorCard(advisor, pgTuning && pgTuning.pgConfigFile, dbConnectionMode) +
-      renderCapacityCard(capacity, db, pgTuning) +
-      // ── Application Updates card ──
+    var advisorHtml = renderCapacityAdvisorCard(advisor, pgTuning && pgTuning.pgConfigFile, dbConnectionMode);
+
+    // ── Application Updates card ──
+    var updateCardHtml =
       '<div class="settings-card" id="update-card">' +
         '<h4>Application Updates</h4>' +
         '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
@@ -2302,7 +2307,18 @@ async function loadDatabaseInfo() {
           '<summary style="cursor:pointer;font-size:0.82rem;color:var(--color-text-secondary);user-select:none">Recent updates</summary>' +
           '<div id="update-history-body" style="margin-top:0.6rem;font-size:0.82rem;color:var(--color-text-tertiary)">Loading...</div>' +
         '</details>' +
-      '</div>' +
+      '</div>';
+
+    container.innerHTML =
+      // Database first — the volume bars and capacity severity are what an
+      // operator opens this tab to see. Capacity Advisor and Application
+      // Updates then share one row as half-width cards; the advisor renders
+      // nothing when it has no recommendations, in which case Updates keeps
+      // the full width rather than leaving half a row empty.
+      renderCapacityCard(capacity, db, pgTuning) +
+      (advisorHtml
+        ? '<div class="settings-cards-row">' + advisorHtml + updateCardHtml + '</div>'
+        : updateCardHtml) +
       // ── Polaris Agent card ──
       // ── Backup / Restore / History — three columns ──
       '<div class="settings-cards-row-3">' +
