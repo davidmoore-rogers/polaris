@@ -238,7 +238,14 @@ async function emailMessageFor(d: DeliveryRow, meta: Record<string, unknown>, ur
   return {
     to: d.target,
     subject: titleFor(d.notification),
-    text: appendAckLine(d.notification.message + (url ? `\n\nView: ${url}` : ""), ackUrlForEmail(d.notification.id)),
+    // `noAck` is stamped at fan-out for an address whose Polaris role can't
+    // acknowledge (business rule 25) — the link is left off rather than mailed
+    // to someone the page can only refuse. An address with no account behind
+    // it is never stamped, so contacts keep the link.
+    text: appendAckLine(
+      d.notification.message + (url ? `\n\nView: ${url}` : ""),
+      meta.noAck === true ? null : ackUrlForEmail(d.notification.id),
+    ),
   };
 }
 
@@ -316,11 +323,14 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined, memo: 
           severity: d.notification.severity,
           url: pushDeepLinkUrl(meta.surface),
           notificationId: d.notification.id,
-          // The alert's acknowledge page. Always present: it is the same URL
-          // the email carries, and the page itself decides whether the person
-          // who taps it may acknowledge. sw.js renders the Acknowledge action
-          // button when it arrives and opens this URL.
-          ackUrl: ackUrlForPush(d.notification.id),
+          // The alert's acknowledge page — the same URL the email carries,
+          // and the page itself decides whether the person who taps it may
+          // acknowledge. sw.js renders the Acknowledge action button when it
+          // arrives and opens this URL; it is omitted (no tray action at all)
+          // when fan-out stamped `noAck` because the subscription's owner
+          // holds a role that can't acknowledge. Unlike email, a push always
+          // has a known account behind it, so there is no unknown case.
+          ...(meta.noAck === true ? {} : { ackUrl: ackUrlForPush(d.notification.id) }),
         },
       );
     } else {

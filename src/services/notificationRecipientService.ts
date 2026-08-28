@@ -39,6 +39,11 @@ import {
 } from "../utils/notificationTemplate.js";
 import { defaultAlertEmailTemplate, pruneDeadLinks, pruneEmptyDivs, pruneEmptyRows, pruneEmptyTextLines } from "../utils/alertEmailTemplate.js";
 import {
+  normalizePermissions,
+  permissionOf,
+  rankMeets,
+} from "../api/middleware/permissions.js";
+import {
   type DeliveryTarget,
   type ChannelType,
   type EmailRecipients,
@@ -115,6 +120,15 @@ export interface RecipientUser {
   id: string;
   email: string | null;
   displayName: string | null;
+  /**
+   * May this account acknowledge an alert (`alerts` >= write)? Decided from
+   * the role matrix, away from any request, via the shared rankMeets ladder —
+   * never re-derived here. A recipient who cannot acknowledge is mailed the
+   * SAME alert with the Acknowledge button omitted, and gets no Acknowledge
+   * action on a push (business rule 25). Unknown = true: an account whose role
+   * we could not read keeps the button, and the page refuses if it must.
+   */
+  canAcknowledge: boolean;
 }
 
 interface IndexedUser extends RecipientUser {
@@ -131,6 +145,11 @@ interface IndexedUser extends RecipientUser {
   regionSet: Set<string>;
   /** The user's Role id — recipientRoles routes by it. */
   roleId: string;
+}
+
+/** Project an indexed user down to the recipient shape callers see. */
+function toRecipient(u: IndexedUser): RecipientUser {
+  return { id: u.id, email: u.email, displayName: u.displayName, canAcknowledge: u.canAcknowledge };
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -161,7 +180,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       ssoGroups: true,
       authProvider: true,
       roleId: true,
-      role: { select: { regionTags: true, otherTags: true } },
+      role: { select: { regionTags: true, otherTags: true, permissions: true } },
     },
   });
 
@@ -183,6 +202,11 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       matchSet,
       regionSet,
       roleId: u.roleId,
+      // Unknown role => keep the button. Every real row joins a Role (roleId
+      // is required), so this only covers a read that came back without one.
+      canAcknowledge: u.role
+        ? rankMeets(permissionOf(normalizePermissions(u.role.permissions), "alerts"), "write")
+        : true,
     });
   }
   return index;
@@ -201,7 +225,7 @@ export async function resolveRecipientUsers(recipientTags: string[] | undefined)
   const index = await loadUserIndex();
   return index
     .filter((u) => needles.some((n) => u.matchSet.has(n)))
-    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+    .map(toRecipient);
 }
 
 /**
@@ -221,7 +245,7 @@ export async function resolveUsersByRegions(regions: string[] | undefined): Prom
   const index = await loadUserIndex();
   return index
     .filter((u) => needles.some((n) => u.regionSet.has(n)))
-    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+    .map(toRecipient);
 }
 
 /**
@@ -234,7 +258,7 @@ export async function resolveUsersInAnyRegion(): Promise<RecipientUser[]> {
   const index = await loadUserIndex();
   return index
     .filter((u) => u.regionSet.size > 0)
-    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+    .map(toRecipient);
 }
 
 /**
@@ -252,13 +276,13 @@ export async function resolveUsersByRoles(roleIds: string[] | undefined): Promis
   const index = await loadUserIndex();
   return index
     .filter((u) => want.has(u.roleId))
-    .map(({ id, email, displayName }) => ({ id, email, displayName }));
+    .map(toRecipient);
 }
 
 /** Every user account — the explicit broadcast opt-in (recipientAllUsers). */
 export async function resolveAllUsers(): Promise<RecipientUser[]> {
   const index = await loadUserIndex();
-  return index.map(({ id, email, displayName }) => ({ id, email, displayName }));
+  return index.map(toRecipient);
 }
 
 /** Specific users by id (the rule's "individual user accounts" recipients). */
@@ -266,7 +290,7 @@ export async function resolveRecipientUsersByIds(ids: string[] | undefined): Pro
   if (!ids || ids.length === 0) return [];
   const want = new Set(ids);
   const index = await loadUserIndex();
-  return index.filter((u) => want.has(u.id)).map(({ id, email, displayName }) => ({ id, email, displayName }));
+  return index.filter((u) => want.has(u.id)).map(toRecipient);
 }
 
 /** All users for the rule-builder recipient picker (id + name + email). */
@@ -415,6 +439,82 @@ export function fillComposedAckUrl(composed: ComposedEmail, url: string | null):
   };
 }
 
+/**
+ * Address -> may the Polaris account behind it acknowledge an alert?
+ *
+ * Addresses with no account are ABSENT from the map rather than false: an
+ * address-book contact or an operator-typed address belongs to someone Polaris
+ * knows nothing about, and business rule 25 keeps their button — the page
+ * decides. When two accounts share an address (User.email is nullable and NOT
+ * unique), "can" wins: withholding the button from someone who may act is the
+ * worse error, since the page refuses the one who may not.
+ */
+export async function ackCapabilityByAddress(): Promise<Map<string, boolean>> {
+  const out = new Map<string, boolean>();
+  for (const u of await loadUserIndex()) {
+    if (!u.email?.trim()) continue;
+    const key = u.email.trim().toLowerCase();
+    out.set(key, (out.get(key) ?? false) || u.canAcknowledge);
+  }
+  return out;
+}
+
+/** One outbound variant of a composed alert email. */
+export interface AckVariant {
+  /** Does this copy carry the Acknowledge button? */
+  ack: boolean;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+}
+
+/**
+ * Split a composed email's recipient lists into the copy that carries the
+ * Acknowledge button and the copy that doesn't.
+ *
+ * A recipient whose Polaris role cannot acknowledge is mailed a button they
+ * can only be refused by, so the body goes out twice at most — never once per
+ * person (the per-recipient fan-out business rule 25 retired). An address the
+ * capability map doesn't know is treated as capable, so contacts and typed
+ * addresses keep the button exactly as before, and a message with no
+ * read-only recipient on it produces the SAME single row it always did.
+ *
+ * Two shape rules keep both copies deliverable:
+ *   - a variant that lost its whole To line still owes its Cc'd readers a
+ *     copy, so Cc is promoted into To (a Cc address is visible to everyone on
+ *     the message anyway) rather than dying on the empty-To guard;
+ *   - a variant left with only Bcc goes out as one message per address, so the
+ *     blind list stays blind.
+ *
+ * Pure — exported for the tests.
+ */
+export function splitAckVariants(
+  to: string[],
+  cc: string[],
+  bcc: string[],
+  capable: Map<string, boolean>,
+): AckVariant[] {
+  const canAck = (a: string) => capable.get(a.trim().toLowerCase()) !== false;
+  const part = (list: string[], want: boolean) => list.filter((a) => canAck(a) === want);
+  const out: AckVariant[] = [];
+  for (const ack of [true, false]) {
+    let vTo = part(to, ack);
+    let vCc = part(cc, ack);
+    const vBcc = part(bcc, ack);
+    if (vTo.length === 0 && vCc.length === 0 && vBcc.length === 0) continue;
+    if (vTo.length === 0) {
+      vTo = vCc;
+      vCc = [];
+    }
+    if (vTo.length === 0) {
+      for (const b of vBcc) out.push({ ack, to: [b], cc: [], bcc: [] });
+      continue;
+    }
+    out.push({ ack, to: vTo, cc: vCc, bcc: vBcc });
+  }
+  return out;
+}
+
 export interface ExpandDeliveriesOptions {
   /** `region:` tags mined from the RULE's scope (recipientScopeRegion routing). */
   scopeRegionTags?: string[];
@@ -540,6 +640,21 @@ export async function expandDeliveries(
     ? fillComposedAckUrl(composedEmail, ackUrlForEmail(notificationId))
     : null;
 
+  // The same body with the button taken out, for recipients whose role can't
+  // acknowledge — the identical substitution an install with no
+  // POLARIS_PUBLIC_URL already gets. Both this and the capability lookup are
+  // lazy: a send with no read-only recipient pays for neither.
+  let _composedBodyNoAck: ComposedEmail | null = null;
+  const composedBodyNoAck = (): ComposedEmail => {
+    if (!_composedBodyNoAck) _composedBodyNoAck = fillComposedAckUrl(composedEmail as ComposedEmail, null);
+    return _composedBodyNoAck;
+  };
+  let _ackCapable: Map<string, boolean> | null = null;
+  const ackCapable = async (): Promise<Map<string, boolean>> => {
+    if (!_ackCapable) _ackCapable = await ackCapabilityByAddress();
+    return _ackCapable;
+  };
+
   for (const t of targets) {
     const channel = byId.get(t.channelId);
     if (!channel || !channel.enabled || !isChannelType(channel.type)) continue;
@@ -556,20 +671,33 @@ export async function expandDeliveries(
       if (composedBody) {
         const to = Array.from(owners.keys());
         if (to.length === 0) continue; // no recipients = no send (Graph rejects empty To)
-        const { cc, bcc } = dedupeEmailRecipients(to, ccResolved, bccResolved);
-        // ONE row for the whole To list. The body carries an acknowledge link
-        // that works for whoever reads it, so there is nothing left to fan out.
-        add(channel.id, "email", to.join(", "), {
-          composed: true,
-          to,
-          cc,
-          bcc,
-          subject: composedBody.subject,
-          text: composedBody.text,
-          ...(composedBody.html ? { html: composedBody.html } : {}),
-        });
+        // ONE row for the whole To list — the body carries an acknowledge link
+        // that works for whoever reads it, so there is nothing left to fan out
+        // per person. The one thing that still splits a send is capability: a
+        // reader whose role can't acknowledge gets the same alert with no
+        // button, so this is at most TWO rows.
+        for (const v of splitAckVariants(to, ccResolved, bccResolved, await ackCapable())) {
+          const body = v.ack ? composedBody : composedBodyNoAck();
+          const { cc, bcc } = dedupeEmailRecipients(v.to, v.cc, v.bcc);
+          add(channel.id, "email", v.to.join(", "), {
+            composed: true,
+            to: v.to,
+            cc,
+            bcc,
+            subject: body.subject,
+            text: body.text,
+            ...(body.html ? { html: body.html } : {}),
+          });
+        }
       } else {
-        for (const addr of owners.keys()) add(channel.id, "email", addr);
+        // Plain (uncomposed) email is already one row per address, so the
+        // button is decided per row: `noAck` tells the drain to leave the
+        // acknowledge line off this copy.
+        const capable = await ackCapable();
+        for (const addr of owners.keys()) {
+          const denied = capable.get(addr.trim().toLowerCase()) === false;
+          add(channel.id, "email", addr, denied ? { noAck: true } : undefined);
+        }
       }
     } else if (transport === "web_push") {
       const users = await usersForTarget(t);
@@ -578,11 +706,20 @@ export async function expandDeliveries(
             where: { userId: { in: users.map((u) => u.id) } },
             // `surface` rides along so the drain can pick the right deep link
             // (mobile SPA vs desktop Automations page) without a second query.
-            select: { endpoint: true, p256dh: true, auth: true, surface: true },
+            // `userId` rides along for the same reason `noAck` does below: a
+            // push is always addressed to a known account, so the tray action
+            // can be withheld from a role that can't use it.
+            select: { userId: true, endpoint: true, p256dh: true, auth: true, surface: true },
           })
         : [];
+      const cannotAck = new Set(users.filter((u) => !u.canAcknowledge).map((u) => u.id));
       for (const s of subs) {
-        add(channel.id, "web_push", s.endpoint, { p256dh: s.p256dh, auth: s.auth, surface: s.surface });
+        add(channel.id, "web_push", s.endpoint, {
+          p256dh: s.p256dh,
+          auth: s.auth,
+          surface: s.surface,
+          ...(cannotAck.has(s.userId) ? { noAck: true } : {}),
+        });
       }
       if (subs.length === 0) {
         // Push is opt-in per browser, so a perfectly valid-looking automation

@@ -278,8 +278,9 @@ export function pruneEmptyRows(html: string): string {
 /**
  * Drop a button whose link came out empty.
  *
- * {ack} is blank for a recipient who can't acknowledge (a contact, a typed
- * address) and {asset.link} is blank on an install with no POLARIS_PUBLIC_URL.
+ * {ack} is blank for a recipient Polaris knows may not acknowledge — a
+ * read-only account, and on an install with no POLARIS_PUBLIC_URL everyone —
+ * and {asset.link} is blank without that public URL too.
  * Left alone, those render as `<a href="">` — a button that reloads whatever
  * page the reader is on, which is worse than no button. The spacer cell
  * between the two buttons goes with them when it ends up on an edge.
@@ -289,7 +290,13 @@ export function pruneDeadLinks(html: string): string {
     .replace(/<td[^>]*>\s*<a\s+href=""[^>]*>.*?<\/a>\s*<\/td>/gs, "")
     // A spacer left at the start or end of its row after the drop.
     .replace(/(<tr>)\s*<td style="width:10px">&nbsp;<\/td>/g, "$1")
-    .replace(/<td style="width:10px">&nbsp;<\/td>\s*(<\/tr>)/g, "$1");
+    .replace(/<td style="width:10px">&nbsp;<\/td>\s*(<\/tr>)/g, "$1")
+    // An operator's own template needn't wrap its button in a cell. A bare
+    // anchor with an empty href is dead wherever it sits, and since a
+    // recipient who may not acknowledge is now mailed the blanked body on
+    // purpose (business rule 25), leaving one behind means a live-looking
+    // "Acknowledge" that does nothing.
+    .replace(/<a\s+href=""[^>]*>.*?<\/a>/gs, "");
 }
 
 /**

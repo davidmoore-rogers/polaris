@@ -70,9 +70,10 @@ describe("acknowledge URL", () => {
 
 describe("fillComposedAckUrl", () => {
   // The button row as the shipped template actually builds it: the ack button,
-  // a spacer, and the Open-device button. Both details matter — a bare <a>
-  // would never match pruneDeadLinks (so the blank case would prove nothing),
-  // and a TWO-cell row is a label/value pair pruneEmptyRows drops wholesale.
+  // a spacer, and the Open-device button. Both details matter — the cell is
+  // what carries the button's styling away with it (pruneDeadLinks has a bare
+  // <a href=""> fallback for operator templates, but it leaves the cell), and
+  // a TWO-cell row is a label/value pair pruneEmptyRows drops wholesale.
   const composed = {
     subject: "Alert",
     text: "CPU high\n\nAcknowledge:      {ack}\n",
