@@ -42,6 +42,7 @@ const FN_NAMES = [
   "_getCollapsedIfaces",
   "_setCollapsedIfaces",
   "_lldpNeighborInlineCell",
+  "_treeElbow",
   "_distinctSorted",
   "_distinctVlanOptions",
   "_sizeAssetIfaceTableWrapper",
@@ -375,5 +376,91 @@ describe("a member whose parent isn't in the list", () => {
     const n = names();
     expect(n.indexOf("port23")).toBe(n.indexOf("8EF5920000001-0") + 1);
     expect(sectionLabels()[0]).toMatch(/Interfaces \(1\)/);
+  });
+});
+
+
+describe("a member port belongs to its aggregate", () => {
+  /** Render an arbitrary system-info payload instead of the shared fixture. */
+  function renderSi(si: Record<string, any>): void {
+    doc.body.innerHTML = '<div id="ifaces"></div>';
+    g._renderInterfacesTable(doc.getElementById("ifaces"), si, ASSET);
+  }
+  const pollCellOf = (name: string) => rowFor(name).querySelector(":scope > td")!;
+
+  // The elbow is what says "this row hangs off the one above". It was a lone
+  // U+2514 at half opacity and read as a stray character; the two-glyph run
+  // draws the line into the row, and the tee distinguishes a middle member
+  // from the last one without counting.
+  it("draws a tree connector on the nested row, tee then elbow", () => {
+    renderSi({
+      lastSystemInfoAt: new Date().toISOString(),
+      monitoredInterfaces: [], monitoredIpsecTunnels: [], lldpNeighbors: [], ipsecTunnels: [],
+      interfaces: [
+        { ifName: "lag1",  ifType: "aggregate", adminStatus: "up", operStatus: "up" },
+        { ifName: "port1", ifType: "physical", ifParent: "lag1", adminStatus: "up", operStatus: "up" },
+        { ifName: "port2", ifType: "physical", ifParent: "lag1", adminStatus: "up", operStatus: "up" },
+      ],
+    });
+    expect(rowFor("port1").textContent).toContain("├─");
+    expect(rowFor("port2").textContent).toContain("└─");
+    expect(rowFor("lag1").textContent).not.toContain("└─");
+  });
+
+  // A LAG is one link as far as history goes: three checkboxes answering one
+  // question is what the member boxes were.
+  it("gives the nested member no pin checkbox", () => {
+    expect(rowFor("port9").querySelector(".asset-iface-toggle")).toBeNull();
+    expect(pollCellOf("port9").getAttribute("title")).toMatch(/Member of lag1/);
+    expect(rowFor("lag1").querySelector(".asset-iface-toggle")).not.toBeNull();
+  });
+
+  // ...unless it is already pinned. Hiding THAT box would leave the pin
+  // collecting history and feeding interface triggers with nothing in the UI
+  // saying so, and no way to switch it off.
+  it("keeps the checkbox on a member that is already pinned", () => {
+    renderSi({
+      lastSystemInfoAt: new Date().toISOString(),
+      monitoredInterfaces: ["port9"], monitoredIpsecTunnels: [], lldpNeighbors: [], ipsecTunnels: [],
+      interfaces: [
+        { ifName: "lag1",  ifType: "aggregate", adminStatus: "up", operStatus: "up" },
+        { ifName: "port9", ifType: "physical", ifParent: "lag1", adminStatus: "up", operStatus: "up" },
+      ],
+    });
+    const box: any = rowFor("port9").querySelector(".asset-iface-toggle");
+    expect(box).not.toBeNull();
+    expect(box.checked).toBe(true);
+  });
+
+  // A member rendered at TOP level has no aggregate to be pinned through --
+  // the trunk is out of the ifTable because the link is down, which is exactly
+  // when the member port is the signal worth recording.
+  it("keeps the checkbox on a member whose aggregate is absent", () => {
+    renderSi({
+      lastSystemInfoAt: new Date().toISOString(),
+      monitoredInterfaces: [], monitoredIpsecTunnels: [], lldpNeighbors: [], ipsecTunnels: [],
+      interfaces: [
+        { ifName: "port23", ifType: "physical", ifParent: "8EF5920000001-0", adminStatus: "up", operStatus: "up" },
+      ],
+    });
+    expect(rowFor("port23").querySelector(".asset-iface-toggle")).not.toBeNull();
+  });
+
+  // Flat mode has no row above to hang off, so the Member badge carries the
+  // relationship -- but the pin still belongs to the aggregate.
+  it("withholds the checkbox in flat (sorted) mode too", () => {
+    sortBy("ifname");
+    expect(rowFor("port9").querySelector(".asset-iface-toggle")).toBeNull();
+  });
+
+  // Select-all iterates the rendered boxes, so a member simply is not one of
+  // them -- it must not be swept into a pin-everything.
+  it("is not pinned by select-all", async () => {
+    const all: any = doc.getElementById("iface-poll-all");
+    all.checked = true;
+    change(all);
+    await settle();
+    expect(putCalls[0].monitoredInterfaces).not.toContain("port9");
+    expect(putCalls[0].monitoredInterfaces).toContain("lag1");
   });
 });

@@ -7226,6 +7226,19 @@ function _notAvailableViaPollingHTML(label, pollingMethod, description) {
 // Orchestrator for the System-tab interfaces table (split 2026-08): the DOM
 // build (tree + rows + headers, returning the mutable pin-set state) and the
 // event wiring are separate phases; bodies extracted verbatim.
+// The tree connector on a nested row. Two characters, not one: the elbow
+// alone read as a stray glyph at the head of the name, while the elbow plus
+// its horizontal run draws the line INTO the row it belongs to. A row with
+// more siblings below it gets the tee, so the last member of an aggregate is
+// identifiable without counting. Box-drawing rather than CSS borders because
+// the cell is already mono and the glyphs survive the column-resize + sort
+// re-render that a positioned pseudo-element would have to be re-measured
+// against.
+function _treeElbow(isLast) {
+  return '<span style="color:var(--color-text-secondary);opacity:0.85;margin-right:4px;font-size:0.8rem;letter-spacing:-1px" aria-hidden="true">' +
+    (isLast === false ? "├─" : "└─") + '</span>';
+}
+
 function _renderInterfacesTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.interfaces) || [];
@@ -7391,9 +7404,22 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
 
   function buildRow(iface, opts) {
     opts = opts || {};
-    var checked  = monitored.has(iface.ifName) ? " checked" : "";
+    var isPinned = monitored.has(iface.ifName);
+    // A member port's pin lives on the aggregate it belongs to: the trunk is
+    // what an operator charts and alerts on, and offering the same control on
+    // every member turned a 2-member LAG into three boxes answering one
+    // question. The exception is a member that IS already pinned (an older
+    // pin, or one auto-monitor placed) — hiding its box would leave it
+    // collecting history and feeding interface triggers with nothing in the UI
+    // saying so, and no way to switch it off. A member rendered at TOP level
+    // (its aggregate is out of the ifTable — a downed FortiLink trunk) keeps
+    // its checkbox: during that outage the member port IS the signal.
+    var isMember = !!(opts.isChild || (opts.flat && iface.ifParent));
+    var checked  = isPinned ? " checked" : "";
     var disabled = canEdit ? "" : " disabled";
-    var checkbox = '<input type="checkbox" class="asset-iface-toggle" data-ifname="' + escapeHtml(iface.ifName) + '"' + checked + disabled + ' title="Poll this interface every minute for fast-cadence monitoring">';
+    var checkbox = (isMember && !isPinned)
+      ? ""
+      : '<input type="checkbox" class="asset-iface-toggle" data-ifname="' + escapeHtml(iface.ifName) + '"' + checked + disabled + ' title="Poll this interface every minute for fast-cadence monitoring">';
 
     var prefix = "", padStyle = "";
     if (opts.isParent) {
@@ -7403,7 +7429,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     }
     if (opts.isChild) {
       padStyle = "padding-left:1.4rem;";
-      prefix = '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>';
+      prefix = _treeElbow(opts.lastChild);
     }
     // Operator-set alias overrides ifName as the visible label when present.
     // The real ifName is preserved as a tooltip + secondary subtitle so the
@@ -7436,8 +7462,13 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     }
     var neighborCell = '<td>' + _lldpNeighborInlineCell(lldpByIf[iface.ifName] || []) + '</td>';
 
+    // An empty cell reads as a rendering fault unless it says why it is empty.
+    var pollCell = checkbox
+      ? '<td style="text-align:center;width:1%">' + checkbox + "</td>"
+      : '<td style="text-align:center;width:1%" title="Member of ' + escapeHtml(iface.ifParent || "an aggregate") + ' — pin the aggregate to record history"></td>';
+
     return "<tr" + rowAttrs + ">" +
-      '<td style="text-align:center;width:1%">' + checkbox + "</td>" +
+      pollCell +
       nameCell +
       "<td>" + statusCell(iface) + "</td>" +
       "<td>" + speed + "</td>" +
@@ -7467,9 +7498,7 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     opts = opts || {};
     var depth = opts.depth || 0;
     var pad = depth > 0 ? "padding-left:" + (1.4 * depth) + "rem;" : "";
-    var bullet = depth > 0
-      ? '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>'
-      : "";
+    var bullet = depth > 0 ? _treeElbow(opts.lastChild) : "";
     var checked  = monitoredTunnels.has(tn.tunnelName) ? " checked" : "";
     var disabled = canEdit ? "" : " disabled";
     var checkbox =
@@ -7582,14 +7611,25 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     var hasNested = kids.length > 0 || nestedTunnelsCount > 0;
     var collapseGroup = iface.ifName;
     entries.push(_ifaceEntry(iface, group, { isParent: hasNested }));
-    kids.forEach(function (child) {
-      entries.push(_ifaceEntry(child, group, { isChild: true, parentName: collapseGroup }));
-      (tunnelMap[child.ifName] || []).forEach(function (tn) {
-        entries.push(_tunnelEntry(tn, group, { collapseGroupName: collapseGroup, depth: 2 }));
+    kids.forEach(function (child, ci) {
+      // `lastChild` decides elbow vs tee. A member is last only when nothing
+      // else follows it inside this cluster — no later member, no tunnel of
+      // its own, and no tunnel hanging off the parent below it.
+      var childTunnels = tunnelMap[child.ifName] || [];
+      var lastChild = ci === kids.length - 1 && childTunnels.length === 0 && directTunnels.length === 0;
+      entries.push(_ifaceEntry(child, group, { isChild: true, parentName: collapseGroup, lastChild: lastChild }));
+      childTunnels.forEach(function (tn, ti) {
+        entries.push(_tunnelEntry(tn, group, {
+          collapseGroupName: collapseGroup, depth: 2,
+          lastChild: ti === childTunnels.length - 1,
+        }));
       });
     });
-    directTunnels.forEach(function (tn) {
-      entries.push(_tunnelEntry(tn, group, { collapseGroupName: collapseGroup, depth: 1 }));
+    directTunnels.forEach(function (tn, ti) {
+      entries.push(_tunnelEntry(tn, group, {
+        collapseGroupName: collapseGroup, depth: 1,
+        lastChild: ti === directTunnels.length - 1,
+      }));
     });
   }
 
@@ -7766,10 +7806,10 @@ function _buildInterfacesTableDOM(container, si, asset, rows, tunnelsAll) {
     ? '<th data-col-id="poe" data-sf-key="poe" data-sf-options="" title="Power over Ethernet: detection status and the negotiated power CLASS (a budget bracket, e.g. class3 = up to 12.95 W at the powered device). POWER-ETHERNET-MIB defines no per-port wattage, so no draw is shown. SNMP only.">PoE</th>'
     : "";
   container.innerHTML = staleBanner +
-    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>history</strong>. Every interface below shows its current state; only selected ones record history you can chart or alert on throughput.</p>' +
+    '<p class="hint" style="margin:0 0 0.4rem 0;font-size:0.76rem">The <strong>Poll&nbsp;1m</strong> column selects interfaces for fast-cadence polling and <strong>history</strong>. Every interface below shows its current state; only selected ones record history you can chart or alert on throughput. A member port is pinned through the aggregate it belongs to.</p>' +
     '<div class="table-wrapper table-wrapper-panel-sticky" id="asset-iface-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
       '<th title="Pin this interface for fast-cadence polling + history. Unselected interfaces still show current state here, but record no history to chart." style="width:32px" data-col-id="poll" data-col-required="true">' +
-        '<input type="checkbox" id="iface-poll-all" title="Select / de-select every listed interface and tunnel for fast-cadence polling (rows hidden by a filter keep their current setting)"' + (canEdit ? '' : ' disabled') + '>' +
+        '<input type="checkbox" id="iface-poll-all" title="Select / de-select every listed interface and tunnel for fast-cadence polling — member ports are pinned through their aggregate (rows hidden by a filter keep their current setting)"' + (canEdit ? '' : ' disabled') + '>' +
       '</th>' +
       '<th data-col-id="ifname" data-col-required="true" data-sf-key="ifname" data-sf-type="string">Interface</th>' +
       '<th data-col-id="status" data-sf-key="status" data-sf-options="">Status</th>' +
@@ -8597,11 +8637,11 @@ function _stationEndpointHTML(s) {
 }
 
 /** One client row of the tree, indented under its SSID. */
-function _wirelessStationRow(s, parentKey, hidden) {
+function _wirelessStationRow(s, parentKey, hidden, isLast) {
   var signal = (s.signalStrength != null) ? (s.signalStrength + " dBm") : "—";
   return '<tr class="wireless-child" data-parent="' + escapeHtml(parentKey) + '"' + hidden + '>' +
     '<td style="padding-left:2.8rem" class="mono">' +
-      '<span style="opacity:0.5;margin-right:3px">└</span>' + escapeHtml(s.staMacAddr) +
+      _treeElbow(isLast) + escapeHtml(s.staMacAddr) +
     '</td>' +
     '<td class="mono" style="font-size:0.75rem">' + escapeHtml(s.bssid || "—") + '</td>' +
     '<td class="mono">' + escapeHtml(s.staIpAddr || "—") + '</td>' +
@@ -8649,7 +8689,7 @@ function _wirelessRadioRow(rn, key, isCollapsed) {
 }
 
 /** One SSID row, between its radio and the clients on it. */
-function _wirelessVapRow(vn, key, hidden) {
+function _wirelessVapRow(vn, key, hidden, isLast) {
   var v = vn.vap;
   var label = v.ssid || v.vapName;
   // The VAP object name is worth showing only when it is not simply the SSID
@@ -8659,7 +8699,7 @@ function _wirelessVapRow(vn, key, hidden) {
     : "";
   return '<tr class="wireless-child" data-parent="' + escapeHtml(key) + '"' + hidden + '>' +
     '<td style="padding-left:1.4rem">' +
-      '<span style="opacity:0.5;margin-right:3px">└</span>' + escapeHtml(label) +
+      _treeElbow(isLast) + escapeHtml(label) +
       _wirelessChip(vn.stations.length + (vn.stations.length === 1 ? " client" : " clients")) + sub +
     '</td>' +
     '<td class="mono" style="font-size:0.75rem">' + escapeHtml(v.bssid || "—") + '</td>' +
@@ -8692,9 +8732,15 @@ function _renderWirelessTree(container, radios, stations, asset, si) {
           'No SSIDs reported for this radio.' +
         '</td></tr>';
     }
-    rn.vaps.forEach(function (vn) {
-      rows += _wirelessVapRow(vn, key, hidden);
-      vn.stations.forEach(function (s) { rows += _wirelessStationRow(s, key, hidden); });
+    rn.vaps.forEach(function (vn, vi) {
+      // Tee vs elbow says whether more rows follow at this level: an SSID is
+      // last only when it has no clients of its own and no sibling below it.
+      var lastVap = vi === rn.vaps.length - 1 && vn.stations.length === 0;
+      rows += _wirelessVapRow(vn, key, hidden, lastVap);
+      vn.stations.forEach(function (st, sti) {
+        rows += _wirelessStationRow(st, key, hidden,
+          sti === vn.stations.length - 1 && vi === rn.vaps.length - 1);
+      });
     });
   });
 
@@ -8706,7 +8752,9 @@ function _renderWirelessTree(container, radios, stations, asset, si) {
         _wirelessChip(tree.unplaced.length + " of " + stations.length,
           "These clients reported a BSSID or SSID no radio in the inventory is broadcasting — usually radios and stations scraped by different sources a cycle apart.") +
       '</td></tr>';
-    tree.unplaced.forEach(function (s) { rows += _wirelessStationRow(s, "unplaced", ""); });
+    tree.unplaced.forEach(function (s, i) {
+      rows += _wirelessStationRow(s, "unplaced", "", i === tree.unplaced.length - 1);
+    });
   }
 
   var staleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
@@ -21107,17 +21155,19 @@ async function _loadAssetMacTable(assetId) {
         '<span style="font-weight:400">· ' + g.entries.length + ' MAC' + (g.entries.length === 1 ? "" : "s") +
           (reads ? " · " + escapeHtml(reads) : "") + '</span>' +
         '</td></tr>';
-      return head + g.entries.map(function (e) { return entryHtml(e, g.key); }).join("");
+      return head + g.entries.map(function (e, i) {
+        return entryHtml(e, g.key, i === g.entries.length - 1);
+      }).join("");
     }
 
-    function entryHtml(e, groupKey) {
+    function entryHtml(e, groupKey, isLast) {
       var dev = e.matchedAsset
         ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
             escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
         : dash;
       return '<tr class="mactable-entry" data-group="' + escapeHtml(groupKey) + '">' +
         '<td class="mono" style="padding-left:1.4rem">' +
-          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">└</span>' +
+          _treeElbow(isLast) +
           escapeHtml(e.macAddress) +
         '</td>' +
         '<td class="mono">' + (e.vlanId != null ? e.vlanId : dash) + '</td>' +
@@ -21401,10 +21451,12 @@ async function _loadAssetArpTable(assetId, range) {
         '<span style="font-weight:400">&middot; ' + g.entries.length + ' address' +
           (g.entries.length === 1 ? "" : "es") + '</span>' +
         '</td></tr>';
-      return head + g.entries.map(function (e) { return entryHtml(e, g.key); }).join("");
+      return head + g.entries.map(function (e, i) {
+        return entryHtml(e, g.key, i === g.entries.length - 1);
+      }).join("");
     }
 
-    function entryHtml(e, groupKey) {
+    function entryHtml(e, groupKey, isLast) {
       var dev = e.matchedAsset
         ? '<a href="#" class="asset-link" data-asset-id="' + escapeHtml(e.matchedAsset.id) + '">' +
             escapeHtml(e.matchedAsset.hostname || e.matchedAsset.ipAddress || e.matchedAsset.id) + '</a>'
@@ -21412,7 +21464,7 @@ async function _loadAssetArpTable(assetId, range) {
       var age = _arpAgeLabel(e.ageSec);
       return '<tr class="arptable-entry" data-group="' + escapeHtml(groupKey) + '">' +
         '<td class="mono" style="padding-left:1.4rem">' +
-          '<span style="color:var(--color-text-secondary);opacity:0.5;margin-right:3px;font-size:0.8rem">&#9492;</span>' +
+          _treeElbow(isLast) +
           escapeHtml(e.ipAddress) +
         '</td>' +
         '<td class="mono">' + escapeHtml(e.macAddress) + '</td>' +

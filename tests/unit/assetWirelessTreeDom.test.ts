@@ -48,6 +48,7 @@ const FN_NAMES = [
   "_setCollapsedIfaces",
   "_radioBandLabel",
   "_wirelessChip",
+  "_treeElbow",
   "_radioPowerLabel",
   "_buildWirelessTree",
   "_stationEndpointHTML",
