@@ -38,6 +38,15 @@ export interface WebPushPayload {
    * it arrives, so an unentitled recipient simply gets the plain notification.
    */
   ackUrl?: string | null;
+  /**
+   * This alert's DEVICE page, or null/absent when the alert has no asset
+   * behind it (a capacity warning, a discovery failure, an alert about Polaris
+   * itself). sw.js renders an "Open device" action only when it arrives.
+   *
+   * Distinct from `url`, which is the SERVER-chosen deep link the body tap
+   * follows — the alerts list on the surface that enrolled the subscription.
+   */
+  assetUrl?: string | null;
 }
 
 export interface WebPushError extends Error {

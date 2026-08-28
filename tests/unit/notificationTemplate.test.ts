@@ -70,6 +70,10 @@ const FULL_PARTS: TemplateContextParts = {
   escalationElapsed: "1h 30m",
   repeatAttempt: 3,
   repeatElapsed: "45m",
+  // The follow-up policy the alert was RAISED under — snapshotted at fire
+  // time so a reminder describes the same automation the first email did.
+  repeatPolicy: "Reminders every 15 minutes until acknowledged.",
+  escalationPolicy: "Escalates in 30 minutes if not acknowledged.",
 };
 
 /**

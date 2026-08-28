@@ -33,7 +33,9 @@
 
 import { prisma } from "../db.js";
 import { logEvent } from "./eventLogService.js";
-import { renderNotificationTemplate } from "../utils/notificationTemplate.js";
+import { renderNotificationTemplate,
+  followUpLine,
+} from "../utils/notificationTemplate.js";
 import {
   expandDeliveries,
   buildComposedEmail,
@@ -117,6 +119,12 @@ export async function executeActions(
           assetRegionTags: exec.assetRegionTags,
           ...(action.recipientAssetContacts ? { assetContactEmails: await assetContactEmails() } : {}),
           composedEmail: composed,
+          // Push has no facts table to prune, so the two policy sentences
+          // are joined into one line and appended to the body. Both are ""
+          // on an automation that neither repeats nor escalates, and the
+          // whole option then stays undefined — a one-shot alert's push is
+          // byte-identical to what it was.
+          ...(followUpLine(ctx) ? { followUp: followUpLine(ctx) } : {}),
           escalation: exec.escalation,
           repeat: exec.repeat,
         });

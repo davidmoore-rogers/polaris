@@ -62,6 +62,7 @@ import {
   isTriggerLeaf,
   normalizeRuleToV2,
   normalizeEscalationToV2,
+  followUpPolicy,
   scopeCidrOf,
   evaluateScopeCondition,
   triggerSignature,
@@ -928,6 +929,26 @@ function readingContextParts(rule: DbRule, reading: Reading, now: Date, composit
     : trigger.type === "asset_state" ? String(trigger.value) : "";
   const valueStr = reading.value === null ? "n/a" : typeof reading.value === "number" ? round2(reading.value) : String(reading.value);
   return { ...base, metric: String(metric), value: valueStr, threshold };
+}
+
+/**
+ * The two "what happens if nobody acts" sentences, as context parts.
+ *
+ * A thin wrapper over the pure followUpPolicy so the three FIRE sites can't
+ * drift — and so the boundary stays visible: recovery (fireResolved), reset
+ * (fireReset) and the authoring preview deliberately DON'T call it. An alert
+ * that has already ended has no follow-up left to describe, and a body that
+ * still promised reminders under a green "resolved" header would be telling
+ * the reader to expect messages that will never come.
+ */
+function followUpParts(rule: DbRule, severity: string): Pick<TemplateContextParts, "repeatPolicy" | "escalationPolicy"> {
+  const p = followUpPolicy(rule, severity);
+  return { repeatPolicy: p.repeat, escalationPolicy: p.escalation };
+}
+
+/** In-place form, for the sites that mutate a parts object they already built. */
+function applyFollowUpPolicy(parts: TemplateContextParts, rule: DbRule, severity: string): void {
+  Object.assign(parts, followUpParts(rule, severity));
 }
 
 /** Render the in-app message from a built context (default string when no template). */
@@ -2047,6 +2068,10 @@ async function fire(
   const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
   const parts = readingContextParts(rule, reading, now, composite);
   parts.severity = severity; // band-resolved severity for the {severity} token
+  // What happens if nobody acts. Resolved for the BAND-RESOLVED severity
+  // above, not rule.severity, because a band declares its own escalation
+  // chain — a critical alert must not advertise the warning tier's.
+  applyFollowUpPolicy(parts, rule, severity);
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
   // State a sensor reading in the install's display unit, so the sentence
   // agrees with the chart drawn underneath it in the email.
@@ -2125,6 +2150,7 @@ async function applyBandTransition(
   const detail = ruleWantsAssetDetail(rule) && reading.assetId ? await assetDetail(reading.assetId) : null;
   const parts = readingContextParts(rule, reading, now);
   parts.severity = newSeverity;
+  applyFollowUpPolicy(parts, rule, newSeverity);
   const ctx = buildTemplateContext({ ...parts, assetDetail: detail });
   // State a sensor reading in the install's display unit, so the sentence
   // agrees with the chart drawn underneath it in the email.
@@ -2591,6 +2617,7 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
           // resourceType ("system") named nothing a reader recognizes.
           eventResource: subjectLabel || ev.resourceType || null,
         }),
+        ...followUpParts(c.rule, c.rule.severity),
       });
       const tmpl = c.rule.messageTemplate;
       const message = tmpl && tmpl.trim()

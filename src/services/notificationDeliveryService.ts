@@ -20,7 +20,7 @@
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
-import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail, ackUrlForPush } from "../utils/notificationTemplate.js";
+import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail, ackUrlForPush, assetUrlForPush } from "../utils/notificationTemplate.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor, type ChartToken, type RenderedChart } from "./alertChartService.js";
 import { buildInterfaceLldpBlocks, interfaceTokensIn, substituteInterfaceTokens } from "./alertInterfaceService.js";
 import { buildAlertBrandBlock, brandTokensIn, substituteBrandTokens, BRAND_LOGO_CID } from "./alertBrandService.js";
@@ -319,10 +319,24 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined, memo: 
         { endpoint: d.target, p256dh: String(meta.p256dh ?? ""), auth: String(meta.auth ?? "") },
         {
           title: titleFor(d.notification),
-          body: d.notification.message,
+          // The follow-up policy rides IN the body: a push has no facts
+          // table, and "will this keep bothering me / is my manager about
+          // to get this" is exactly the question a tray notification is
+          // read to answer. Absent (and the body unchanged) when the
+          // automation neither repeats nor escalates.
+          body: typeof meta.followUp === "string" && meta.followUp
+            ? `${d.notification.message}\n\n${meta.followUp}`
+            : d.notification.message,
           severity: d.notification.severity,
           url: pushDeepLinkUrl(meta.surface),
           notificationId: d.notification.id,
+          // The DEVICE page, as its own tray action. The body tap goes where
+          // the server chose (the Alerts list / the phone's alerts tab),
+          // which is the right landing for triage across several alerts but
+          // two taps from the one device this alert is about. Null — and no
+          // button — for an alert with no asset behind it: a capacity
+          // warning, a failed backup, a discovery error.
+          ...(assetUrlForPush(d.notification.assetId) ? { assetUrl: assetUrlForPush(d.notification.assetId) } : {}),
           // The alert's acknowledge page — the same URL the email carries,
           // and the page itself decides whether the person who taps it may
           // acknowledge. sw.js renders the Acknowledge action button when it

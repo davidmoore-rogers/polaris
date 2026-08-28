@@ -60,6 +60,11 @@ export const DEFAULT_ALERT_TEXT = [
   "Triggered by: {event.actor}",
   "Detail:     {event.message}",
   "Severity:   {severity}",
+  // What happens if they do nothing. Both prune away (pruneEmptyTextLines)
+  // on an automation that neither repeats nor escalates, so a one-shot alert
+  // is unchanged.
+  "Reminders:  {repeat.policy}",
+  "Escalation: {escalation.policy}",
   // {time.local} rather than {time}: the ISO-8601 form is what a machine wants,
   // and "2026-08-12T18:46:01.561Z" is also a 24-character unbreakable string
   // that wrapped mid-token in the HTML table. {time} stays catalogued for
@@ -186,6 +191,13 @@ export const DEFAULT_ALERT_HTML = [
   factRow("Detail", "{event.message}"),
   factRow("Automation", "{rule}"),
   factRow("Raised", "{time.local}"),
+  // What happens if the reader does nothing. Last in the facts table, under
+  // the automation that decided it — these describe the AUTOMATION's
+  // behaviour, not the device's, so they belong beside {rule} rather than up
+  // among the device facts. Both prune away (pruneEmptyRows) on an alert that
+  // neither repeats nor escalates, which is most of them.
+  factRow("Reminders", "{repeat.policy}"),
+  factRow("Escalation", "{escalation.policy}"),
   "</table>",
   "</td></tr>",
   // The LLDP neighbours on the interface this alert is about — a complete <tr>

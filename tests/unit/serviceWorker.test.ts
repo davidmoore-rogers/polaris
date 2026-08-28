@@ -222,6 +222,136 @@ describe("acknowledge action", () => {
   });
 });
 
+describe("ignore action", () => {
+  // There is no duration member in NotificationOptions, so a serious/critical
+  // alert stays on screen via `requireInteraction` and Windows honours that
+  // literally — the toast never auto-dismisses. Ignore is the button that
+  // clears it, and it must clear it WITHOUT meaning anything to the server.
+  it("rides along on a sticky alert, behind Acknowledge", async () => {
+    const h = makeSelf();
+    await fire(h.handlers, "push", {
+      data: { json: () => ({ title: "t", severity: "critical", ackUrl: ORIGIN + "/alert-ack.html?id=n1", notificationId: "n1" }) },
+    });
+    // Chrome drops overflow past maxActions from the END, so the action that
+    // actually does something has to be first.
+    expect(h.shown[0].options.actions).toEqual([
+      { action: "ack", title: "Acknowledge" },
+      { action: "ignore", title: "Ignore" },
+    ]);
+  });
+
+  it("is the only action when the recipient cannot acknowledge", async () => {
+    // A role below alerts:write gets no ackUrl (business rule 25). The alert is
+    // still sticky, so it still needs a way off the screen.
+    const h = makeSelf();
+    await fire(h.handlers, "push", { data: { json: () => ({ title: "t", severity: "serious" }) } });
+    expect(h.shown[0].options.actions).toEqual([{ action: "ignore", title: "Ignore" }]);
+  });
+
+  it("is NOT offered on an alert that clears itself", async () => {
+    // A transient notification goes away on the OS banner timer; a button to
+    // hurry that along is noise, and it would make the button set vary for no
+    // reason the operator can see.
+    const h = makeSelf();
+    await fire(h.handlers, "push", {
+      data: { json: () => ({ title: "t", severity: "warning", ackUrl: ORIGIN + "/alert-ack.html?id=n1" }) },
+    });
+    expect(h.shown[0].options.actions).toEqual([{ action: "ack", title: "Acknowledge" }]);
+  });
+
+  it("yields its slot to Acknowledge and Open device when both apply", async () => {
+    // Notification.maxActions is 2 and the overflow is dropped from the end,
+    // so the order in sw.js IS the priority. Ignore is last because the
+    // Windows toast already carries its own close button; the other two do
+    // something no platform affordance can.
+    const h = makeSelf();
+    await fire(h.handlers, "push", {
+      data: { json: () => ({
+        title: "t", severity: "critical", notificationId: "n1",
+        ackUrl: ORIGIN + "/alert-ack.html?id=n1",
+        assetUrl: ORIGIN + "/assets.html#view=asset:a1",
+      }) },
+    });
+    expect(h.shown[0].options.actions).toEqual([
+      { action: "ack", title: "Acknowledge" },
+      { action: "open-asset", title: "Open device" },
+    ]);
+  });
+
+  it("takes the free slot when the reader cannot acknowledge", async () => {
+    const h = makeSelf();
+    await fire(h.handlers, "push", {
+      data: { json: () => ({ title: "t", severity: "serious", assetUrl: ORIGIN + "/assets.html#view=asset:a1" }) },
+    });
+    expect(h.shown[0].options.actions).toEqual([
+      { action: "open-asset", title: "Open device" },
+      { action: "ignore", title: "Ignore" },
+    ]);
+  });
+
+  it("closes the notification and does nothing else", async () => {
+    // The bug this guards: an unrecognized action falls through to the
+    // focusOrOpen at the bottom of the handler, so a missing early return
+    // makes Ignore open the app — the opposite of ignoring.
+    const close = vi.fn();
+    const h = makeSelf({ clients: [ORIGIN + "/index.html"] });
+    await fire(h.handlers, "notificationclick", {
+      action: "ignore",
+      notification: { close, data: { url: ORIGIN + "/automations.html", ackUrl: ORIGIN + "/alert-ack.html?id=n1" } },
+    });
+    expect(close).toHaveBeenCalled();
+    expect(h.opened).toHaveLength(0);
+    expect(h.navigated).toHaveLength(0);
+    expect(h.focused).toHaveLength(0);
+    // Nothing reaches the server: a tray button has no session, so it cannot
+    // mean the alert was handled. It keeps escalating.
+    expect(h.fetches).toHaveLength(0);
+  });
+});
+
+describe("open device action", () => {
+  const ASSET = ORIGIN + "/assets.html#view=asset:a1";
+  const notif = (over?: any) => ({
+    close: vi.fn(),
+    data: { url: ORIGIN + "/automations.html", assetUrl: ASSET, notificationId: "n1", ...over },
+  });
+
+  it("opens the device page, not the server-chosen alerts deep link", async () => {
+    // The body tap still goes to the alerts list — right for triage across
+    // several alerts, two taps from the one device this alert is about.
+    const h = makeSelf({ clients: [] });
+    await fire(h.handlers, "notificationclick", { action: "open-asset", notification: notif() });
+    expect(h.opened).toEqual([ASSET]);
+  });
+
+  it("navigates an open tab rather than opening a second one", async () => {
+    const h = makeSelf({ clients: [ORIGIN + "/index.html"] });
+    await fire(h.handlers, "notificationclick", { action: "open-asset", notification: notif() });
+    expect(h.opened).toHaveLength(0);
+    expect(h.navigated).toEqual([{ from: ORIGIN + "/index.html", to: ASSET }]);
+  });
+
+  it("falls back to the deep link rather than navigating off-origin", async () => {
+    const h = makeSelf({ clients: [] });
+    await fire(h.handlers, "notificationclick", {
+      action: "open-asset",
+      notification: notif({ assetUrl: "https://evil.example.net/assets.html#view=asset:a1" }),
+    });
+    expect(h.opened).toEqual([ORIGIN + "/automations.html"]);
+  });
+
+  it("is absent on an alert with no device behind it", async () => {
+    // A capacity warning, a failed backup, a discovery error: the server sends
+    // no assetUrl and the button must not point at #view=asset:undefined.
+    const h = makeSelf();
+    await fire(h.handlers, "push", { data: { json: () => ({ title: "t", severity: "critical", ackUrl: ORIGIN + "/alert-ack.html?id=n1" }) } });
+    expect(h.shown[0].options.actions).toEqual([
+      { action: "ack", title: "Acknowledge" },
+      { action: "ignore", title: "Ignore" },
+    ]);
+  });
+});
+
 describe("pushsubscriptionchange", () => {
   const newSub = (endpoint: string) => ({
     endpoint,

@@ -24,6 +24,38 @@
  * iOS/Safari, where the option is simply ignored and the body tap behaves as
  * it always has.
  *
+ * OPEN DEVICE BUTTON. When the payload carries `assetUrl` — this alert's own
+ * device page — the notification grows an "Open device" action. It is NOT the
+ * same destination as the body tap: that follows the server-chosen `url`, the
+ * alerts list on whichever surface enrolled this subscription, which is the
+ * right landing when several alerts are firing and the wrong one when you
+ * want the box this alert is about. An alert with no asset behind it (a
+ * capacity warning, a failed backup, a discovery error) carries no assetUrl
+ * and gets no button.
+ *
+ * TWO SLOTS, THREE CANDIDATES. Notification.maxActions is 2 on every browser
+ * that renders actions at all, and the overflow is dropped from the END, so
+ * ACTIONS is listed in priority order and sliced: Acknowledge (the only one
+ * that changes state and stops escalation), then Open device, then Ignore.
+ * Ignore therefore appears when a slot is free — a reader whose role can't
+ * acknowledge, or an alert with no device — and otherwise yields to the two
+ * that do something the toast's own close button can't.
+ *
+ * IGNORE BUTTON. A serious/critical alert sets `requireInteraction`, which is
+ * the platform's only way to say "leave this up until it's dealt with" — there
+ * is no duration member in NotificationOptions. On Windows that lands as a
+ * toast with no auto-dismiss, so those alerts grow an "Ignore" action that
+ * closes the notification and does nothing else. It is offered ONLY on the
+ * sticky ones: a transient notification already clears itself on the OS
+ * banner timer (Settings > Accessibility > Visual effects), and a button to
+ * hurry that along is noise.
+ *
+ * Ignore is deliberately LOCAL — it sends nothing. A tray button carries no
+ * session, so it cannot mean "seen" or "handled" to the server; the alert
+ * stays open in Polaris and keeps escalating exactly as if the push had never
+ * been read. Acknowledging is what changes state, and that happens on the
+ * page (business rule 25).
+ *
  * NO FETCH HANDLER, deliberately. Polaris is an online-only tool: there is no
  * offline caching, no precache, no cache versioning to keep in step with
  * deploys. Do not add one without a deliberate decision — it changes this from
@@ -65,6 +97,7 @@ self.addEventListener("push", function (event) {
       // anyone who received the push.
       url: data.url || DEFAULT_URL,
       ackUrl: data.ackUrl || null,
+      assetUrl: data.assetUrl || null,
       notificationId: data.notificationId || null,
     },
     // Branded icon rendered from the operator's logo by appIconService. The
@@ -82,7 +115,17 @@ self.addEventListener("push", function (event) {
   // unsupported NotificationOptions member is dropped, not an error, so
   // iOS/Safari (which renders no action buttons at all) simply shows the plain
   // notification and the body tap keeps working.
-  if (data.ackUrl) options.actions = [{ action: "ack", title: "Acknowledge" }];
+  //
+  // ORDER IS THE PRIORITY — see the header. The slice is explicit rather than
+  // left to the platform: the drop-from-the-end behaviour is what makes this
+  // order correct, and a reader of this file should not have to know that to
+  // see why Ignore is last.
+  var actions = [];
+  if (data.ackUrl) actions.push({ action: "ack", title: "Acknowledge" });
+  if (data.assetUrl) actions.push({ action: "open-asset", title: "Open device" });
+  if (options.requireInteraction) actions.push({ action: "ignore", title: "Ignore" });
+  var maxActions = (self.Notification && self.Notification.maxActions) || 2;
+  if (actions.length) options.actions = actions.slice(0, maxActions);
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
@@ -90,23 +133,53 @@ self.addEventListener("notificationclick", function (event) {
   var d = event.notification.data || {};
   var url = d.url || DEFAULT_URL;
   event.notification.close();
+  // Dismissal only. The close() above IS the whole action — no navigation, no
+  // request, and an early return because the fallback at the bottom of this
+  // handler would otherwise open the app, which is the opposite of ignoring.
+  if (event.action === "ignore") return;
   // Exactly one waitUntil per invocation, taken before the first await, so the
   // worker stays alive for the whole chain.
+  if (event.action === "open-asset" && d.assetUrl) {
+    // Same-origin only, for the reason the ack branch is: a foreign host in a
+    // payload must never become a window this worker opened. A rejected URL
+    // falls back to the ordinary deep link rather than doing nothing, so the
+    // tap still lands somewhere useful.
+    event.waitUntil(focusOrOpen(sameOriginOr(d.assetUrl, url)));
+    return;
+  }
   if (event.action === "ack" && d.ackUrl) {
     // Same-origin only. The push is VAPID-signed, but resolving the URL costs
     // nothing and keeps this worker from ever navigating a window to a foreign
     // host. `src=push` is audit provenance the page forwards on acknowledge.
-    var ack = new URL(d.ackUrl, self.location.origin);
-    if (ack.origin !== self.location.origin) {
+    var ack = sameOriginOr(d.ackUrl, null);
+    if (!ack) {
       event.waitUntil(focusOrOpen(url));
       return;
     }
-    ack.searchParams.set("src", "push");
-    event.waitUntil(focusOrOpen(ack.href));
+    var acked = new URL(ack, self.location.origin);
+    acked.searchParams.set("src", "push");
+    event.waitUntil(focusOrOpen(acked.href));
     return;
   }
   event.waitUntil(focusOrOpen(url));
 });
+
+/**
+ * `candidate` when it resolves to THIS origin, else `fallback`.
+ *
+ * One helper for both action branches: the payload is VAPID-signed, so a
+ * foreign URL in it would already mean the server was compromised — but
+ * resolving costs nothing, and the property worth keeping is that no code
+ * path in this worker can navigate a window off-origin.
+ */
+function sameOriginOr(candidate, fallback) {
+  try {
+    var u = new URL(candidate, self.location.origin);
+    return u.origin === self.location.origin ? u.href : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
 
 function focusOrOpen(url) {
   return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (clientList) {

@@ -529,6 +529,18 @@ export interface ExpandDeliveriesOptions {
    *  close an import cycle. */
   assetContactEmails?: string[];
   composedEmail?: ComposedEmail;
+  /**
+   * "Reminders every 15 minutes until acknowledged. Escalates in 30 minutes…"
+   * — the follow-up policy as one line, appended to the WEB PUSH body.
+   *
+   * Stamped onto the delivery row's meta here rather than read from
+   * Notification.templateCtx at drain time, because the drain's select is
+   * shared by every transport: pulling a JSON blob onto 200 rows every 15
+   * seconds to serve one transport is the wrong trade. Email needs nothing —
+   * its body is already composed, with these tokens substituted, by the time
+   * it reaches this function.
+   */
+  followUp?: string;
   /** Escalation provenance (tier/attempt) — stamped into every row's meta so
    *  the View tab's "Escalated" marker and audits can attribute the send. */
   escalation?: { tier: number; attempt: number };
@@ -543,7 +555,7 @@ export async function expandDeliveries(
   targets: DeliveryTarget[] | undefined,
   opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
-  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat } = opts;
+  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat, followUp } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -719,6 +731,7 @@ export async function expandDeliveries(
           auth: s.auth,
           surface: s.surface,
           ...(cannotAck.has(s.userId) ? { noAck: true } : {}),
+          ...(followUp ? { followUp } : {}),
         });
       }
       if (subs.length === 0) {

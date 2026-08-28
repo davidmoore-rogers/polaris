@@ -90,6 +90,8 @@ export const TEMPLATE_VARIABLES: TemplateVariable[] = [
   { token: "{escalation.elapsed}", label: "Escalation elapsed", description: "Time since the notification fired (e.g. 1h 30m)", group: "escalation" },
   { token: "{repeat.attempt}", label: "Reminder number", description: "Which reminder this is (empty on the initial notification)", group: "escalation" },
   { token: "{repeat.elapsed}", label: "Reminder elapsed", description: "Time since the alert fired, on a reminder (e.g. 1h 30m)", group: "escalation" },
+  { token: "{repeat.policy}", label: "Reminder policy", description: "Whether this alert will keep reminding, in words — e.g. \"Reminders every 15 minutes until acknowledged.\" Empty (and its row prunes away) when the automation doesn't repeat", group: "escalation" },
+  { token: "{escalation.policy}", label: "Escalation policy", description: "Whether this alert goes over the reader's head if they leave it — e.g. \"Escalates in 30 minutes if not acknowledged.\" Empty when the automation has no escalation at the severity it fired at", group: "escalation" },
 ];
 
 /** Escape a string for safe embedding in HTML text/attribute content. */
@@ -151,6 +153,15 @@ export interface TemplateContextParts {
   ruleDescription?: string | null;
   /** "Response time (median over 5 minutes) is 760 ms" — utils/triggerSummary. */
   triggerSummary?: string;
+  /**
+   * What happens if nobody acts — the two sentences from
+   * notificationTypes.followUpPolicy, resolved for the severity this alert
+   * FIRED at. Supplied only on a fire (and a band change); deliberately absent
+   * on a recovery or a reset, where an alert that is already over has no
+   * follow-up left to describe.
+   */
+  repeatPolicy?: string;
+  escalationPolicy?: string;
   /**
    * Event-path alerts: the source Event's own identity. Most event automations
    * fire on things that are NOT assets (an integration, a user, the host),
@@ -277,6 +288,12 @@ export function buildTemplateContext(parts: TemplateContextParts): Record<string
     // email if these keys were absent. The sweep's repeat pass supplies them.
     "repeat.attempt": parts.repeatAttempt !== undefined ? String(parts.repeatAttempt) : "",
     "repeat.elapsed": str(parts.repeatElapsed),
+    // Present-but-empty everywhere they don't apply, for the same reason the
+    // four above are: the renderer leaves an UNKNOWN token in place, so a
+    // body printing {repeat.policy} on a non-repeating alert would show the
+    // literal braces if the key were absent instead of blank.
+    "repeat.policy": str(parts.repeatPolicy),
+    "escalation.policy": str(parts.escalationPolicy),
   };
 }
 
@@ -393,7 +410,7 @@ export function notificationsPageUrl(): string | null {
 export function assetPageUrl(assetId: string | null | undefined): string | null {
   const base = process.env.POLARIS_PUBLIC_URL;
   if (!base || !assetId) return null;
-  return `${base.replace(/\/$/, "")}/assets.html#view=asset:${encodeURIComponent(assetId)}`;
+  return `${base.replace(/\/$/, "")}${assetPath(assetId)}`;
 }
 
 /** The acknowledge page's path for ONE alert. Shared by both callers below. */
@@ -427,6 +444,42 @@ export function ackUrlForEmail(notificationId: string): string | null {
 export function ackUrlForPush(notificationId: string): string {
   const base = process.env.POLARIS_PUBLIC_URL;
   const path = ackPath(notificationId);
+  return base ? `${base.replace(/\/$/, "")}${path}` : path;
+}
+
+/**
+ * The two follow-up policy sentences as ONE line, for surfaces with no facts
+ * table to prune — a push body, a chat message.
+ *
+ * Reads the rendered context rather than the rule, so it cannot disagree with
+ * what the email said about the same alert: both are the strings the engine
+ * snapshotted at fire time. Returns "" when the automation neither repeats nor
+ * escalates, which is the signal to leave the body exactly as it was.
+ */
+export function followUpLine(ctx: Record<string, string>): string {
+  return [ctx["repeat.policy"], ctx["escalation.policy"]].filter((s) => s && s.trim()).join(" ");
+}
+
+/** The device page's path for ONE asset. Shared by both callers. */
+function assetPath(assetId: string): string {
+  return `/assets.html#view=asset:${encodeURIComponent(assetId)}`;
+}
+
+/**
+ * The device page for a WEB PUSH payload — the `assetPageUrl` sibling of
+ * `ackUrlForPush`, and null for the same reason that one is never null is not
+ * available here: an alert about Polaris itself, an integration or a user has
+ * no asset, and the tray button has to disappear rather than point at
+ * `#view=asset:undefined`. When there IS an asset it falls back to a relative
+ * path (which the service worker resolves against its own origin) so the
+ * button works on installs that never set a public URL — exactly the reason
+ * assetPageUrl, whose callers embed it in EMAIL and therefore need an
+ * absolute one, returns null in that case instead.
+ */
+export function assetUrlForPush(assetId: string | null | undefined): string | null {
+  if (!assetId) return null;
+  const base = process.env.POLARIS_PUBLIC_URL;
+  const path = assetPath(assetId);
   return base ? `${base.replace(/\/$/, "")}${path}` : path;
 }
 

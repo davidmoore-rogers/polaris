@@ -2638,6 +2638,95 @@ export function escalationChainsForSeverity(
   return chains;
 }
 
+// ─── Follow-up policy (what happens if nobody acts) ─────────────────────────
+
+/**
+ * What an alert's own notification should tell its reader about what happens
+ * NEXT — whether it will keep reminding them, and whether it will go over
+ * their head if they leave it.
+ *
+ * WHY THIS IS IN THE ALERT AT ALL. Repeat and escalation are the two settings
+ * that change what IGNORING an alert costs, and until now they were visible
+ * only to whoever edited the automation. The person holding the phone at
+ * 3am is usually not that person, and the two questions they actually have —
+ * "will this stop bothering me on its own?" and "is my manager about to get
+ * this?" — had no answer anywhere in the message. Both change what a
+ * reasonable reader does next, which is what earns them a line in the body.
+ *
+ * SEVERITY-RESOLVED, not rule-level. A banded alert's escalation is the
+ * band's when the band declares one (escalationChainsForSeverity), so the
+ * sentence has to be built for the severity the alert actually fired at or a
+ * critical alert would advertise the warning tier's chain.
+ *
+ * SNAPSHOT, not a live read. These strings are built at fire time into
+ * Notification.templateCtx alongside every other token, so a reminder or an
+ * escalation of the same alert re-renders the policy the alert was RAISED
+ * under. An operator who edits the automation mid-incident changes what
+ * happens next but not what the already-sent messages claimed — which is the
+ * honest reading of an email that has already left.
+ *
+ * Both are "" when not configured, so the default bodies' rows prune away
+ * (pruneEmptyRows / pruneEmptyTextLines) and an alert with no follow-up says
+ * nothing rather than saying "none".
+ */
+export interface FollowUpPolicy {
+  /** e.g. "Reminders every 15 minutes until acknowledged." */
+  repeat: string;
+  /** e.g. "Escalates in 30 minutes if not acknowledged." */
+  escalation: string;
+}
+
+/** "1 minute" / "15 minutes" / "2 hours" — whole hours read as hours because
+ *  an escalation set at 120 minutes was configured as two hours. */
+function humanMinutes(min: number): string {
+  if (min >= 60 && min % 60 === 0) {
+    const h = min / 60;
+    return h === 1 ? "1 hour" : `${h} hours`;
+  }
+  return min === 1 ? "1 minute" : `${min} minutes`;
+}
+
+/** "acknowledged" / "cleared" — the word the operator picked in the builder. */
+const stopWord = (stopOn: string): string => (stopOn === "clear" ? "cleared" : "acknowledged");
+
+export function followUpPolicy(
+  rule: RuleActionCarrier & { severity: string; repeat?: RepeatConfig | null },
+  severity: string,
+): FollowUpPolicy {
+  let repeat = "";
+  const r = rule.repeat;
+  if (r && r.everyMin > 0) {
+    // The cut-off is stated because it is the difference between "this will
+    // chase you until you deal with it" and "this goes quiet at 8 hours",
+    // and a reader planning their night needs the second one.
+    repeat = `Reminders every ${humanMinutes(r.everyMin)} until ${stopWord(r.stopOn)}` +
+      (r.stopAfterHours ? `, for up to ${r.stopAfterHours === 1 ? "1 hour" : `${r.stopAfterHours} hours`}.` : ".");
+  }
+
+  // EARLIEST first tier across every chain that applies — rule-level, band-level
+  // and per-action chains all run independently, so the honest answer to "when
+  // does this go over my head" is whichever fires first, not the rule-level
+  // one. Tiers within a chain are not ordered by the schema, hence the min.
+  let escalation = "";
+  const chains = escalationChainsForSeverity(rule, severity);
+  if (chains.length > 0) {
+    let firstMin = Infinity;
+    let stopOn = "acknowledge";
+    let steps = 0;
+    for (const c of chains) {
+      steps += c.escalation.tiers.length;
+      for (const t of c.escalation.tiers) {
+        if (t.afterMin < firstMin) { firstMin = t.afterMin; stopOn = c.escalation.stopOn; }
+      }
+    }
+    if (Number.isFinite(firstMin)) {
+      escalation = `Escalates in ${humanMinutes(firstMin)} if not ${stopWord(stopOn)}` +
+        (steps > 1 ? `, then through ${steps - 1} more step${steps - 1 === 1 ? "" : "s"}.` : ".");
+    }
+  }
+  return { repeat, escalation };
+}
+
 /** Trigger categories that select assets via `scope` (vs. event/host).
  *  Composite triggers are scoped iff kind="asset" — use isAssetScopedTrigger. */
 export const ASSET_SCOPED_TRIGGER_TYPES = ["asset_metric", "asset_state", "change"] as const;
