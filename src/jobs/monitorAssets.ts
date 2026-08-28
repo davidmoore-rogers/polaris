@@ -141,6 +141,8 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       lastProcessesAt: true, lastProcessPinsAt: true, processesIntervalSec: true,
       processesPolling: true,
       monitoredProcesses: true, mappedProcesses: true,
+      // Agentless event-log cadence due-calc inputs.
+      lastEventLogAt: true, eventLogPolling: true,
       probeTimeoutMs: true,
       responseTimePolling: true,
       cpuMemoryPolling:    true,
@@ -303,6 +305,16 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
         await publishMonitorJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
       }
     }
+    // Agentless event-log cadence (ssh/winrm), same shape and the same isUp
+    // gate as processes above. runEventLogFor re-checks the global
+    // agentEventLog master switch and stamps its anchor even on failure, so a
+    // bad credential can't re-queue every tick. Keep in sync with
+    // computeDueWork.
+    if (isUp && enabled.has("eventLog") &&
+        (eff.eventLogPolling === "ssh" || eff.eventLogPolling === "winrm") &&
+        isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
+      await publishMonitorJob("eventLog", a.id, { transport: eff.eventLogPolling, assetType, verboseDebug });
+    }
     // ICMP packet-loss sampler: 10s side-probe while the state machine is
     // mid-run (warning / recovering only — utils/lossSampler.ts explains why
     // `down` is excluded: an uncorroborated ICMP reply could be a squatter on
@@ -361,12 +373,13 @@ async function heavyTick(): Promise<void> {
         // ["telemetry", "systemInfo"] set for those two — the cursor pass
         // doesn't drive the LLDP/Storage queues (pg-boss-only); the existing
         // systemInfo walk picks up LLDP + Storage as session-coalesced side
-        // effects on cursor installs. The agentless "processes" cadence has NO
-        // side effect to ride, so it dispatches explicitly in BOTH modes.
-        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage", "processes"]);
+        // effects on cursor installs. The agentless "processes" and "eventLog"
+        // cadences have NO side effect to ride, so they dispatch explicitly in
+        // BOTH modes.
+        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage", "processes", "eventLog"]);
       } else {
         const stats = await runMonitorPass({
-          cadences: ["telemetry", "systemInfo", "processes"],
+          cadences: ["telemetry", "systemInfo", "processes", "eventLog"],
           concurrency: HEAVY_CONCURRENCY,
         });
         if (stats.telemetry.collected > 0 || stats.systemInfo.collected > 0 || stats.processes.collected > 0) {

@@ -163,10 +163,12 @@ function _collectorExists(source, stream, klass) {
     if (method === "agent") return stream !== "lldp";
     if (method === "ssh" || method === "winrm") {
       // agentlessProcessService (processes) + agentlessHostService (cpuMemory /
-      // interfaces / storage). Temperature has no dependable Windows source and
-      // LLDP has none at all over a shell, so both stay agent/SNMP-only.
+      // interfaces / storage / eventLog). Temperature has no dependable Windows
+      // source and LLDP has none at all over a shell, so both stay
+      // agent/SNMP-only.
       return stream === "responseTime" || stream === "processes" ||
-             stream === "cpuMemory" || stream === "interfaces" || stream === "storage";
+             stream === "cpuMemory" || stream === "interfaces" ||
+             stream === "storage" || stream === "eventLog";
     }
     if (method === "snmp") {
       // hrSWRunTable is declared-but-unimplemented; there is no event-log MIB.

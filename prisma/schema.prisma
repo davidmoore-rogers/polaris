@@ -940,6 +940,13 @@ model Asset {
   // can't retrigger every heavy tick (AD-lockout / fail2ban exposure).
   lastProcessesAt         DateTime?
   lastProcessPinsAt       DateTime?
+  // Agentless (ssh/winrm) event-log cadence anchor. Same model and the same
+  // stamped-even-on-failure rule as lastProcessesAt — an agentless stream that
+  // re-fires on every tick against a bad credential is an AD-lockout risk, and
+  // the event log is the one stream where a retry storm also floods the audit
+  // table it writes into. Agent-mode assets never use it (the agent runs its
+  // own loop and pushes to POST /agents/samples).
+  lastEventLogAt          DateTime?
   // Bumped after every successful collectCustomWidgets pass.
   lastCustomWidgetAt      DateTime?
 

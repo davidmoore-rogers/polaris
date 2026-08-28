@@ -333,6 +333,155 @@ export function parseWindowsStorage(stdout: string): AgentlessMount[] {
   return out;
 }
 
+// ─── Event log ───────────────────────────────────────────────────────────────
+//
+// Feeds the SAME sink the agent's eventLog stream uses — `ingestOsEventLog`,
+// which curates entries into the audit Event table and already applies the
+// min-level filter, dedupe, per-push cap and per-asset hourly rate cap. So the
+// only job here is to produce entries in that shape.
+//
+// `sinceMinutes` bounds the window rather than the row count: an hourly poll
+// that asked for "the last 500 entries" would either miss a burst or re-ingest
+// the same quiet hour repeatedly. `maxEntries` is the safety cap on top.
+
+export interface AgentlessEventLogEntry {
+  timestamp: string | null;
+  channel: string;
+  provider: string | null;
+  eventId: number | null;
+  /** Normalized to the sink's vocabulary: critical | error | warning | info. */
+  level: string;
+  message: string;
+}
+
+/** journalctl priorities: 0 emerg … 7 debug. Collapsed to the sink's four. */
+export function journalPriorityToLevel(p: unknown): string {
+  const n = typeof p === "number" ? p : Number(p);
+  if (!Number.isFinite(n)) return "info";
+  if (n <= 2) return "critical";  // emerg / alert / crit
+  if (n === 3) return "error";
+  if (n === 4) return "warning";
+  return "info";
+}
+
+/**
+ * `journalctl -o json` emits ONE JSON OBJECT PER LINE, not a JSON array — so
+ * this parses line-by-line. A malformed line is skipped rather than failing the
+ * batch; journald can emit binary-ish fields for some units.
+ */
+export function parseJournalctl(stdout: string, maxEntries: number): AgentlessEventLogEntry[] {
+  const out: AgentlessEventLogEntry[] = [];
+  for (const line of stdout.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let o: Record<string, unknown>;
+    try { o = JSON.parse(t) as Record<string, unknown>; } catch { continue; }
+    const message = typeof o.MESSAGE === "string" ? o.MESSAGE : "";
+    if (!message) continue;
+    // __REALTIME_TIMESTAMP is microseconds since epoch, as a STRING.
+    let timestamp: string | null = null;
+    const us = Number(o.__REALTIME_TIMESTAMP);
+    if (Number.isFinite(us) && us > 0) timestamp = new Date(us / 1000).toISOString();
+    out.push({
+      timestamp,
+      channel: typeof o.SYSLOG_IDENTIFIER === "string" && o.SYSLOG_IDENTIFIER ? o.SYSLOG_IDENTIFIER : "journal",
+      provider: typeof o._SYSTEMD_UNIT === "string" ? o._SYSTEMD_UNIT : null,
+      eventId: null,
+      level: journalPriorityToLevel(o.PRIORITY),
+      message,
+    });
+    if (out.length >= maxEntries) break;
+  }
+  return out;
+}
+
+/** Get-WinEvent Level: 1 critical, 2 error, 3 warning, 4 info, 5 verbose. */
+export function winEventLevelToLevel(l: unknown): string {
+  const n = typeof l === "number" ? l : Number(l);
+  if (!Number.isFinite(n)) return "info";
+  if (n === 1) return "critical";
+  if (n === 2) return "error";
+  if (n === 3) return "warning";
+  return "info";
+}
+
+export function parseWindowsEventLog(stdout: string, maxEntries: number): AgentlessEventLogEntry[] {
+  const parsed = safeJson(stdout);
+  const arr = Array.isArray(parsed) ? parsed : parsed != null ? [parsed] : [];
+  const out: AgentlessEventLogEntry[] = [];
+  for (const row of arr) {
+    const r = row as Record<string, unknown>;
+    const message = typeof r.msg === "string" ? r.msg : "";
+    if (!message) continue;
+    out.push({
+      timestamp: typeof r.t === "string" ? r.t : null,
+      channel: typeof r.ch === "string" && r.ch ? r.ch : "Application",
+      provider: typeof r.prov === "string" ? r.prov : null,
+      eventId: num(r.id),
+      level: winEventLevelToLevel(r.lvl),
+      message,
+    });
+    if (out.length >= maxEntries) break;
+  }
+  return out;
+}
+
+/**
+ * Only warning-and-above, and only within the window. Everything below that is
+ * volume without signal, and the sink writes into the audit table that the
+ * syslog / SFTP archivers ship off-host — so over-collecting here is not merely
+ * noisy, it is someone else's disk.
+ */
+export function buildJournalctlCommand(sinceMinutes: number, maxEntries: number): string {
+  const mins = Math.max(1, Math.floor(sinceMinutes));
+  const n = Math.max(1, Math.floor(maxEntries));
+  return `LC_ALL=C journalctl --no-pager -o json -p warning --since "-${mins}min" -n ${n} 2>/dev/null`;
+}
+
+export function buildWindowsEventLogScript(sinceMinutes: number, maxEntries: number): string {
+  const mins = Math.max(1, Math.floor(sinceMinutes));
+  const n = Math.max(1, Math.floor(maxEntries));
+  return [
+    "$ErrorActionPreference='SilentlyContinue'",
+    `$since=(Get-Date).AddMinutes(-${mins})`,
+    // Level 1-3 = critical/error/warning. -ErrorAction keeps an empty channel
+    // (no matching events) from writing to stderr and looking like a failure.
+    "$f=@{LogName=@('System','Application');Level=@(1,2,3);StartTime=$since}",
+    `@(Get-WinEvent -FilterHashtable $f -MaxEvents ${n} -ErrorAction SilentlyContinue|%{[pscustomobject]@{` +
+      "t=$_.TimeCreated.ToUniversalTime().ToString('o');ch=$_.LogName;prov=$_.ProviderName;" +
+      "id=$_.Id;lvl=$_.Level;msg=$_.Message}})|ConvertTo-Json -Depth 3 -Compress",
+  ].join(";");
+}
+
+export interface AgentlessEventLogOpts {
+  sinceMinutes: number;
+  maxEntries: number;
+  timeoutMs: number;
+}
+
+export async function collectEventLogSsh(
+  host: string,
+  credConfig: Record<string, unknown>,
+  opts: AgentlessEventLogOpts,
+): Promise<AgentlessEventLogEntry[] | undefined> {
+  return withSshClient(host, credConfig, async (client) => {
+    const r = await sshExec(client, buildJournalctlCommand(opts.sinceMinutes, opts.maxEntries), opts.timeoutMs);
+    // journalctl exits 1 when the window matched nothing — a successful empty
+    // scrape, not a failure.
+    if (r.exitCode !== 0 && r.exitCode !== 1 && !r.stdout.trim()) return undefined;
+    return parseJournalctl(r.stdout, opts.maxEntries);
+  });
+}
+
+export async function collectEventLogWinrm(
+  conn: WinRmConnection,
+  opts: AgentlessEventLogOpts,
+): Promise<AgentlessEventLogEntry[] | undefined> {
+  const r = await winrmRunPowershell(conn, buildWindowsEventLogScript(opts.sinceMinutes, opts.maxEntries));
+  if (r.exitCode !== 0 && !r.stdout.trim()) return undefined;
+  return parseWindowsEventLog(r.stdout, opts.maxEntries);
+}
+
 // ─── Transports ──────────────────────────────────────────────────────────────
 
 /**

@@ -57,7 +57,11 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 // NOTE: agentlessProcessService imports back from this module with
 // `import type` only, so this pair can't cycle at runtime.
 import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
-import { collectHostSsh, collectHostWinrm } from "./agentlessHostService.js";
+import {
+  collectHostSsh, collectHostWinrm, collectEventLogSsh, collectEventLogWinrm,
+  type AgentlessEventLogEntry,
+} from "./agentlessHostService.js";
+import { ingestOsEventLog, getAgentEventLogConfig } from "./osEventLogService.js";
 import type { WinRmConnection } from "../utils/winrm.js";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
@@ -10995,11 +10999,20 @@ interface RunStats {
   fastFiltered: { collected: number; failed: number };
   /** Agentless (ssh/winrm) processes cadence — cursor mode only. */
   processes:    { collected: number; failed: number };
+  /** Agentless (ssh/winrm) OS event-log cadence — cursor mode only. */
+  eventLog:     { collected: number; failed: number };
   /** ICMP packet-loss sampler (warning/recovering assets only). */
   lossSample:   { collected: number; failed: number };
 }
 
-export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "lossSample";
+/**
+ * Per-poll cap on agentless event-log entries. The sink applies its own
+ * per-push and per-asset-hourly caps on top; this one bounds the SSH/WinRM
+ * payload and the parse, before any of that runs.
+ */
+const EVENT_LOG_MAX_ENTRIES_PER_POLL = 300;
+
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "eventLog" | "lossSample";
 
 /**
  * Per-cadence outcome tally returned by the runFooFor() functions. Used by
@@ -11739,6 +11752,116 @@ const PROCESS_PINS_INTERVAL_SEC = 60;
  * heavy tick (AD-lockout / fail2ban exposure). Failures are metrics + debug
  * log only — no Event spam.
  */
+/**
+ * Agentless OS event-log cadence (ssh / winrm).
+ *
+ * Feeds the SAME sink the agent's eventLog stream uses — `ingestOsEventLog`,
+ * which curates entries into the audit Event table and already applies the
+ * min-level filter, dedupe, per-push cap and per-asset hourly rate cap. So the
+ * only new work is collecting entries in that shape and honouring the global
+ * `agentEventLog` master switch, which gates BOTH paths: an operator who turned
+ * the feature off must not have an agentless poller keep filling the audit log.
+ *
+ * The collection window is derived from the stream's own interval rather than a
+ * fixed row count. A poll that asked for "the last N entries" would either miss
+ * a burst or re-ingest the same quiet hour repeatedly; asking for "everything
+ * since a bit longer ago than my last run" is the shape that neither drops nor
+ * duplicates. The overlap is deliberate and cheap — the sink dedupes.
+ *
+ * `lastEventLogAt` is stamped **even on failure**, exactly as
+ * `runProcessesFor` stamps its anchors: an agentless stream that re-fires every
+ * tick against a bad credential is an AD-lockout risk, and this is the one
+ * stream where a retry storm would also flood the table it writes into.
+ */
+export async function runEventLogFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("eventLog", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: { monitorCredential: true, eventLogCredential: true, discoveredByIntegration: true },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const method = effective.eventLogPolling;
+    if (method !== "ssh" && method !== "winrm") {
+      // agent-mode assets self-collect; no other transport delivers this.
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+
+    // Master switch first — before any anchor write or network call, so a
+    // disabled feature costs nothing per tick.
+    const cfg = await getAgentEventLogConfig();
+    if (!cfg.enabled) {
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+
+    // Stamp the anchor up front so every exit below — success, failure, throw —
+    // leaves the cadence spaced. See the header.
+    const stampAnchor = () =>
+      prisma.asset.update({ where: { id: assetId }, data: { lastEventLogAt: new Date() } }).catch(() => {});
+
+    const targetIp = asset.ipAddress || asset.dnsName || asset.hostname;
+    if (!targetIp) {
+      await stampAnchor();
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+
+    const cred = await resolveAgentlessCredConfig(
+      asset.eventLogCredential ?? asset.monitorCredential,
+      effective.eventLogCredentialId,
+      method,
+      asset.discoveredByIntegration ?? null,
+    );
+    if (!cred) {
+      await stampAnchor();
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+
+    const intervalSec = effective.eventLogIntervalSeconds ?? 600;
+    // 1.5× the interval: enough overlap that a slow tick cannot open a hole,
+    // small enough that the duplicate load stays trivial. The sink dedupes.
+    const sinceMinutes = Math.max(1, Math.ceil((intervalSec * 1.5) / 60));
+    const opts = { sinceMinutes, maxEntries: EVENT_LOG_MAX_ENTRIES_PER_POLL, timeoutMs: Math.max(effective.eventLogTimeoutMs ?? 15_000, 30_000) };
+
+    let entries: AgentlessEventLogEntry[] | undefined;
+    try {
+      entries = method === "ssh"
+        ? await collectEventLogSsh(targetIp, cred, opts)
+        : await collectEventLogWinrm(winrmConnFrom(targetIp, cred, opts.timeoutMs), opts);
+    } catch (err) {
+      logger.debug({ err, assetId }, "Agentless event-log collection failed");
+      entries = undefined;
+    }
+
+    await stampAnchor();
+    if (entries === undefined) {
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+    if (entries.length > 0) {
+      await ingestOsEventLog(assetId, asset.hostname ?? null, entries, cfg);
+    }
+    recordWorkOutcome("eventLog", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Agentless event-log cadence crashed");
+    recordWorkOutcome("eventLog", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
 export async function runProcessesFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("processes", labels);
   try {
@@ -12104,13 +12227,15 @@ export async function loadMonitorPassCandidates() {
       processesPolling: true,
       lastProcessesAt: true, lastProcessPinsAt: true,
       monitoredProcesses: true, mappedProcesses: true,
+      // Same, for the agentless event-log cadence.
+      eventLogPolling: true, lastEventLogAt: true,
       dependencySuppressed: true,
     },
   });
 }
 export type MonitorPassCandidate = Awaited<ReturnType<typeof loadMonitorPassCandidates>>[number];
 
-export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes" | "lossSample";
+export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes" | "eventLog" | "lossSample";
 export type MonitorWork = { id: string; kind: MonitorWorkKind };
 /**
  * Effective probe spacing in seconds for one asset.
@@ -12151,6 +12276,7 @@ export interface DueMonitorWork {
   telemetries: MonitorWork[];
   systemInfos: MonitorWork[];
   processesWork: MonitorWork[];
+  eventLogWork: MonitorWork[];
   lossSamples: MonitorWork[];
 }
 
@@ -12182,6 +12308,7 @@ export async function computeDueWork(
   const telemetries: MonitorWork[]  = [];
   const systemInfos: MonitorWork[]  = [];
   const processesWork: MonitorWork[] = [];
+  const eventLogWork: MonitorWork[] = [];
   const lossSamples: MonitorWork[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
@@ -12337,6 +12464,13 @@ export async function computeDueWork(
         (procPins && isDue(a.lastProcessPinsAt, PROCESS_PINS_INTERVAL_SEC));
       if (processesDue) processesWork.push({ id: a.id, kind: "processes" });
     }
+    // Agentless event-log cadence — same shape and the same isUp gate. Keep in
+    // sync with publishDueWork in monitorAssets.ts.
+    if (enabled.has("eventLog") && isUp &&
+        (eff.eventLogPolling === "ssh" || eff.eventLogPolling === "winrm") &&
+        isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
+      eventLogWork.push({ id: a.id, kind: "eventLog" });
+    }
     // ICMP packet-loss sampler: 10s side-probe while the state machine is
     // mid-run (warning / recovering only — see utils/lossSampler.ts for why
     // `down` is excluded). Independent of `probe` above: it has its own anchor
@@ -12364,7 +12498,7 @@ export async function computeDueWork(
     );
     lossSamples.length = LOSS_SAMPLES_MAX_PER_PASS;
   }
-  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples };
+  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples };
 }
 
 export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
@@ -12429,6 +12563,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       lldp:         a.lldpPolling    || ifT,
       storage:      a.storagePolling || ifT,
       processes:    a.processesPolling || "not_delivered",
+      eventLog:     a.eventLogPolling  || "not_delivered",
       // The loss sampler is ICMP by definition, whatever the response-time
       // stream uses — that IS the finding the label should carry.
       lossSample:   "icmp",
@@ -12436,7 +12571,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }
 
-  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples } =
+  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples } =
     await computeDueWork(candidates, enabled, now);
 
   // Order matters: probes first so a saturated worker pool drains the cheap
@@ -12450,7 +12585,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // one is already due), so queueing them behind the heavy walks would mean
   // collecting nothing during exactly the incident they exist to measure.
   // They still yield to probes, which decide whether the asset is down at all.
-  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
+  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork, ...eventLogWork];
 
   setQueueDepth({
     probe: probes.length,
@@ -12458,6 +12593,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     telemetry: telemetries.length,
     systemInfo: systemInfos.length,
     processes: processesWork.length,
+    eventLog: eventLogWork.length,
     lossSample: lossSamples.length,
   });
 
@@ -12467,6 +12603,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     systemInfo: { collected: 0, failed: 0 },
     fastFiltered: { collected: 0, failed: 0 },
     processes:  { collected: 0, failed: 0 },
+    eventLog:   { collected: 0, failed: 0 },
     lossSample: { collected: 0, failed: 0 },
   };
   if (work.length === 0) {
@@ -12515,6 +12652,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
             const outcome = await runProcessesFor(w.id, labelFor("processes"));
             if (outcome === "success") stats.processes.collected++;
             else stats.processes.failed++;
+            break;
+          }
+          case "eventLog": {
+            const outcome = await runEventLogFor(w.id, labelFor("eventLog"));
+            if (outcome === "success") stats.eventLog.collected++;
+            else stats.eventLog.failed++;
             break;
           }
           case "lossSample": {

@@ -157,6 +157,9 @@ export function collectorCapability(
       case "cpuMemory":
       case "interfaces":
       case "storage":
+      // journalctl / Get-WinEvent, feeding the same ingestOsEventLog sink the
+      // agent's stream uses. Gated by the global agentEventLog master switch.
+      case "eventLog":
         return OK;
       case "temperature":
         // Linux hwmon is readable, but there is no dependable Windows
@@ -166,8 +169,6 @@ export function collectorCapability(
         return no(`${label} temperature collection is not implemented — host thermal sensors are only available via the Polaris Agent`);
       case "lldp":
         return no(`${label} cannot enumerate LLDP neighbours — use SNMP on a device that publishes LLDP-MIB`);
-      case "eventLog":
-        return no("The agentless event-log collector is not implemented — only the Polaris Agent delivers this stream today");
       default:
         return OK;
     }

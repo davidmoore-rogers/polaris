@@ -15,6 +15,12 @@ import {
   parseWindowsInterfaces,
   parseWindowsStorage,
   parseWindowsLinkSpeed,
+  parseJournalctl,
+  parseWindowsEventLog,
+  journalPriorityToLevel,
+  winEventLevelToLevel,
+  buildJournalctlCommand,
+  buildWindowsEventLogScript,
 } from "../../src/services/agentlessHostService.js";
 
 describe("parseLinuxCpuMem", () => {
@@ -202,5 +208,118 @@ describe("Windows parsers", () => {
   it("parseWindowsStorage tolerates junk", () => {
     expect(parseWindowsStorage("nope")).toEqual([]);
     expect(parseWindowsStorage("")).toEqual([]);
+  });
+});
+
+describe("event-log severity mapping", () => {
+  // journald priorities 0-7, collapsed to the sink's four so agentless entries
+  // sort alongside the agent's under the same min-level filter.
+  it("collapses journald priorities", () => {
+    expect(journalPriorityToLevel(0)).toBe("critical");
+    expect(journalPriorityToLevel(2)).toBe("critical");
+    expect(journalPriorityToLevel(3)).toBe("error");
+    expect(journalPriorityToLevel(4)).toBe("warning");
+    expect(journalPriorityToLevel(6)).toBe("info");
+    // journald emits PRIORITY as a STRING in JSON output.
+    expect(journalPriorityToLevel("3")).toBe("error");
+    // Unknown must not become "critical" — an unparseable field is not an
+    // emergency, and treating it as one would page someone.
+    expect(journalPriorityToLevel(undefined)).toBe("info");
+    expect(journalPriorityToLevel("nonsense")).toBe("info");
+  });
+
+  it("maps Get-WinEvent levels", () => {
+    expect(winEventLevelToLevel(1)).toBe("critical");
+    expect(winEventLevelToLevel(2)).toBe("error");
+    expect(winEventLevelToLevel(3)).toBe("warning");
+    expect(winEventLevelToLevel(4)).toBe("info");
+    expect(winEventLevelToLevel(0)).toBe("info");
+    expect(winEventLevelToLevel(undefined)).toBe("info");
+  });
+});
+
+describe("parseJournalctl", () => {
+  // journalctl -o json emits ONE OBJECT PER LINE, not a JSON array.
+  const sample = [
+    JSON.stringify({ __REALTIME_TIMESTAMP: "1756400000000000", PRIORITY: "3", SYSLOG_IDENTIFIER: "sshd", _SYSTEMD_UNIT: "sshd.service", MESSAGE: "Failed password for root" }),
+    JSON.stringify({ __REALTIME_TIMESTAMP: "1756400001000000", PRIORITY: "4", SYSLOG_IDENTIFIER: "kernel", MESSAGE: "link down" }),
+  ].join("\n");
+
+  it("parses line-delimited JSON into sink entries", () => {
+    const rows = parseJournalctl(sample, 100);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].level).toBe("error");
+    expect(rows[0].channel).toBe("sshd");
+    expect(rows[0].provider).toBe("sshd.service");
+    expect(rows[0].message).toContain("Failed password");
+    expect(rows[1].level).toBe("warning");
+  });
+
+  // __REALTIME_TIMESTAMP is MICROSECONDS since epoch, as a string.
+  it("converts the microsecond timestamp", () => {
+    expect(parseJournalctl(sample, 100)[0].timestamp).toBe(new Date(1756400000000).toISOString());
+  });
+
+  it("skips malformed lines rather than failing the batch", () => {
+    expect(parseJournalctl("not json\n" + sample + "\n{broken", 100)).toHaveLength(2);
+  });
+
+  it("drops entries with no message and honours the cap", () => {
+    expect(parseJournalctl(JSON.stringify({ PRIORITY: 3 }), 100)).toEqual([]);
+    expect(parseJournalctl(sample, 1)).toHaveLength(1);
+  });
+});
+
+describe("parseWindowsEventLog", () => {
+  const sample = JSON.stringify([
+    { t: "2026-08-28T12:00:00.0000000Z", ch: "System", prov: "Service Control Manager", id: 7040, lvl: 3, msg: "A service changed state" },
+    { t: "2026-08-28T12:01:00.0000000Z", ch: "Application", prov: "App", id: 1000, lvl: 2, msg: "Faulting application" },
+  ]);
+
+  it("maps rows onto sink entries", () => {
+    const rows = parseWindowsEventLog(sample, 100);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].eventId).toBe(7040);
+    expect(rows[0].level).toBe("warning");
+    expect(rows[1].level).toBe("error");
+    expect(rows[1].channel).toBe("Application");
+  });
+
+  it("accepts a single non-array object and honours the cap", () => {
+    expect(parseWindowsEventLog(JSON.stringify({ ch: "System", msg: "one", lvl: 2 }), 100)).toHaveLength(1);
+    expect(parseWindowsEventLog(sample, 1)).toHaveLength(1);
+  });
+
+  it("tolerates junk", () => {
+    expect(parseWindowsEventLog("nope", 100)).toEqual([]);
+    expect(parseWindowsEventLog("", 100)).toEqual([]);
+  });
+});
+
+describe("event-log command builders", () => {
+  // Warning-and-above only: the sink writes into the audit Event table, which
+  // the syslog / SFTP archivers ship off-host. Over-collecting here is not just
+  // noisy, it is someone else's disk.
+  it("journalctl asks for warning and above within the window", () => {
+    const cmd = buildJournalctlCommand(15, 200);
+    expect(cmd).toContain("-p warning");
+    expect(cmd).toContain('--since "-15min"');
+    expect(cmd).toContain("-n 200");
+    expect(cmd).toContain("-o json");
+  });
+
+  it("the Windows script filters to levels 1-3 within the window", () => {
+    const s = buildWindowsEventLogScript(15, 200);
+    expect(s).toContain("Level=@(1,2,3)");
+    expect(s).toContain("AddMinutes(-15)");
+    expect(s).toContain("-MaxEvents 200");
+  });
+
+  // These numbers are interpolated into a remote command line, so they must be
+  // integers and must never fall to zero (journalctl -n 0 returns nothing).
+  it("clamps the window and cap to sane integers", () => {
+    expect(buildJournalctlCommand(0, 0)).toContain('--since "-1min"');
+    expect(buildJournalctlCommand(0, 0)).toContain("-n 1");
+    expect(buildJournalctlCommand(2.7, 9.9)).toContain('--since "-2min"');
   });
 });

@@ -16,15 +16,15 @@ import type { Stream } from "../../src/utils/pollingCompatibility.js";
 const HEAVY: Stream[] = ["cpuMemory", "temperature", "interfaces", "lldp", "storage"];
 
 describe("collectorCapability — the silent no-ops", () => {
-  // agentlessHostService closed the cpuMemory / interfaces / storage half of
-  // this gap; temperature, LLDP and eventLog are still genuinely absent over a
+  // agentlessHostService closed the cpuMemory / interfaces / storage / eventLog
+  // half of this gap; temperature and LLDP are still genuinely absent over a
   // shell rather than merely unwired.
-  it("SSH and WinRM deliver the host streams, but not temperature, LLDP or eventLog", () => {
+  it("SSH and WinRM deliver the host streams, but not temperature or LLDP", () => {
     for (const m of ["ssh", "winrm"] as const) {
-      for (const s of ["responseTime", "processes", "cpuMemory", "interfaces", "storage"] as Stream[]) {
+      for (const s of ["responseTime", "processes", "cpuMemory", "interfaces", "storage", "eventLog"] as Stream[]) {
         expect(collectorExists("activedirectory", s, m), `${m}/${s}`).toBe(true);
       }
-      for (const s of ["temperature", "lldp", "eventLog"] as Stream[]) {
+      for (const s of ["temperature", "lldp"] as Stream[]) {
         expect(collectorExists("activedirectory", s, m), `${m}/${s}`).toBe(false);
       }
     }
@@ -44,12 +44,13 @@ describe("collectorCapability — the silent no-ops", () => {
     expect(collectorCapability("manual", "processes", "snmp").reason).toMatch(/hrSWRunTable/);
   });
 
-  // No runEventLogFor, no queue, no computeDueWork case — nothing but the agent.
-  it("eventLog has no collector on any transport except the agent", () => {
-    expect(collectorExists("activedirectory", "eventLog", "agent")).toBe(true);
-    for (const m of ["ssh", "winrm", "snmp"] as const) {
-      expect(collectorExists("activedirectory", "eventLog", m), m).toBe(false);
+  // The agent and the agentless transports both feed ingestOsEventLog; SNMP has
+  // no event-log MIB and the FortiOS device-log collector was never written.
+  it("eventLog is served by the agent and by ssh/winrm, and by nothing else", () => {
+    for (const m of ["agent", "ssh", "winrm"] as const) {
+      expect(collectorExists("activedirectory", "eventLog", m), m).toBe(true);
     }
+    expect(collectorExists("activedirectory", "eventLog", "snmp")).toBe(false);
     expect(collectorExists("fortimanager", "eventLog", "rest_api")).toBe(false);
   });
 
