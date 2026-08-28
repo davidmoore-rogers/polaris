@@ -445,6 +445,20 @@ CSS-grid row per item, not as a `<table>` and not as N repeated form groups.
 
 ---
 
+## Expand/collapse tree inside a data table
+
+**What it is:** A `data-table` whose rows form a parent → child (→ grandchild) tree: a caret on the parent row hides and shows its descendants, and the collapsed set persists per user per asset.
+
+**Canonical implementation:** the System tab's **interface tree** in `public/js/assets.js` (`_renderInterfacesCard` and the `iface-expand-toggle` handler) — an aggregate/trunk row with its member ports and VLANs nested under it. The Wireless tab's **radio → SSID → client tree** (`_renderWirelessTree`) is the second implementation and follows it exactly; copy from either, but do not invent a third set of mechanics.
+
+**Key conventions:**
+- The parent row carries `<button class="<scope>-expand-toggle" data-parent="<key>">` rendering `▼` when expanded and `▶` when collapsed, with a matching `title`.
+- Every descendant row carries `class="<scope>-child" data-parent="<the same key>"` — **the key is the whole subtree's, not the immediate parent's**, so one toggle hides every level below it without walking the tree.
+- Indent with `padding-left` on the name cell (1.4rem per level) plus a dimmed `└`. Depth is a style, never a separate column.
+- Collapsed state persists through `_getCollapsedIfaces(assetId, scope)` / `_setCollapsedIfaces(assetId, set, scope)`. **Pass a `scope`** for anything that is not the interface tree — the default key is the interface tree's, and a radio and a port that happen to share a name would otherwise collapse each other.
+- Re-render reads the persisted set first, so an expand/collapse survives the tab's next refresh.
+- A count shown on a parent row is **counted from the rows rendered below it**, never taken from a source's own tally: a number next to a list that disagrees with the list reads as a bug in the list.
+
 ## Table column layout (resize + hover-gear chooser + reorder)
 
 **What it is:** Drag-to-resize column widths plus a show/hide/reorder column chooser, opened by a gear icon that floats at the top-right corner of the table's scroll wrapper and surfaces on table hover. Replaces the older "Columns ▾" toolbar button — the gear is the only canonical affordance going forward. Pairs naturally with `TableSF` (same `data-sf-key` ids double as column ids) but works standalone on any `<table>` with a `<thead>`.

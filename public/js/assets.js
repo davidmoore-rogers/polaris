@@ -126,23 +126,27 @@ function _setStorageForecastVisible(assetId, mountPath, visible) {
 //   { "<assetId>": ["wan1", "agg1", ...] }  // collapsed parent ifNames
 // Same per-user keying as chart-range prefs. Per-asset because the same parent
 // name on different assets can have wildly different children.
-function _getCollapsedIfaces(assetId) {
+// `scope` picks the storage key: the System tab's interface tree (default)
+// and the Stations tab's wireless tree keep separate collapsed sets, since a
+// radio and an interface can share a name and neither should collapse the
+// other. Existing callers pass no scope and keep the original key.
+function _getCollapsedIfaces(assetId, scope) {
   if (!currentUsername || !assetId) return new Set();
   try {
-    var raw = localStorage.getItem("polaris-prefs-iface-collapse-" + currentUsername);
+    var raw = localStorage.getItem("polaris-prefs-" + (scope || "iface") + "-collapse-" + currentUsername);
     var p = raw ? JSON.parse(raw) : null;
     var arr = (p && p[assetId]) || [];
     return new Set(arr);
   } catch (_) { return new Set(); }
 }
-function _setCollapsedIfaces(assetId, collapsedSet) {
+function _setCollapsedIfaces(assetId, collapsedSet, scope) {
   if (!currentUsername || !assetId) return;
   try {
-    var raw = localStorage.getItem("polaris-prefs-iface-collapse-" + currentUsername);
+    var raw = localStorage.getItem("polaris-prefs-" + (scope || "iface") + "-collapse-" + currentUsername);
     var p = raw ? (JSON.parse(raw) || {}) : {};
     if (collapsedSet.size === 0) delete p[assetId];
     else p[assetId] = Array.from(collapsedSet);
-    localStorage.setItem("polaris-prefs-iface-collapse-" + currentUsername, JSON.stringify(p));
+    localStorage.setItem("polaris-prefs-" + (scope || "iface") + "-collapse-" + currentUsername, JSON.stringify(p));
   } catch (_) {}
 }
 
@@ -5376,14 +5380,15 @@ async function openViewModal(id) {
       { key: "general", label: "General", html: generalHTML },
       { key: "system",  label: "System",  html: systemHTML },
     ];
-    // Stations tab — visible on FortiAPs that have wireless clients
-    // reported by the most recent SNMP fapStationTable scrape. The
-    // content is loaded async from /system-info so initial render is a
-    // placeholder; _loadSystemTabFor() reuses the same endpoint, so
-    // when the operator clicks Stations the data is already in cache
-    // from the System tab's first fetch.
+    // Wireless tab — every monitored FortiAP, whether or not it currently
+    // has clients: the tab now leads with the AP's radios and the SSIDs they
+    // broadcast, which are worth reading on an AP nobody is connected to.
+    // The content is loaded async from /system-info so initial render is a
+    // placeholder; _loadSystemTabFor() reuses the same endpoint, so when the
+    // operator clicks the tab the data is already in cache from the System
+    // tab's first fetch.
     if (a.assetType === "access_point" && a.monitored) {
-      tabs.push({ key: "stations", label: "Stations", html: _assetStationsTabHTML(a) });
+      tabs.push({ key: "stations", label: "Wireless", html: _assetStationsTabHTML(a) });
     }
     // SD-WAN tab — shown only when the device actually reported SD-WAN data
     // (rules or health-check links exist); the trio was prefetched in the wave
@@ -8484,11 +8489,257 @@ function _renderLldpNeighborsCard(container, si, asset) {
 // table once the data lands.
 function _assetStationsTabHTML(a) {
   if (!a.monitored) {
-    return '<p class="empty-state" style="padding:1rem 0">Monitoring is disabled for this AP — enable it to start collecting wireless station data via the FORTINET-FORTIAP-MIB fapStationTable SNMP walk.</p>';
+    return '<p class="empty-state" style="padding:1rem 0">Monitoring is disabled for this AP — enable it to collect its radios, the SSIDs they broadcast, and the clients connected to each.</p>';
   }
-  return '<div data-shot-section="stations" data-shot-label="Wireless Stations"><div id="asset-system-stations">' +
-    '<span class="empty-state">Loading wireless stations…</span>' +
+  return '<div data-shot-section="stations" data-shot-label="Wireless"><div id="asset-system-stations">' +
+    '<span class="empty-state">Loading radios and wireless clients…</span>' +
     '</div></div>';
+}
+
+
+// ─── Wireless tree (radio → SSID → station) ─────────────────────────────────
+//
+// The Stations tab used to be a flat list of clients, which answered "who is
+// connected" and nothing about the radio they are connected TO. The tree adds
+// the two levels above: each radio with its channel, width and power, then
+// the SSIDs that radio broadcasts, then the clients on each SSID.
+//
+// Radios come from GET /assets/:id/system-info's `apRadios` (AssetApRadio +
+// nested AssetApVap). An AP with no radio inventory — discovery has not run
+// since the feature shipped, or it is not controller-managed — falls back to
+// the flat station table, so nothing regresses while the tree fills in.
+
+/** "5 GHz" / "2.4 GHz" for a radio heading; the short form is for chips. */
+function _radioBandLabel(band) {
+  if (band === "2.4GHz") return "2.4 GHz";
+  if (band === "5GHz")   return "5 GHz";
+  if (band === "6GHz")   return "6 GHz";
+  return "";
+}
+
+/** Small neutral chip used for a radio's channel / width / power facts. */
+function _wirelessChip(text, title) {
+  return '<span style="display:inline-block;padding:0 6px;border-radius:3px;font-size:0.7rem;' +
+    'background:var(--color-surface-2,#8881);color:var(--color-text-secondary);margin-left:6px"' +
+    (title ? ' title="' + escapeHtml(title) + '"' : "") + '>' + escapeHtml(text) + '</span>';
+}
+
+/**
+ * Transmit power as the SOURCES actually reported it — a percentage from the
+ * controller, dBm (with the floor/ceiling) from the AP's own MIB. Deliberately
+ * not normalized into one number: converting a percentage to dBm needs a
+ * per-model maximum Polaris does not have, so a made-up dBm would read as a
+ * measurement. Both are shown when both are known.
+ */
+function _radioPowerLabel(r) {
+  var bits = [];
+  if (r.txPowerDbm != null) {
+    var dbm = r.txPowerDbm + " dBm";
+    if (r.txPowerMinDbm != null && r.txPowerMaxDbm != null) {
+      dbm += " (" + r.txPowerMinDbm + "–" + r.txPowerMaxDbm + ")";
+    }
+    bits.push(dbm);
+  }
+  if (r.txPowerPct != null) bits.push(r.txPowerPct + "%");
+  if (!bits.length) return "—";
+  return bits.join(" · ");
+}
+
+/**
+ * Attach each station to the SSID it is actually on.
+ *
+ * BSSID first: it is the per-VAP radio address the client associated with, so
+ * it identifies one SSID on one radio exactly. The (radio, SSID-name) pair is
+ * the fallback for sources that publish no BSSID. A station's own `wlanId` is
+ * deliberately NOT used — it is only as trustworthy as the source's VAP
+ * numbering, and getting it wrong files a client under someone else's SSID.
+ *
+ * Anything left over is returned rather than dropped: a client Polaris cannot
+ * file is still a client, and hiding it would make the tree quietly disagree
+ * with the station count.
+ */
+function _buildWirelessTree(radios, stations) {
+  var byBssid = {}, byRadioSsid = {};
+  var nodes = radios.map(function (r) {
+    var vapNodes = (r.vaps || []).map(function (v) {
+      var node = { vap: v, stations: [] };
+      if (v.bssid) byBssid[String(v.bssid).toUpperCase()] = node;
+      if (v.ssid)  byRadioSsid[r.radioIndex + "\u0000" + String(v.ssid).toLowerCase()] = node;
+      return node;
+    });
+    return { radio: r, vaps: vapNodes };
+  });
+
+  var unplaced = [];
+  stations.forEach(function (s) {
+    var node = s.bssid ? byBssid[String(s.bssid).toUpperCase()] : null;
+    if (!node && s.radioId != null && s.ssid) {
+      node = byRadioSsid[s.radioId + "\u0000" + String(s.ssid).toLowerCase()];
+    }
+    if (node) node.stations.push(s);
+    else unplaced.push(s);
+  });
+  return { radios: nodes, unplaced: unplaced };
+}
+
+/** The matched-endpoint cell shared by the tree and the flat station table. */
+function _stationEndpointHTML(s) {
+  if (s.matchedAsset && s.matchedAsset.id) {
+    return '<a href="#" class="asset-station-link" data-asset-id="' + escapeHtml(s.matchedAsset.id) +
+      '" style="color:var(--color-accent);text-decoration:none">' +
+      escapeHtml(s.matchedAsset.hostname || s.matchedAsset.ipAddress || s.matchedAsset.id) +
+      '</a>';
+  }
+  return '<span style="color:var(--color-text-tertiary)">(not in inventory)</span>';
+}
+
+/** One client row of the tree, indented under its SSID. */
+function _wirelessStationRow(s, parentKey, hidden) {
+  var signal = (s.signalStrength != null) ? (s.signalStrength + " dBm") : "—";
+  return '<tr class="wireless-child" data-parent="' + escapeHtml(parentKey) + '"' + hidden + '>' +
+    '<td style="padding-left:2.8rem" class="mono">' +
+      '<span style="opacity:0.5;margin-right:3px">└</span>' + escapeHtml(s.staMacAddr) +
+    '</td>' +
+    '<td class="mono" style="font-size:0.75rem">' + escapeHtml(s.bssid || "—") + '</td>' +
+    '<td class="mono">' + escapeHtml(s.staIpAddr || "—") + '</td>' +
+    '<td>' + _stationEndpointHTML(s) + '</td>' +
+    '<td>' + escapeHtml(_wirelessBandLabel(s.band)) + '</td>' +
+    '<td style="text-align:right">' + escapeHtml(signal) + '</td>' +
+  '</tr>';
+}
+
+/** One radio's header row — the level that carries channel, width and power. */
+function _wirelessRadioRow(rn, key, isCollapsed) {
+  var r = rn.radio;
+  // A radio's client count is COUNTED from the stations filed under it rather
+  // than taken from the controller's own clientCount: the two disagree while a
+  // client is roaming, and a number next to a list has to match the list.
+  var clients = rn.vaps.reduce(function (n, vn) { return n + vn.stations.length; }, 0);
+  var bandLabel = _radioBandLabel(r.band);
+  var chips = "";
+  if (r.mode && r.mode.toLowerCase() !== "ap") chips += _wirelessChip(r.mode, "Radio mode");
+  if (r.radioType) chips += _wirelessChip(r.radioType, "PHY / radio type");
+  chips += _wirelessChip(clients + (clients === 1 ? " client" : " clients"),
+    "Counted from the clients listed below, not the controller's own tally");
+
+  var channelCell = r.channel != null
+    ? ("ch " + r.channel + (r.bandwidthMhz != null ? " · " + r.bandwidthMhz + " MHz" : ""))
+    : (r.bandwidthMhz != null ? r.bandwidthMhz + " MHz" : "—");
+
+  return '<tr style="background:var(--color-surface-2,#8881)">' +
+    '<td>' +
+      '<button class="wireless-expand-toggle" data-parent="' + escapeHtml(key) + '" ' +
+        'style="background:none;border:none;cursor:pointer;color:var(--color-text-secondary);padding:0 3px 0 0;font-size:0.75rem;vertical-align:middle;line-height:1" ' +
+        'title="' + (isCollapsed ? "Expand" : "Collapse") + '">' + (isCollapsed ? "▶" : "▼") + '</button>' +
+      '<strong>Radio ' + escapeHtml(String(r.radioIndex)) + '</strong>' +
+      (bandLabel ? ' <span style="color:var(--color-text-secondary)">· ' + escapeHtml(bandLabel) + '</span>' : "") +
+      chips +
+    '</td>' +
+    '<td class="mono" style="font-size:0.75rem">' + escapeHtml(r.baseBssid || "—") + '</td>' +
+    '<td>—</td>' +
+    '<td>—</td>' +
+    '<td>' + escapeHtml(channelCell) + '</td>' +
+    '<td style="text-align:right">' + escapeHtml(_radioPowerLabel(r)) +
+      (r.txPowerMode ? _wirelessChip(r.txPowerMode, "Transmit-power mode") : "") +
+    '</td>' +
+  '</tr>';
+}
+
+/** One SSID row, between its radio and the clients on it. */
+function _wirelessVapRow(vn, key, hidden) {
+  var v = vn.vap;
+  var label = v.ssid || v.vapName;
+  // The VAP object name is worth showing only when it is not simply the SSID
+  // under another name — otherwise it is noise on every row.
+  var sub = (v.ssid && v.vapName && v.vapName !== v.ssid)
+    ? '<span style="display:block;font-size:0.7rem;opacity:0.6">' + escapeHtml(v.vapName) + '</span>'
+    : "";
+  return '<tr class="wireless-child" data-parent="' + escapeHtml(key) + '"' + hidden + '>' +
+    '<td style="padding-left:1.4rem">' +
+      '<span style="opacity:0.5;margin-right:3px">└</span>' + escapeHtml(label) +
+      _wirelessChip(vn.stations.length + (vn.stations.length === 1 ? " client" : " clients")) + sub +
+    '</td>' +
+    '<td class="mono" style="font-size:0.75rem">' + escapeHtml(v.bssid || "—") + '</td>' +
+    '<td>—</td>' +
+    '<td>—</td>' +
+    '<td>' + (v.vlanId != null ? "VLAN " + escapeHtml(String(v.vlanId)) : "—") + '</td>' +
+    '<td style="text-align:right">—</td>' +
+  '</tr>';
+}
+
+/**
+ * Render the radio → SSID → client tree. Expand/collapse mirrors the System
+ * tab's interface tree — a ▼/▶ toggle on the parent row, children carrying
+ * data-parent — and the collapsed set persists per user per asset through the
+ * same helper under its own "wireless" scope.
+ */
+function _renderWirelessTree(container, radios, stations, asset, si) {
+  var tree = _buildWirelessTree(radios, stations);
+  var collapsed = _getCollapsedIfaces(asset && asset.id, "wireless");
+  var rows = "";
+
+  tree.radios.forEach(function (rn) {
+    var key = "radio-" + rn.radio.radioIndex;
+    var isCollapsed = collapsed.has(key);
+    var hidden = isCollapsed ? ' style="display:none"' : "";
+    rows += _wirelessRadioRow(rn, key, isCollapsed);
+    if (rn.vaps.length === 0) {
+      rows += '<tr class="wireless-child" data-parent="' + escapeHtml(key) + '"' + hidden + '>' +
+        '<td colspan="6" style="padding-left:1.4rem;color:var(--color-text-tertiary);font-size:0.78rem">' +
+          'No SSIDs reported for this radio.' +
+        '</td></tr>';
+    }
+    rn.vaps.forEach(function (vn) {
+      rows += _wirelessVapRow(vn, key, hidden);
+      vn.stations.forEach(function (s) { rows += _wirelessStationRow(s, key, hidden); });
+    });
+  });
+
+  // Clients Polaris could not file under any SSID are SHOWN, not dropped: the
+  // alternative is a tree that quietly disagrees with the client count.
+  if (tree.unplaced.length > 0) {
+    rows += '<tr style="background:var(--color-surface-2,#8881)">' +
+      '<td colspan="6"><strong>Not matched to a broadcast SSID</strong>' +
+        _wirelessChip(tree.unplaced.length + " of " + stations.length,
+          "These clients reported a BSSID or SSID no radio in the inventory is broadcasting — usually radios and stations scraped by different sources a cycle apart.") +
+      '</td></tr>';
+    tree.unplaced.forEach(function (s) { rows += _wirelessStationRow(s, "unplaced", ""); });
+  }
+
+  var staleBanner = _staleBannerHTML(asset && asset.id, asset, "systemInfo", si && si.lastSystemInfoAt);
+  container.innerHTML = staleBanner +
+    '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+      '<th>Radio / SSID / Client</th>' +
+      '<th>BSSID</th>' +
+      '<th>IP</th>' +
+      '<th>Endpoint</th>' +
+      '<th>Channel / VLAN / Band</th>' +
+      '<th style="text-align:right">Power / Signal</th>' +
+    '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+
+  container.querySelectorAll(".wireless-expand-toggle").forEach(function (tog) {
+    tog.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var parentKey = tog.getAttribute("data-parent");
+      var expanded = tog.textContent.trim() === "▼";
+      tog.textContent = expanded ? "▶" : "▼";
+      tog.title = expanded ? "Expand" : "Collapse";
+      container.querySelectorAll(".wireless-child").forEach(function (row) {
+        if (row.getAttribute("data-parent") !== parentKey) return;
+        row.style.display = expanded ? "none" : "";
+      });
+      if (expanded) collapsed.add(parentKey); else collapsed.delete(parentKey);
+      _setCollapsedIfaces(asset && asset.id, collapsed, "wireless");
+    });
+  });
+
+  container.querySelectorAll(".asset-station-link").forEach(function (link) {
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      var assetId = link.getAttribute("data-asset-id");
+      if (assetId) openViewModal(assetId);
+    });
+  });
 }
 
 // Short band label for the Stations table. The backend derives band from the
@@ -8508,12 +8759,19 @@ function _wirelessBandLabel(band) {
 function _renderWirelessStationsCard(container, si, asset) {
   if (!container) return;
   var stations = (si && si.wirelessStations) || [];
+  var radios = (si && si.apRadios) || [];
+  // With radio inventory, the clients hang off the SSID they joined on the
+  // radio broadcasting it. Without it — discovery has not run since the
+  // feature shipped, or this AP is not controller-managed — fall back to the
+  // flat list below so the tab never regresses to empty while it fills in.
+  if (radios.length > 0) return _renderWirelessTree(container, radios, stations, asset, si);
   if (stations.length === 0) {
     var pollingLabel = _assetMonitorStreamSource(asset, "interfaces").polling || "the configured transport";
     container.innerHTML = '<p class="empty-state" style="padding:1rem 0">' +
-      'No wireless stations reported. Either no clients are currently connected, ' +
-      'or the SNMP fapStationTable walk hasn’t run yet — confirm interfacesPolling is set to SNMP ' +
-      '(currently: ' + escapeHtml(pollingLabel) + ') on this AP.' +
+      'No radios or wireless clients reported yet. Radios and their SSIDs arrive with the next ' +
+      'discovery run against the controlling FortiGate; connected clients come from the SNMP ' +
+      'fapStationTable walk, which needs interfacesPolling set to SNMP (currently: ' +
+      escapeHtml(pollingLabel) + ') on this AP.' +
       '</p>';
     return;
   }
