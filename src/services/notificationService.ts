@@ -8,9 +8,11 @@
  */
 
 import { prisma } from "../db.js";
-import type { Prisma } from "../generated/prisma/client.js";
+// A value import (not `import type`): the suppression sweep resets the per-tier
+// band runs, a Json column, and that needs Prisma.DbNull at runtime.
+import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
-import { logEvent } from "./eventLogService.js";
+import { logEvent, logEventsBatch } from "./eventLogService.js";
 import { findRulesMatchingAsset } from "./notificationRuleService.js";
 
 // Both moved to utils/tagNormalize (a leaf) so regionHierarchyService can use
@@ -301,6 +303,130 @@ export async function clearNotifications(ids: string[], actor: string): Promise<
     details: { ids, count: res.count },
   });
   return res.count;
+}
+
+/** Alerts retired by one suppression sweep. A window opening on a large
+ *  schedule can only ever clear as many alerts as were already firing, so this
+ *  is a runaway guard rather than a real bound; the remainder is picked up by
+ *  the next 60s pass. */
+const SUPPRESSION_SWEEP_CAP = 2000;
+
+/** Why an asset's alerts are being retired — the two halves of
+ *  `isSuppressedForNotifications` (business rule 16). Maintenance wins when an
+ *  asset is both: it is the announced downtime the operator is looking at. */
+const SUPPRESSION_CLEARED_BY = {
+  maintenance: "system:maintenance",
+  dependency: "system:dependency-suppressed",
+} as const;
+
+/**
+ * Retire every ACTIVE alert whose asset is currently suppressed — inside a
+ * maintenance window, or dependency-suppressed behind a dark parent
+ * (business rule 16).
+ *
+ * The engine already refuses to FIRE about a suppressed asset
+ * (`assetCanTrigger`), but an alert raised BEFORE the window opened was left
+ * frozen: announced downtime with a live red row beside it for the whole
+ * window, and nothing able to clear it, because the readings that would
+ * recover it are exactly what maintenance stops collecting. Entering
+ * suppression therefore ends the alert instead of freezing it.
+ *
+ * Handoff semantics, not recovery — the same contract the precedence carve-out
+ * and the packet-loss/device-down handoff already use:
+ *  - the alert is SOFT-cleared (history preserved, ack state intact);
+ *  - its `NotificationRuleState` row is reset, so a condition still bad when
+ *    the window closes re-earns its full debounce and fires as a NEW alert
+ *    rather than resurrecting a stale one;
+ *  - NO reset actions run. Nothing recovered, and mailing "resolved" about a
+ *    device nobody is currently polling would be a lie.
+ *
+ * It is a sweep over Notification rows rather than a branch in the engine's
+ * per-rule loops because **event and change alerts carry no state row at all**
+ * (the event tail `createMany`s notifications directly), so a state-machine-side
+ * clear would silently miss exactly the automations most likely to have fired
+ * on the way into a maintenance window.
+ *
+ * `assetIds` scopes the sweep to the assets that just entered a window — the
+ * maintenance scheduler's own call, so an ad-hoc "enter maintenance now"
+ * clears the board immediately instead of a tick later. Unscoped it is the
+ * 60s safety net, which is also what catches dependency suppression (owned by
+ * the dependency reconciler, which has no edge of its own here).
+ */
+export async function clearSuppressedAlerts(assetIds?: string[]): Promise<number> {
+  if (assetIds && assetIds.length === 0) return 0;
+  const open = await prisma.notification.findMany({
+    where: {
+      cleared: false,
+      // A system-scoped alert (capacity, backups) has no asset and can't be
+      // suppressed by one.
+      assetId: assetIds ? { in: assetIds } : { not: null },
+    },
+    select: { id: true, assetId: true, rule: { select: { name: true } } },
+    take: SUPPRESSION_SWEEP_CAP,
+  });
+  if (open.length === 0) return 0;
+
+  const suppressed = await prisma.asset.findMany({
+    where: {
+      id: { in: Array.from(new Set(open.map((n) => n.assetId as string))) },
+      OR: [{ status: "maintenance" }, { dependencySuppressed: true }],
+    },
+    select: { id: true, hostname: true, status: true, dependencySuppressed: true },
+  });
+  if (suppressed.length === 0) return 0;
+
+  const reasonById = new Map<string, keyof typeof SUPPRESSION_CLEARED_BY>(
+    suppressed.map((a) => [a.id, a.status === "maintenance" ? "maintenance" : "dependency"] as const),
+  );
+  const nameById = new Map(suppressed.map((a) => [a.id, a.hostname ?? a.id]));
+
+  const idsByReason = new Map<keyof typeof SUPPRESSION_CLEARED_BY, string[]>();
+  const events: Parameters<typeof logEventsBatch>[0] = [];
+  for (const n of open) {
+    const reason = reasonById.get(n.assetId as string);
+    if (!reason) continue;
+    const list = idsByReason.get(reason);
+    if (list) list.push(n.id);
+    else idsByReason.set(reason, [n.id]);
+    const hostname = nameById.get(n.assetId as string) ?? n.assetId;
+    events.push({
+      action: "notification.suppressed",
+      resourceType: "notification",
+      resourceId: n.id,
+      resourceName: n.rule?.name ?? "alert",
+      actor: "system:notification-engine",
+      message: reason === "maintenance"
+        ? `Cleared: ${n.rule?.name ?? "alert"} — ${hostname} entered a maintenance window`
+        : `Cleared: ${n.rule?.name ?? "alert"} — ${hostname} is suppressed behind a parent that is down`,
+      details: { assetId: n.assetId, reason },
+    });
+  }
+  if (events.length === 0) return 0;
+
+  const cleared = Array.from(idsByReason.values()).flat();
+  const now = new Date();
+  await prisma.$transaction([
+    ...Array.from(idsByReason.entries()).map(([reason, ids]) =>
+      prisma.notification.updateMany({
+        where: { id: { in: ids }, cleared: false },
+        data: { cleared: true, clearedBy: SUPPRESSION_CLEARED_BY[reason], clearedAt: now },
+      }),
+    ),
+    // The state machine has to let go of the alert it just lost, or the key
+    // sits `firing` with a dangling notificationId and can never fire again.
+    prisma.notificationRuleState.updateMany({
+      where: { notificationId: { in: cleared } },
+      data: {
+        state: "clear",
+        conditionMetSince: null,
+        recoveredSince: null,
+        notificationId: null,
+        bandMetSince: Prisma.DbNull,
+      },
+    }),
+  ]);
+  await logEventsBatch(events);
+  return cleared.length;
 }
 
 /**

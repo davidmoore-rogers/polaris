@@ -335,10 +335,15 @@ export async function loadScopeAssetIds(scope: RuleScope, opts?: { monitoredOnly
  *  - dependencySuppressed — everything behind a down (or maintained) parent;
  *    silencing these keeps a switch's maintenance window from spraying "down"
  *    alerts for every device behind it.
- * Suppressed assets are dropped from rule evaluation; their `pending` state
- * rows reset to clear (a still-bad condition re-earns its full debounce after
- * the window) and `firing` rows are left frozen (no duplicate fire on exit —
- * recovery/timed clears still apply).
+ * Suppressed assets are dropped from rule evaluation and their `pending` state
+ * rows reset to clear — a still-bad condition re-earns its full debounce after
+ * the window. Their live ALERTS are retired rather than frozen, by
+ * `clearSuppressedAlerts` (notificationService) rather than here: an alert
+ * raised before the window opened has nothing left that could clear it (the
+ * readings that would recover it are what maintenance stops collecting), and
+ * event/change alerts carry no state row at all, so the sweep has to run over
+ * Notification rows. Once it has, the firing row is already `clear` and the
+ * loops below never see it.
  */
 export function isSuppressedForNotifications(a: { status: string; dependencySuppressed: boolean }): boolean {
   return String(a.status) === "maintenance" || a.dependencySuppressed === true;
@@ -1081,11 +1086,13 @@ interface SweepStateRow {
  * unmonitored) or its dimension stopped being covered (interface unpinned or
  * admin-downed, mount/tunnel gone, dimensionFilter edit). Without this they
  * sit firing forever: the loop only re-evaluates keys that produce readings.
- * Two deliberate freezes stay frozen: suppressed assets (maintenance /
+ * Two rows are deliberately left alone: suppressed assets (maintenance /
  * dependency — business rule 16; re-checked here for assets whose scope
- * condition drops them WHILE suppressed, e.g. a `status = active` condition)
- * and in-scope assets that produced no readings at all this tick (a
- * collection gap is not evidence of recovery). The no-readings freeze has one
+ * condition drops them WHILE suppressed, e.g. a `status = active` condition,
+ * so their alert is retired by the suppression sweep under its own reason
+ * rather than mislabelled "left the scope") and in-scope assets that produced
+ * no readings at all this tick (a collection gap is not evidence of
+ * recovery). The no-readings freeze has one
  * carve-out: a PIN-gated dimension (interface / IPsec tunnel) whose pin is
  * gone clears anyway — the operator unpinning it is a configuration edge,
  * not a collection gap, and without the carve-out unpinning a device's ONLY
@@ -1129,7 +1136,7 @@ async function clearVanishedStates(
     const byId = new Map(rows.map((r) => [r.id, r]));
     for (const st of scopeChecks) {
       const a = byId.get(st.assetId as string);
-      if (a && isSuppressedForNotifications(a)) continue; // rule-16 freeze wins over scope drift
+      if (a && isSuppressedForNotifications(a)) continue; // rule 16: the suppression sweep owns these, not scope drift
       vanished.push({ st, reason: "scope" });
     }
   }
@@ -1337,9 +1344,13 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   }
 
   // Suppressed assets produced no readings this tick. Reset their `pending`
-  // rows (the debounce restarts from scratch after the window — a dropped
-  // reading is not evidence either way) and leave `firing` rows frozen so
-  // exiting maintenance can't double-fire an already-active notification.
+  // rows — the debounce restarts from scratch after the window, a dropped
+  // reading being evidence of nothing. Their `firing` rows are the
+  // suppression sweep's business (clearSuppressedAlerts, run ahead of this
+  // tick), which retires the alert and resets the row in one place for every
+  // trigger type; by the time this loop runs there is normally nothing firing
+  // left to see, and a row that entered suppression mid-tick is picked up by
+  // the next one.
   for (const st of states) {
     if (st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
       await prisma.notificationRuleState.update({
@@ -1838,7 +1849,8 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
   }
 
   // Suppressed assets: reset pending rows (the debounce restarts after the
-  // window), leave firing rows frozen — same contract as the legacy path.
+  // window). Firing rows belong to the suppression sweep — same contract as
+  // the per-reading path.
   for (const st of states) {
     if (st.dimensionKey === "" && st.state === "pending" && st.assetId && suppressedIds.has(st.assetId)) {
       await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });

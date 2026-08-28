@@ -4,9 +4,11 @@
  * Maintenance/dependency suppression semantics in the notification engine:
  * suppressed assets (status="maintenance" or dependencySuppressed) produce no
  * readings (no fire), their `pending` state rows reset to clear, their
- * `firing` rows stay frozen, and a healthy asset in the same scope still
- * evaluates normally. Also locks the shared monitor candidate filter so the
- * polling exclusion can't silently drift.
+ * `firing` rows are left to the suppression sweep (clearSuppressedAlerts —
+ * see notificationSuppressionSweep.test.ts, which owns retiring the alert),
+ * and a healthy asset in the same scope still evaluates normally. Also locks
+ * the shared monitor candidate filter so the polling exclusion can't silently
+ * drift.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -114,7 +116,7 @@ describe("threshold-rule suppression", () => {
     expect(h.prisma.notification.create).not.toHaveBeenCalled();
   });
 
-  it("resets a suppressed asset's pending row to clear and leaves firing rows frozen", async () => {
+  it("resets a suppressed asset's pending row to clear and leaves firing rows to the sweep", async () => {
     h.prisma.asset.findMany.mockResolvedValue([
       scopeAsset("maint", { status: "maintenance", monitorStatus: "down" }),
     ]);
@@ -129,7 +131,8 @@ describe("threshold-rule suppression", () => {
     expect(h.prisma.notificationRuleState.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "st-pending" }, data: expect.objectContaining({ state: "clear" }) }),
     );
-    // firing row untouched — frozen, and its notification NOT cleared
+    // firing row untouched HERE: retiring it belongs to clearSuppressedAlerts,
+    // which runs ahead of the tick and covers event/change alerts too.
     const touchedIds = h.prisma.notificationRuleState.update.mock.calls.map((c) => c[0].where.id);
     expect(touchedIds).not.toContain("st-firing");
     expect(h.prisma.notification.updateMany).not.toHaveBeenCalled();
