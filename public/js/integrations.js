@@ -65,9 +65,18 @@ var _VCENTER_STREAMS = ["responseTime", "cpuMemory", "interfaces", "storage"];
 
 // Source-default polling for one stream. Mirrors defaultPollingForSource() in
 // src/services/monitoringService.ts. Used to label the "Inherit" option.
-function _polarisSourceDefaultPolling(source, stream) {
+function _polarisSourceDefaultPolling(source, stream, opts) {
   // Cross-transport streams are opt-in everywhere — default "disabled".
   if (stream === "processes" || stream === "eventLog") return "disabled";
+  // Mirrors the fortiosRestUnavailable branch in defaultPollingForSource: with
+  // no way to make a FortiOS call, the REST defaults resolve to "disabled"
+  // instead. Without this the Inherit option would advertise "REST API" for a
+  // stream the resolver has already decided not to collect.
+  if (opts && opts.fortiosRestUnavailable && source === "fortimanager") {
+    if (_fortiosRestUsable(stream === "telemetry" ? "cpuMemory" : stream, opts.klass)) return "rest_api";
+    if (stream === "responseTime") return "icmp";
+    return "disabled";
+  }
   if (source === "fortimanager" || source === "fortigate") {
     if (stream === "lldp") return "disabled";
     // FortiOS appliances don't expose meaningful mountable storage; default
@@ -89,6 +98,42 @@ function _polarisSourceDefaultPolling(source, stream) {
   }
   if (stream === "responseTime") return "icmp";
   return null; // telemetry/interfaces/lldp/storage not delivered on AD/Entra/Win/Manual by default
+}
+
+// ─── FortiOS REST reachability (mirrors monitoringService) ──────────────────
+//
+// A FortiManager on the PROXY transport with NO FortiGate API token cannot make
+// a FortiOS REST call at all: every collector goes through buildFortinetConfig(),
+// which has no useProxy branch — it dials the asset's own IP and requires that
+// token. Picking REST API for a stream under those conditions produces a 409 on
+// every tick, forever, so the dropdowns are locked rather than offering it.
+//
+// Note the condition is NOT simply "proxy mode". Proxy + a token is a valid
+// setup (discovery and writes ride FMG, monitoring reaches the gates directly),
+// and its REST streams work — so the token is what unlocks the controls.
+//
+// Mirrors fortiosRestUsable() in src/services/monitoringService.ts. The one
+// stream that still works with no token is a managed switch/AP's response time:
+// that read goes to the PARENT gate's controller table via
+// fetchViaFortinetTransport, the one monitoring path that honours useProxy.
+function _fortiosRestUsable(stream, klass) {
+  var isManagedChild = klass === "fortiswitch" || klass === "fortiap";
+  return stream === "responseTime" && isManagedChild;
+}
+
+// Live read of the connection form. `f-useDirect` checked = bypass. A stored
+// token renders as a placeholder with an empty value, so the placeholder counts
+// as "a token exists".
+function _fmgFortiosRestUnavailable(integrationType) {
+  if (integrationType !== "fortimanager") return false;
+  var directEl = document.getElementById("f-useDirect");
+  if (directEl && directEl.checked) return false;
+  var tokEl = document.getElementById("f-fortigateApiToken");
+  if (!tokEl) return false;
+  var typed = (tokEl.value || "").trim();
+  var stored = (tokEl.getAttribute("placeholder") || "").trim();
+  var hasStoredToken = stored && stored !== "Bearer token";
+  return !typed && !hasStoredToken;
 }
 
 // Methods offered for a stream = source-compatible methods intersected with the
@@ -161,7 +206,14 @@ function _polarisPollingDropdownHTML(id, source, stream, currentValue, opts) {
     var m = allowed[i];
     opts2 += '<option value="' + m + '"' + (v === m ? " selected" : "") + '>' + escapeHtml(_POLLING_LABELS[m]) + '</option>';
   }
-  return '<select id="' + id + '" data-poll-source="' + escapeHtml(source) + '" data-poll-stream="' + escapeHtml(stream) + '">' + opts2 + '</select>';
+  // data-poll-class carries the asset class this dropdown governs. Needed by
+  // _applyFortiosRestLocks, which has to know whether a rest_api pick is a
+  // managed switch/AP controller-table read (works through the FMG proxy on
+  // FMG's own credential) or a direct FortiOS call (needs the direct token).
+  return '<select id="' + id + '" data-poll-source="' + escapeHtml(source) + '"' +
+    ' data-poll-stream="' + escapeHtml(stream) + '"' +
+    (opts.klass ? ' data-poll-class="' + escapeHtml(opts.klass) + '"' : "") +
+    '>' + opts2 + '</select>';
 }
 
 function _polarisReadPollingDropdown(id) {
@@ -1723,6 +1775,7 @@ function _classStreamSubtabHTML(idPrefix, sourceKind, klass, stream, settings, c
   var pollDropdown = _polarisPollingDropdownHTML(pollId, sourceKind, pollStreamKeyForDefaults, pollCurrent, {
     fmgDirectMode: opts.fmgDirectMode === true,
     showInherit:   showInherit,
+    klass:         klass,
   });
 
   // Credential picker. Visibility is reactive — we render the row always and
@@ -1932,19 +1985,39 @@ function _classSubtabBodyHTML(opts) {
     };
   });
 
-  // Stream subtabs are gated by the class's Direct Polling toggle on
-  // integrations that have one (FMG-FortiGate, FortiSwitch, FortiAP).
-  // `_wireMonitoringTabSubtabs` wires the toggles' change events to show/hide
-  // this wrapper at runtime. Classes without a toggle (standalone FortiGate's
-  // FortiGate subtab, AD / Entra / WinSrv) render the wrapper always-visible.
+  // Stream subtabs are gated by the class's Direct Polling toggle on the
+  // FortiSwitch / FortiAP classes, whose toggle really does mean "Polaris talks
+  // to these devices directly" — with it off there is nothing to configure.
+  //
+  // The FMG-FortiGate class is NOT gated that way any more. Its toggle is the
+  // TRANSPORT switch, and hiding the whole stream matrix behind it was wrong
+  // twice over: monitoring never used the FMG proxy anyway (every FortiOS
+  // collector dials the gate directly), and the stored per-stream values stayed
+  // in force while nothing was on screen to show or change them. The subtabs now
+  // always render for that class, with individual dropdowns locked by
+  // _applyFortiosRestLocks when no FortiOS call can be made at all.
   var streamsWrapId = "intg-mon-streams-wrap-" + (isPrimary ? "primary-" : "") + klass;
   var directToggleId = _directPollingToggleIdFor(integrationType, klass);
+  var isFmgFortigateClass = integrationType === "fortimanager" && klass === "fortigate";
+  if (isFmgFortigateClass) directToggleId = null;
   var initialDirectOn = _directPollingInitialStateFor(integrationType, klass, opts);
   var wrapperHidden = (directToggleId && !initialDirectOn) ? "display:none" : "";
+
+  // Shown only while a FortiOS REST call is impossible. Hidden by default and
+  // revealed by _applyFortiosRestLocks so it tracks the live form state rather
+  // than the state at render time.
+  var restNote = (integrationType === "fortimanager")
+    ? '<div data-fortios-rest-note style="display:none;background:rgba(255,179,0,0.08);border:1px solid rgba(255,179,0,0.35);border-radius:var(--radius-md);padding:0.6rem 0.8rem;margin-bottom:0.75rem;font-size:0.85rem;line-height:1.5">' +
+        '<strong>REST API methods are locked.</strong> FortiManager proxy mode with no FortiGate API token cannot make a FortiOS call to the device, so these streams fall back to what the integration inherits. ' +
+        'Set a <em>FortiGate API Token</em> on the General tab (it applies in both transports), or enable <em>Direct Polling</em>. ' +
+        'SNMP and ICMP are unaffected, and per-asset overrides still apply.' +
+      '</div>'
+    : "";
 
   return banner +
     headerHtml +
     '<div id="' + streamsWrapId + '" data-direct-toggle="' + escapeHtml(directToggleId || "") + '" style="' + wrapperHidden + '">' +
+      restNote +
       tabbedBodyHTML(streamTabsPrefix, streamTabs) +
     '</div>';
 }
@@ -3659,11 +3732,52 @@ function _relabelInheritOptions(container, fmgDirectMode) {
     if (!sel.options || sel.options.length === 0) continue;
     var firstOpt = sel.options[0];
     if (firstOpt.value !== "") continue; // safety: only touch the Inherit row
-    var defaultMethod = _polarisSourceDefaultPolling(source, stream);
+    var defaultMethod = _polarisSourceDefaultPolling(source, stream, {
+      fortiosRestUnavailable: _fmgFortiosRestUnavailable(source),
+      klass: sel.getAttribute("data-poll-class") || "",
+    });
     var sourceLabel = _polarisSourceLabel(source, { fmgDirectMode: fmgDirectMode === true });
     firstOpt.textContent = defaultMethod
       ? "Inherit (Source " + sourceLabel + ": " + _POLLING_LABELS[defaultMethod] + ")"
       : "Inherit (Source " + sourceLabel + ": not delivered)";
+  }
+}
+
+// Lock every polling-method dropdown that cannot produce data, and say why.
+//
+// This replaces the old behaviour of HIDING the FortiGate class's stream
+// subtabs whenever proxy mode was on. Hiding explained nothing and left the
+// stored values invisibly in force; locking shows the operator what is
+// inherited and names the one thing that would unlock it.
+//
+// Non-destructive in both directions: the stored per-stream values are never
+// rewritten (the disabled control still round-trips its own value on save), and
+// the resolver independently skips a stored rest_api it cannot honour — so
+// supplying a token restores the operator's original choices intact.
+//
+// A managed switch/AP's response time is left ENABLED: that read works through
+// the proxy on FMG's own credential.
+function _applyFortiosRestLocks(rootEl, integrationType) {
+  var root = rootEl || document;
+  var locked = _fmgFortiosRestUnavailable(integrationType);
+  var selects = root.querySelectorAll("select[data-poll-source][data-poll-stream]");
+  for (var i = 0; i < selects.length; i++) {
+    var sel = selects[i];
+    if (sel.getAttribute("data-poll-source") !== "fortimanager") continue;
+    var stream = sel.getAttribute("data-poll-stream");
+    var klass  = sel.getAttribute("data-poll-class") || "";
+    // The dropdown labels cpuMemory as "telemetry" for legacy-default reasons;
+    // normalize before asking the shared predicate.
+    var canonicalStream = stream === "telemetry" ? "cpuMemory" : stream;
+    var lockThis = locked && !_fortiosRestUsable(canonicalStream, klass);
+    sel.disabled = lockThis;
+    sel.title = lockThis
+      ? "Locked: FortiManager proxy mode with no FortiGate API token cannot make a FortiOS REST call. Set a FortiGate API Token on the General tab, or enable Direct Polling."
+      : "";
+  }
+  var notes = root.querySelectorAll("[data-fortios-rest-note]");
+  for (var n = 0; n < notes.length; n++) {
+    notes[n].style.display = locked ? "" : "none";
   }
 }
 
@@ -3752,6 +3866,22 @@ function _wireMonitoringTabSubtabs(integrationType) {
   wireModalTabs("intg-mon-class");
   // Wire the Enable/Disable Auto-Monitoring buttons for every class subtab.
   _wireAutoMonitoringButtons(document);
+
+  // Lock REST API on every stream that cannot make a FortiOS call, and reveal
+  // the note that says why. Applied once now for the initial render, and again
+  // whenever either input that decides it changes: the transport toggle
+  // (handled with the relabel below) and the FortiGate API Token field, since
+  // typing a token unlocks REST without touching the transport.
+  _applyFortiosRestLocks(document, integrationType);
+  var tokenEl = document.getElementById("f-fortigateApiToken");
+  if (tokenEl && tokenEl.dataset.polarisRestLockWired !== "1") {
+    tokenEl.dataset.polarisRestLockWired = "1";
+    tokenEl.addEventListener("input", function () {
+      _applyFortiosRestLocks(document, integrationType);
+      var directEl = document.getElementById("f-useDirect");
+      _relabelInheritOptions(document, !!(directEl && directEl.checked));
+    });
+  }
   spec.classes.forEach(function (c) {
     var prefix = (c.key === spec.primary)
       ? "intg-mon-streams-primary"
@@ -3774,7 +3904,12 @@ function _wireMonitoringTabSubtabs(integrationType) {
         // Proxy" relabel only fires for fortimanager integrations.
         (function (tEl, wEl, cls) {
           tEl.addEventListener("change", function () {
-            wEl.style.display = tEl.checked ? "" : "none";
+            // The FMG-FortiGate class no longer hides its streams behind the
+            // transport toggle — see the note in the class-subtab renderer.
+            // Its dropdowns are locked individually instead, so leave the
+            // wrapper visible and just re-evaluate the locks below.
+            var isFmgFortigateClass = cls === "fortigate" && integrationType === "fortimanager";
+            if (!isFmgFortigateClass) wEl.style.display = tEl.checked ? "" : "none";
             // FMG's f-useDirect toggle changes the source label across every
             // stream-subtab dropdown in the whole modal (every class subtab
             // reads "FortiGate Direct" vs "FortiManager Proxy" from the same
@@ -3788,6 +3923,9 @@ function _wireMonitoringTabSubtabs(integrationType) {
               // form root so every dropdown gets relabeled.
               var root = monTab.closest ? (monTab.closest("form, .modal, body") || document) : document;
               _relabelInheritOptions(root, tEl.checked);
+              // Flipping the transport changes whether a FortiOS call is
+              // possible, so the locks and the explanatory note move with it.
+              _applyFortiosRestLocks(root, integrationType);
             }
           });
         })(toggleEl, wrapEl, c.key);

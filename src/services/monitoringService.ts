@@ -628,6 +628,23 @@ const classOverrideCache = new Map<string, MonitorOverrideSettings | null>();
 // generic integration-tier badge. Manual-tier rows are not eligible (no
 // pollInterval to inherit from).
 const tierSystemInfoFromPollIntervalCache = new Map<string, boolean>();
+// Sidecar: can this integration make a FortiOS REST call to the device at all?
+// Populated by the same load that already reads Integration.config, so the hot
+// resolver pays no extra query.
+//
+// True only for a FortiManager on the PROXY transport with NO FortiGate API
+// token configured. That pairing is the one where `rest_api` cannot possibly
+// succeed: every FortiOS collector builds its config via buildFortinetConfig(),
+// which has no useProxy branch — it dials the asset's own IP and requires
+// fortigateApiToken — so the call throws "FortiManager direct-mode API token
+// not configured" on every tick.
+//
+// Note this is NOT simply "proxy mode". A proxy-mode integration WITH a token
+// is a legitimate configuration — discovery and writes ride FMG, monitoring
+// reaches the gates directly — and its REST streams work fine. Gating on the
+// transport alone would break that, and would undo the change that made the
+// token reachable in proxy mode in the first place.
+const tierFortiosRestUnavailableCache = new Map<string, boolean>();
 
 function classCacheKey(integrationId: string | null, assetType: string): string {
   return `${integrationId ?? MANUAL_TIER_CACHE_KEY}:${assetType}`;
@@ -646,6 +663,7 @@ export function invalidateMonitorSettingsCache(scope?: {
     tierCache.clear();
     classOverrideCache.clear();
     tierSystemInfoFromPollIntervalCache.clear();
+    tierFortiosRestUnavailableCache.clear();
     return;
   }
   const tierKey = scope.integrationId === null ? MANUAL_TIER_CACHE_KEY : scope.integrationId;
@@ -655,11 +673,13 @@ export function invalidateMonitorSettingsCache(scope?: {
       // legacy key clear still works.
       tierCache.delete(MANUAL_TIER_CACHE_KEY);
       tierSystemInfoFromPollIntervalCache.delete(MANUAL_TIER_CACHE_KEY);
+      tierFortiosRestUnavailableCache.delete(MANUAL_TIER_CACHE_KEY);
     } else if (scope.assetType) {
       // Per-class evict — Phase 2 cache key is `${integrationId}:${assetType}`.
       const k = `${tierKey}:${scope.assetType}`;
       tierCache.delete(k);
       tierSystemInfoFromPollIntervalCache.delete(k);
+      tierFortiosRestUnavailableCache.delete(k);
     } else {
       // Whole-integration evict — walk every `<integrationId>:<assetType>`
       // entry. Integration config writes (PUT /integrations/:id, per-class
@@ -668,6 +688,7 @@ export function invalidateMonitorSettingsCache(scope?: {
         if (k.startsWith(`${tierKey}:`)) {
           tierCache.delete(k);
           tierSystemInfoFromPollIntervalCache.delete(k);
+      tierFortiosRestUnavailableCache.delete(k);
         }
       }
     }
@@ -790,15 +811,66 @@ function readMibIdFromJson(v: unknown): string | null {
  *   credentialed method (and a credential) to enable telemetry/interfaces
  *   on a manually-created asset.
  */
-function defaultPollingForSource(
+/**
+ * When a FortiOS REST call cannot be assembled (FMG on the proxy transport with
+ * no FortiGate API token), which (stream, assetType) pairs can STILL ride
+ * `rest_api`?
+ *
+ * Exactly one: response time for a managed FortiSwitch or FortiAP. That read
+ * goes to the PARENT gate's controller table through fetchViaFortinetTransport,
+ * which is the one monitoring path that honours `useProxy` and therefore works
+ * with FMG's own credential. Everything else — including a firewall's own
+ * response-time probe — goes through buildFortinetConfig() and needs the direct
+ * token.
+ *
+ * Shared by the source default and the resolver's validity gate so the two
+ * cannot disagree about what is collectable.
+ */
+export function fortiosRestUsable(stream: Stream, assetType: string | null | undefined): boolean {
+  const isManagedChild = assetType === "switch" || assetType === "access_point";
+  return stream === "responseTime" && isManagedChild;
+}
+
+export function defaultPollingForSource(
   source: AssetSourceKind,
   stream: Stream,
+  opts?: { assetType?: string | null; fortiosRestUnavailable?: boolean },
 ): PollingMethod | null {
   // Cross-transport streams default to "disabled" everywhere — they're opt-in
   // (operator picks agent / SNMP / SSH / WinRM, or REST for eventLog on a
   // FortiGate). Keeping them off by default means no behavior change for
   // existing fleets until an operator turns them on at some tier.
   if (stream === "processes" || stream === "eventLog") return "disabled";
+
+  // ── FortiManager proxy transport with no FortiGate API token ─────────────
+  // The REST defaults below assume Polaris can make a FortiOS call to the
+  // device. On an FMG in proxy mode with no direct token that is impossible:
+  // every FortiOS collector builds its config via buildFortinetConfig(), which
+  // has no useProxy branch — it dials the asset's own IP and requires
+  // fortigateApiToken. So `rest_api` on cpuMemory / temperature / interfaces
+  // meant a 409 every tick, forever, on an integration left at its defaults.
+  //
+  // `disabled` is the honest state: Polaris is not collecting these, and now
+  // says so instead of failing repeatedly. Supplying the token flips this
+  // condition off and the normal REST defaults return — so this narrows what
+  // Polaris CLAIMS, never what it can do.
+  //
+  // Response time is deliberately UNCHANGED (icmp). Pointing it elsewhere would
+  // silently change how up/down is decided for every gate on every affected
+  // install, which is not a default's business.
+  //
+  // Managed switches and APs are the exception: their responseTime rides the
+  // parent gate's controller table via fetchViaFortinetTransport, which IS
+  // transport-aware and genuinely works through the proxy with no direct token.
+  // That is the one FortiOS read proxy mode serves by itself, so it stays on
+  // rest_api — downgrading it to icmp would be a real regression, since plenty
+  // of FortiLink-managed devices are not directly pingable.
+  if (opts?.fortiosRestUnavailable && source === "fortimanager") {
+    if (fortiosRestUsable(stream, opts.assetType)) return "rest_api";
+    if (stream === "responseTime") return "icmp";
+    return "disabled";
+  }
+
   if (isFortinetIntegrationType(source)) {
     // FortiOS exposes lldp-neighbors but most fleets don't enable LLDP per
     // interface, so the endpoint returns nothing on every probe. Default
@@ -1047,6 +1119,16 @@ async function loadIntegrationTierSettings(integrationId: string, assetType: str
   }
   tierCache.set(cacheKey, result);
   tierSystemInfoFromPollIntervalCache.set(cacheKey, systemInfoFromPollInterval);
+  // Proxy is the DEFAULT on a FortiManager integration, so an absent flag is
+  // proxy — the same `!== false` reading every other consumer uses. Presence of
+  // the token is what decides whether REST is reachable at all; its value is
+  // never needed here.
+  tierFortiosRestUnavailableCache.set(
+    cacheKey,
+    integration?.type === "fortimanager" &&
+      cfg.useProxy !== false &&
+      !String(cfg.fortigateApiToken || "").trim(),
+  );
   return result;
 }
 
@@ -1339,6 +1421,12 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
   // Resolve the asset's source kind once — drives both the polling default
   // and the compatibility check at every layer.
   const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
+  // Read from the sidecar the tier load above just populated — no extra query.
+  // Only meaningful for an integration-backed asset; manual-tier assets have no
+  // transport to be on.
+  const fortiosRestUnavailable = asset.discoveredByIntegrationId
+    ? tierFortiosRestUnavailableCache.get(`${asset.discoveredByIntegrationId}:${asset.assetType}`) === true
+    : false;
 
   const merged: ResolvedMonitorSettings = { ...tier3 };
   // Every field starts attributed to tier 3; each adopting layer below
@@ -1436,8 +1524,24 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
     classVal: PollingMethod | null | undefined,
     assetVal: string | null | undefined,
   ): void {
-    const ok = (m: PollingMethod) => isPollingMethodCompatible(sourceKind, m) && isMethodValidForStream(stream, m);
-    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
+    // A stored `rest_api` on an FMG that cannot make a FortiOS call is skipped
+    // like any other incompatible value — the layer below stays, which is how
+    // the resolver has always handled a method the asset's source can't use.
+    // Without this, a per-class stream authored while the direct token was set
+    // (or while the integration was in bypass mode) keeps overriding the
+    // default and keeps throwing 409 on every tick, invisibly. Non-destructive:
+    // the stored value is untouched and returns the moment REST is reachable
+    // again.
+    const ok = (m: PollingMethod) => {
+      if (!isPollingMethodCompatible(sourceKind, m)) return false;
+      if (!isMethodValidForStream(stream, m)) return false;
+      if (m === "rest_api" && fortiosRestUnavailable && !fortiosRestUsable(stream, asset.assetType)) return false;
+      return true;
+    };
+    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream, {
+      assetType: asset.assetType,
+      fortiosRestUnavailable,
+    });
     let tier: ProvenanceTier = "default";
     if (tierVal && ok(tierVal)) {
       resolved = tierVal;
