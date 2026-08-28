@@ -1427,6 +1427,32 @@ window.POLARIS_WIDGET_STATUS_COLORS = {
   neutral: "#90a4ae",
 };
 
+// Operator-facing label per monitorStatus value. Mirrors MONITOR_STATUS_LABELS
+// in src/utils/monitorStatus.ts — change one, change both, or the assets pill
+// and the search-hit pill (rendered from the server's label) drift apart.
+//
+// `warning` reads "Missed", not "Warning": the alert severities are also named
+// warning/serious/critical, so a Status pill reading Warning was read as "an
+// alert has fired about this device" when it only ever meant "a poll was
+// missed and the down count has started". The stored value is untouched — this
+// is the display name only.
+window.POLARIS_MONITOR_STATUS_LABELS = {
+  up:         "Up",
+  warning:    "Missed",
+  recovering: "Recovering",
+  down:       "Down",
+  unknown:    "Pending",
+  passive:    "Passive",
+};
+
+// Label for a raw monitorStatus; unrecognized values pass through unchanged so
+// a server-side addition renders as itself instead of vanishing.
+function monitorStatusLabel(status) {
+  if (!status) return window.POLARIS_MONITOR_STATUS_LABELS.unknown;
+  return window.POLARIS_MONITOR_STATUS_LABELS[status] || String(status);
+}
+window.monitorStatusLabel = monitorStatusLabel;
+
 // Copy a PNG blob to the clipboard. Resolves true on success, false when the
 // clipboard image API is unavailable (HTTP context / permission denied) or the
 // write fails — callers own their toast/download-fallback UX. Companion to

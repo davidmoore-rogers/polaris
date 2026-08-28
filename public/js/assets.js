@@ -939,7 +939,10 @@ async function fetchAssetsPage() {
       } else if (a.monitorStatus === "up") {
         a._monitor = ["Monitored", "Up"];
       } else if (a.monitorStatus === "warning") {
-        a._monitor = ["Monitored", "Warning"];
+        // Chip label is "Missed" — see POLARIS_MONITOR_STATUS_LABELS in api.js.
+        // The server still accepts the legacy "Warning" chip so saved presets
+        // and view tabs that stored it keep filtering (monitorClause).
+        a._monitor = ["Monitored", "Missed"];
       } else if (a.monitorStatus === "down") {
         a._monitor = ["Monitored", "Down"];
       } else if (a.monitorStatus === "recovering") {
@@ -3222,7 +3225,7 @@ function assetStatusBadge(asset) {
 // don't have to drill in to discover the state.
 //   monitored=false                          → grey   "Unmonitored"
 //   monitored=true, status="up"              → green  "Up"
-//   monitored=true, status="warning"         → amber  "Warning"     (was up, currently failing but below threshold)
+//   monitored=true, status="warning"         → amber  "Missed"      (was up, currently failing but below threshold)
 //   monitored=true, status="recovering"      → blue   "Recovering"  (was down, now succeeding; below threshold)
 //   monitored=true, status="down"            → red    "Down"
 //   monitored=true, status="unknown"/null    → blue   "Pending"     (never probed — same blue treatment as "Recovering" but a different label)
@@ -3368,7 +3371,7 @@ function assetMonitorBadge(asset) {
   // discoverable.
   if (asset.dependencySuppressed) {
     var depBits = bits.slice();
-    depBits.unshift("Own probe: " + s);
+    depBits.unshift("Own probe: " + monitorStatusLabel(s));
     if (asset.dependencyLayer != null) depBits.unshift("Level " + asset.dependencyLayer + " — upstream parent is down");
     else                                depBits.unshift("Upstream dependency is down");
     var depTitle = ' title="' + escapeHtml(depBits.join("\n")) + '"';
@@ -3376,7 +3379,11 @@ function assetMonitorBadge(asset) {
   }
   var title = bits.length ? ' title="' + escapeHtml(bits.join("\n")) + '"' : "";
   if (s === "up")         return '<span class="badge badge-monitored'        + clickCls + '"' + title + toggleAttrs + '>Up</span>';
-  if (s === "warning")    return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>Warning</span>';
+  // "Missed", not "Warning": the alert severities are named warning/serious/
+  // critical too, so this pill read as "an alert fired" when all it means is
+  // that a poll was missed and the down count has started. Class name and
+  // stored monitorStatus are unchanged.
+  if (s === "warning")    return '<span class="badge badge-monitor-warning'  + clickCls + '"' + title + toggleAttrs + '>' + monitorStatusLabel("warning") + '</span>';
   if (s === "down")       return '<span class="badge badge-monitor-down'     + clickCls + '"' + title + toggleAttrs + '>Down</span>';
   if (s === "recovering") return '<span class="badge badge-monitor-recovering' + clickCls + '"' + title + toggleAttrs + '>Recovering</span>';
   // No down-detection automation covers this device, so Polaris renders no
@@ -3387,7 +3394,7 @@ function assetMonitorBadge(asset) {
   if (s === "passive") {
     var pBits = ["Passive — no down-detection automation covers this device",
                  "Polling continues and samples are recorded",
-                 "Polaris will not declare Warning or Down"];
+                 "Polaris will not declare Missed or Down"];
     pBits.push((asset.consecutiveFailures || 0) === 0
       ? "Its last poll succeeded"
       : "Its last " + asset.consecutiveFailures + " poll(s) failed");
@@ -4506,7 +4513,7 @@ function _paintDownDetectionHint(eff, asset) {
   if (!dd) { el.textContent = "Could not resolve which automation decides Down for this device."; return; }
   if (dd.passive) {
     el.innerHTML = "<strong>Passive</strong> — no down-detection automation covers this device. " +
-      "Polaris records its polls but will never declare it Warning or Down. " +
+      "Polaris records its polls but will never declare it Missed or Down. " +
       '<a href="/automations.html">Manage down detection &rarr;</a>';
     return;
   }
@@ -11044,7 +11051,7 @@ async function _renderIntermittencyBar(assetId, effP) {
   var cellHTML = states.map(function (st) {
     var ts = new Date(st.timestamp).toLocaleTimeString();
     var color = colors[st.status] || colors.unknown;
-    return '<div title="' + escapeHtml(ts + " · " + st.status) + '" style="flex:1;background:' + color + '"></div>';
+    return '<div title="' + escapeHtml(ts + " · " + monitorStatusLabel(st.status)) + '" style="flex:1;background:' + color + '"></div>';
   }).join("");
   slot.innerHTML =
     '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-primary)">' +
@@ -17164,7 +17171,7 @@ function _depTreeStatusPip(node) {
   }
   switch (node.monitorStatus) {
     case "up":         return '<span class="dep-tree-pip dep-tree-pip-up"   title="Up">▲</span>';
-    case "warning":    return '<span class="dep-tree-pip dep-tree-pip-warn" title="Warning">▲</span>';
+    case "warning":    return '<span class="dep-tree-pip dep-tree-pip-warn" title="Missed">▲</span>';
     case "recovering": return '<span class="dep-tree-pip dep-tree-pip-rec"  title="Recovering">▲</span>';
     case "down":       return '<span class="dep-tree-pip dep-tree-pip-down" title="Down">▼</span>';
     // Hollow glyph, matching the hollow pill: no verdict was rendered.
@@ -18700,7 +18707,7 @@ function _paintAssetDownDetectionPanel(assetId) {
       var canEdit = permAtLeast("automationManagement", "fullwrite");
       el2.innerHTML =
         '<strong style="color:var(--color-warning)">Passive</strong> — no down-detection automation covers this device. ' +
-        'Polaris records its polls but will never declare it Warning or Down, and no alert will ever be raised about it going offline.' +
+        'Polaris records its polls but will never declare it Missed or Down, and no alert will ever be raised about it going offline.' +
         (canEdit ? ' <a href="/automations.html">Create a down-detection automation &rarr;</a>' : '');
       return;
     }

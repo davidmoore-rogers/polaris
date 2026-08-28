@@ -1,6 +1,6 @@
 /**
  * widgets/statusSummary.js — NOC status tiles. Compact color-coded counts of
- * monitored assets by state (Total / Up / Down / Warning / Unknown), plus an
+ * monitored assets by state (Total / Up / Down / Missed / Unknown), plus an
  * infra Uptime% gauge and an active-Alerts count. Data from
  * /dashboard/noc-summary. The gear toggles which tiles appear.
  */
@@ -12,9 +12,12 @@
     { id: "total",   label: "Total",   color: WC.neutral, val: function (d) { return d.statusCounts.total; } },
     { id: "up",      label: "Up",      color: WC.ok, val: function (d) { return d.statusCounts.up; } },
     { id: "down",    label: "Down",    color: WC.down, val: function (d) { return d.statusCounts.down; } },
-    { id: "warning", label: "Warning", color: WC.warning, val: function (d) { return d.statusCounts.warning; } },
+    // The `warning` monitorStatus is labeled "Missed" everywhere an operator
+    // sees it (POLARIS_MONITOR_STATUS_LABELS in api.js) — the count key stays
+    // `warning` because that is the stored value the server groups by.
+    { id: "warning", label: "Missed", color: WC.warning, val: function (d) { return d.statusCounts.warning; } },
     { id: "unknown", label: "Unknown", color: WC.neutral, val: function (d) { return d.statusCounts.unknown; } },
-    // Maintenance-window assets — excluded from Up/Down/Warning server-side
+    // Maintenance-window assets — excluded from Up/Down/Missed server-side
     // (their frozen monitorStatus is not live state); purple matches the
     // assets-page maintenance pill and the Status Map dot.
     { id: "maintenance", label: "Maint", color: window.POLARIS_HEALTH_COLORS.maintenance, val: function (d) { return d.statusCounts.maintenance; } },

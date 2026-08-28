@@ -11,6 +11,7 @@ import { prisma } from "../db.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { isValidIpAddress, normalizeCidr, ipInCidr } from "../utils/cidr.js";
 import { macColonUpperOrNull } from "../utils/mac.js";
+import { MONITOR_STATUS_LABELS } from "../utils/monitorStatus.js";
 
 export interface SearchHit {
   type: "block" | "subnet" | "reservation" | "asset" | "ip" | "site";
@@ -805,7 +806,8 @@ export function assetMonitorPillState(a: AssetMonitorPillFields): { kind: string
   if (a.dependencySuppressed) return { kind: "dep-down", label: "Dep. Down" };
   const s = a.monitorStatus || "unknown";
   if (s === "up")         return { kind: "up",         label: "Up" };
-  if (s === "warning")    return { kind: "warning",    label: "Warning" };
+  // "Missed" not "Warning" — see MONITOR_STATUS_LABELS in utils/monitorStatus.
+  if (s === "warning")    return { kind: "warning",    label: MONITOR_STATUS_LABELS.warning };
   if (s === "down")       return { kind: "down",       label: "Down" };
   if (s === "recovering") return { kind: "recovering", label: "Recovering" };
   // Explicit, not folded into the Pending fallback: passive means "no

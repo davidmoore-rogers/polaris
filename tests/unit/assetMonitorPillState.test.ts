@@ -41,7 +41,7 @@ describe("assetMonitorPillState", () => {
 
   it("maps each five-state value onto its pill", () => {
     expect(assetMonitorPillState({ ...base, monitorStatus: "up" })).toEqual({ kind: "up", label: "Up" });
-    expect(assetMonitorPillState({ ...base, monitorStatus: "warning" })).toEqual({ kind: "warning", label: "Warning" });
+    expect(assetMonitorPillState({ ...base, monitorStatus: "warning" })).toEqual({ kind: "warning", label: "Missed" });
     expect(assetMonitorPillState({ ...base, monitorStatus: "down" })).toEqual({ kind: "down", label: "Down" });
     expect(assetMonitorPillState({ ...base, monitorStatus: "recovering" })).toEqual({ kind: "recovering", label: "Recovering" });
   });

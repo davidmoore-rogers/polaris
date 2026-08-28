@@ -5466,7 +5466,7 @@ function deviceIconsCardHTML() {
       'Upload PNG / JPEG / WebP images (max 256 KB) or SVG (max 32 KB, strict validation — no scripts, no external refs) to overlay vendor logos on the Device Map\'s topology graph. ' +
       'Every icon is keyed to a <strong>manufacturer</strong> plus either an asset <strong>type</strong> or a specific <strong>model</strong>. ' +
       'The manufacturer field accepts any value — the dropdown only suggests names already on file. ' +
-      'On render: <strong>manufacturer + model</strong> exact match wins over the <strong>manufacturer + type</strong> fallback. The asset\'s status (Up/Warning/Down/Recovering) keeps coloring the ring around the logo so both signals stay visible.' +
+      'On render: <strong>manufacturer + model</strong> exact match wins over the <strong>manufacturer + type</strong> fallback. The asset\'s status (Up/Missed/Down/Recovering) keeps coloring the ring around the logo so both signals stay visible.' +
     '</p>';
 
   // Upload form: manufacturer + scope (type|model) + type dropdown / model input + file

@@ -21,6 +21,7 @@
  */
 
 import { METRIC_META, FIELD_META, CHANGE_TYPE_META, WINDOWED_RATIO_METRICS, probeLossWindowSec } from "../services/notificationTypes.js";
+import { monitorStatusLabel } from "./monitorStatus.js";
 
 /** "5 minutes" / "1 hour" / "45 seconds" — mirrors the wizard's humanDuration. */
 export function humanDuration(sec: number | null | undefined): string {
@@ -162,7 +163,11 @@ export function triggerSummary(parts: TriggerSummaryParts): string {
     const on = parts.dimensionLabel ? ` on ${parts.dimensionLabel}` : "";
     // The READING when we have one; the configured value otherwise (a test on
     // a device with nothing reported still reads as a sentence).
-    const v = formatValue(parts.value) ?? formatValue(trigger.value ?? null);
+    const raw = formatValue(parts.value) ?? formatValue(trigger.value ?? null);
+    // Monitor status is the one state field whose stored values are not what
+    // operators are shown anywhere else — `warning` reads "Missed" on every
+    // pill — so the email must not be the single surface quoting the enum.
+    const v = raw !== null && trigger.field === "monitorStatus" ? monitorStatusLabel(raw).toLowerCase() : raw;
     return v ? `${label}${on} is ${v}` : `${label}${on} changed`;
   }
 

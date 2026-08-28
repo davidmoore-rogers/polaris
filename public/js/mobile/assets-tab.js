@@ -230,6 +230,8 @@
     switch (a.monitorStatus) {
       case "up":      return "up";
       case "down":    return "down";
+      case "warning": return "warn";
+      case "recovering": return "recovering";
       case "unknown": return "unk";
       // No down-detection automation covers it — still polled, no verdict.
       case "passive": return "passive";
@@ -241,6 +243,11 @@
     if (a.dependencySuppressed)        return "Dep. Down — upstream parent is down";
     if (a.monitorStatus === "up")      return "Up — last RTT " + (a.lastResponseTimeMs != null ? a.lastResponseTimeMs + " ms" : "n/a");
     if (a.monitorStatus === "down")    return "Down";
+    // "Missed", not "Warning" — the alert severities own that word (api.js
+    // POLARIS_MONITOR_STATUS_LABELS). No count here: the list payload does not
+    // select consecutiveFailures, and "0 missed polls" would contradict the pill.
+    if (a.monitorStatus === "warning") return "Missed — a poll failed, below the down threshold";
+    if (a.monitorStatus === "recovering") return "Recovering — answering again, not yet Up";
     if (a.monitorStatus === "unknown") return "No samples yet";
     if (a.monitorStatus === "passive") return "Passive — no down-detection automation covers this device";
     return "Monitored";

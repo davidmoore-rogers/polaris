@@ -427,7 +427,7 @@ describe("asset Alerts tab — down detection panel", () => {
     await new Promise((r) => setTimeout(r, 10));
     const txt = panel()!.textContent || "";
     expect(txt).toContain("Passive");
-    expect(txt).toMatch(/never declare it Warning or Down/i);
+    expect(txt).toMatch(/never declare it Missed or Down/i);
     expect(txt).toMatch(/no alert will ever be raised/i);
     // And a way out, for someone who can act on it.
     expect(panel()!.querySelector('a[href="/automations.html"]')).toBeTruthy();

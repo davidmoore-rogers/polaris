@@ -10,7 +10,11 @@
  * The six states:
  *
  *   up          — answering, and it has answered `failureThreshold` times in a row
- *   warning     — answering intermittently: 1..threshold-1 consecutive misses
+ *   warning     — answering intermittently: 1..threshold-1 consecutive misses.
+ *                 Operator-facing label is "Missed" (MONITOR_STATUS_LABELS) —
+ *                 "Warning" collided with the alert severity of the same name,
+ *                 so a pill reading Warning looked like a fired alert rather
+ *                 than a missed poll. The stored value is unchanged.
  *   down        — `missedPolls` consecutive misses, per the covering automation
  *   recovering  — answering again after an outage, not yet back to `up`
  *   unknown     — nothing measured yet
@@ -24,6 +28,31 @@ export type MonitorStatus = "up" | "warning" | "recovering" | "down" | "unknown"
 
 /** The states reachable by probing — i.e. everything except the config state. */
 export const PROBE_MONITOR_STATUSES: readonly MonitorStatus[] = ["up", "warning", "recovering", "down", "unknown"];
+
+/**
+ * Operator-facing label for each state. ONE map so the assets pill, the search
+ * hit pill, the alert-email trigger summary and the dashboard status tiles can
+ * never disagree about what a state is called.
+ *
+ * `warning` reads "Missed" and `unknown` reads "Pending": both names describe
+ * what the device did rather than the enum value, and "Warning" in particular
+ * had to go — it is also an alert severity, so operators read the pill as
+ * "an alert fired" when it only ever meant "a poll was missed".
+ */
+export const MONITOR_STATUS_LABELS: Record<MonitorStatus, string> = {
+  up: "Up",
+  warning: "Missed",
+  recovering: "Recovering",
+  down: "Down",
+  unknown: "Pending",
+  passive: "Passive",
+};
+
+/** Label for a raw status string; unrecognized values pass through unchanged. */
+export function monitorStatusLabel(status: string | null | undefined): string {
+  if (!status) return MONITOR_STATUS_LABELS.unknown;
+  return (MONITOR_STATUS_LABELS as Record<string, string>)[status] ?? status;
+}
 
 /**
  * Should the heavy cadences (telemetry / system info / interfaces / storage /

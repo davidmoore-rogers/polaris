@@ -323,7 +323,7 @@ function clampMonitoredState(data: Record<string, unknown>): void {
     data.consecutiveFailures = 0;
   } else if (monitored === true) {
     // Reset probe state so the pill always starts at Recovering on re-enable
-    // rather than carrying over stale Down/Warning from the previous session.
+    // rather than carrying over stale Down/Missed from the previous session.
     data.monitorStatus = "recovering";
     data.consecutiveFailures = 0;
     data.consecutiveSuccesses = 0;
@@ -462,6 +462,10 @@ function monitorClause(v: string): Record<string, unknown> | null {
     case "Monitored":   return { monitored: true };
     case "Dep. Down":   return { monitored: true, dependencySuppressed: true };
     case "Up":          return { monitored: true, dependencySuppressed: false, monitorStatus: "up" };
+    // "Warning" is the pre-2026-08 chip label, kept as an alias: it is persisted
+    // verbatim inside SavedTableFilter.state and UserTableTabs rows, so dropping
+    // it would silently turn every stored preset naming it into "no filter".
+    case "Missed":
     case "Warning":     return { monitored: true, dependencySuppressed: false, monitorStatus: "warning" };
     case "Down":        return { monitored: true, dependencySuppressed: false, monitorStatus: "down" };
     case "Recovering":  return { monitored: true, dependencySuppressed: false, monitorStatus: "recovering" };

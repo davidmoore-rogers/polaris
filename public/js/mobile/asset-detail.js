@@ -1682,6 +1682,8 @@
     switch (asset.monitorStatus) {
       case "up": return "up";
       case "down": return "down";
+      case "warning": return "warn";
+      case "recovering": return "recovering";
       case "unknown": return "unk";
       case "passive": return "passive";
       default: return "unk";
@@ -1710,6 +1712,12 @@
     switch (asset.monitorStatus) {
       case "up":      return '<span class="status-pill up"><span class="dot up"></span>Up' + rttBit + '</span>';
       case "down":    return '<span class="status-pill down"><span class="dot down"></span>Down — ' + (asset.consecutiveFailures || 0) + ' consecutive fails</span>';
+      // Missed / Recovering used to fall through to the generic "Monitored",
+      // which hid the two states an operator most wants on a phone: a poll has
+      // started failing, or the device is answering again but not yet Up.
+      case "warning":    return '<span class="status-pill warn"><span class="dot warn"></span>Missed — ' +
+        (asset.consecutiveFailures || 0) + ' missed poll(s)</span>';
+      case "recovering": return '<span class="status-pill recovering"><span class="dot recovering"></span>Recovering' + rttBit + '</span>';
       case "unknown": return '<span class="status-pill unk"><span class="dot unk"></span>No samples yet</span>';
       // Passive keeps SOME reachability signal in the label — the counter is
       // still advancing, and "Passive" alone would read as "not looked at".
@@ -1734,7 +1742,7 @@
       bits.push("upstream parent down");
       // The pill hides the five-state label while suppressed; keep the own-probe
       // outcome discoverable in the subtext.
-      if (asset.monitorStatus) bits.push("own probe " + asset.monitorStatus);
+      if (asset.monitorStatus) bits.push("own probe " + monitorStatusLabel(asset.monitorStatus).toLowerCase());
     }
     if (asset.responseTimePolling) bits.push(asset.responseTimePolling);
     if (asset.lastMonitorAt) bits.push("last poll " + formatTimeAgo(asset.lastMonitorAt));

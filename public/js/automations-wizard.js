@@ -478,6 +478,19 @@ function makeAutomationSentences(s) {
     };
   }
   /** "Alarm" / "OK" for a 0/1 threshold. */
+  /**
+   * One monitorStatus VALUE as operators know it, lower-cased so it drops into
+   * a sentence ("Monitor status equals missed"). The stored value is the enum —
+   * `warning` — but every pill in the product reads "Missed", and the sentence
+   * is the last place that quoted the column instead of the label. Falls back
+   * to the raw value when api.js hasn't loaded (the factory is also used by
+   * automations.js, which loads it, and by the DOM tests, which may not).
+   */
+  function monStatusWord(value) {
+    var raw = value == null ? "" : String(value);
+    if (!raw) return raw;
+    return (typeof monitorStatusLabel === "function" ? monitorStatusLabel(raw) : raw).toLowerCase();
+  }
   function stateValueLabel(metric, df, threshold) {
     var t = Number(threshold);
     if (t !== 0 && t !== 1) return "…";
@@ -572,7 +585,9 @@ function makeAutomationSentences(s) {
       if (leaf.field === "monitorStatus" && leaf.operator === "==" && String(leaf.value).toLowerCase() === "passive") {
         return "no down-detection automation covers the device";
       }
-      var sOut = fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + String(leaf.value == null || leaf.value === "" ? "…" : leaf.value);
+      var sVal = leaf.value == null || leaf.value === "" ? "…"
+        : (leaf.field === "monitorStatus" ? monStatusWord(leaf.value) : String(leaf.value));
+      var sOut = fieldLabel(leaf.field) + " " + (CMP_PHRASE[leaf.operator] || leaf.operator) + " " + sVal;
       // State leaves carry dimension filters too (interface for the ifOper
       // trio, tunnel for ipsecStatus, hostname everywhere) — render them the
       // same way a metric leaf does, or the filter is invisible in the sentence.
@@ -685,7 +700,9 @@ function makeAutomationSentences(s) {
         if (df[k]) out += " " + escapeHtml((DIM_PHRASE[k] || k + " = {value}").replace("{value}", df[k]));
       });
     } else if (tr.type === "asset_state") {
-      out = "When <strong>" + escapeHtml(fieldLabel(tr.field)) + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(String(tr.value == null ? "…" : tr.value)) + "</strong>";
+      var trVal = tr.value == null || tr.value === "" ? "…"
+        : (tr.field === "monitorStatus" ? monStatusWord(tr.value) : String(tr.value));
+      out = "When <strong>" + escapeHtml(fieldLabel(tr.field)) + " " + escapeHtml(CMP_PHRASE[tr.operator] || tr.operator) + " " + escapeHtml(trVal) + "</strong>";
       // Same dimension clauses a metric trigger renders — a state trigger can
       // filter by interface / tunnel / hostname and the sentence must say so.
       var sdf = tr.dimensionFilter || {};
@@ -1026,6 +1043,7 @@ function makeAutomationSentences(s) {
     metricLabel: metricLabel, metricUnit: metricUnit, leafUnit: leafUnit,
     isBooleanMetric: isBooleanMetric, stateProbeOf: stateProbeOf, stateMapOf: stateMapOf,
     stateValueLabel: stateValueLabel, stateLeafClause: stateLeafClause,
+    monStatusWord: monStatusWord,
     fieldLabel: fieldLabel, changeLabel: changeLabel, humanDuration: humanDuration,
     isDownDetectionLeaf: isDownDetectionLeaf, isDownDetectionTrigger: isDownDetectionTrigger,
     missedPollsOf: missedPollsOf, downDetectionMeta: downDetectionMeta,
@@ -1457,6 +1475,13 @@ async function openAutomationWizard(existing, opts) {
       return '<option value="' + escapeHtml(v) + '" class="sev-' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(v) + '</option>';
     }).join("");
   }
+  // Display name for one asset_state VALUE. Only monitorStatus needs one — its
+  // stored values are the enum, and `warning` is shown as "Missed" everywhere
+  // else (POLARIS_MONITOR_STATUS_LABELS in api.js). Everything else is its own
+  // label already, so it passes straight through.
+  function stateEnumValueLabel(field, value) {
+    return field === "monitorStatus" ? monStatusWord(value) : String(value == null ? "" : value);
+  }
   function optLabeled(list, sel, labelFor) {
     return (list || []).map(function (v) {
       return '<option value="' + escapeHtml(v) + '"' + (v === sel ? " selected" : "") + '>' + escapeHtml(labelFor ? labelFor(v) : v) + '</option>';
@@ -1477,6 +1502,7 @@ async function openAutomationWizard(existing, opts) {
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       isDownDetectionLeaf = _sent.isDownDetectionLeaf, missedPollsOf = _sent.missedPollsOf,
       downDetectionMeta = _sent.downDetectionMeta,
+      monStatusWord = _sent.monStatusWord,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
   var DIM_PLACEHOLDER = { hostnamePattern: "any device — click to pick a hostname, or type to filter", ipPattern: "click to pick an IP — a prefix like 10.4. or a CIDR like 10.4.0.0/16 also works", macPattern: "click to pick a MAC, or type one in any separator style", manufacturerPattern: "any manufacturer — click to pick, or type to filter", modelPattern: "any model — click to pick, or type to filter", sdwanRulePattern: "any SD-WAN rule — click to pick, or type to filter", ifNamePattern: "any interface — click to pick, or type to filter", sensorClass:"sensor class (temperature / fan / voltage / current / optical / poe / power / disk)", sensorNamePattern: "any sensor — click to pick one, or type to filter", mountPathPattern: "any mount — click to pick, or type to filter", healthCheck: "any health check — click to pick", link: "any WAN member — click to pick", tunnelName: "any tunnel — click to pick, or type to filter", widgetId: "custom widget id", stateProbeId: "which state probe", stateRowPattern: "every row — click to pick one, or type to filter" };
   // Dimension VALUE pickers. The server says which dimensionFilter fields it can
@@ -2308,7 +2334,12 @@ async function openAutomationWizard(existing, opts) {
     var meta = s.fieldMeta && s.fieldMeta[field];
     var v = val != null ? String(val) : "";
     if (meta && (meta.kind === "enum" || meta.kind === "bool") && meta.values) {
-      return '<select class="tgl-value" style="width:130px">' + opt(meta.values, v) + '</select>';
+      // Labeled, not raw: monitorStatus stores `warning` but every pill in the
+      // product reads "Missed", and the builder was the one surface still
+      // quoting the enum. The option VALUE is untouched, so what saves and what
+      // the engine compares are unchanged.
+      return '<select class="tgl-value" style="width:130px">' +
+        optLabeled(meta.values, v, function (x) { return stateEnumValueLabel(field, x); }) + '</select>';
     }
     if (meta && meta.kind === "number") return '<input type="number" class="tgl-value" value="' + escapeHtml(v) + '" style="width:110px" placeholder="e.g. 3">';
     return '<input type="text" class="tgl-value" value="' + escapeHtml(v) + '" style="width:130px" placeholder="e.g. up / down">';
