@@ -1262,7 +1262,19 @@ export interface DiscoveryResult {
   // include/exclude filter. A subnet's fortigateDevice missing from this set
   // means the device was removed from FMG — safe to deprecate. An offline but
   // still-configured device remains here, so its subnets are left alone.
+  // HA cluster members ride this list too: a standby's hostname never appears
+  // at the top-level device name, only inside `ha_slave[]`, and it is just as
+  // "still configured" as the member currently holding the cluster IP.
   knownDeviceNames: string[];
+  // The serial sibling of `knownDeviceNames` — every FortiGate CHASSIS the
+  // upstream knows, captured from the same raw roster (pre-filter, any
+  // conn_status) and including every `ha_slave[]` member. This is the ONLY
+  // place an HA standby's identity can come from, which is why it is roster-
+  // sourced rather than collected from the devices that happened to process
+  // successfully: a gate that failed, was skipped for a missing management IP
+  // or was filtered out keeps its primary (still in the roster by name) and
+  // would otherwise lose its standby to the Phase 2a stale-firewall sweep.
+  knownDeviceSerials: string[];
   fortiSwitches: DiscoveredFortiSwitch[];
   fortiAps: DiscoveredFortiAP[];
   vips: DiscoveredVip[];
@@ -1334,6 +1346,43 @@ export type DiscoveryProgressCallback = (
   message: string,
   device?: string,
 ) => void;
+
+/**
+ * Every identity the FMG device roster knows, from the RAW `/dvmdb/adom/<adom>
+ * /device` payload — pre-filter, any conn_status, HA members included.
+ *
+ * The HA half is the point. A cluster's standby never appears at the top-level
+ * `name`/`sn`; its identity lives only inside `ha_slave[]`. Collecting member
+ * identities from the PROCESSED devices instead (which is what the sync layer
+ * used to do) tied a standby's survival to its cluster being reachable: one
+ * gate that failed its direct read, was skipped for an unresolved management
+ * IP, or was dropped by the include/exclude filter still contributed its
+ * top-level name — so the primary asset matched the roster and lived, while
+ * the standby matched nothing and was decommissioned by the Phase 2a stale-
+ * firewall sweep. Roster membership is config truth for every member of every
+ * cluster, online or not, so it is captured in one place, once.
+ *
+ * `ha_mode` is deliberately NOT consulted: a member listed in `ha_slave[]` is
+ * a configured chassis whatever the mode field says, and this function answers
+ * "does the upstream still know this box", not "what shape is the cluster".
+ * Duplicates are possible (the primary appears both at top level and in
+ * `ha_slave[]`) and harmless — both consumers build Sets.
+ */
+export function extractRosterIdentities(devicesRaw: any[]): { names: string[]; serials: string[] } {
+  const names: string[] = [];
+  const serials: string[] = [];
+  const pushName = (v: unknown) => { if (typeof v === "string" && v.length > 0) names.push(v); };
+  const pushSerial = (v: unknown) => { if (typeof v === "string" && v.length > 0) serials.push(v); };
+  for (const d of Array.isArray(devicesRaw) ? devicesRaw : []) {
+    pushName(d?.name || d?.hostname);
+    pushSerial(d?.sn);
+    for (const m of Array.isArray(d?.ha_slave) ? d.ha_slave : []) {
+      pushName(m?.name);
+      pushSerial(m?.sn);
+    }
+  }
+  return { names, serials };
+}
 
 /**
  * Extract HA cluster info from a raw FMG `/dvmdb/adom/<adom>/device` record.
@@ -2470,15 +2519,16 @@ export async function discoverDhcpSubnets(
     } else {
       log("discover.devices", "info", `No managed devices found in ADOM "${adom}"`);
     }
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [], knownDeviceSerials: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
   }
 
   // Capture the full roster of configured devices (pre-filter, any conn_status).
   // Subnets whose fortigateDevice is NOT in this set were discovered from a
   // device that has since been deleted from FMG — those are the ones to deprecate.
-  const knownDeviceNames: string[] = (devicesDataRaw as any[])
-    .map((d) => d.name || d.hostname)
-    .filter((n): n is string => typeof n === "string" && n.length > 0);
+  // HA members are captured HERE, from the raw roster, and deliberately not
+  // from the devices that processed successfully — see extractRosterIdentities.
+  const { names: knownDeviceNames, serials: knownDeviceSerials } =
+    extractRosterIdentities(devicesDataRaw as any[]);
 
   // Apply device-level include/exclude filter (FortiGate names or hostnames).
   // Include wins over exclude when both are set.
@@ -2511,7 +2561,7 @@ export async function discoverDhcpSubnets(
     }
   }
   if (devicesData.length === 0) {
-    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+    return { subnets: [], devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames, knownDeviceSerials, fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
   }
 
   const discovered: DiscoveredSubnet[] = [];
@@ -3010,6 +3060,7 @@ export async function discoverDhcpSubnets(
             deviceInventory: filteredDevInventory,
             inventoryDevices: chunk.didInventory ? [chunk.device.name] : [],
             knownDeviceNames: [],
+            knownDeviceSerials: [],
             fortiSwitches: chunk.fortiSwitches,
             fortiAps: chunk.fortiAps,
             vips: chunk.vips,
@@ -3170,6 +3221,7 @@ export async function discoverDhcpSubnets(
     deviceInventory,
     inventoryDevices: [...inventoryDevices],
     knownDeviceNames,
+    knownDeviceSerials,
     fortiSwitches,
     fortiAps,
     vips,

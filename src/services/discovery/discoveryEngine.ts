@@ -781,7 +781,7 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
     } else if (integration.type === "windowsserver") {
       const subnets = await windowsServer.discoverDhcpScopes(config as any, ac.signal);
       const wsHost = (config as any).host as string;
-      discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
+      discoveryResult = { subnets, devices: [], interfaceIps: [], dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: wsHost ? [wsHost] : [], knownDeviceSerials: [], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [], vipInventoriedDevices: [], dhcpReservationsInventoriedDevices: [], dhcpLeasesInventoriedDevices: [] };
       // Windows Server is a single host — no per-device iteration, sync the full result normally
       const r = await syncDhcpSubnets(integrationId, integrationName, integration.type, discoveryResult, actor, "full", ac.signal);
       syncTotals.created.push(...r.created);
@@ -1680,6 +1680,40 @@ export function sweepPhaseEnabled(mode: SyncMode, phase: "2" | "2a" | "2b" | "2c
 }
 
 /**
+ * Pure guard for the Phase 2a stale-firewall sweep: is this asset the standby
+ * member of a cluster whose membership NOBODY read this run?
+ *
+ * A standby has no identity outside its cluster's HA roster — no top-level
+ * device name, and (by design) no management IP of its own. So the sweep can
+ * only judge it when that roster was actually published: `knownFirewallSerialsUc`
+ * says the upstream still knows the peer chassis, and `haRosterPublishedUc`
+ * says some device this run enumerated its members. Three outcomes:
+ *
+ *   - peer serial unknown to the upstream  → the WHOLE cluster is gone; judge
+ *     this asset normally (both members are genuinely stale).
+ *   - peer known AND its roster published  → membership was read and this
+ *     member wasn't in it; it really did leave the cluster. Judge it.
+ *   - peer known, roster NOT published     → protected. The cluster is still
+ *     configured but nothing enumerated it — an unreachable gate, a skipped
+ *     direct read, a FortiOS build whose `ha-peer` endpoint 404s, an FMG API
+ *     user without the field. Absence of evidence is not evidence of absence.
+ *
+ * Both sets are UPPER-CASE serials; the topology serial is folded to match.
+ */
+export function haStandbyOfUnreadCluster(
+  fortinetTopology: unknown,
+  knownFirewallSerialsUc: Set<string>,
+  haRosterPublishedUc: Set<string>,
+): boolean {
+  const topo = (fortinetTopology as Record<string, unknown> | null) || null;
+  if (!topo || topo.haRole !== "secondary") return false;
+  const peer = typeof topo.haPeerSerial === "string" ? topo.haPeerSerial.toUpperCase() : "";
+  if (!peer) return false;
+  if (!knownFirewallSerialsUc.has(peer)) return false;
+  return !haRosterPublishedUc.has(peer);
+}
+
+/**
  * Pure matcher for the Phase 2a controller cascade: given a FortiSwitch/FortiAP
  * asset's `fortinetTopology` blob and the set of just-decommissioned FortiGate
  * hostnames (lowercased), return the matched controller name, or null when the
@@ -2108,12 +2142,31 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // device.name — only inside ha_slave[]). On failover, the previous
   // primary would suffer the same fate. Both member hostnames AND member
   // serials are tracked so the sweep can match either.
+  //
+  // The identities come from the ROSTER (`knownDeviceSerials`, captured
+  // pre-filter and regardless of conn_status) first, and only then from the
+  // devices that processed this run. Roster-first is the whole point: a gate
+  // that failed its direct read, was skipped for an unresolved management IP,
+  // or was dropped by the include/exclude filter contributes no processed
+  // device at all — so its primary survived on the raw-roster name while its
+  // standby, an identity only ha_slave[] carries, matched nothing and was
+  // decommissioned. Serials fold to upper case here and are compared that way
+  // below, mirroring the serial-mismatch guard in the firewall fan-out.
   const knownFirewallSerials = new Set<string>();
+  for (const sn of result.knownDeviceSerials || []) knownFirewallSerials.add(sn.toUpperCase());
+  // Cluster memberships actually PUBLISHED this run. A member missing from a
+  // roster that WAS read has genuinely left its cluster; a member whose
+  // cluster published no roster at all is unknowable, not gone — the same
+  // "absence is not negative evidence" posture the switch/AP sweeps take.
+  const haRosterPublished = new Set<string>();
   for (const dev of result.devices) {
-    if (dev.serial) knownFirewallSerials.add(dev.serial);
+    if (dev.serial) knownFirewallSerials.add(dev.serial.toUpperCase());
     if (Array.isArray(dev.haMembers)) {
       for (const m of dev.haMembers) {
-        if (m.serial) knownFirewallSerials.add(m.serial);
+        if (m.serial) {
+          knownFirewallSerials.add(m.serial.toUpperCase());
+          haRosterPublished.add(m.serial.toUpperCase());
+        }
         if (m.name) knownDeviceNames.add(m.name);
       }
     }
@@ -2336,14 +2389,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   // flipping a filter shouldn't decommission previously-discovered firewalls.
   //
   // Match order:
-  //   1. Serial — chassis identity, never case-mismatched, never renamed.
-  //      Also covers HA: every cluster member's serial is added to
-  //      `knownFirewallSerials` (including ha_slave[] entries), so a standby
-  //      whose hostname never appears at top-level still matches by serial.
+  //   1. Serial (case-insensitive) — chassis identity, never renamed. Also
+  //      covers HA: every cluster member's serial is in `knownFirewallSerials`
+  //      (roster ha_slave[] entries included), so a standby whose hostname
+  //      never appears at top-level still matches by serial.
   //   2. Hostname (case-insensitive) — fallback for legacy/partial rows
   //      where Asset.serialNumber wasn't populated. FMG-stored names and
   //      FortiOS system-status hostnames can disagree in case for the same
   //      device, so the comparison is lowercase-on-both-sides.
+  //   3. HA standby whose cluster never published its membership this run —
+  //      see haStandbyOfUnreadCluster. Absence from a roster nobody read is
+  //      not evidence the box left the cluster.
   //
   // A decommissioned firewall is reactivated by the Phase-3b firewall update
   // path above on a future discovery cycle when the device returns to FMG.
@@ -2364,15 +2420,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // the status flip — see maintenanceScheduleService.
         status: { not: "decommissioned" },
       },
-      select: { id: true, hostname: true, serialNumber: true },
+      select: { id: true, hostname: true, serialNumber: true, fortinetTopology: true },
     });
     const staleFwIds: string[] = [];
     const staleFwHostnames: string[] = [];
     for (const a of candidateFws) {
       // 1) Serial-first — canonical chassis identity.
-      if (a.serialNumber && knownFirewallSerials.has(a.serialNumber)) continue;
+      if (a.serialNumber && knownFirewallSerials.has(a.serialNumber.toUpperCase())) continue;
       // 2) Hostname fallback (case-insensitive).
       if (a.hostname && knownDeviceNamesLc.has(a.hostname.toLowerCase())) continue;
+      // 3) Standby of a cluster whose membership went unread this run.
+      if (haStandbyOfUnreadCluster(a.fortinetTopology, knownFirewallSerials, haRosterPublished)) continue;
       if (!a.hostname) continue;
       staleFwIds.push(a.id);
       staleFwHostnames.push(a.hostname);
@@ -2401,6 +2459,17 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         where: { id: { in: staleFwIds } },
         data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
       });
+      // Keep the in-memory index in step with the DB. `assetIdx` is a snapshot
+      // taken before this sweep, and in "full" mode (the standalone FortiGate
+      // integration — one pass, Phase 2a ahead of the Phase 3 firewall fan-out)
+      // that snapshot is what Phase 3 reads. A row this sweep just
+      // decommissioned would still look "active" there, the resurrection clause
+      // would not fire, and the DB row would stay decommissioned with nothing
+      // able to flip it back on any later cycle.
+      for (const id of staleFwIds) {
+        const row = assetIdx.findById(id);
+        if (row) row.status = "decommissioned";
+      }
       // Cascade — a decommissioned FortiGate takes its managed FortiSwitches /
       // FortiAPs with it. Phase 2b can't cover this case: it only judges
       // children whose controller was successfully INVENTORIED this run, and a
@@ -2452,6 +2521,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           where: { id: { in: cascadeIds } },
           data: { status: "decommissioned", statusChangedAt: new Date(now), statusChangedBy: integrationLabel },
         });
+        // Same snapshot sync as the firewall flip above — the switch / AP
+        // update paths resurrect off `existingAsset.status`, which comes from
+        // the pre-sweep `assetIdx`.
+        for (const id of cascadeIds) {
+          const row = assetIdx.findById(id);
+          if (row) row.status = "decommissioned";
+        }
         // Give back the addresses. Runs BEFORE the status flip would matter but
         // AFTER it for ordering safety: the helper reads asset ipAddress only,
         // so a decommissioned row is still resolvable. Never throws.

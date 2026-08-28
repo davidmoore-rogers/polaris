@@ -833,6 +833,24 @@ async function fgtChainVips(ctx: FgtChainCtx): Promise<void> {
   }
 }
 
+/**
+ * Every FortiGate chassis serial this standalone integration knows: the gate
+ * we authenticated against, plus every member Chain G's `ha-peer` read named.
+ * The HA half matters because a cluster's standby has no identity of its own
+ * anywhere else on this integration type — the caller's roster is a single
+ * device name — and the stale-firewall sweep matches by serial before it
+ * falls back to hostname.
+ */
+function rosterSerials(devices: DiscoveredDevice[], callerSerial: string): string[] {
+  const out: string[] = [];
+  if (callerSerial) out.push(callerSerial);
+  for (const d of devices) {
+    if (d.serial) out.push(d.serial);
+    for (const m of d.haMembers ?? []) if (m.serial) out.push(m.serial);
+  }
+  return out;
+}
+
     // ─── Chain G: HA peer info ──────────────────────────────────────────
     // GET /api/v2/monitor/system/ha-peer returns the calling unit's serial
     // plus each peer member. Standalone (non-HA) gates return 404 or empty
@@ -1031,7 +1049,7 @@ export async function discoverDhcpSubnets(
 
   // Stop early if aborted
   if (signal?.aborted) {
-    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
+    return { subnets: [], devices, interfaceIps, dhcpEntries: [], deviceInventory: [], inventoryDevices: [], knownDeviceNames: [deviceName], knownDeviceSerials: rosterSerials(devices, deviceSerial), fortiSwitches: [], fortiAps: [], vips: [], switchMacTable: [], arpTable: [], arpQueriedDevices: [], cmdbSwitchSerials: [], cmdbApSerials: [], switchInventoriedDevices: [], apInventoriedDevices: [] };
   }
 
   // Hoisted: dhcpInterfaceNames is built in Step 3 and read both by Step 3b
@@ -1135,6 +1153,10 @@ export async function discoverDhcpSubnets(
     inventoryDevices: [...inventoryDevices],
     // Standalone FortiGate: the one device we connected to is the entire roster.
     knownDeviceNames: [deviceName],
+    // …plus every chassis its HA roster named. Chain G's `ha-peer` read is the
+    // only place a standby member's serial exists on this integration type,
+    // and the stale-firewall sweep matches firewalls by serial first.
+    knownDeviceSerials: rosterSerials(devices, deviceSerial),
     fortiSwitches,
     fortiAps,
     vips,
