@@ -4,12 +4,17 @@
  * `sanitizeTabs` — the validator behind per-user list-page tabs. Per-tab state
  * validation is delegated to savedFilterService.sanitizeFilterState (covered in
  * its own suite); what's tested here is the envelope: caps, uniqueness, name
- * hygiene, the preset back-reference, the base-filter triple, and the activeId
- * repair rule.
+ * hygiene, the preset back-reference, the base-filter triple, the per-tab
+ * favorites list, and the activeId repair rule.
  */
 
 import { describe, it, expect } from "vitest";
-import { sanitizeTabs, MAX_TABS, MAX_TAB_NAME_LEN } from "../../src/services/tableTabsService.js";
+import {
+  sanitizeTabs,
+  MAX_TABS,
+  MAX_TAB_NAME_LEN,
+  MAX_TAB_FAVORITES,
+} from "../../src/services/tableTabsService.js";
 
 const STATE = { sfFilters: { assetType: ["firewall"] }, sortKey: "hostname", sortDir: "asc" };
 
@@ -35,6 +40,7 @@ describe("sanitizeTabs", () => {
         defaultFilterId: null,
         defaultFilterName: null,
         defaultState: null,
+        favoriteIds: null,
       }],
     });
   });
@@ -76,6 +82,27 @@ describe("sanitizeTabs", () => {
     const out = sanitizeTabs({ tabs: [tab({ defaultFilterId: "deleted", defaultState: STATE })] });
     expect(out.tabs[0]!.defaultState).toEqual(STATE);
     expect(out.tabs[0]!.defaultFilterId).toBe("deleted");
+  });
+
+  it("round-trips a tab's own favorites, deduped and in order", () => {
+    const out = sanitizeTabs({ tabs: [tab({ favoriteIds: ["a2", "a1", "a2"] })] });
+    expect(out.tabs[0]!.favoriteIds).toEqual(["a2", "a1"]);
+  });
+
+  it("keeps an ABSENT favorites list null and an empty one empty", () => {
+    // The two differ: null lets the client seed the tab from the legacy
+    // per-user localStorage set, [] says the operator has none here.
+    expect(sanitizeTabs({ tabs: [tab()] }).tabs[0]!.favoriteIds).toBeNull();
+    expect(sanitizeTabs({ tabs: [tab({ favoriteIds: null })] }).tabs[0]!.favoriteIds).toBeNull();
+    expect(sanitizeTabs({ tabs: [tab({ favoriteIds: [] })] }).tabs[0]!.favoriteIds).toEqual([]);
+  });
+
+  it("rejects a favorites list that is over the cap or not a list of ids", () => {
+    const many = Array.from({ length: MAX_TAB_FAVORITES + 1 }, (_, i) => `a${i}`);
+    expect(() => sanitizeTabs({ tabs: [tab({ favoriteIds: many })] })).toThrowError(/favorite cap/);
+    expect(() => sanitizeTabs({ tabs: [tab({ favoriteIds: "a1" })] })).toThrowError(/must be an array/);
+    expect(() => sanitizeTabs({ tabs: [tab({ favoriteIds: [1] })] })).toThrowError(/must be a string/);
+    expect(() => sanitizeTabs({ tabs: [tab({ favoriteIds: [""] })] })).toThrowError(/is required/);
   });
 
   it("trims names and rejects blank / control-character ones", () => {

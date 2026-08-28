@@ -4,6 +4,7 @@
  * The /api/v1/me/table-tabs surface (Assets page tab strip):
  *   - empty layout before anything is saved; full-replace round-trip after
  *   - a tab's BASE filter round-trips, and its id/name drop without a snapshot
+ *   - a tab's own FAVORITES round-trip; absent stays null, over-cap is refused
  *   - tabs are STRICTLY per user — two users never see each other's
  *   - a readonly caller gets tabs (they only need read on the scope's key)
  *   - unknown scope + malformed tab payloads are rejected
@@ -130,6 +131,28 @@ d("table tabs", () => {
       { id: "t1", name: "x", state: {}, defaultState: { sfFilters: { hostname: { op: "nope" } } } },
     ], "t1"));
     expect(bad.status).toBe(400);
+  });
+
+  it("round-trips each tab's own favorites, and refuses an over-cap list", async () => {
+    const saved = await put(admin, layout([
+      { id: "t1", name: "Firewalls", state: STATE, favoriteIds: ["a2", "a1", "a2"] },
+      { id: "t2", name: "Switches", state: {}, favoriteIds: [] },
+      // Absent stays NULL — that's what lets the client seed the tab once from
+      // the legacy per-user localStorage set.
+      { id: "t3", name: "Pre-feature", state: {} },
+    ], "t1"));
+    expect(saved.status).toBe(200);
+    expect(saved.body.tabs[0].favoriteIds).toEqual(["a2", "a1"]);   // deduped, order kept
+    expect(saved.body.tabs[1].favoriteIds).toEqual([]);
+    expect(saved.body.tabs[2].favoriteIds).toBeNull();
+
+    const reread = await admin.agent.get("/api/v1/me/table-tabs?scope=assets");
+    expect(reread.body.tabs[0].favoriteIds).toEqual(["a2", "a1"]);
+
+    const overCap = await put(admin, layout([
+      { id: "t1", name: "Full", state: {}, favoriteIds: Array.from({ length: 501 }, (_, i) => `a${i}`) },
+    ], "t1"));
+    expect(overCap.status).toBe(400);
   });
 
   it("keeps each user's tabs to themselves, and gives a readonly caller tabs of their own", async () => {

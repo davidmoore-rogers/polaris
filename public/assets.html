@@ -52,8 +52,9 @@
       </div>
 
       <!-- Per-user view tabs (assets-tabs.js). Each tab holds its own filter +
-           sort state; the set is persisted per user at /me/table-tabs. Rendered
-           client-side — the strip is empty until init() resolves. -->
+           sort state, its own base filter, and its own favorites; the set is
+           persisted per user at /me/table-tabs. Rendered client-side — the strip
+           is empty until init() resolves. -->
       <div class="table-tabs" id="assets-tabs">
         <div class="table-tabs-list" id="assets-tabs-list" role="tablist" aria-label="Asset views"></div>
         <button type="button" class="table-tab-add" id="assets-tab-add" title="New tab" aria-label="New tab">+</button>

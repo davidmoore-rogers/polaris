@@ -20,6 +20,17 @@
  * live preset every time the Filters menu lists them, which is how an edit to
  * the preset reaches the tabs based on it.
  *
+ * Favorites are the tab's too: the module registers a favorites.js PROVIDER for
+ * the "assets" entity, so the stars assets.js renders — and the `?favoriteIds=`
+ * it sends to float them to the top of the whole result set — come from the tab
+ * the operator is on. Blocks / subnets favorites are untouched and still live in
+ * localStorage; the Assets set moved onto the tab because a favorite is part of
+ * a view, and a view is server-persisted and follows the operator between
+ * browsers. A tab written before the feature carries `favoriteIds: null`, which
+ * is the one moment it adopts this browser's old per-user set (every tab, since
+ * that set is exactly what each tab used to show); once saved as an array, no
+ * other browser re-seeds it.
+ *
  * Contract with assets.js:
  *   init({hashSeeded})  — awaited before the first fetch so the page loads once
  *   syncFromTable()     — called from assetsApplyFilterState on every change
@@ -33,21 +44,28 @@
  * just left.
  *
  * Depends on globals from app.js (showToast/showConfirm/escapeHtml), api.js
- * (api), table-sf.js (TableSF.applyState/getPrefs) and assets.js (_assetsSF,
+ * (api), table-sf.js (TableSF.applyState/getPrefs), favorites.js
+ * (registerFavoritesProvider/getStoredFavorites) and assets.js (_assetsSF,
  * assetsApplyFilterState). Loaded by assets.html BEFORE assets.js so
- * window.PolarisAssetTabs exists when assets.js's DOMContentLoaded runs.
+ * window.PolarisAssetTabs exists when assets.js's DOMContentLoaded runs, and
+ * AFTER favorites.js so the provider can be registered during init.
  */
 
-/* global api, showToast, showConfirm, escapeHtml, _assetsSF, assetsApplyFilterState */
+/* global api, showToast, showConfirm, escapeHtml, _assetsSF, assetsApplyFilterState,
+          registerFavoritesProvider, getStoredFavorites */
 
 (function () {
   var SCOPE = "assets";
+  var FAV_ENTITY = "assets";          // favorites.js entity this strip takes over
+  // Mirrors tableTabsService.MAX_TAB_FAVORITES — the server rejects the whole
+  // PUT past it, so the click is where the operator gets told.
+  var MAX_FAVORITES = 500;
   var MAX_TABS = 20;
   var MAX_NAME = 40;
   var SAVE_DEBOUNCE_MS = 800;
 
   // [{ id, name, state, savedFilterId, savedFilterName,
-  //    defaultFilterId, defaultFilterName, defaultState }]
+  //    defaultFilterId, defaultFilterName, defaultState, favoriteIds }]
   var _tabs = [];
   var _activeId = "";
   var _applying = false;     // suppresses syncFromTable while we drive the table
@@ -121,6 +139,9 @@
             defaultFilterId: t.defaultFilterId || null,
             defaultFilterName: t.defaultFilterName || null,
             defaultState: t.defaultState || null,
+            // Array vs null is meaningful to the server (see the service): null
+            // still means "may be seeded from the legacy per-user set".
+            favoriteIds: Array.isArray(t.favoriteIds) ? t.favoriteIds : null,
           };
         }),
         activeId: _activeId,
@@ -165,11 +186,84 @@
     return true;
   }
 
+  // ─── Favorites (per tab) ──────────────────────────────────────────────────
+
+  function favoriteIds(tab) {
+    return (tab && Array.isArray(tab.favoriteIds)) ? tab.favoriteIds : [];
+  }
+
+  /** This browser's pre-provider per-user set, capped. Read once, at init. */
+  function legacyFavorites() {
+    if (typeof getStoredFavorites !== "function") return [];
+    var set = getStoredFavorites(FAV_ENTITY);
+    return set ? Array.from(set).slice(0, MAX_FAVORITES) : [];
+  }
+
+  /**
+   * Fill in every tab that predates per-tab favorites from the legacy set. Runs
+   * once per strip load and is a no-op the moment the tabs carry arrays, so the
+   * first browser to open the page after the upgrade decides — a second one can
+   * never re-seed a tab whose favorites the operator has since curated.
+   */
+  function seedLegacyFavorites() {
+    var pending = _tabs.filter(function (t) { return !Array.isArray(t.favoriteIds); });
+    if (!pending.length) return;
+    var legacy = legacyFavorites();
+    pending.forEach(function (t) { t.favoriteIds = legacy.slice(); });
+    // Only worth a write for an operator who already has a server row; a first
+    // visit stays write-free until they actually use tabs.
+    if (_persisted) scheduleSave();
+  }
+
+  /**
+   * Hand favorites.js the active tab as the store for the "assets" entity.
+   * That's the whole integration: assets.js renders stars through starCellHTML
+   * and builds `?favoriteIds=` through getFavorites, so both follow the tab
+   * with no change on the page side.
+   */
+  function registerFavoritesBridge() {
+    if (typeof registerFavoritesProvider !== "function") return;
+    registerFavoritesProvider(FAV_ENTITY, {
+      get: function () {
+        return new Set(favoriteIds(activeTab()));
+      },
+      toggle: function (id) {
+        var tab = activeTab();
+        if (!tab || !id) return false;
+        if (!Array.isArray(tab.favoriteIds)) tab.favoriteIds = [];
+        var at = tab.favoriteIds.indexOf(id);
+        if (at >= 0) {
+          tab.favoriteIds.splice(at, 1);
+        } else if (tab.favoriteIds.length >= MAX_FAVORITES) {
+          // Refuse rather than drop the tail server-side, where it would look
+          // like a star that didn't stick.
+          showToast('"' + tab.name + '" already has ' + MAX_FAVORITES +
+            " favorites — unstar one first", "error");
+          return false;
+        } else {
+          tab.favoriteIds.push(id);
+        }
+        render();                                         // tooltip count
+        scheduleSave();
+        return tab.favoriteIds.indexOf(id) >= 0;
+      },
+      titleFor: function (_id, fav) {
+        var tab = activeTab();
+        // Named, because the next tab shows a different set — this is the only
+        // surface that explains the scoping at the moment of the click.
+        return (fav ? "Unfavorite" : "Favorite") +
+          (tab ? ' in this view ("' + tab.name + '")' : " in this view");
+      },
+    });
+  }
+
   // ─── Rendering ────────────────────────────────────────────────────────────
 
   function tabTitle(tab) {
     var n = filterCount(tab.state);
     var bits = [n ? (n + (n === 1 ? " filter" : " filters")) : "No filters"];
+    var f = favoriteIds(tab).length;
+    if (f) bits.push(f + (f === 1 ? " favorite" : " favorites"));
     if (tab.defaultState) {
       bits.push('resets to base filter "' + (tab.defaultFilterName || "base") + '"');
     } else if (tab.savedFilterName) {
@@ -232,6 +326,9 @@
       defaultFilterId: opts.defaultFilterId || null,
       defaultFilterName: opts.defaultFilterName || null,
       defaultState: opts.defaultState ? cloneState(opts.defaultState) : null,
+      // A new view starts with no stars — that IS the per-tab promise. (Never
+      // null: this tab has no legacy set to inherit.)
+      favoriteIds: [],
     };
     _tabs.push(tab);
     _activeId = tab.id;
@@ -259,8 +356,15 @@
     // filter can be reopened from the Filters menu in one click, and a tab
     // sitting exactly on its own base has nothing on top of it to lose.
     var onBase = tab.defaultState && sameState(tab.state, tab.defaultState);
-    if (filterCount(tab.state) && !tab.savedFilterId && !onBase) {
-      var ok = await showConfirm('Close "' + tab.name + '"? Its filters are not saved.');
+    var losesFilters = !!(filterCount(tab.state) && !tab.savedFilterId && !onBase);
+    // Favorites live ONLY on this tab now, so closing it is the only way to
+    // lose them — worth asking about even on a tab with no filters at all.
+    var losesFavorites = favoriteIds(tab).length > 0;
+    if (losesFilters || losesFavorites) {
+      var lost = [];
+      if (losesFilters) lost.push("Its filters are not saved");
+      if (losesFavorites) lost.push("its favorites live only here");
+      var ok = await showConfirm('Close "' + tab.name + '"? ' + lost.join(", and ") + ".");
       if (!ok) return;
     }
     _tabs.splice(idx, 1);
@@ -344,6 +448,9 @@
             defaultFilterId: t.defaultFilterId || null,
             defaultFilterName: t.defaultFilterName || null,
             defaultState: (t.defaultState && typeof t.defaultState === "object") ? t.defaultState : null,
+            // null (not []) when absent — seedLegacyFavorites below reads that
+            // as "may adopt this browser's old per-user stars".
+            favoriteIds: Array.isArray(t.favoriteIds) ? t.favoriteIds.slice() : null,
           };
         });
         _activeId = layout.activeId || _tabs[0].id;
@@ -360,11 +467,16 @@
           defaultFilterId: null,
           defaultFilterName: null,
           defaultState: null,
+          favoriteIds: legacyFavorites(),
         }];
         _activeId = _tabs[0].id;
         _persisted = false;                               // don't write until they use it
       }
       _ready = true;
+      seedLegacyFavorites();
+      // Before the first render + before assets.js fetches: the star cells and
+      // the ?favoriteIds= query both read through the provider.
+      registerFavoritesBridge();
       render();
       wire(strip);
 

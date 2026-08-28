@@ -2414,7 +2414,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 **Used by:**
 - `src/api/routes/tableTabs.ts` — `GET|PUT /me/table-tabs?scope=…`, gated `read` on the scope's key via `middleware/scopeAccess.ts`.
-- `public/js/assets-tabs.js` — the only frontend consumer, via `api.tableTabs.*`.
+- `public/js/assets-tabs.js` — the only frontend consumer, via `api.tableTabs.*`. It also owns the Assets page's FAVORITES store, by registering a `public/js/favorites.js` provider for the `"assets"` entity (`registerFavoritesProvider`) — so `assets.js`'s stars and its `?favoriteIds=` query read the active tab. Blocks / subnets / widget-library favorites still come from localStorage.
 
 **Invariants:**
 - Whole-blob replace per (user, scope): the client owns tab order + which tab is active. No merge, no partial update.
@@ -2424,6 +2424,8 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `savedFilterId` on a tab is a REFERENCE, not a foreign key: it may dangle (preset deleted, or it was someone else's private one) and is never resolved server-side, because it only labels the tab. **`defaultFilterId` is the same kind of label** — the tab's BASE filter is carried by the `defaultState` SNAPSHOT, which is what Reset applies, so a preset its owner deletes can never cost a tab its way back.
 - The base-filter triple is normalized TOGETHER: no `defaultState` ⇒ `defaultFilterId` + `defaultFilterName` are dropped. The snapshot is the single truth for "this tab has a base", and a leftover label would advertise a Reset button that could do nothing (the frontend labels the page-controls button off `activeDefault()`).
 - A base snapshot goes through `sanitizeFilterState` exactly like the tab's own `state` — it is replayed into the table the same way.
+- `favoriteIds` distinguishes **null from `[]`** and must keep doing so: null = "predates per-tab favorites, client may seed me from the legacy per-user localStorage set", `[]` = "the operator has none here". Normalizing absent → `[]` would let a second browser re-seed tabs whose favorites had since been curated elsewhere.
+- Over-cap favorites are REFUSED (400), never truncated: a silently dropped tail looks like a star that didn't stick. The client enforces `MAX_TAB_FAVORITES` at the click, where it can say so. Note the list route's own `ASSET_FAVORITES_MAX` (5000) is a different bound — that one sizes a query string, this one sizes stored state.
 - Read-level gate on both verbs. Tabs are a view of data the caller can already see, so a readonly operator gets them.
 
 **When changing this:**

@@ -8,6 +8,12 @@
  * open-a-preset-in-a-new-tab entry point, the base ("default") filter a tab
  * resets to, and — the subtle one — the re-entrancy guard that stops applying a
  * tab from writing the table state back into the tab the operator just left.
+ *
+ * The real public/js/favorites.js is eval'd alongside it, because per-tab
+ * favorites work by REGISTERING a provider for its "assets" entity: the thing
+ * worth testing is that the page's own entry points (isFavorite / toggleFavorite
+ * / starCellHTML / getFavorites, which is what builds `?favoriteIds=`) resolve
+ * to the active tab, so stubbing that seam would test nothing.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -19,6 +25,7 @@ vi.mock("../../src/db.js", () => ({ prisma: {} }));
 
 const g = globalThis as Record<string, unknown>;
 const SRC = readFileSync(resolve(__dirname, "../../public/js/assets-tabs.js"), "utf8");
+const FAV_SRC = readFileSync(resolve(__dirname, "../../public/js/favorites.js"), "utf8");
 
 const STRIP_HTML =
   '<div class="table-tabs" id="assets-tabs">' +
@@ -36,6 +43,9 @@ let appliedStates: unknown[];
 let refreshes: number;
 let repaints: number;
 let confirmAnswer: boolean;
+/** Pre-provider per-user stars in THIS browser's localStorage, if any. */
+let legacyFavorites: string[];
+let toasts: string[];
 
 /** Boot a fresh module instance against a fresh DOM. */
 async function boot(opts?: { hashSeeded?: boolean }) {
@@ -48,7 +58,7 @@ async function boot(opts?: { hashSeeded?: boolean }) {
   g.escapeHtml = (s: unknown) =>
     String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-  g.showToast = () => {};
+  g.showToast = (msg: string) => { toasts.push(String(msg)); };
   g.showConfirm = async () => confirmAnswer;
   g.api = {
     tableTabs: {
@@ -74,6 +84,15 @@ async function boot(opts?: { hashSeeded?: boolean }) {
   // base filter changes without the query changing, since that row carries the
   // Clear Filters / Reset Filter label.
   (win as unknown as Record<string, unknown>)._renderAssetsPageControls = () => { repaints += 1; };
+
+  // favorites.js first (assets-tabs.js registers into it during init), with the
+  // browser-side globals it reads.
+  g.currentUsername = "tester";
+  g.localStorage = win.localStorage;
+  if (legacyFavorites.length) {
+    win.localStorage.setItem("polaris-favs-assets-tester", JSON.stringify(legacyFavorites));
+  }
+  (0, eval)(FAV_SRC);
 
   (0, eval)(SRC);
   await tabsApi().init(opts || {});
@@ -116,6 +135,8 @@ beforeEach(() => {
   refreshes = 0;
   repaints = 0;
   confirmAnswer = true;
+  legacyFavorites = [];
+  toasts = [];
 });
 
 describe("first visit", () => {
@@ -290,6 +311,172 @@ describe("saved-filter entry points", () => {
     tabsApi().noteFilterLoaded({ id: "f8", name: "Something else", state: { sfFilters: {} } });
     expect(tabEls()[0]!.querySelector(".table-tab-name")!.textContent).toBe("Down switches");
     expect(tabsApi()._debugState().tabs[0].savedFilterId).toBe("f8");
+  });
+});
+
+describe("per-tab favorites", () => {
+  // The page-side entry points, resolved off globalThis after favorites.js is
+  // eval'd — exactly what assets.js calls.
+  const favApi = () => ({
+    isFavorite: g.isFavorite as (entity: string, id: string) => boolean,
+    toggleFavorite: g.toggleFavorite as (entity: string, id: string) => boolean,
+    getFavorites: g.getFavorites as (entity: string) => Set<string>,
+    starCellHTML: g.starCellHTML as (entity: string, id: string) => string,
+    getStoredFavorites: g.getStoredFavorites as (entity: string) => Set<string>,
+  });
+
+  beforeEach(() => {
+    getResponse = {
+      version: 1,
+      activeId: "t1",
+      tabs: [
+        { id: "t1", name: "Firewalls", state: { sfFilters: {}, sortKey: null, sortDir: null }, favoriteIds: ["a1"] },
+        { id: "t2", name: "Switches", state: { sfFilters: {}, sortKey: null, sortDir: null }, favoriteIds: [] },
+      ],
+    };
+  });
+
+  it("stars land on the ACTIVE tab and are invisible from the other", async () => {
+    await boot();
+    expect(favApi().isFavorite("assets", "a1")).toBe(true);
+
+    expect(favApi().toggleFavorite("assets", "a9")).toBe(true);
+    expect(Array.from(favApi().getFavorites("assets"))).toEqual(["a1", "a9"]);
+
+    fire(tabEls()[1], "click");
+    expect(favApi().isFavorite("assets", "a1")).toBe(false);
+    expect(favApi().isFavorite("assets", "a9")).toBe(false);
+    // Starring here must not reach back into t1.
+    favApi().toggleFavorite("assets", "b1");
+    expect(favApi().isFavorite("assets", "b1")).toBe(true);
+
+    const state = tabsApi()._debugState();
+    expect(state.tabs[0].favoriteIds).toEqual(["a1", "a9"]);
+    expect(state.tabs[1].favoriteIds).toEqual(["b1"]);
+  });
+
+  it("persists each tab's own list, and unstarring removes just that id", async () => {
+    await boot();
+    favApi().toggleFavorite("assets", "a9");
+    expect(favApi().toggleFavorite("assets", "a1")).toBe(false);   // unstar
+    expect(Array.from(favApi().getFavorites("assets"))).toEqual(["a9"]);
+    await flushSave();
+    const last = saved[saved.length - 1] as any;
+    expect(last.tabs[0].favoriteIds).toEqual(["a9"]);
+    expect(last.tabs[1].favoriteIds).toEqual([]);
+  });
+
+  it("names the tab on the star, escaped — it is where the scoping is explained", async () => {
+    getResponse = {
+      version: 1,
+      activeId: "t1",
+      tabs: [{ id: "t1", name: 'Sites "A"', state: { sfFilters: {}, sortKey: null, sortDir: null }, favoriteIds: [] }],
+    };
+    await boot();
+    const html = favApi().starCellHTML("assets", "a1");
+    expect(html).toContain("Favorite in this view");
+    expect(html).toContain("Sites &quot;A&quot;");                 // would break the attribute raw
+    expect(html).not.toContain('title="Favorite in this view ("');
+  });
+
+  it("counts favorites in the tab tooltip", async () => {
+    await boot();
+    expect(tabEls()[0]!.getAttribute("title")).toContain("1 favorite");
+    favApi().toggleFavorite("assets", "a9");
+    expect(tabEls()[0]!.getAttribute("title")).toContain("2 favorites");
+    expect(tabEls()[1]!.getAttribute("title")).not.toContain("favorite");
+  });
+
+  it("a new tab starts with no stars — that is the whole promise", async () => {
+    await boot();
+    fire(doc.getElementById("assets-tab-add"), "click");
+    expect(Array.from(favApi().getFavorites("assets"))).toEqual([]);
+    expect(tabsApi()._debugState().tabs[2].favoriteIds).toEqual([]);
+    // ...and opening a preset in a new tab likewise.
+    tabsApi().openInNewTab({ id: "f1", name: "Down switches", state: { sfFilters: { _monitor: ["Down"] } } });
+    expect(Array.from(favApi().getFavorites("assets"))).toEqual([]);
+  });
+
+  it("closing a tab whose only content is favorites still asks first", async () => {
+    await boot();
+    confirmAnswer = false;
+    fire(doc.querySelector('[data-tab-close="t1"]'), "click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(tabEls()).toHaveLength(2);                              // t1 has "a1"
+
+    // t2 has neither filters nor favorites — nothing to lose, no prompt.
+    fire(doc.querySelector('[data-tab-close="t2"]'), "click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(tabEls()).toHaveLength(1);
+  });
+
+  it("refuses past the cap instead of letting the server drop the tail", async () => {
+    getResponse = {
+      version: 1,
+      activeId: "t1",
+      tabs: [{
+        id: "t1",
+        name: "Full",
+        state: { sfFilters: {}, sortKey: null, sortDir: null },
+        favoriteIds: Array.from({ length: 500 }, (_, i) => `a${i}`),
+      }],
+    };
+    await boot();
+    expect(favApi().toggleFavorite("assets", "one-too-many")).toBe(false);
+    expect(favApi().isFavorite("assets", "one-too-many")).toBe(false);
+    expect(toasts.some((t) => t.includes("500 favorites"))).toBe(true);
+    // Unstarring still works, and makes room again.
+    expect(favApi().toggleFavorite("assets", "a0")).toBe(false);
+    expect(favApi().toggleFavorite("assets", "one-too-many")).toBe(true);
+  });
+
+  describe("adopting the pre-feature per-user set", () => {
+    it("seeds EVERY tab that predates the feature, since that is what each showed", async () => {
+      legacyFavorites = ["old1", "old2"];
+      getResponse = {
+        version: 1,
+        activeId: "t1",
+        tabs: [
+          { id: "t1", name: "One", state: { sfFilters: {}, sortKey: null, sortDir: null } },
+          { id: "t2", name: "Two", state: { sfFilters: {}, sortKey: null, sortDir: null } },
+        ],
+      };
+      await boot();
+      expect(Array.from(favApi().getFavorites("assets"))).toEqual(["old1", "old2"]);
+      const state = tabsApi()._debugState();
+      expect(state.tabs[1].favoriteIds).toEqual(["old1", "old2"]);
+      // Seeded copies are independent from that point on.
+      favApi().toggleFavorite("assets", "old1");
+      expect(tabsApi()._debugState().tabs[1].favoriteIds).toEqual(["old1", "old2"]);
+      // The adoption is written, which is what stops another browser re-seeding.
+      await flushSave();
+      const last = saved[saved.length - 1] as any;
+      expect(last.tabs[1].favoriteIds).toEqual(["old1", "old2"]);
+    });
+
+    it("never re-seeds a tab that already carries its own list", async () => {
+      // The curated case: another browser adopted (and the operator pruned)
+      // first, and this browser still holds the stale localStorage set.
+      legacyFavorites = ["old1", "old2"];
+      getResponse = {
+        version: 1,
+        activeId: "t1",
+        tabs: [{ id: "t1", name: "Curated", state: { sfFilters: {}, sortKey: null, sortDir: null }, favoriteIds: [] }],
+      };
+      await boot();
+      expect(Array.from(favApi().getFavorites("assets"))).toEqual([]);
+      // The legacy set itself is left alone — blocks/subnets still use that store.
+      expect(Array.from(favApi().getStoredFavorites("assets"))).toEqual(["old1", "old2"]);
+    });
+
+    it("a first visit takes the legacy set but still writes nothing", async () => {
+      legacyFavorites = ["old1"];
+      getResponse = { version: 1, tabs: [], activeId: "" };
+      await boot();
+      expect(Array.from(favApi().getFavorites("assets"))).toEqual(["old1"]);
+      expect(tabsApi()._debugState().persisted).toBe(false);
+      expect(saved).toEqual([]);
+    });
   });
 });
 

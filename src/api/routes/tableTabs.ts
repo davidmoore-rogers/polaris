@@ -24,6 +24,7 @@ import {
   saveTabsForUser,
   MAX_TABS,
   MAX_TAB_NAME_LEN,
+  MAX_TAB_FAVORITES,
 } from "../../services/tableTabsService.js";
 
 const router = Router();
@@ -46,6 +47,8 @@ const BodySchema = z.object({
         defaultFilterId:   z.string().max(64).nullish(),
         defaultFilterName: z.string().max(MAX_TAB_NAME_LEN).nullish(),
         defaultState:      z.record(z.unknown()).nullish(),
+        // Per-tab favorites. Null (or absent) is meaningful — see the service.
+        favoriteIds:       z.array(z.string().max(64)).max(MAX_TAB_FAVORITES).nullish(),
       }),
     )
     .max(MAX_TABS),

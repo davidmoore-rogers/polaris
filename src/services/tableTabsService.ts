@@ -23,6 +23,14 @@
  * refreshes the snapshot from the live preset whenever it lists them, which is
  * what makes an edit to the preset reach the tabs based on it.
  *
+ * A tab also owns its own FAVORITES (`favoriteIds`) — the starred rows that
+ * float to the top of that view. They live here rather than in localStorage
+ * (where blocks/subnets favorites still live) because a favorite is part of the
+ * view, and the view is server-persisted and follows the operator across
+ * browsers. `null` means "this tab predates per-tab favorites", which is what
+ * lets the client seed it ONCE from the old per-user localStorage set without
+ * a second browser later re-seeding curated tabs.
+ *
  * Whole-blob read/replace per (user, scope), like userDashboardService: the
  * client owns tab order + active tab and PUTs the full set. `sanitizeTabs` is
  * pure and unit-tested; it delegates per-tab state validation to
@@ -39,6 +47,14 @@ import type { Prisma } from "../generated/prisma/client.js";
 export const MAX_TABS = 20;
 export const MAX_TAB_NAME_LEN = 40;
 export const MAX_TAB_ID_LEN = 64;
+/**
+ * Starred rows per tab. Well above any real "rows I watch" list, and far below
+ * what would matter: the whole strip is ONE JSON blob, so 20 tabs × this × a
+ * cuid is the size the client PUTs on every star. The list route accepts up to
+ * ASSET_FAVORITES_MAX (5000) ids in a query — deliberately not the same number,
+ * since that one bounds a URL and this one bounds stored state.
+ */
+export const MAX_TAB_FAVORITES = 500;
 
 export interface TableTab {
   id: string;
@@ -55,6 +71,12 @@ export interface TableTab {
   defaultFilterId: string | null;
   defaultFilterName: string | null;
   defaultState: SavedFilterState | null;
+  /**
+   * Row ids starred IN THIS TAB, in the order they were starred. `null` = the
+   * tab predates per-tab favorites and the client may seed it from the legacy
+   * per-user localStorage set; `[]` = the operator has none here.
+   */
+  favoriteIds: string[] | null;
 }
 
 export interface TableTabsLayout {
@@ -73,6 +95,29 @@ function shortString(value: unknown, where: string, max: number): string {
   if (typeof value !== "string") throw new AppError(400, `${where} must be a string`);
   if (value.length > max) throw new AppError(400, `${where} exceeds ${max} characters`);
   return value;
+}
+
+/**
+ * One tab's starred row ids: deduped, order preserved, bounded. Throws rather
+ * than truncating — a client over the cap has a bug, and silently dropping the
+ * tail would look like a star that didn't stick (the client enforces the same
+ * cap at the click, where it can say so).
+ */
+function sanitizeFavoriteIds(raw: unknown, where: string): string[] {
+  if (!Array.isArray(raw)) throw new AppError(400, `${where} must be an array`);
+  if (raw.length > MAX_TAB_FAVORITES) {
+    throw new AppError(400, `${where} exceeds the ${MAX_TAB_FAVORITES}-favorite cap`);
+  }
+  const out: string[] = [];
+  const seen = new Set<string>();
+  raw.forEach((value, i) => {
+    const id = shortString(value, `${where}[${i}]`, MAX_TAB_ID_LEN);
+    if (!id) throw new AppError(400, `${where}[${i}] is required`);
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(id);
+  });
+  return out;
 }
 
 /**
@@ -119,6 +164,9 @@ export function sanitizeTabs(raw: unknown): TableTabsLayout {
       defaultFilterId:   defaultState && t.defaultFilterId   != null ? shortString(t.defaultFilterId, `tabs[${i}].defaultFilterId`, MAX_TAB_ID_LEN) : null,
       defaultFilterName: defaultState && t.defaultFilterName != null ? shortString(t.defaultFilterName, `tabs[${i}].defaultFilterName`, MAX_TAB_NAME_LEN) : null,
       defaultState,
+      // Absent stays NULL rather than becoming []: the two mean different
+      // things to the client (seed me from the legacy set vs. I have none).
+      favoriteIds: t.favoriteIds == null ? null : sanitizeFavoriteIds(t.favoriteIds, `tabs[${i}].favoriteIds`),
     };
   });
 
