@@ -6150,7 +6150,15 @@ const OID = {
   // whole trunk/member relationship in one string. See
   // utils/fortiswitchTrunkMap.ts for the format and why matching is a suffix
   // test rather than a reconstruction.
-  fsTrunkMember:               "1.3.6.1.4.1.12356.106.3.1.1.0",
+  fsTrunkMember:               "1.3.6.1.4.1.12356.106.3.1.0",
+  // Same object one level deeper. The constant above shipped at this depth and
+  // silently returned noSuchObject on every switch (a scalar GET resolves an
+  // error varbind to null, so the whole trunk overlay just never ran); the walk
+  // that caught it named `fsTrunkMember.0` at ...106.3.1.0. Kept as a fallback
+  // GET rather than deleted because it is one extra round trip only on a switch
+  // that answered nothing at the MIB-stated OID, and a firmware that publishes
+  // it deeper cannot be ruled out from one device.
+  fsTrunkMemberAlt:            "1.3.6.1.4.1.12356.106.3.1.1.0",
   pethMainPsePower:            "1.3.6.1.2.1.105.1.3.1.1.2",
   pethMainPseOperStatus:       "1.3.6.1.2.1.105.1.3.1.1.3",
   pethMainPseConsumptionPower: "1.3.6.1.2.1.105.1.3.1.1.4",
@@ -7842,7 +7850,12 @@ async function collectSystemInfoSnmp(
         // Trunk map: one scalar GET, so it costs nothing next to the FDB walk.
         // Undefined (not []) when the device doesn't publish the object at all,
         // so a non-Fortinet switch preserves rather than wipes.
-        const trunkRaw = await snmpGetScalar(session, OID.fsTrunkMember).catch(() => null);
+        let trunkRaw = await snmpGetScalar(session, OID.fsTrunkMember).catch(() => null);
+        // A non-Fortinet switch answers neither OID; a FortiSwitch that answers
+        // nothing at the MIB-stated one gets the second try (see the constants).
+        if (trunkRaw == null) {
+          trunkRaw = await snmpGetScalar(session, OID.fsTrunkMemberAlt).catch(() => null);
+        }
         const trunkStr = snmpVbToString(trunkRaw);
         trunkMembers = trunkStr ? parseTrunkPortMap(trunkStr) : undefined;
         // The scalar is the ONLY source of the trunk/member relationship on a

@@ -9,6 +9,21 @@ import {
 // Verbatim from a FortiSwitch-124E-FPOE running v7.6.6.
 const REAL = "8EF5920000001-0: port23 ::8EPTQ21000003-0: port27 ::GT61FTK21000002: port24 ::";
 
+// A 48-port access switch, same firmware family. Shape-identical to a real
+// prod walk (names changed): operator-configured LAGs sit in the SAME string
+// as the auto-created FortiLink trunks, so a trunk name carries spaces, an
+// underscore-wrapped internal name, or a plain hostname just as often as it
+// carries a peer serial. This is the string the OID fix made reachable — the
+// scalar had been read one level too deep (…106.3.1.1.0), which answers
+// noSuchObject, so no switch ever produced a member edge from SNMP.
+const REAL_LAGS = [
+  "_FlInK1_ICL0_: port51 ",
+  "::EDGE2-T1024E: port54 ",
+  "::Storage Node 2: port2 ",
+  "::APPHOST01: port9 ",
+  "::G181FTK20900967: port49 ::",
+].join("");
+
 // The same site's inventory, as Polaris stores it.
 const SERIALS = new Map<string, string>([
   ["S108EPTQ21000003", "asset-108e-1"],
@@ -156,5 +171,28 @@ describe("trunkMemberMap", () => {
   it("is empty for an empty read", () => {
     expect(trunkMemberMap([]).size).toBe(0);
     expect(trunkMemberMap(parseTrunkPortMap("")).size).toBe(0);
+  });
+});
+
+// The operator-named half of the same string. These are member/parent edges
+// like any other, but they are NOT peer identities, and the peer lookup has to
+// tell the difference or it will attach a trunk to an unrelated device.
+describe("operator-named LAGs in the same scalar", () => {
+  it("parses names carrying spaces and underscores", () => {
+    const map = trunkMemberMap(parseTrunkPortMap(REAL_LAGS));
+    expect(map.get("Storage Node 2")).toEqual(["port2"]);
+    expect(map.get("_FlInK1_ICL0_")).toEqual(["port51"]);
+    expect(map.get("APPHOST01")).toEqual(["port9"]);
+    expect(map.get("G181FTK20900967")).toEqual(["port49"]);
+  });
+
+  it("offers only the serial-shaped names to the peer lookup", () => {
+    const serials = new Map<string, string>([["FG181FTK20900967", "asset-gate"]]);
+    expect(matchTrunkPeer("G181FTK20900967", serials)).toBe("asset-gate");
+    // A space or an underscore means it is a label, not a serial — and a short
+    // alphanumeric one could suffix-match a real serial by accident.
+    expect(matchTrunkPeer("Storage Node 2", serials)).toBeNull();
+    expect(matchTrunkPeer("_FlInK1_ICL0_", serials)).toBeNull();
+    expect(matchTrunkPeer("0967", serials)).toBeNull();
   });
 });

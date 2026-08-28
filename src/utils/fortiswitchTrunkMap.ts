@@ -2,16 +2,24 @@
  * src/utils/fortiswitchTrunkMap.ts
  *
  * Decoding for the FortiSwitch trunk→physical-port map published as a single
- * OctetString at `1.3.6.1.4.1.12356.106.3.1.1.0`.
+ * OctetString at `1.3.6.1.4.1.12356.106.3.1.0` (`fsTrunkMember.0`).
  *
  * Observed on FortiSwitchOS 7.6.6 (FS-124E-FPOE):
  *
  *   8EF5920000001-0: port23 ::8EPTQ21000003-0: port27 ::GT61FTK21000002: port24 ::
  *
  * Each entry is `<trunk name>: <local physical port>`, separated by `::`. This
- * is the switch stating its own adjacencies — the trunk names are built from
- * the SERIAL NUMBER of the device at the far end, so it names peers directly
- * instead of leaving them to be inferred.
+ * is the switch stating its own adjacencies. The trunk names the switch
+ * auto-creates are built from the SERIAL NUMBER of the device at the far end,
+ * so it names those peers directly instead of leaving them to be inferred.
+ *
+ * The scalar carries the LAGs an operator configured by hand in the same
+ * string, and those are named for whatever is plugged into them:
+ *
+ *   _FlInK1_ICL0_: port51 ::Cohesity Node 2: port2 ::PLPCORTSC2: port9 ::
+ *
+ * So a trunk name is a member/parent edge always and a peer identity only
+ * sometimes — see `isPeerSerialTail` for the shape test that separates them.
  *
  * ── Why the names look mangled ───────────────────────────────────────────────
  *
@@ -61,6 +69,24 @@ const TRUNK_SUFFIX = /-\d+$/;
 const MIN_PEER_TAIL_LEN = 10;
 
 /**
+ * Is this fragment worth suffix-matching against a serial at all?
+ *
+ * Not every trunk name is a peer serial. A FortiSwitch also carries the LAGs
+ * an operator configured by hand, named for what is plugged into them ("PLPCORTSC2",
+ * "Cohesity Node 2", "_FlInK1_ICL0_"), and those share the scalar with the
+ * auto-created FortiLink trunks. A name with a space or an underscore in it is
+ * not a serial, and a short one that happens to be alphanumeric could suffix-
+ * match a real serial by accident — which would attach the trunk to a device
+ * that is nowhere near it. Both checks are the same shape test, applied by
+ * `trunkPeerNameTail` before a name is treated as a peer identity and by
+ * `matchTrunkPeer` before the lookup runs.
+ */
+function isPeerSerialTail(tail: string): boolean {
+  if (tail.length < MIN_PEER_TAIL_LEN) return false;
+  return /^[A-Za-z0-9]+$/.test(tail);
+}
+
+/**
  * The peer-serial tail of an interface NAME shaped like a FortiLink trunk
  * ("8EF5920000001-0", "GT61FTK21000002"), or null for anything else.
  *
@@ -75,8 +101,7 @@ export function trunkPeerNameTail(ifName: string | null | undefined): string | n
   const name = (ifName ?? "").trim();
   if (!name) return null;
   const tail = name.replace(TRUNK_SUFFIX, "");
-  if (tail.length < MIN_PEER_TAIL_LEN) return null;
-  if (!/^[A-Za-z0-9]+$/.test(tail)) return null;
+  if (!isPeerSerialTail(tail)) return null;
   return tail;
 }
 
@@ -134,7 +159,7 @@ export function matchTrunkPeer(
   serialToAssetId: ReadonlyMap<string, string>,
 ): string | null {
   const tail = peerSerialTail.trim().toUpperCase();
-  if (!tail) return null;
+  if (!isPeerSerialTail(tail)) return null;
 
   let hit: string | null = null;
   for (const [serial, assetId] of serialToAssetId.entries()) {
