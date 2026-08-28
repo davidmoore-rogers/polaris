@@ -197,13 +197,7 @@ function renderUsersBody() {
     var onlineDot = u.isOnline
       ? '<span class="ip-status-dot ip-dot-available" title="Currently logged in" style="vertical-align:middle"></span>'
       : '';
-    // Regions render on their own line under the username as one pill per
-    // region, each colored by the region's stored map-color so admins can
-    // scan scope at a glance.
-    var regionsLabel = "";
-    if (Array.isArray(u.regionTags) && u.regionTags.length > 0) {
-      regionsLabel = '<div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;gap:0.25rem" title="Per-user region scope">' + regionPillsHtml(u.regionTags) + '</div>';
-    }
+    var regionsLabel = userTagPillsHtml(u);
     var totpCell;
     if (isIdpManaged(u)) {
       totpCell = '<span style="color:var(--color-text-tertiary);font-size:0.85em" title="Handled by your identity provider">IdP-managed</span>';
@@ -232,6 +226,43 @@ function renderUsersBody() {
       '<td>' + formatDate(u.createdAt) + '</td>' +
       '</tr>';
   }).join("");
+}
+
+/**
+ * The tag pills under a username: BOTH scope dimensions, one row.
+ *
+ * Regions alone were drawn here, which was right while Region Scope was its own
+ * control. Assign Tags now edits both dimensions through one picker, so a list
+ * that shows one of them says an operator's tags did not save. Each keeps its
+ * own colour source — a region its stored map colour (PolarisRegionPills, shared
+ * with the Device Map's "My regions" strip), a tag its registry colour — because
+ * that is what makes a pill scannable, and the `title` names which dimension a
+ * pill belongs to, since the two are matched differently at fire time.
+ *
+ * A tag the registry has no row for still renders, in the neutral grey
+ * `tagColorFor` falls back to: the assignment is real whether or not a `Tag`
+ * row backs it (there is no FK), and hiding it would be the same lie as before.
+ */
+function userTagPillsHtml(u) {
+  var regions = Array.isArray(u.regionTags) ? u.regionTags : [];
+  var tags = Array.isArray(u.otherTags) ? u.otherTags : [];
+  if (!regions.length && !tags.length) return "";
+  var html = "";
+  // The shared pill helper takes a per-pill title function, so the dimension is
+  // named on the pill itself rather than on a wrapper -- a `display:contents`
+  // box has no hover target and would carry no tooltip at all.
+  if (regions.length) {
+    html += regionPillsHtml(regions, function () { return "Per-user region scope"; });
+  }
+  html += tags.map(function (t) {
+    var hex = tagColorFor(t);
+    var rgb = hexToRgbTriplet(hex);
+    return '<span class="badge" title="Per-user tag scope" style="background:rgba(' + rgb + ',0.18);color:' +
+      escapeHtml(hex) + ';border:1px solid rgba(' + rgb + ',0.45);font-size:0.7rem;padding:0.1rem 0.4rem">' +
+      escapeHtml(t) +
+    '</span>';
+  }).join("");
+  return '<div style="margin-top:0.25rem;display:flex;flex-wrap:wrap;gap:0.25rem">' + html + '</div>';
 }
 
 /**
@@ -1626,7 +1657,7 @@ async function loadRegionList() {
 // markup all live there; these keep the existing call sites reading naturally.
 function regionColorFor(name)  { return window.PolarisRegionPills.colorFor(name); }
 function hexToRgbTriplet(hex)  { return window.PolarisRegionPills.rgbTriplet(hex); }
-function regionPillsHtml(names) { return window.PolarisRegionPills.html(names); }
+function regionPillsHtml(names, titleFor) { return window.PolarisRegionPills.html(names, titleFor); }
 
 // Render every map-region as a clickable pill colored by the region's stored
 // color. Selected pills are filled; deselected pills are an outline of the
@@ -1777,6 +1808,12 @@ async function loadTagList() {
     _tagCatalogLoaded = true;
   } catch (_) {
     _tagCatalogLoaded = false;
+  }
+  // Repaint any rows already on screen so their tag pills pick up the registry
+  // colours — the same late-catalogue repaint loadRegionList does, and for the
+  // same reason: this load races the first render.
+  if (typeof renderUsersBody === "function" && document.getElementById("users-tbody")) {
+    try { renderUsersBody(); } catch (_e) { /* the table just keeps its grey pills */ }
   }
 }
 

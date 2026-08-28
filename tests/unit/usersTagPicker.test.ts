@@ -37,6 +37,7 @@ const g = globalThis as Record<string, any>;
 let otherTagsPickerHtml: (idPrefix: string, selected: string[]) => string;
 let collectOtherTags: (idPrefix: string) => string[];
 let addOtherTagChips: (input: unknown) => Promise<void>;
+let userTagPillsHtml: (u: { regionTags?: string[]; otherTags?: string[] }) => string;
 let splitUserTagScope: (tags: string[]) => { regionTags: string[]; otherTags: string[] };
 
 interface TagRow { name: string; color: string; category: string }
@@ -112,10 +113,12 @@ beforeAll(() => {
   otherTagsPickerHtml = g.otherTagsPickerHtml as typeof otherTagsPickerHtml;
   collectOtherTags = g.collectOtherTags as typeof collectOtherTags;
   addOtherTagChips = g.addOtherTagChips as typeof addOtherTagChips;
+  userTagPillsHtml = g.userTagPillsHtml as typeof userTagPillsHtml;
   splitUserTagScope = g._splitUserTagScope as typeof splitUserTagScope;
   expect(typeof otherTagsPickerHtml, "users.js no longer declares otherTagsPickerHtml").toBe("function");
   expect(typeof collectOtherTags, "users.js no longer declares collectOtherTags").toBe("function");
   expect(typeof addOtherTagChips, "users.js no longer declares addOtherTagChips").toBe("function");
+  expect(typeof userTagPillsHtml, "users.js no longer declares userTagPillsHtml").toBe("function");
   expect(typeof splitUserTagScope, "users.js no longer declares _splitUserTagScope").toBe("function");
 });
 
@@ -311,5 +314,57 @@ describe("_splitUserTagScope", () => {
 
   it("keeps a bare prefix out of regionTags rather than storing an empty region", () => {
     expect(splitUserTagScope(["region:", "PCI"])).toEqual({ regionTags: [], otherTags: ["PCI"] });
+  });
+});
+
+/**
+ * The pills under a username in the Users table.
+ *
+ * This drew `regionTags` ALONE, which was right while Region Scope was its own
+ * control. Assign Tags now edits both dimensions through one picker, so a list
+ * that renders one of them tells an operator their tags did not save. The stub
+ * `PolarisRegionPills.html` returns the bare names, so a name present in the
+ * output is a pill drawn for it.
+ */
+describe("userTagPillsHtml", () => {
+  it("draws BOTH dimensions, not regions alone", () => {
+    const html = userTagPillsHtml({ regionTags: ["Ashfield"], otherTags: ["PCI"] });
+    expect(html).toContain("Ashfield");
+    expect(html).toContain("PCI");
+  });
+
+  it("draws tags for a user who has no region at all", () => {
+    // The regression: a purely tag-scoped user rendered an empty cell.
+    const html = userTagPillsHtml({ regionTags: [], otherTags: ["Critical"] });
+    expect(html).toContain("Critical");
+  });
+
+  it("still draws regions for a user who has no other tags", () => {
+    const html = userTagPillsHtml({ regionTags: ["Memphis"], otherTags: [] });
+    expect(html).toContain("Memphis");
+  });
+
+  it("names the dimension on the pill, since the two match differently", () => {
+    const html = userTagPillsHtml({ regionTags: [], otherTags: ["PCI"] });
+    expect(html).toContain("Per-user tag scope");
+  });
+
+  it("colours a tag from the registry", () => {
+    // #ef5350 is PCI's catalogue colour — a pill that ignored the registry
+    // would be indistinguishable from an unregistered one.
+    expect(userTagPillsHtml({ otherTags: ["PCI"] })).toContain("#ef5350");
+  });
+
+  it("still draws a tag the registry has no row for", () => {
+    // No FK backs the assignment, so an unregistered name is a real scope.
+    // Grey, but present — hiding it is the same lie the region-only cell told.
+    const html = userTagPillsHtml({ otherTags: ["legacy-tag"] });
+    expect(html).toContain("legacy-tag");
+    expect(html).toContain("#9e9e9e");
+  });
+
+  it("renders nothing at all for an unscoped user", () => {
+    expect(userTagPillsHtml({ regionTags: [], otherTags: [] })).toBe("");
+    expect(userTagPillsHtml({})).toBe("");
   });
 });
