@@ -41,7 +41,7 @@ import { sensorReadingDisplay } from "./alertChartService.js";
 import { buildTemplateContext } from "../utils/notificationTemplate.js";
 import { scopeRegionTagsOf } from "./notificationRecipientService.js";
 import type { AutomationAction, PreviewRuleInput, Severity } from "./notificationTypes.js";
-import { allRuleActionRefs } from "./notificationTypes.js";
+import { allRuleActionRefs, notifyChannelIds } from "./notificationTypes.js";
 import { previewRule } from "./notificationEngine.js";
 import { triggerSummary } from "../utils/triggerSummary.js";
 
@@ -50,6 +50,13 @@ export type TestTarget = "delivery" | "event";
 /** Which action of the draft to test — an index into the canonical walk. */
 export interface TestActionPath {
   index: number;
+  /**
+   * Which of a MULTI-CHANNEL notify action's channels to test. Omitted =
+   * the action's primary channel, which is every pre-multi-channel path and
+   * every single-channel action. Refused if it names a channel the action
+   * doesn't carry — a test that quietly retargets is worse than no test.
+   */
+  channelId?: string;
 }
 
 export interface SkippedAction {
@@ -104,10 +111,18 @@ export function selectTestActions(
   const comp = action.emailComposition
     ? { ...action.emailComposition, cc: null, bcc: null }
     : action.emailComposition;
+  // One channel per test send: the buttons are per-DELIVERY ("Send Test
+  // Email", "Send Test Web Push"), so a multi-channel action offers one button
+  // per channel rather than firing all of them off a single click.
+  const channelIds = notifyChannelIds(action);
+  const channelId = path.channelId ?? channelIds[0];
+  if (!channelIds.includes(channelId)) {
+    throw new AppError(400, "That delivery channel is no longer part of the action");
+  }
   return {
     actions: [{
       type: "notify",
-      channelId: action.channelId,
+      channelId,
       recipientUserIds: [callerUserId],
       ...(comp ? { emailComposition: comp } : {}),
     }],

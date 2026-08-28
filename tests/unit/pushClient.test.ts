@@ -198,3 +198,76 @@ describe("registerSW()", () => {
     expect(h.registerCount()).toBe(1);
   });
 });
+
+describe("syncToPreference() — the cross-device reconcile", () => {
+  // This is what makes the notification preference an ACCOUNT setting rather
+  // than a per-browser one (business rule 39): every client calls it at boot
+  // and brings its OWN subscription into line. If it stops working, "prefer
+  // push" quietly means push only on the device the operator clicked it on —
+  // and nothing anywhere reports that.
+
+  it("enrolls silently when the account prefers push and permission is granted", async () => {
+    h.setPermission("granted");
+    h.setSubscription(null);
+    await expect(h.polarisPush.syncToPreference("push", "mobile")).resolves.toBe("enrolled");
+    expect(h.calls).toContain("pushManager.subscribe");
+    expect(h.subscribeArgs[0].surface).toBe("mobile");
+  });
+
+  it("NEVER prompts — a boot-time call has no user activation to spend", async () => {
+    // Safari refuses a prompt raised outside a gesture, and a refusal is
+    // sticky, so asking here would burn the operator's one chance to say yes.
+    h.setPermission("default");
+    h.setSubscription(null);
+    await expect(h.polarisPush.syncToPreference("push", "desktop")).resolves.toBe("needs-permission");
+    expect(h.calls).not.toContain("Notification.requestPermission");
+    expect(h.calls).not.toContain("pushManager.subscribe");
+  });
+
+  it("un-enrolls this browser when the account has gone back to email", async () => {
+    // "Email" is also an instruction to STOP pushing here — which is how a
+    // preference set on one device reaches the others.
+    h.setPermission("granted");
+    h.setSubscription("https://push.example.com/existing");
+    await expect(h.polarisPush.syncToPreference("email", "desktop")).resolves.toBe("removed");
+    expect(h.calls).toContain("api.push.unsubscribe");
+  });
+
+  it("does nothing when the account prefers email and nothing is enrolled", async () => {
+    h.setSubscription(null);
+    await expect(h.polarisPush.syncToPreference("email", "desktop")).resolves.toBe("");
+    expect(h.calls).not.toContain("api.push.unsubscribe");
+  });
+
+  it("refreshes an existing subscription instead of re-subscribing", async () => {
+    // Browsers rotate endpoints; this pass is the primary repair, so a
+    // push-preferring browser that is already enrolled must still re-post.
+    h.setPermission("granted");
+    h.setSubscription("https://push.example.com/existing");
+    await expect(h.polarisPush.syncToPreference("any", "desktop")).resolves.toBe("");
+    expect(h.calls).toContain("api.push.subscribe");
+    expect(h.calls).not.toContain("pushManager.subscribe");
+    expect(h.subscribeArgs[0].endpoint).toBe("https://push.example.com/existing");
+  });
+
+  it("treats 'any' as wanting push, not as ambiguous", async () => {
+    h.setPermission("granted");
+    h.setSubscription(null);
+    await expect(h.polarisPush.syncToPreference("any", "desktop")).resolves.toBe("enrolled");
+  });
+
+  it("stays silent when the server has no Web Push channel", async () => {
+    // Nothing to enroll against, and nothing the operator did wrong — this
+    // runs on every page load for someone who clicked nothing.
+    const off = load({ serverEnabled: false });
+    off.setPermission("granted");
+    off.setSubscription(null);
+    await expect(off.polarisPush.syncToPreference("push", "desktop")).resolves.toBe("");
+    expect(off.calls).not.toContain("pushManager.subscribe");
+  });
+
+  it("never throws on an unsupported browser", async () => {
+    const un = load({ supported: false });
+    await expect(un.polarisPush.syncToPreference("push", "desktop")).resolves.toBe("");
+  });
+});

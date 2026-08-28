@@ -19,6 +19,7 @@
 
 import { chunkArray } from "../utils/chunk.js";
 import { prisma } from "../db.js";
+import { Prisma } from "../generated/prisma/client.js";
 import { logger } from "../utils/logger.js";
 import { notificationsPageUrl, pushDeepLinkUrl, ackUrlForEmail, ackUrlForPush, assetUrlForPush } from "../utils/notificationTemplate.js";
 import { buildAlertCharts, chartTokensIn, substituteChartTokens, attachmentsFor, type ChartToken, type RenderedChart } from "./alertChartService.js";
@@ -357,6 +358,152 @@ async function dispatch(d: DeliveryRow, channel: ChannelInfo | undefined, memo: 
   }
 }
 
+/** What expandDeliveries stamps on a web_push row so a dead endpoint can be
+ *  re-routed. Absent when the action carries no email channel, or the
+ *  recipient's account has no address. */
+interface PushFallback {
+  userId: string;
+  channelId: string;
+  address: string;
+}
+
+export function readPushFallback(meta: unknown): PushFallback | null {
+  const f = (meta as { fallback?: unknown } | null | undefined)?.fallback as Partial<PushFallback> | undefined;
+  return f && typeof f.userId === "string" && typeof f.channelId === "string" && typeof f.address === "string"
+    ? { userId: f.userId, channelId: f.channelId, address: f.address }
+    : null;
+}
+
+/** One sibling delivery row of the same alert, as the fallback pass reads it. */
+export interface FallbackSibling {
+  transport: string;
+  status: string;
+  target: string;
+  channelId: string | null;
+  meta: unknown;
+}
+
+/**
+ * Is ANY other push device of this recipient's still reached or still trying?
+ *
+ * The fallback is per RECIPIENT, not per row: one account with three enrolled
+ * browsers has three delivery rows and two of them may have succeeded, so
+ * emailing on the first dead endpoint is a duplicate — and duplicates are how
+ * people learn to ignore alerts. `sent` counts as reached; `pending` means a
+ * retry may still land it (a 5xx burns up to MAX_ATTEMPTS before it is
+ * terminal). Only OTHER rows belonging to the SAME user count.
+ *
+ * Pure — exported for the tests, since both directions fail quietly: too eager
+ * sends a second copy, too shy sends nothing at all.
+ */
+export function pushStillInPlay(siblings: FallbackSibling[], userId: string): boolean {
+  return siblings.some(
+    (s) => s.transport === "web_push" &&
+      (s.status === "sent" || s.status === "pending") &&
+      readPushFallback(s.meta)?.userId === userId,
+  );
+}
+
+/**
+ * Has this address already been emailed on this channel for this alert — by
+ * the automation's own email target, or by an earlier pass's fallback?
+ *
+ * Substring, not equality: a COMPOSED send is ONE row whose `target` is the
+ * whole joined To list, so an equality test would miss a recipient who is
+ * already on it and mail them a second copy.
+ *
+ * Pure — exported for the tests.
+ */
+export function alreadyEmailedOnChannel(
+  siblings: FallbackSibling[],
+  channelId: string,
+  address: string,
+): boolean {
+  const needle = address.trim().toLowerCase();
+  return siblings.some(
+    (s) => s.transport === "email" && s.channelId === channelId &&
+      s.target.toLowerCase().includes(needle),
+  );
+}
+
+/**
+ * Email the recipients whose web push just failed for good.
+ *
+ * The signal is the ONLY one Polaris actually gets: a push service answering
+ * 404/410 means that subscription is dead. It is not "the phone is off" — a
+ * phone in a drawer returns 201 and the message quietly expires at its TTL,
+ * and nothing ever reports that. So this catches an uninstalled browser,
+ * cleared site data, or a rotated endpoint, and deliberately claims nothing
+ * more.
+
+ * Three rules keep it from emailing people who were reached perfectly well:
+ *
+ *   PER RECIPIENT, NOT PER ROW. One account with three enrolled browsers has
+ *   three delivery rows; two may have succeeded. So a user is only emailed
+ *   when EVERY push row of theirs on this alert has stopped being in play —
+ *   `sent` counts as reached, and `pending` means a retry may still land it.
+ *
+ *   THE ACTION'S OWN EMAIL CHANNEL. `fallback.channelId` was chosen at
+ *   expansion time from the same action's channels, so no alert is re-routed
+ *   through an SMTP config nobody picked for it.
+ *
+ *   NEVER TWICE. An existing email row on the same (alert, channel, address)
+ *   — the operator's own email target, or an earlier pass's fallback — wins,
+ *   and the fallback is skipped.
+ *
+ * The body is CLONED from a sibling email row on the same channel when one
+ * exists, so a custom composition reaches the fallback too; with no sibling it
+ * is the plain per-address path, which renders the default alert email.
+ */
+async function enqueuePushFallbacks(terminal: DeliveryRow[]): Promise<number> {
+  const wanted = terminal
+    .map((r) => ({ notificationId: r.notification.id, fallback: readPushFallback(r.meta) }))
+    .filter((x): x is { notificationId: string; fallback: PushFallback } => !!x.fallback);
+  if (wanted.length === 0) return 0;
+
+  const byNotification = new Map<string, PushFallback[]>();
+  for (const w of wanted) {
+    const list = byNotification.get(w.notificationId) ?? [];
+    if (!list.some((f) => f.userId === w.fallback.userId)) list.push(w.fallback);
+    byNotification.set(w.notificationId, list);
+  }
+
+  const created: Prisma.NotificationDeliveryCreateManyInput[] = [];
+  for (const [notificationId, fallbacks] of byNotification) {
+    const siblings = await prisma.notificationDelivery.findMany({
+      where: { notificationId },
+      select: { transport: true, status: true, target: true, channelId: true, meta: true },
+    });
+    for (const f of fallbacks) {
+      if (pushStillInPlay(siblings, f.userId)) continue;
+      if (alreadyEmailedOnChannel(siblings, f.channelId, f.address)) continue;
+      // Reuse the action's own composed body when it has one.
+      const composedSibling = siblings.find(
+        (s) => s.transport === "email" && s.channelId === f.channelId &&
+          !!(s.meta as { composed?: unknown } | null)?.composed,
+      );
+      const composed = composedSibling?.meta as Record<string, unknown> | undefined;
+      created.push({
+        notificationId,
+        channelId: f.channelId,
+        transport: "email",
+        target: f.address,
+        meta: {
+          ...(composed ? { ...composed, to: [f.address], cc: [], bcc: [] } : {}),
+          // Audit provenance: this row exists because a push died, not because
+          // the automation addressed this person by email.
+          pushFallback: true,
+        } as Prisma.InputJsonValue,
+      });
+    }
+  }
+
+  if (created.length === 0) return 0;
+  await prisma.notificationDelivery.createMany({ data: created });
+  logger.info({ count: created.length }, "web push failed permanently; queued email fallback");
+  return created.length;
+}
+
 /** One drain pass. Returns counts. */
 /**
  * @param opts.notificationId Drain only ONE alert's rows. The wizard's test
@@ -424,6 +571,9 @@ export async function drainPendingDeliveries(
   if (sentIds.length > 0) {
     ops.push(prisma.notificationDelivery.updateMany({ where: { id: { in: sentIds } }, data: { status: "sent", lastAttemptAt: now } }));
   }
+  // Web push rows that just gave up for good, so the drain can email the
+  // person instead (see enqueuePushFallbacks).
+  const terminalPush: DeliveryRow[] = [];
   for (const f of failed) {
     const row = rows.find((r) => r.id === f.id)!;
     // A missing channel is permanent — fail immediately rather than burn
@@ -431,10 +581,12 @@ export async function drainPendingDeliveries(
     // their failures always take the normal retry path.
     const permanent = row.transport !== "api_call" && (!row.channelId || !channels.get(row.channelId));
     const nextAttempts = row.attempts + 1;
+    const terminal = permanent || nextAttempts >= MAX_ATTEMPTS;
+    if (terminal && row.transport === "web_push") terminalPush.push(row);
     ops.push(
       prisma.notificationDelivery.update({
         where: { id: f.id },
-        data: { attempts: { increment: 1 }, lastAttemptAt: now, error: f.error, status: permanent || nextAttempts >= MAX_ATTEMPTS ? "failed" : "pending" },
+        data: { attempts: { increment: 1 }, lastAttemptAt: now, error: f.error, status: terminal ? "failed" : "pending" },
       }),
     );
   }
@@ -443,6 +595,17 @@ export async function drainPendingDeliveries(
   }
   await Promise.all(ops);
 
+  // AFTER the status writes, never before: enqueuePushFallbacks asks whether
+  // any of a recipient's OTHER devices are still in play, and the rows that
+  // just failed have to already read `failed` for that question to be honest.
+  const fellBack = await enqueuePushFallbacks(terminalPush).catch((err) => {
+    // A fallback that throws must never cost the drain its status writes or
+    // its summary Event — the alert has already been delivered to everyone
+    // else by this point.
+    logger.warn({ err }, "push-to-email fallback failed");
+    return 0;
+  });
+
   if (failed.length > 0 || sentIds.length > 0) {
     await logEvent({
       action: "notification.delivered",
@@ -450,7 +613,7 @@ export async function drainPendingDeliveries(
       actor: "system:notification-delivery",
       level: failed.length > 0 ? "warning" : "info",
       message: `Notification delivery: ${sentIds.length} sent, ${failed.length} failed`,
-      details: { sent: sentIds.length, failed: failed.length, prunedSubscriptions: deadEndpoints.length },
+      details: { sent: sentIds.length, failed: failed.length, prunedSubscriptions: deadEndpoints.length, emailedInsteadOfPush: fellBack },
     }).catch(() => {});
   }
 

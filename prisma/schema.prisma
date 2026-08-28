@@ -2997,6 +2997,20 @@ model User {
   totpEnabledAt   DateTime? @map("totp_enabled_at")
   totpBackupCodes String[]  @default([]) @map("totp_backup_codes")
 
+  // How this account prefers to be alerted. "email" (the default — every
+  // account has an address long before it has a push subscription), "push", or
+  // "any" (both). Stored on the USER, not per browser, because it has to
+  // survive a sign-in on a device that has never seen it: the client reads it
+  // at boot and enrolls or unsubscribes this browser to match, which is what
+  // makes the choice follow the operator across devices.
+  //
+  // It only ever REMOVES recipients, and only from a notify action that opted
+  // in (`respectUserPreference`) inside an action group that actually offers
+  // both methods — see business rule 39. An account that never touches it is
+  // "email", which is what the pre-feature behaviour already was for every
+  // email action; a push action in a single-method group ignores it entirely.
+  notificationPreference String @default("email") @map("notification_preference")
+
   // Flipped true the first time the user actually logs in (lastLogin transitions
   // null → set). Drives the sidebar "new user — review role" notification for
   // admins; cleared globally by Dismiss.

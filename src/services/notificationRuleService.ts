@@ -26,6 +26,7 @@ import {
   normalizeRuleToV2,
   normalizeEscalationToV2,
   allRuleActionRefs,
+  notifyChannelIds,
   evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
@@ -400,12 +401,28 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
   const all = allRuleActionRefs(input);
 
   const notifyRefs: { label: string; channelId: string; broadcast: boolean }[] = [];
+  // One entry per ACTION (not per channel) for the checks that are about the
+  // action as a whole — the broadcast modes and the channelId/channelIds
+  // coherence rule.
+  const notifyActions: { label: string; channelIds: string[]; broadcast: boolean }[] = [];
   const scriptRefs: { label: string; scriptId: string; runOn: string }[] = [];
   for (const { action, label } of all) {
     if (action.type === "notify") {
-      notifyRefs.push({
+      // channelId is the lossless single-channel mirror every pre-multi-channel
+      // reader still uses, so the two views must agree. Refused rather than
+      // repaired: a payload whose primary channel isn't its first channel is a
+      // client bug, and picking one of the two answers is how an alert quietly
+      // goes to the wrong destination.
+      if (action.channelIds && action.channelIds[0] !== action.channelId) {
+        throw new AppError(400, `${label}: channelId must be the first entry of channelIds`);
+      }
+      const chIds = notifyChannelIds(action);
+      if (action.channelIds && new Set(action.channelIds).size !== action.channelIds.length) {
+        throw new AppError(400, `${label}: the same delivery channel is listed twice`);
+      }
+      notifyActions.push({
         label,
-        channelId: action.channelId,
+        channelIds: chIds,
         // The two BROADCAST modes are Web-Push-only; flagged here so the
         // channel-type check below can reject them without a second walk.
         // `recipientRegions` is deliberately NOT in this set any more: naming
@@ -415,6 +432,9 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
         // reason for the restriction.
         broadcast: !!(action.recipientAllUsers || action.recipientAllRegions),
       });
+      for (const channelId of chIds) {
+        notifyRefs.push({ label, channelId, broadcast: false });
+      }
     } else if (action.type === "api_call") {
       let host = "";
       try {
@@ -458,10 +478,15 @@ async function assertActionRefs(input: RuleInput): Promise<void> {
     if (!known.has(ref.channelId)) {
       throw new AppError(400, `${ref.label}: references a delivery channel that no longer exists`);
     }
-    // Keep the stored shape renderable: the builder only offers the broadcast
-    // modes on Web Push, so a rule holding them on an email/chat channel would
-    // be a state no UI can show or edit back out.
-    if (ref.broadcast && known.get(ref.channelId) !== "web_push") {
+  }
+  // Keep the stored shape renderable: the builder only offers the broadcast
+  // modes on Web Push, so an action holding them with NO push channel at all
+  // would be a state no UI can show or edit back out. A MIXED action (push +
+  // email) keeps them — the builder renders the toggles as soon as one push
+  // channel is selected, and expandDeliveries applies them to the push half
+  // only, so the email half never silently inherits a fleet-wide broadcast.
+  for (const ref of notifyActions) {
+    if (ref.broadcast && !ref.channelIds.some((id) => known.get(id) === "web_push")) {
       throw new AppError(
         400,
         `${ref.label}: "all users" / "all regions" broadcast is only available on a Web Push channel — pick recipients (people, roles or named regions) explicitly for email and chat channels`,

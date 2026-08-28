@@ -303,17 +303,27 @@ function ruleRecipientGroups(rule, catalogs) {
   // action alone, so a tier never inherits the rule's Cc list.
   var addNotify = function (action, where, inTier) {
     if (!action || action.type !== "notify") return;
-    var ch = chanById(action.channelId);
-    var fixed = !!ch && !RECIPIENT_ROUTED_CHANNEL_TYPES[ch.type];
     var comp = action.emailComposition || (inTier ? null : rule.emailComposition) || null;
-    groups.push({
-      where: where,
-      channel: ch ? ch.name : null,
-      channelType: ch ? ch.type : null,
-      fixedDestination: fixed,
-      to: fixed ? [] : recipientDisplayLabels(action, cat),
-      cc: fixed ? [] : recipientDisplayLabels(comp && comp.cc, cat),
-      bcc: fixed ? [] : recipientDisplayLabels(comp && comp.bcc, cat),
+    // ONE GROUP PER CHANNEL. A notify action may deliver through several, and
+    // each is a different destination with its own type \u2014 a chat channel
+    // shows no recipients, an email one shows To/Cc/Bcc \u2014 so collapsing
+    // them into a single row would have to pick one channel's story and tell
+    // it about all of them.
+    var ids = (action.channelIds && action.channelIds.length)
+      ? action.channelIds
+      : (action.channelId ? [action.channelId] : []);
+    (ids.length ? ids : [null]).forEach(function (id) {
+      var ch = id ? chanById(id) : null;
+      var fixed = !!ch && !RECIPIENT_ROUTED_CHANNEL_TYPES[ch.type];
+      groups.push({
+        where: where,
+        channel: ch ? ch.name : null,
+        channelType: ch ? ch.type : null,
+        fixedDestination: fixed,
+        to: fixed ? [] : recipientDisplayLabels(action, cat),
+        cc: fixed ? [] : recipientDisplayLabels(comp && comp.cc, cat),
+        bcc: fixed ? [] : recipientDisplayLabels(comp && comp.bcc, cat),
+      });
     });
   };
   // `prefix` names WHICH chain — a per-action chain chases that one action, the
@@ -1598,6 +1608,96 @@ async function openAutomationWizard(existing, opts) {
   function chanTypeLabel(type) { return (s.channelTypes && s.channelTypes[type] && s.channelTypes[type].label) || type; }
   function isRouted(type) { return routedTypes.indexOf(type) !== -1; }
   function isEmailType(type) { return type === "smtp" || type === "oauth_m365"; }
+  /**
+   * Every channel one notify action delivers through — the browser mirror of
+   * notifyChannelIds() in notificationTypes.ts. `channelId` is the PRIMARY and
+   * the lossless single-channel view; `channelIds` is the full list when the
+   * action carries more than one. Every reader goes through this so "an action
+   * has one channel" survives nowhere as an assumption.
+   */
+  function actionChannelIds(a) {
+    if (!a) return [];
+    var list = (a.channelIds && a.channelIds.length) ? a.channelIds : (a.channelId ? [a.channelId] : []);
+    var seen = {}, out = [];
+    list.forEach(function (id) { if (id && !seen[id]) { seen[id] = true; out.push(id); } });
+    return out;
+  }
+  /** The resolved channel objects an action delivers through (unknown ids dropped). */
+  function actionChannels(a) {
+    return actionChannelIds(a).map(chanById).filter(Boolean);
+  }
+  /**
+   * Which of the two per-recipient delivery METHODS a channel type is, or "" for
+   * a chat / Pushbullet channel that posts to one fixed destination and has no
+   * per-user recipients at all. The vocabulary the preference checkbox is
+   * gated on — see business rule 39.
+   */
+  function channelMethod(type) {
+    if (type === "web_push") return "push";
+    return isEmailType(type) ? "email" : "";
+  }
+  /**
+   * Do the notify actions inside ONE action list offer BOTH methods? The
+   * browser half of actionsCarryBothMethods() — same question, same answer, so
+   * the checkbox is never enabled on a group the server would ignore it for.
+   * `host` is the action list: the trigger actions, one severity band's, the
+   * reset list, or a single escalation tier's.
+   */
+  function hostOffersBothMethods(host) {
+    if (!host) return false;
+    var methods = {};
+    Array.from(host.querySelectorAll(":scope > .aw-action")).forEach(function (r) {
+      var typeSel = r.querySelector(".aw-action-type");
+      if (!typeSel || typeSel.value !== "notify") return;
+      checkedChannelIds(r).forEach(function (id) {
+        var ch = chanById(id);
+        var m = ch && channelMethod(ch.type);
+        if (m) methods[m] = true;
+      });
+    });
+    return !!(methods.email && methods.push);
+  }
+  /**
+   * The channel ids ticked on ONE action, in list order (so the first is the
+   * primary). Takes either the `.aw-action` row or its `.aw-action-fields`.
+   *
+   * Scoped to that row's OWN fields box, never the whole row: an escalatable
+   * action nests a `.aw-esc-sec` full of tier action rows, and a bare
+   * `row.querySelectorAll(".na-chan:checked")` would fold every tier's
+   * channels into its parent's list — silently, and in the direction that
+   * makes an email-only action look like it offers push.
+   */
+  function checkedChannelIds(el) {
+    if (!el) return [];
+    var fields = (el.classList && el.classList.contains("aw-action-fields"))
+      ? el
+      : el.querySelector(":scope > .aw-action-fields");
+    if (!fields) return [];
+    return Array.from(fields.querySelectorAll(".na-chan:checked")).map(function (cb) { return cb.value; });
+  }
+  /**
+   * Re-gate every preference checkbox in an action list. Called whenever the
+   * list's shape changes — a channel ticked, an action added, removed or
+   * retyped — because the gate is a property of the GROUP, so one row's edit
+   * can enable or disable the checkbox on every other row.
+   */
+  function refreshPrefGating(host) {
+    if (!host) return;
+    var both = hostOffersBothMethods(host);
+    Array.from(host.querySelectorAll(":scope > .aw-action")).forEach(function (r) {
+      var wrap = r.querySelector(":scope > .aw-action-fields > .na-pref");
+      if (!wrap) return;
+      var cb = wrap.querySelector(".na-pref-enable");
+      var hint = wrap.querySelector(".na-pref-hint");
+      if (cb) cb.disabled = !both;
+      wrap.style.opacity = both ? "" : ".6";
+      if (hint) {
+        hint.textContent = both
+          ? "Each recipient is delivered only through the channel matching their own preference (Email / Push / both). Anyone without a Polaris account — a typed address or an address-book contact — is unaffected."
+          : "Available once this list offers both an email and a push channel. With only one method on offer everyone receives it, whatever they prefer — otherwise the preference would delete the alert instead of routing it.";
+      }
+    });
+  }
   // The default alert email, straight from the server (the SAME strings
   // buildComposedEmail falls back to). A new Notify action shows them so the
   // operator edits what actually gets sent; a stored action shows what it
@@ -1609,13 +1709,27 @@ async function openAutomationWizard(existing, opts) {
     if (comp && typeof comp[key] === "string") return comp[key];
     return defaultEmailTemplate()[key] || "";
   }
-  function channelOptions(selId) {
-    if (channels.length === 0) return '<option value="">No channels configured</option>';
-    return channels.map(function (c) {
-      var lbl = c.name + " — " + chanTypeLabel(c.type) + (c.enabled ? "" : " (disabled)");
-      return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
+  /**
+   * The channel picker on a Notify action: one checkbox per configured channel,
+   * ticked for those the action delivers through. Replaces the single-select —
+   * an action is plural now. The ORDER of this list defines which channel is
+   * primary (the first ticked), which is what keeps `channelId` a truthful
+   * mirror of `channelIds[0]` without asking the operator to rank anything.
+   */
+  function channelChecklist(selIds) {
+    if (channels.length === 0) {
+      return '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0">No channels configured — add one on the Delivery tab first.</p>';
+    }
+    var sel = {};
+    (selIds || []).forEach(function (id) { sel[id] = true; });
+    return channels.map(function (ch) {
+      var lbl = ch.name + " — " + chanTypeLabel(ch.type) + (ch.enabled ? "" : " (disabled)");
+      return '<label style="font-size:0.82rem;display:inline-flex;align-items:center;gap:5px;margin:0">' +
+        '<input type="checkbox" class="na-chan" value="' + escapeHtml(ch.id) + '"' + (sel[ch.id] ? " checked" : "") + '>' +
+        escapeHtml(lbl) + '</label>';
     }).join("");
   }
+
   /**
    * "Sends to all 47 users (12 with a push device)" — a checked-by-default
    * broadcast should say out loud how many people it reaches, rather than
@@ -1644,8 +1758,13 @@ async function openAutomationWizard(existing, opts) {
     return n ? n + " device" + (n === 1 ? "" : "s") : "no push device";
   }
 
-  /** Warning line under a push recipient picker, or "" when everyone's reachable. */
-  function pushReachWarning(selectedIds) {
+  /**
+   * Warning line under a push recipient picker, or "" when everyone's
+   * reachable. `alsoEmail` says this action ALSO carries an email channel, in
+   * which case the named people are not lost — they simply get the email
+   * copy — and the line must say so rather than claim a total loss.
+   */
+  function pushReachWarning(selectedIds, alsoEmail) {
     var users = _ruleRecipientUsers || [];
     var byId = {};
     users.forEach(function (u) { byId[u.id] = u; });
@@ -1657,7 +1776,10 @@ async function openAutomationWizard(existing, opts) {
     var more = without.length > 3 ? " and " + (without.length - 3) + " more" : "";
     return '<p class="aw-push-warn" style="font-size:0.78rem;color:var(--color-warning);margin:4px 0 0">' +
       escapeHtml(without.length + " of " + chosen.length + " selected user" + (chosen.length === 1 ? "" : "s") +
-      " have no push-enabled device (" + names + more + ") — they will receive nothing from this action.") +
+      " have no push-enabled device (" + names + more + ") — " +
+      (alsoEmail
+        ? "they will receive only the email from this action."
+        : "they will receive nothing from this action.")) +
       '</p>';
   }
   // ── Collapsible severity blocks ────────────────────────────────────────
@@ -4170,8 +4292,14 @@ async function openAutomationWizard(existing, opts) {
 
   function actionSummary(a) {
     if (a.type === "notify") {
-      var ch = chanById(a.channelId);
-      return "Notify via " + (ch ? ch.name : "…") + notifySuffix(a);
+      var chs = actionChannels(a);
+      var via = chs.length
+        ? chs.map(function (x) { return x.name; }).join(" + ")
+        : "…";
+      // The preference filter changes WHO each channel reaches, so it belongs
+      // in the one-line summary a folded action shows.
+      return "Notify via " + via + notifySuffix(a) +
+        (a.respectUserPreference && chs.length > 1 ? " (by each user’s preferred method)" : "");
     }
     if (a.type === "api_call") return (a.method || "POST") + " " + (a.url || "…");
     if (a.type === "script") {
@@ -5169,28 +5297,34 @@ async function openAutomationWizard(existing, opts) {
         else out.push(null);
         return;
       }
-      if (action.type !== "notify" || !action.channelId) return;
-      var ch = chanById(action.channelId);
-      if (!ch) return;
-      var key = "ch:" + ch.id;
-      if (seen[key]) {
-        // Same channel again (a band, an escalation tier): note where, don't
-        // offer a second button for the same destination.
-        var prior = out.find(function (t) { return t && t.key === key; });
-        if (prior && prior.usedIn.indexOf(where) === -1) prior.usedIn.push(where);
-        return;
-      }
-      seen[key] = true;
-      var kind = ch.type === "web_push" ? "push" : isEmailType(ch.type) ? "email" : "webhook";
-      out.push({
-        key: key, kind: kind, index: idx, channel: ch, action: action, usedIn: [where],
-        // The button names the DELIVERY the operator is about to receive, not
-        // the action's index or the channel row: "Send Test Web Push" is what
-        // tells them to go look at their phone.
-        label: kind === "push" ? "Send Test Web Push"
-          : kind === "email" ? "Send Test Email"
-            : "Send Test " + chanTypeLabel(ch.type),
-        detail: ch.name + " — " + chanTypeLabel(ch.type),
+      if (action.type !== "notify") return;
+      // A button per CHANNEL, not per action: the button names a delivery the
+      // operator is about to receive, and a multi-channel action produces one
+      // of each. They share the action's ref index and differ by channelId,
+      // which is what the server's path carries.
+      var actionIdx = idx;
+      actionChannels(action).forEach(function (ch) {
+        var key = "ch:" + ch.id;
+        if (seen[key]) {
+          // Same channel again (a band, an escalation tier, or a second action
+          // on the same channel): note where, don't offer a second button for
+          // the same destination.
+          var prior = out.find(function (t) { return t && t.key === key; });
+          if (prior && prior.usedIn.indexOf(where) === -1) prior.usedIn.push(where);
+          return;
+        }
+        seen[key] = true;
+        var kind = ch.type === "web_push" ? "push" : isEmailType(ch.type) ? "email" : "webhook";
+        out.push({
+          key: key, kind: kind, index: actionIdx, channelId: ch.id, channel: ch, action: action, usedIn: [where],
+          // The button names the DELIVERY the operator is about to receive, not
+          // the action's index or the channel row: "Send Test Web Push" is what
+          // tells them to go look at their phone.
+          label: kind === "push" ? "Send Test Web Push"
+            : kind === "email" ? "Send Test Email"
+              : "Send Test " + chanTypeLabel(ch.type),
+          detail: ch.name + " — " + chanTypeLabel(ch.type),
+        });
       });
     };
     // Walk order MUST match allRuleActionRefs: actions (+ their tiers), rule
@@ -5288,7 +5422,7 @@ async function openAutomationWizard(existing, opts) {
     try {
       var r = await api.automations.testDelivery({
         rule: testDeliveryPayload(),
-        path: { index: target.index },
+        path: { index: target.index, ...(target.channelId ? { channelId: target.channelId } : {}) },
         target: target.kind === "event" ? "event" : "delivery",
       });
       showToast(r.message || "Test sent", r.ok ? "success" : "error");
@@ -5454,7 +5588,13 @@ async function openAutomationWizard(existing, opts) {
     // attribute reflection makes the row's type environment-dependent (it is
     // not honored by happy-dom for a non-first option).
     row.querySelector(".aw-action-type").value = action.type;
-    row.querySelector(".aw-action-remove").addEventListener("click", function () { row.remove(); });
+    row.querySelector(".aw-action-remove").addEventListener("click", function () {
+      var owner = row.parentNode;
+      row.remove();
+      // Removing the only push action re-gates every remaining preference
+      // checkbox in the list.
+      refreshPrefGating(owner);
+    });
     row.querySelector(".aw-action-type").addEventListener("change", function () {
       // Switching TO/FROM event changes whether the escalation footer belongs,
       // so rebuild the row rather than just its fields.
@@ -5467,6 +5607,8 @@ async function openAutomationWizard(existing, opts) {
       foldActionRow(rebuilt, false); // mid-edit: the operator just changed its type
       // addActionRow appends; move the rebuilt row back to where it was.
       if (anchor) host2.insertBefore(host2.lastChild, anchor);
+      // A row that stopped (or started) being a Notify changes what the list offers.
+      refreshPrefGating(host2);
     });
     renderActionFields(row, action);
     // The composition block carries its own token chips, and a row added after
@@ -5995,10 +6137,18 @@ async function openAutomationWizard(existing, opts) {
       // prefilled from that same default so ticking the box shows the real text
       // to edit rather than an empty page.
       var customEmail = !!(comp && (comp.subjectTemplate || comp.bodyTextTemplate || comp.bodyHtmlTemplate));
+      var selIds = actionChannelIds(action);
+      if (!selIds.length && channels.length) selIds = [channels[0].id];
       var html =
-        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
-          '<label style="margin:0;font-size:0.8rem">Channel</label>' +
-          '<select class="na-channel" style="flex:1">' + channelOptions(action.channelId) + '</select>' +
+        // CHANNELS, plural. One action may deliver through several — which is
+        // what lets a single "page the on-call" action carry both an email and
+        // a push channel and let each recipient's own preference pick between
+        // them (the checkbox below). A checkbox list rather than a multi-select:
+        // the set is small, the types matter, and a <select multiple> hides
+        // what is chosen the moment it scrolls.
+        '<div class="form-group" style="margin-bottom:6px">' +
+          '<label style="font-size:0.8rem;display:block;margin-bottom:2px">Channels</label>' +
+          '<div class="na-chan-list" style="display:flex;flex-wrap:wrap;gap:4px 14px">' + channelChecklist(selIds) + '</div>' +
         '</div>' +
         '<div class="na-fields"></div>' +
         // Cc/Bcc were promoted OUT of this disclosure into first-class token
@@ -6016,6 +6166,15 @@ async function openAutomationWizard(existing, opts) {
         // copy the operator never asked to own. (The old disclosure prefilled
         // the fields and collected them regardless of whether it was open, so a
         // new action silently stored its own snapshot of the default.)
+        // Per-recipient channel selection. Above the composition block because
+        // it decides WHO is reached, and the block below only decides what the
+        // email says. Gated by refreshPrefGating(): meaningless — and disabled
+        // — until this action list actually offers both methods.
+        '<div class="na-pref" style="display:none">' +
+          '<label style="font-size:0.8rem;display:block;margin-top:4px"><input type="checkbox" class="na-pref-enable"' +
+            (action.respectUserPreference ? " checked" : "") + '> Only use the channel matching the user’s preferred notification method</label>' +
+          '<p class="hint na-pref-hint" style="margin:2px 0 6px 22px"></p>' +
+        '</div>' +
         '<div class="na-comp">' +
           '<label style="font-size:0.8rem;display:block;margin-top:4px"><input type="checkbox" class="na-comp-enable"' + (customEmail ? " checked" : "") + '> Customize the email (subject / body)</label>' +
           '<p class="hint" style="margin:2px 0 6px 22px">Unchecked, this action sends the default Polaris alert email.</p>' +
@@ -6052,68 +6211,104 @@ async function openAutomationWizard(existing, opts) {
         '</div>';
       box.innerHTML = html;
       var renderRecipients = function () {
-        var ch = chanById(row.querySelector(".na-channel").value);
+        // The action's channels, as a SET of capabilities rather than one type.
+        // A mixed action (email + push) renders the union: To for everyone,
+        // Cc/Bcc because an email channel is present, the broadcast toggles
+        // because a push channel is. The recipient FIELDS were always
+        // transport-agnostic on the wire — only the old single-select forced
+        // the UI to pick one shape.
+        var sel = actionChannels({ channelIds: checkedChannelIds(row), channelId: "" });
         var fbox = box.querySelector(".na-fields");
         var compEl = box.querySelector(".na-comp");
-        if (!ch) { fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Add a channel in the Delivery tab first.</p>'; if (compEl) compEl.style.display = "none"; return; }
-        if (compEl) compEl.style.display = isEmailType(ch.type) ? "" : "none";
-        if (!isRouted(ch.type)) { fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Posts to this channel’s configured destination.</p>'; return; }
-        var isPush = ch.type === "web_push";
-        var h;
-        if (isEmailType(ch.type)) {
-          // Email gets proper To / Cc / Bcc token fields. Cc/Bcc live here as
-          // first-class recipients rather than inside the "Customize the
-          // email…" disclosure, which is where they used to hide.
-          var comp0 = action.emailComposition || {};
-          h = '<div class="na-recips">' +
-            recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts()) +
-            recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers, awRoles()), false) +
-            recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers, awRoles()), false) +
-            "</div>" +
-            '<p class="hint" style="margin:0 0 6px">Anything in Cc or Bcc sends <strong>one</strong> message with the full To list visible, instead of a separate email per recipient.</p>';
-        } else {
-          // Push mirrors the email shape: ONE To field of the same pills,
-          // because the recipients ARE the same vocabulary (accounts, roles,
-          // map regions, and the region-dynamic entries) — only addresses and
-          // asset contacts fall away, having no subscription behind them.
-          // There is no Cc or Bcc: a push is delivered per endpoint, so a
-          // "copy" is just another recipient. Above the field sit the two
-          // broadcast toggles.
-          //
-          // What the old account multi-select did that a pill list must keep
-          // doing: SAY WHO IS UNREACHABLE. Push is opt-in per browser, so a
-          // named user with no enrolled device is a recipient that silently
-          // receives nothing — the warning under the field, and the picker's
-          // "Push devices" column, are the only places that admit it.
-          //
-          // BOTH TOGGLES DEFAULT TO CHECKED on a NEW action (operator
-          // decision): a push automation usually does mean "tell everyone",
-          // and unchecking is one click. On a STORED action they reflect what
-          // was saved — `isNew` keeps an old rule that listed three people
-          // from silently becoming a fleet-wide broadcast on next edit.
-          var isNew = !action.channelId;
-          var allUsers = isNew ? action.recipientAllUsers !== false : !!action.recipientAllUsers;
-          var allRegions = isNew ? action.recipientAllRegions !== false : !!action.recipientAllRegions;
-          h = '<div class="form-group" style="margin-bottom:6px">' +
-            '<label style="display:block;font-size:0.8rem;margin:0 0 4px"><input type="checkbox" class="na-all-users"' +
-              (allUsers ? " checked" : "") + '> <strong>Send to All Users</strong></label>' +
-            '<div class="na-users-block"' + (allUsers ? ' style="display:none"' : "") + '>' +
-              '<div class="na-recips">' +
-                recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts(), "push") +
-              "</div>" +
-              '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + "</div>" +
-            "</div>" +
-            '<label style="display:block;font-size:0.8rem;margin:6px 0 4px"><input type="checkbox" class="na-all-regions"' +
-              (allRegions ? " checked" : "") + (allUsers ? " disabled" : "") +
-              '> <strong>Send to All User Regions</strong></label>' +
-            // "All users" already covers every region, so the region toggle is
-            // disabled rather than left to look meaningful but change nothing.
-            '<p class="hint na-region-note" style="margin:4px 0 0' + (allUsers ? "" : ";display:none") + '">' +
-              "“All Users” already includes everyone in every region." +
-            "</p>" +
-            '<p class="hint na-reach" style="margin:4px 0 0"></p>' +
-            "</div>";
+        var prefEl = box.querySelector(".na-pref");
+        var anyEmail = sel.some(function (x) { return isEmailType(x.type); });
+        var anyPush = sel.some(function (x) { return x.type === "web_push"; });
+        var fixed = sel.filter(function (x) { return !isRouted(x.type); });
+        if (compEl) compEl.style.display = anyEmail ? "" : "none";
+        // Offered on every recipient-routed action; ENABLED only where the
+        // group carries both methods (refreshPrefGating owns that half).
+        if (prefEl) prefEl.style.display = (anyEmail || anyPush) ? "" : "none";
+        if (!channels.length) {
+          fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">Add a channel in the Delivery tab first.</p>';
+          return;
         }
+        if (!sel.length) {
+          fbox.innerHTML = '<p style="font-size:0.78rem;color:var(--color-warning,#d97706);margin:0 0 6px">Pick at least one channel above.</p>';
+          return;
+        }
+        // A fixed-destination channel (Slack / Teams / Pushbullet) posts where
+        // it is configured to and takes no recipients, so it is stated rather
+        // than given controls — and it never suppresses the routed channels
+        // sharing the action with it.
+        var fixedNote = fixed.length
+          ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:0 0 6px">' +
+            escapeHtml(fixed.map(function (x) { return x.name; }).join(", ")) +
+            (fixed.length === 1 ? ' posts to its' : ' post to their') + ' configured destination — no recipients to choose.</p>'
+          : "";
+        if (!anyEmail && !anyPush) { fbox.innerHTML = fixedNote; return; }
+        var isPush = anyPush;
+        // A To pill has to be deliverable by SOMETHING this action carries. An
+        // email channel makes every kind deliverable; push alone narrows the
+        // box to the kinds that resolve to ACCOUNTS (an address and an
+        // address-book contact have no subscription behind them). So the mode
+        // is "push" only when there is no email channel to carry them.
+        var toMode = anyEmail ? "email" : "push";
+        // BOTH BROADCAST TOGGLES DEFAULT TO CHECKED on a NEW action (operator
+        // decision): a push automation usually does mean "tell everyone", and
+        // unchecking is one click. On a STORED action they reflect what was
+        // saved — `isNew` keeps an old rule that listed three people from
+        // silently becoming a fleet-wide broadcast on next edit.
+        var isNew = !action.channelId && !(action.channelIds && action.channelIds.length);
+        var allUsers = anyPush && (isNew ? action.recipientAllUsers !== false : !!action.recipientAllUsers);
+        var allRegions = anyPush && (isNew ? action.recipientAllRegions !== false : !!action.recipientAllRegions);
+        // "All Users" replaces the recipient list — but only where push is
+        // the ONLY method. On a mixed action the email half still needs a To
+        // list, so the broadcast covers push and the field stays visible.
+        var hideTo = allUsers && !anyEmail;
+        var comp0 = action.emailComposition || {};
+        // ONE To field whichever channels are selected: the recipients ARE the
+        // same vocabulary (accounts, roles, map regions, and the two dynamic
+        // "asset's …" entries) on both transports. Cc and Bcc are email's
+        // alone — a push is delivered per endpoint, so a "copy" is just
+        // another recipient.
+        var h = fixedNote +
+          '<div class="na-users-block"' + (hideTo ? ' style="display:none"' : "") + '>' +
+            '<div class="na-recips">' +
+              recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts(), toMode) +
+              (anyEmail
+                ? recipBoxHtml("cc", "Cc", recipientsToPills(comp0.cc, _ruleRecipientUsers, awRoles()), false) +
+                  recipBoxHtml("bcc", "Bcc", recipientsToPills(comp0.bcc, _ruleRecipientUsers, awRoles()), false)
+                : "") +
+            "</div>" +
+            (anyEmail
+              ? '<p class="hint" style="margin:0 0 6px">Anything in Cc or Bcc sends <strong>one</strong> message with the full To list visible, instead of a separate email per recipient.</p>'
+              : "") +
+            // SAY WHO IS UNREACHABLE. Push is opt-in per browser, so a named
+            // user with no enrolled device is a recipient that silently
+            // receives nothing — this line and the picker's "Push devices"
+            // column are the only places that admit it. On a MIXED action they
+            // still get the email, which the line says rather than implying a
+            // total loss.
+            (anyPush ? '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds, anyEmail) + "</div>" : "") +
+          "</div>" +
+          (anyPush
+            ? '<div class="form-group na-push-block" style="margin:6px 0 0">' +
+                '<label style="display:block;font-size:0.8rem;margin:0 0 4px"><input type="checkbox" class="na-all-users"' +
+                  (allUsers ? " checked" : "") + '> <strong>Send to All Users</strong>' +
+                  (anyEmail ? ' <span class="hint" style="margin:0">(push only)</span>' : "") + '</label>' +
+                '<label style="display:block;font-size:0.8rem;margin:6px 0 4px"><input type="checkbox" class="na-all-regions"' +
+                  (allRegions ? " checked" : "") + (allUsers ? " disabled" : "") +
+                  '> <strong>Send to All User Regions</strong>' +
+                  (anyEmail ? ' <span class="hint" style="margin:0">(push only)</span>' : "") + '</label>' +
+                // "All users" already covers every region, so the region toggle
+                // is disabled rather than left to look meaningful but change
+                // nothing.
+                '<p class="hint na-region-note" style="margin:4px 0 0' + (allUsers ? "" : ";display:none") + '">' +
+                  "“All Users” already includes everyone in every region." +
+                "</p>" +
+                '<p class="hint na-reach" style="margin:4px 0 0"></p>' +
+              "</div>"
+            : "");
         // Device-region routing (match users' region tags against the TRIGGERING
         // asset's own region: tag at fire time) and address-book ownership (the
         // contacts whose device filter covers it) are RECIPIENTS, so they are
@@ -6136,10 +6331,13 @@ async function openAutomationWizard(existing, opts) {
         // reachability line as well as the summary, and the box's onChange is
         // the only place that sees them all (typing, picker, drag, delete).
         var onPillsChanged = null;
+        var resummarize = function () {
+          row.querySelector(".aw-action-summary").textContent =
+            actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: sel[0].id });
+        };
         if (recips) {
           wireRecipBoxes(recips, function () {
-            row.querySelector(".aw-action-summary").textContent =
-              actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: ch.id });
+            resummarize();
             if (onPillsChanged) onPillsChanged();
           });
         }
@@ -6163,11 +6361,14 @@ async function openAutomationWizard(existing, opts) {
             var ids = pillsOf(toBoxEl)
               .filter(function (x) { return x.kind === "user"; })
               .map(function (x) { return x.value; });
-            warnBox.innerHTML = pushReachWarning(ids);
+            warnBox.innerHTML = pushReachWarning(ids, anyEmail);
           };
           var syncPush = function () {
             var au = allUsersEl.checked;
-            usersBlock.style.display = au ? "none" : "";
+            // The broadcast covers PUSH only, so it may hide the recipient
+            // field only when push is all this action does. On a mixed action
+            // the To list is still the email half's entire answer.
+            usersBlock.style.display = (au && !anyEmail) ? "none" : "";
             allRegionsEl.disabled = au;
             if (noteEl) noteEl.style.display = au ? "" : "none";
             if (reachEl) {
@@ -6178,8 +6379,7 @@ async function openAutomationWizard(existing, opts) {
                   : "";
             }
             syncWarn();
-            row.querySelector(".aw-action-summary").textContent =
-              actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: ch.id });
+            resummarize();
           };
           allUsersEl.addEventListener("change", syncPush);
           allRegionsEl.addEventListener("change", syncPush);
@@ -6222,11 +6422,27 @@ async function openAutomationWizard(existing, opts) {
           box.querySelector(".na-html").value = d.bodyHtmlTemplate || "";
         });
       }
-      row.querySelector(".na-channel").addEventListener("change", function () {
-        row.querySelector(".aw-action-summary").textContent = actionSummary({ type: "notify", channelId: row.querySelector(".na-channel").value });
-        renderRecipients();
+      box.querySelectorAll(".na-chan").forEach(function (cb) {
+        cb.addEventListener("change", function () {
+          var ids = checkedChannelIds(row);
+          row.querySelector(".aw-action-summary").textContent =
+            actionSummary({ type: "notify", channelId: ids[0] || "", channelIds: ids });
+          renderRecipients();
+          // Ticking a channel can change which METHODS this action list offers,
+          // which enables or disables the preference checkbox on EVERY row in
+          // it — not just this one.
+          refreshPrefGating(row.parentNode);
+        });
       });
+      var prefEnable = box.querySelector(".na-pref-enable");
+      if (prefEnable) {
+        prefEnable.addEventListener("change", function () {
+          row.querySelector(".aw-action-summary").textContent =
+            actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: "" });
+        });
+      }
       renderRecipients();
+      refreshPrefGating(row.parentNode);
     } else if (t === "api_call") {
       var meta = s.apiCallMeta || { allowedMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"] };
       var headers = action.headers || {};
@@ -6333,9 +6549,13 @@ async function openAutomationWizard(existing, opts) {
   }
   function collectActionCore(t, box) {
     if (t === "notify") {
-      var chSel = box.querySelector(".na-channel");
-      if (!chSel || !chSel.value) return null;
-      var a = { type: "notify", channelId: chSel.value };
+      // Ticked channels in LIST order, so channelId (the primary, and the
+      // lossless single-channel mirror every legacy reader still uses) is
+      // always channelIds[0] — which is exactly what the server re-checks.
+      var chIds = checkedChannelIds(box);
+      if (!chIds.length) return null;
+      var a = { type: "notify", channelId: chIds[0] };
+      if (chIds.length > 1) a.channelIds = chIds;
       // Push broadcast toggles. "All Users" subsumes every narrower source, so
       // nothing under it is collected — persisting a recipient list the UI
       // isn't showing would resurface on the next edit. Read BEFORE the pills,
@@ -6362,13 +6582,19 @@ async function openAutomationWizard(existing, opts) {
         if (to.recipientDeviceRegionLevels) a.recipientDeviceRegionLevels = to.recipientDeviceRegionLevels;
         if (to.recipientAssetContacts) a.recipientAssetContacts = true;
       }
+      // Per-recipient channel selection. Collected only while the checkbox is
+      // ENABLED: a disabled one is a group with a single method on offer, where
+      // the flag would change nothing at delivery and would resurface as a
+      // ticked-but-inert box on the next edit.
+      var prefEl = box.querySelector(".na-pref-enable");
+      if (prefEl && prefEl.checked && !prefEl.disabled) a.respectUserPreference = true;
       // Legacy scope-region checkbox renders only on actions that already
       // carried the flag — unchecking it drops the flag deliberately.
       var regEl = box.querySelector(".na-scope-region");
       if (regEl && regEl.checked) a.recipientScopeRegion = true;
-      // Per-action email composition (email channels only; hidden otherwise).
-      var ch = chanById(a.channelId);
-      if (ch && isEmailType(ch.type)) {
+      // Per-action email composition (collected when ANY selected channel is an
+      // email one; the block is hidden otherwise).
+      if (chIds.map(chanById).some(function (x) { return x && isEmailType(x.type); })) {
         var c = {};
         // Only when the operator asked to customize. Unchecked stores NO
         // templates, so buildComposedEmail falls back to the shared default for
@@ -6621,7 +6847,7 @@ async function openAutomationWizard(existing, opts) {
     // never mirrorable must not read as "edited".
     var triggerHost = panel.querySelector("#aw-actions");
     var mirrorable = (triggerHost ? collectActionsFrom(triggerHost) : [])
-      .filter(function (a) { return a.type === "notify" && a.channelId; }).length;
+      .filter(function (a) { return a.type === "notify" && actionChannelIds(a).length; }).length;
     if (rows.length === 0) {
       note.textContent = "Nothing here yet — add an action, or add a Notify above and it will appear here.";
     } else if (mirrorable === 0) {
@@ -6636,14 +6862,17 @@ async function openAutomationWizard(existing, opts) {
   }
 
   function mirroredResetActions(triggerActions, existing) {
-    var notifies = (triggerActions || []).filter(function (a) { return a.type === "notify" && a.channelId; });
+    var notifies = (triggerActions || []).filter(function (a) { return a.type === "notify" && actionChannelIds(a).length; });
     var kept = (existing || []).filter(function (a) { return !a._mirrorOf; });
     var stillMirrored = notifies.map(function (a) {
       var clone = JSON.parse(JSON.stringify(a));
       // An escalation chases an UNHANDLED alert — meaningless on a recovery,
       // and the server rejects it (reset actions are plain, not escalatable).
       delete clone.escalation;
-      clone._mirrorOf = a.channelId;
+      // Keyed on the WHOLE channel list: two notify actions that share a
+      // primary but differ in their second channel are different destinations,
+      // and mirroring one onto the other would silently drop the difference.
+      clone._mirrorOf = actionChannelIds(a).join(",");
       return clone;
     });
     // Operator-authored rows keep their place after the mirrored ones.
@@ -6716,9 +6945,13 @@ async function openAutomationWizard(existing, opts) {
   }
   function validateAction(a, label) {
     if (a.type === "notify") {
-      if (!a.channelId) return label + ": pick a channel.";
-      var ch = chanById(a.channelId);
-      if (ch && isRouted(ch.type)) {
+      var chs = actionChannels(a);
+      if (!chs.length) return label + ": pick a channel.";
+      // Recipients are shared across an action's channels, so the check is
+      // asked once about the action and named after whichever channel needs
+      // them — not repeated per channel with the same answer.
+      var ch = chs.filter(function (x) { return isRouted(x.type); })[0];
+      if (ch) {
         var hasTo = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) ||
           (a.recipientRoles && a.recipientRoles.length);
         var hasRecip = hasTo || a.recipientDeviceRegion || a.recipientScopeRegion || a.recipientAssetContacts ||

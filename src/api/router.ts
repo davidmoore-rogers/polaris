@@ -42,6 +42,7 @@ import dashboardRouter from "./routes/dashboard.js";
 import userDashboardRouter from "./routes/userDashboard.js";
 import savedFiltersRouter from "./routes/savedFilters.js";
 import tableTabsRouter from "./routes/tableTabs.js";
+import notificationPreferenceRouter from "./routes/notificationPreference.js";
 import { agentsEnrollRouter, agentsRouter, agentsBinaryRouter } from "./routes/agents.js";
 import rolesRouter from "./routes/roles.js";
 import groupMappingsRouter from "./routes/groupMappings.js";
@@ -127,6 +128,10 @@ router.use("/dashboard", dashboardRouter);
 router.use("/me/dashboard", userDashboardRouter);
 // Per-user list-page tabs (Assets page tab strip) — the /me/dashboard sibling.
 router.use("/me/table-tabs", tableTabsRouter);
+// How the caller wants to be alerted (email / push / both) — the third
+// per-caller /me route. Stored on the User so it follows them between devices;
+// each client enrolls or unsubscribes its own browser to match at boot.
+router.use("/me/notification-preference", notificationPreferenceRouter);
 // Saved table filters (Assets page → Filters ▾). Gated per-request on the
 // function key that owns the requested scope — see routes/savedFilters.ts.
 router.use("/saved-filters", savedFiltersRouter);

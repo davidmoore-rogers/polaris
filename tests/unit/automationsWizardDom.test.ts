@@ -358,7 +358,7 @@ describe("automation wizard DOM render", () => {
     const tier = cardEsc.querySelector(".aesc-tiers .aw-tier")!;
     expect(tier.querySelector(".tier-after")).toBeTruthy(); // minutes-before field
     expect(tier.querySelector(".tier-actions .aw-action")).toBeTruthy(); // seeded notify action
-    expect(tier.querySelector(".na-channel")).toBeTruthy(); // channel select → recipients render from it
+    expect(tier.querySelector(".na-chan")).toBeTruthy(); // channel checklist → recipients render from it
     // Recipient sources on an EMAIL channel are all pills in the To field —
     // device-region and asset-contacts became recipients you can see rather than
     // checkboxes beside the field (the checkbox survives only on Web Push, which
@@ -417,9 +417,10 @@ describe("automation wizard DOM render", () => {
     expect((doc.querySelector("#aw-reset-actions-on") as unknown as { checked: boolean }).checked).toBe(true);
     (doc.querySelector("#aw-add-action") as unknown as { click: () => void }).click();
     const newNotify = Array.from(doc.querySelectorAll("#aw-actions .aw-action")).pop()!;
-    const chanSel = newNotify.querySelector(".na-channel") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
-    chanSel.value = "c1";
-    chanSel.dispatchEvent(new win5.Event("change", { bubbles: true }));
+    // A channel is a CHECKBOX now — an action may deliver through several.
+    const chanBox = newNotify.querySelector('.na-chan[value="c1"]') as unknown as { checked: boolean; dispatchEvent: (e: unknown) => void };
+    chanBox.checked = true;
+    chanBox.dispatchEvent(new win5.Event("change", { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     expect(doc.querySelector("#aw-reset-actions .aw-action")).toBeTruthy();
     expect(doc.querySelector("#aw-reset-mirror-note")!.textContent).toContain("Following your notify actions");
@@ -2830,5 +2831,125 @@ describe("web push recipients", () => {
     const hits = Array.from(box.querySelectorAll(".aw-suggest.open .aw-suggest-item")).map((el) => el.textContent || "");
     expect(hits.join(" | ")).toContain("Asset’s Region Users");
     expect(hits.join(" | ")).not.toContain("Responsible Contacts");
+  });
+});
+
+describe("multi-channel notify + the user-preference filter", () => {
+  // The stub catalogue carries exactly one of each method: c1 (smtp) and
+  // c2 (web_push) — which is what makes "does this group offer both?"
+  // testable by ticking one box.
+  const rule = {
+    id: "r-multi",
+    name: "CPU",
+    description: null,
+    enabled: true,
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 90, forDurationSec: 0 },
+    scope: { allAssets: true },
+    reset: { mode: "auto" },
+    cooldownSec: null,
+    actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+  };
+
+  async function openStep5(): Promise<Element> {
+    doc.body.innerHTML = "";
+    toastErrors.length = 0;
+    savedPayloads.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(JSON.parse(JSON.stringify(rule)));
+    await new Promise((r) => setTimeout(r, 20));
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    return doc.querySelector("#aw-step-5 .aw-action .aw-action-fields")!;
+  }
+
+  function tick(fields: Element, id: string, on: boolean) {
+    const win = g.window as InstanceType<typeof Window>;
+    const cb = fields.querySelector(`.na-chan[value="${id}"]`) as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    cb.checked = on;
+    cb.dispatchEvent(new win.Event("change", { bubbles: true }));
+  }
+
+  it("offers channels as a checklist, with the stored one ticked", async () => {
+    const fields = await openStep5();
+    expect(toastErrors).toEqual([]);
+    // The single-select is gone — an action delivers through a SET of channels.
+    expect(fields.querySelector(".na-channel")).toBeFalsy();
+    const boxes = Array.from(fields.querySelectorAll(".na-chan")) as unknown as { value: string; checked: boolean }[];
+    expect(boxes.map((b) => b.value)).toEqual(["c1", "c2"]);
+    expect(boxes.map((b) => b.checked)).toEqual([true, false]);
+  });
+
+  it("grays the preference checkbox while the group offers only one method", async () => {
+    const fields = await openStep5();
+    // Email alone: honouring a push-preferring recipient's choice here would
+    // remove them from the alert rather than route it (business rule 39).
+    const cb = fields.querySelector(".na-pref-enable") as unknown as { disabled: boolean };
+    expect(cb.disabled).toBe(true);
+    expect(fields.querySelector(".na-pref-hint")!.textContent)
+      .toMatch(/once this list offers both an email and a push channel/i);
+  });
+
+  it("enables it the moment the same action picks up a push channel", async () => {
+    const fields = await openStep5();
+    tick(fields, "c2", true);
+    await new Promise((r) => setTimeout(r, 10));
+    const cb = fields.querySelector(".na-pref-enable") as unknown as { disabled: boolean };
+    expect(cb.disabled).toBe(false);
+    // A mixed action renders the union: email's Cc/Bcc AND push's broadcast
+    // toggles, off one shared To list.
+    expect(fields.querySelector('.na-recip-box[data-field="cc"]')).toBeTruthy();
+    expect(fields.querySelector('.na-recip-box[data-field="bcc"]')).toBeTruthy();
+    expect(fields.querySelector(".na-all-users")).toBeTruthy();
+    // The To box stays permissive: an email channel can still carry an address.
+    expect(fields.querySelector('.na-recip-box[data-field="to"]')!.getAttribute("data-mode")).toBe("email");
+  });
+
+  it("saves channelIds with the primary first, and the flag once it is enabled", async () => {
+    const fields = await openStep5();
+    tick(fields, "c2", true);
+    await new Promise((r) => setTimeout(r, 10));
+    const win = g.window as InstanceType<typeof Window>;
+    const pref = fields.querySelector(".na-pref-enable") as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    pref.checked = true;
+    pref.dispatchEvent(new win.Event("change", { bubbles: true }));
+    // "All Users" defaults on for a NEW push action; this one is stored, so it
+    // is off and the To list still answers for both halves.
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const p = savedPayloads[0]! as Record<string, any>;
+    const a = p.actions[0];
+    expect(a.channelIds).toEqual(["c1", "c2"]);
+    // channelId is the lossless single-channel mirror — the server refuses a
+    // payload where it is not channelIds[0].
+    expect(a.channelId).toBe("c1");
+    expect(a.respectUserPreference).toBe(true);
+    expect(() => ruleInputSchema.parse(p)).not.toThrow();
+  });
+
+  it("never saves the flag from a disabled checkbox", async () => {
+    const fields = await openStep5();
+    tick(fields, "c2", true);
+    await new Promise((r) => setTimeout(r, 10));
+    const win = g.window as InstanceType<typeof Window>;
+    const pref = fields.querySelector(".na-pref-enable") as unknown as
+      { checked: boolean; disabled: boolean; dispatchEvent: (e: unknown) => void };
+    pref.checked = true;
+    pref.dispatchEvent(new win.Event("change", { bubbles: true }));
+    // Take the push channel away again: the group is single-method once more,
+    // so the ticked-but-inert box must not persist — it would resurface on the
+    // next edit as a setting that does nothing.
+    tick(fields, "c2", false);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(pref.disabled).toBe(true);
+    (doc.querySelector("#aw-save") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(toastErrors).toEqual([]);
+    const a = (savedPayloads[0]! as Record<string, any>).actions[0];
+    expect(a.respectUserPreference).toBeUndefined();
+    expect(a.channelIds).toBeUndefined();
+    expect(a.channelId).toBe("c1");
   });
 });

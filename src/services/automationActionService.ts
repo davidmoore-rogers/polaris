@@ -46,6 +46,9 @@ import { resolveContactEmailsForAsset } from "./contactService.js";
 import { logger } from "../utils/logger.js";
 import {
   actionsToTargets,
+  notifyChannelIds,
+  CHANNEL_TRANSPORT,
+  type ChannelType,
   type AutomationAction,
   type ApiCallAction,
   type EmailComposition,
@@ -110,6 +113,18 @@ export async function executeActions(
     return contactEmails;
   };
 
+  // Does THIS action group offer both an email and a push channel? Business
+  // rule 39's whole gate: a `respectUserPreference` action may only drop
+  // recipients when the method they'd fall through to is actually on offer.
+  // Resolved AT MOST ONCE per group and only when some action asked — the same
+  // posture as assetContactEmails above, so a group that never opts in costs
+  // nothing and issues no extra query.
+  let _bothMethods: boolean | null = null;
+  const groupOffersBothMethods = async (): Promise<boolean> => {
+    if (_bothMethods !== null) return _bothMethods;
+    return (_bothMethods = await actionsCarryBothMethods(actions));
+  };
+
   for (const [index, action] of actions.entries()) {
     try {
       if (action.type === "notify") {
@@ -127,6 +142,7 @@ export async function executeActions(
           ...(followUpLine(ctx) ? { followUp: followUpLine(ctx) } : {}),
           escalation: exec.escalation,
           repeat: exec.repeat,
+          ...(action.respectUserPreference ? { enforceUserPreference: await groupOffersBothMethods() } : {}),
         });
         if (rows > 0) executed++;
       } else if (action.type === "api_call") {
@@ -182,6 +198,42 @@ export async function executeActions(
     }
   }
   return { executed, failed };
+}
+
+/**
+ * Do the notify actions in ONE action group reach recipients by BOTH email and
+ * web push?
+ *
+ * The group is the `actions[]` list being executed — the rule's own actions, a
+ * severity band's, the reset list, or one escalation tier's — which is exactly
+ * the unit the wizard grays the preference checkbox on. A MULTI-CHANNEL action
+ * counts on its own: one action carrying an SMTP channel and a Web Push
+ * channel offers both methods by itself, which is the shape the checkbox was
+ * really added for.
+ *
+ * Chat and Pushbullet channels are ignored — they post to one fixed
+ * destination and have no per-user recipients, so they can neither satisfy a
+ * preference nor be excluded by one.
+ *
+ * Exported for the tests: a wrong answer here is silent in the worst
+ * direction — a false positive drops every push-preferring recipient from an
+ * email-only alert, and nothing anywhere reports the omission.
+ */
+export async function actionsCarryBothMethods(actions: AutomationAction[]): Promise<boolean> {
+  const ids = Array.from(
+    new Set(actions.flatMap((a) => (a.type === "notify" ? notifyChannelIds(a) : []))),
+  );
+  if (ids.length < 2) return false; // one channel cannot be two methods
+  const channels = await prisma.notificationChannel.findMany({
+    where: { id: { in: ids } },
+    select: { type: true },
+  });
+  const methods = new Set(
+    channels
+      .map((ch) => CHANNEL_TRANSPORT[ch.type as ChannelType])
+      .filter((t) => t === "email" || t === "web_push"),
+  );
+  return methods.size >= 2;
 }
 
 /**

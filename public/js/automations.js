@@ -81,49 +81,12 @@ var _rulesPage = 1;
     }
   }
 
-  // ─── Web push enable/disable (any viewer; gated only by browser support
-  //     + server-side Web Push config) ─────────────────────────────────────
-  function setupPushButton() {
-    var btn = document.getElementById("btn-enable-push");
-    if (!btn || !window.polarisPush) return;
-    if (!polarisPush.isSupported()) { btn.style.display = "none"; return; }
-
-    // Last painted state, so the click handler can branch WITHOUT awaiting.
-    // Awaiting status() inside the handler (as this used to) burns the click's
-    // transient user activation on a network round trip, and Safari then
-    // refuses the permission prompt — see the ordering comment in push.js.
-    var lastState = null;
-
-    function paint(st) {
-      lastState = st;
-      if (!st.enabledOnServer) {
-        // Server hasn't configured Web Push — keep the control hidden rather
-        // than offer a button that can only error.
-        btn.style.display = "none";
-        return;
-      }
-      btn.style.display = "";
-      btn.textContent = st.subscribed ? "Disable push" : "Enable push";
-      btn.disabled = false;
-    }
-
-    polarisPush.status().then(paint).catch(function () { btn.style.display = "none"; });
-
-    if (!btn._wired) {
-      btn._wired = true;
-      btn.addEventListener("click", async function () {
-        var wasSubscribed = !!(lastState && lastState.subscribed);
-        btn.disabled = true;
-        try {
-          if (wasSubscribed) { await polarisPush.disable(); showToast("Push notifications disabled", "info"); }
-          else { await polarisPush.enable({ surface: "desktop" }); showToast("Push notifications enabled", "success"); }
-        } catch (err) {
-          showToast(err.message || "Push action failed", "error");
-        }
-        polarisPush.status().then(paint).catch(function () {});
-      });
-    }
-  }
+  // Web push enrollment used to have an "Enable push" button here. It is gone:
+  // enrolling a browser is no longer a decision of its own, it is what happens
+  // when the operator says how they want to be alerted. That choice lives on
+  // the account menu (every page) and on the mobile More tab, is stored on the
+  // USER, and every browser reconciles its own subscription to it at boot —
+  // so a page-local switch would be a second answer to the same question.
 
   // ─── Tabs ──────────────────────────────────────────────────────────────
   document.querySelectorAll("#auto-tabs .page-tab").forEach(function (btn) {
@@ -170,7 +133,6 @@ var _rulesPage = 1;
   } else {
     bootPage();
   }
-  setupPushButton();
 
   // ═══════════════════════════════ Manage tab ═════════════════════════════
   // Persisted per user, same shape and key convention as every other list
@@ -1061,7 +1023,7 @@ async function testChannel(c, btn) {
     if (!to) return;
     body.to = to.trim();
   } else if (c.type === "web_push") {
-    showToast("Test web push by enabling it on a device (Enable push button)", "info");
+    showToast("Test web push from a device that receives it — set Notifications to Push or Email and push in the account menu.", "info");
     return;
   }
   if (btn) btn.disabled = true;

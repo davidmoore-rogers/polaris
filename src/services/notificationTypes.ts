@@ -1210,6 +1210,12 @@ export const deliveryTargetSchema = z.object({
   // FLATTENED region-plus-other scope (resolveRecipientUsers), the semantics it
   // has always had as the back-compat field it started life as.
   recipientTags: z.array(z.string().max(100)).max(200).optional(),
+  // Deliver only to recipients whose own notification preference accepts this
+  // channel's transport (business rule 39). Carried on the TARGET as well as
+  // on the notify action because actionsToTargets is the runtime path, not
+  // just the legacy mirror — a field the action holds and the target drops
+  // validates, persists, renders in the wizard and changes nothing at all.
+  respectUserPreference: z.boolean().optional(),
 });
 
 // ─── Rule-level email composition + escalation ──────────────────────────────
@@ -1388,7 +1394,32 @@ export type ScriptInterpreter = (typeof SCRIPT_INTERPRETERS)[number];
 export const notifyActionSchema = z
   .object({
     type: z.literal("notify"),
+    // The action's PRIMARY channel, and the lossless single-channel mirror of
+    // `channelIds` — every pre-multi-channel reader (the legacy targets
+    // column, the escalation-tier converter, the automations list's recipient
+    // groups) still names a channel through this field, so it must always
+    // equal channelIds[0]. Enforced below rather than repaired silently: a
+    // payload whose two views disagree is a client bug, and guessing which one
+    // the operator meant is how an alert goes to the wrong place.
     channelId: z.string().min(1).max(100),
+    // Every channel this ONE action delivers through. Absent (or a single
+    // entry) is the pre-feature shape. Multiple channels exist so an operator
+    // can say "page this person by email AND push" once — and, with
+    // respectUserPreference below, so ONE action can carry both methods and
+    // let each recipient's own preference pick which of them reaches them.
+    // Resolved through notifyChannelIds(); expands to one DeliveryTarget per
+    // channel, so nothing downstream needs to know an action can be plural.
+    channelIds: z.array(z.string().min(1).max(100)).min(1).max(10).optional(),
+    // Deliver through only the channel(s) matching each recipient's own
+    // notification preference (User.notificationPreference). Business rule 39.
+    //
+    // Consulted ONLY when the action group actually offers both methods — an
+    // action group with email alone would otherwise silently drop every
+    // push-preferring recipient, i.e. the preference would delete the alert
+    // rather than route it. The group test lives at execution time
+    // (automationActionService), not here, because the group is the actions[]
+    // list being run, which a single action cannot see.
+    respectUserPreference: z.boolean().optional(),
     // Recipient sources — same semantics as deliveryTargetSchema (meaningful
     // for recipient-routed channel types only; chat/pushbullet ignore them).
     recipientUserIds: z.array(z.string().max(100)).max(500).optional(),
@@ -1424,7 +1455,26 @@ export const notifyActionSchema = z
     // emailComposition, then the pre-feature defaults. Email transports only.
     emailComposition: emailCompositionSchema.optional().nullable(),
   })
+  // NOT superRefine()d, deliberately: this schema is a member of the `action`
+  // discriminated union AND is .extend()ed into the escalatable variant, and
+  // both refuse a ZodEffects. The channelId === channelIds[0] coherence check
+  // therefore lives in assertActionRefs (notificationRuleService), which
+  // already walks every action location through allRuleActionRefs.
   .strict();
+
+/**
+ * Every channel one notify action delivers through, deduped, primary first.
+ *
+ * THE single reader of the channelId/channelIds pair — validation, the action
+ * executor, the wizard's mirror and the recipient-group renderer all go
+ * through it, so "an action has one channel" survives nowhere as an
+ * assumption. Falls back to the primary alone, which is what every stored
+ * pre-feature action and every legacy-converted tier carries.
+ */
+export function notifyChannelIds(a: { channelId: string; channelIds?: string[] | null }): string[] {
+  const list = a.channelIds?.length ? a.channelIds : [a.channelId];
+  return Array.from(new Set(list.filter(Boolean)));
+}
 
 // SECURITY: headers are stored UNMASKED on the rule (and echoed onto delivery
 // rows) — the catalog + docs tell operators never to put credentials here.
@@ -1990,18 +2040,26 @@ export function targetsToNotifyActions(
     ...(t.recipientAllRegions !== undefined ? { recipientAllRegions: t.recipientAllRegions } : {}),
     ...(t.recipientRegions?.length ? { recipientRegions: t.recipientRegions } : {}),
     ...(t.recipientTags?.length ? { recipientTags: t.recipientTags } : {}),
+    ...(t.respectUserPreference !== undefined ? { respectUserPreference: t.respectUserPreference } : {}),
     emailComposition: emailComposition ?? null,
   }));
 }
 
 /** notify actions → legacy delivery targets (per-action emailComposition is
  *  dropped — it has no legacy representation; the rule-level column carries
- *  the shared composition). api_call/script actions have no legacy mirror. */
+ *  the shared composition). api_call/script actions have no legacy mirror.
+ *
+ *  A MULTI-CHANNEL notify action expands to one target per channel, which is
+ *  what lets a single action deliver by email and push at once without any
+ *  reader below this line knowing an action can be plural — expandDeliveries
+ *  sees exactly the shape it always saw. It is also why `channelIds` cannot
+ *  repeat: two identical targets would be deduped by expandDeliveries' `seen`
+ *  key anyway, but only after resolving their recipients twice. */
 export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] {
   return actions
     .filter((a): a is NotifyAction => a.type === "notify")
-    .map((a) => ({
-      channelId: a.channelId,
+    .flatMap((a) => notifyChannelIds(a).map((channelId) => ({
+      channelId,
       ...(a.recipientUserIds?.length ? { recipientUserIds: a.recipientUserIds } : {}),
       ...(a.addresses?.length ? { addresses: a.addresses } : {}),
       ...(a.recipientScopeRegion !== undefined ? { recipientScopeRegion: a.recipientScopeRegion } : {}),
@@ -2015,7 +2073,8 @@ export function actionsToTargets(actions: AutomationAction[]): DeliveryTarget[] 
       ...(a.recipientAllRegions !== undefined ? { recipientAllRegions: a.recipientAllRegions } : {}),
       ...(a.recipientRegions?.length ? { recipientRegions: a.recipientRegions } : {}),
       ...(a.recipientTags?.length ? { recipientTags: a.recipientTags } : {}),
-    }));
+      ...(a.respectUserPreference !== undefined ? { respectUserPreference: a.respectUserPreference } : {}),
+    })));
 }
 
 /** The lossless legacy projection of a v2 rule, kept mirrored on the legacy

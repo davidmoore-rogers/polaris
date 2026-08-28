@@ -55,6 +55,7 @@ import {
   updateEntraProxySettings,
   testEntraProxyRequest,
 } from "../../services/entraProxyAuthService.js";
+import { normalizeNotificationPreference } from "../../services/notificationPreferenceService.js";
 import { resolveTagScopesForUser } from "../../services/regionScopeService.js";
 import { isBlockedOutboundHost } from "../../utils/netGuard.js";
 import { totpCodeLimiter, ssoEntryLimiter, entraProxyLoginLimiter, ssoCallbackLimiter } from "../middleware/rateLimits.js";
@@ -436,6 +437,10 @@ router.get("/me", async (req, res, next) => {
       },
       regionTags: tagScopes.regionTags,
       otherTags: tagScopes.otherTags,
+      // Rides /auth/me so every client can reconcile this browser's push
+      // enrollment to the account's choice on the same boot request it already
+      // makes, instead of a second round trip before it can decide.
+      notificationPreference: normalizeNotificationPreference(u.notificationPreference),
     });
   } catch (err) {
     next(err);

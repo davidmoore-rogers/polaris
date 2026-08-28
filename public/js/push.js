@@ -1,11 +1,19 @@
 /* public/js/push.js — Web Push enrollment helper (classic script).
  *
  * Exposes window.polarisPush: register the service worker, check status, and
- * enable/disable a browser/PWA push subscription for the logged-in user.
+ * bring a browser/PWA push subscription into line with the logged-in user's
+ * NOTIFICATION PREFERENCE (business rule 39).
+ *
+ * There is no operator-facing enable/disable switch any more — enrollment is
+ * the consequence of the account-level preference, not a decision of its own.
+ * `syncToPreference` is the entry point both surfaces call at boot;
+ * `enable()`/`disable()` remain as the primitives it and the preference
+ * choosers are built from.
  *
  * Loaded on every desktop page that renders the sidebar (app.js wires the
- * sidebar's "Push notifications" row) and on the mobile SPA (the More tab's
- * Notifications row). Depends on the `api` global (api.js, loaded first).
+ * account menu's "Notifications: …" row) and on the mobile SPA (the More tab's
+ * Notification preference row). Depends on the `api` global (api.js, loaded
+ * first).
  *
  * SURFACE: enable() takes { surface: "desktop" | "mobile" }. The server stores
  * it on the subscription and uses it to pick the push deep link, because on
@@ -156,6 +164,63 @@
     }
   }
 
+  /**
+   * Bring THIS browser's push enrollment into line with the account's stored
+   * notification preference.
+   *
+   * This is what makes the preference a per-ACCOUNT setting instead of a
+   * per-browser one: every client calls it at boot, so choosing "Push" on a
+   * laptop enrolls the phone the next time it is opened, and switching back to
+   * "Email" un-enrolls every device the same way.
+   *
+   * The one thing it will NOT do is prompt. Notification.requestPermission()
+   * needs live user activation on Safari, and a boot-time call has none — so
+   * an account that prefers push on a browser that has never been asked stays
+   * un-enrolled until the operator picks the preference there (the menu row
+   * says so). Where permission is ALREADY granted the subscribe is silent,
+   * which covers every browser that has ever enrolled and every device where
+   * the operator has since re-installed the app.
+   *
+   * Returns what it did, for the caller's own UI: "enrolled" | "removed" |
+   * "needs-permission" | "" (nothing to do / not applicable). Never throws —
+   * this runs on every page load for a user who did nothing.
+   */
+  async function syncToPreference(pref, surface) {
+    if (!isSupported()) return "";
+    var wantPush = pref === "push" || pref === "any";
+    try {
+      var sub = await getSubscription();
+      if (!wantPush) {
+        // "Email" is also an instruction to stop pushing to this browser.
+        if (!sub) return "";
+        await disable();
+        return "removed";
+      }
+      if (sub) {
+        // Already enrolled — keep the endpoint fresh (browsers rotate them).
+        await reconcileSubscription(surface);
+        return "";
+      }
+      if (Notification.permission !== "granted") return "needs-permission";
+      var key = await api.push.key();
+      if (!key || !key.enabled || !key.publicKey) return "";
+      var reg = await registerSW();
+      var fresh = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key.publicKey),
+      });
+      var json = fresh.toJSON();
+      await api.push.subscribe({
+        endpoint: fresh.endpoint,
+        keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+        surface: normalizeSurface(surface),
+      });
+      return "enrolled";
+    } catch (e) {
+      return "";
+    }
+  }
+
   window.polarisPush = {
     isSupported: isSupported,
     registerSW: registerSW,
@@ -163,5 +228,6 @@
     enable: enable,
     disable: disable,
     reconcileSubscription: reconcileSubscription,
+    syncToPreference: syncToPreference,
   };
 })();

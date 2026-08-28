@@ -244,11 +244,20 @@ const NAV_ITEMS = [
   { href: "/users.html",        label: "Users",        icon: "users", adminOnly: true },
 ];
 
-// Last known push status + in-flight guard. Module-level because the control
-// is rebuilt from scratch every time the user menu opens — there is no
-// long-lived button to repaint, so the state has to outlive the menu.
+// Last known push status + the account's notification preference, plus an
+// in-flight guard. Module-level because the control is rebuilt from scratch
+// every time the user menu opens — there is no long-lived button to repaint,
+// so the state has to outlive the menu.
 var _pushState = null;
 var _pushBusy = false;
+var _notifPref = null;
+
+// The three answers to "how do you want to be alerted", in menu order. Kept
+// here rather than fetched from GET /me/notification-preference's `options`
+// so the menu can be built the instant the preference resolves — the server
+// still owns the vocabulary, and an unknown value simply renders as itself.
+var NOTIF_PREF_LABELS = { email: "Email", push: "Push", any: "Email and push" };
+var NOTIF_PREF_ORDER = ["email", "push", "any"];
 
 // Last known TOTP enrollment state for the account menu's two-factor row, and
 // a one-per-page-load fetch guard. Same reason as _pushState: the row is built
@@ -257,83 +266,151 @@ var _totpState = null;
 var _totpFetched = false;
 
 /**
- * Push enrollment state + service-worker registration for the user menu's
- * "Enable push" / "Disable push" row.
+ * Notification preference + push enrollment for the user menu.
+ *
+ * There is no "enable push" switch any more, because enrollment is not a
+ * decision — it is the CONSEQUENCE of one. The operator says how they want to
+ * be alerted (Email / Push / both), that answer is stored on the ACCOUNT, and
+ * every browser they sign in on reconciles its own subscription to it here.
+ * Which is the whole point: a switch flipped on a laptop reached exactly that
+ * laptop, so "I turned push on" and "my phone buzzes" were different facts.
  *
  * Gated on alerts:read, which is what the push routes themselves require —
  * pushSubscriptions.ts states the intent outright ("any viewer may opt into
- * push"). Previously the only control lived on /automations.html, which is
- * page-gated automationManagement:read, so a role with alerts but not
- * automation management could never enroll. The user menu renders on every
- * page, which preserves that.
+ * push"). The user menu renders on every page, so the control is reachable
+ * from anywhere; the old one lived on /automations.html, which a role with
+ * alerts but no automation management could not even open.
  *
- * Registering the worker here (rather than lazily on first toggle) means the
- * push handler is live on every page for anyone who has already granted
- * permission, and reconcileSubscription repairs a rotated endpoint.
+ * Registering the worker here (rather than lazily) means the push handler is
+ * live on every page for anyone already enrolled, and syncToPreference repairs
+ * a rotated endpoint on the way past.
  */
-function wirePushToggle() {
-  if (!window.polarisPush || !polarisPush.isSupported()) return;
+function wireNotificationPrefs() {
   if (!permAtLeast("alerts", "read")) return;
+  if (!window.polarisPush || !polarisPush.isSupported()) {
+    // No push in this browser at all — the preference is still the account's
+    // and still editable here; this device simply can't be one of its targets.
+    Promise.resolve()
+      .then(function () { return api.push.preference(); })
+      .then(function (r) { _notifPref = (r && r.preference) || "email"; })
+      // Same fallback as the supported branch below: a failed read must still
+      // leave a row the operator can SET the preference from, since a hidden
+      // row is indistinguishable from "this account has no such setting".
+      .catch(function () { _notifPref = _notifPref || "email"; });
+    return;
+  }
 
-  polarisPush.registerSW()
-    .then(function () { return polarisPush.reconcileSubscription("desktop"); })
-    .catch(function () { /* push is optional */ });
+  polarisPush.registerSW().catch(function () { /* push is optional */ });
 
-  polarisPush.status()
-    .then(function (st) { _pushState = st || null; })
-    .catch(function () { _pushState = null; });
+  // Wrapped rather than called bare: this runs inside the sidebar render, so
+  // a synchronous throw here would take the navigation down with it. A
+  // notification preference is never worth that.
+  Promise.resolve()
+    .then(function () { return api.push.preference(); })
+    .then(function (r) {
+      _notifPref = (r && r.preference) || "email";
+      // Enroll or un-enroll THIS browser to match. Silent by design: it never
+      // prompts (no user activation at boot), so a browser that has never been
+      // asked simply stays un-enrolled and the menu row says so.
+      return polarisPush.syncToPreference(_notifPref, "desktop");
+    })
+    .catch(function () { _notifPref = _notifPref || "email"; })
+    .then(function () {
+      return polarisPush.status().then(function (st) { _pushState = st || null; }).catch(function () {});
+    });
 }
 
 /**
- * The user menu's push row, or null when push isn't on offer — unsupported
- * browser, a role below alerts:read, or no Web Push channel configured
- * server-side (offering a control that can only error is worse than omitting
- * it; mirrors the Automations page).
+ * The user menu's notification row: what this account currently prefers, and a
+ * way into the three choices. Null only for a role below alerts:read or before
+ * the preference has resolved — a row that named the wrong current setting
+ * would be worse than a row that isn't there yet.
  */
-function _pushMenuItem() {
-  if (!window.polarisPush || !polarisPush.isSupported()) return null;
+function _notifPrefMenuItem(anchor) {
   if (!permAtLeast("alerts", "read")) return null;
-  if (!_pushState || !_pushState.enabledOnServer) return null;
-
-  if (_pushState.permission === "denied") {
-    // Sticky: requestPermission() resolves instantly with no UI once denied,
-    // so the row states the reason rather than pretending to be actionable.
-    return {
-      label: "Push blocked in browser",
-      icon: ICONS.bell,
-      disabled: true,
-      title: "Notifications are blocked for this site in your browser settings.",
-    };
-  }
-
-  var subscribed = !!_pushState.subscribed;
+  if (!_notifPref) return null;
   return {
-    label: subscribed ? "Disable push" : "Enable push",
+    label: "Notifications: " + (NOTIF_PREF_LABELS[_notifPref] || _notifPref),
     icon: ICONS.bell,
-    onSelect: _togglePush,
+    onSelect: function () { _openNotifPrefMenu(anchor); },
   };
 }
 
 /**
- * Never await before enable() — awaiting burns the click's transient user
- * activation and Safari then refuses the permission prompt. That's why this
- * branches off the cached _pushState instead of re-reading status(). See the
- * ordering comment in push.js.
+ * The three-way chooser, opened from the account menu against the same anchor
+ * (the openThemeMenu pattern). A menu-item click is real user activation, so
+ * picking "Push" here CAN raise the browser's permission prompt — which is
+ * exactly why the choice lives in a menu rather than in a dialog with a Save
+ * button several awaits away from the click.
  */
-function _togglePush() {
-  if (_pushBusy || !_pushState || _pushState.permission === "denied") return;
-  _pushBusy = true;
-  var wasSubscribed = !!_pushState.subscribed;
+function _openNotifPrefMenu(anchor) {
+  if (typeof showRowMenu !== "function") return;
+  // Only the server having no Web Push channel makes the push options
+  // pointless. An unsupported or permission-denied BROWSER does not: the
+  // preference belongs to the account, and the operator's phone may well be
+  // able to receive what this laptop can't.
+  var pushOffered = !_pushState || _pushState.enabledOnServer !== false;
+  var items = NOTIF_PREF_ORDER.map(function (pref) {
+    var wantsPush = pref !== "email";
+    var blocked = wantsPush && !pushOffered;
+    return {
+      label: NOTIF_PREF_LABELS[pref] + (pref === _notifPref ? "  ✓" : ""),
+      disabled: blocked,
+      title: blocked
+        ? "Web Push isn't configured on this server — an admin sets it up on Automations → Delivery."
+        : undefined,
+      onSelect: function () { _chooseNotifPref(pref); },
+    };
+  });
+  showRowMenu(anchor, items, { label: "Notification preference" });
+}
 
-  var action = wasSubscribed ? polarisPush.disable() : polarisPush.enable({ surface: "desktop" });
-  action.then(function () {
-    if (typeof showToast === "function") {
-      showToast(wasSubscribed ? "Push notifications disabled" : "Push notifications enabled", wasSubscribed ? "info" : "success");
-    }
+/**
+ * Apply a chosen preference: enroll this browser first (while the click's
+ * activation is still live), then persist.
+ *
+ * NEVER await before enable() — awaiting burns the click's transient user
+ * activation and Safari then refuses the permission prompt. That is why this
+ * branches off the cached _pushState instead of re-reading status(); see the
+ * ordering comment in push.js.
+ *
+ * The preference is SAVED even when this browser refuses the prompt. It is an
+ * account-wide answer, and the operator's other devices may honour it — so
+ * the toast says what happened here rather than the save silently not
+ * happening.
+ */
+function _chooseNotifPref(pref) {
+  if (_pushBusy || pref === _notifPref) return;
+  _pushBusy = true;
+  var wantPush = pref === "push" || pref === "any";
+  var needPrompt = wantPush && window.polarisPush && polarisPush.isSupported() &&
+    _pushState && _pushState.permission !== "granted";
+
+  // First, synchronously, while the click still counts.
+  var enroll = needPrompt
+    ? polarisPush.enable({ surface: "desktop" }).then(function () { return null; },
+        function (err) { return (err && err.message) || "This browser refused push notifications."; })
+    : Promise.resolve(null);
+
+  enroll.then(function (enrollErr) {
+    return api.push.setPreference(pref).then(function () {
+      _notifPref = pref;
+      // Reconcile whatever the enrollment attempt left behind — in
+      // particular, switching to Email must un-enroll this browser.
+      return (window.polarisPush && polarisPush.isSupported()
+        ? polarisPush.syncToPreference(pref, "desktop")
+        : Promise.resolve("")
+      ).then(function () {
+        if (typeof showToast !== "function") return;
+        if (enrollErr) showToast("Preference saved: " + NOTIF_PREF_LABELS[pref] + ". " + enrollErr, "warning");
+        else showToast("Notifications: " + NOTIF_PREF_LABELS[pref], "success");
+      });
+    });
   }).catch(function (err) {
-    if (typeof showToast === "function") showToast((err && err.message) || "Push action failed", "error");
+    if (typeof showToast === "function") showToast((err && err.message) || "Couldn't save your notification preference", "error");
   }).then(function () {
     _pushBusy = false;
+    if (!window.polarisPush || !polarisPush.isSupported()) return;
     return polarisPush.status().then(function (st) { _pushState = st || null; }).catch(function () {});
   });
 }
@@ -502,7 +579,7 @@ function renderNav() {
     });
   }
 
-  wirePushToggle();
+  wireNotificationPrefs();
   wireTotpState();
 
   // Wire up query status indicator
@@ -1277,8 +1354,8 @@ function renderUserBadge() {
     ? 'class="badge" style="font-size:0.7rem;padding:1px 6px;' + roleColorStyle + '"'
     : 'class="badge ' + _getRoleBadgeClass(currentUserRole) + '" style="font-size:0.7rem;padding:1px 6px"';
 
-  // The badge is the account menu's trigger — theme, push enrollment and
-  // logout hang off it rather than off the sidebar bottom, so per-account
+  // The badge is the account menu's trigger — theme, notification preference
+  // and logout hang off it rather than off the sidebar bottom, so per-account
   // actions sit with the account identity instead of with the navigation.
   var badge = document.createElement("button");
   badge.type = "button";
@@ -1296,9 +1373,10 @@ function renderUserBadge() {
 }
 
 /**
- * The account menu behind the page-header user badge: push enrollment,
- * two-factor enrollment, logout. Items are built per open so the push / 2FA
- * rows reflect current state without anything to keep repainted. The theme
+ * The account menu behind the page-header user badge: notification
+ * preference, two-factor enrollment, logout. Items are built per open so the
+ * preference / 2FA rows reflect current state without anything to keep
+ * repainted. The theme
  * toggle lives at the bottom of the sidebar, not here — it is a display
  * preference rather than an account action, and an always-visible control
  * beats one behind a menu for something operators flip often.
@@ -1308,13 +1386,13 @@ function openUserMenu(anchor) {
 
   var items = [];
 
-  var push = _pushMenuItem();
-  if (push) items.push(push);
+  var pref = _notifPrefMenuItem(anchor);
+  if (pref) items.push(pref);
 
   var totp = _totpMenuItem();
   if (totp) items.push(totp);
 
-  // Only separate Logout from something — with no push or 2FA row the menu is
+  // Only separate Logout from something — with no preference or 2FA row the menu is
   // Logout alone, and a leading rule would be a divider above nothing.
   if (items.length) items.push({ separator: true });
   items.push({

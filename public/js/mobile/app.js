@@ -170,15 +170,27 @@ window.PolarisTheme = {
   // ever opens More, and (b) the push handler is live regardless. It subscribes
   // to nothing, so there is no permission or privacy consequence.
   //
-  // reconcileSubscription re-posts an already-granted subscription so a rotated
-  // push endpoint self-heals — see the comment in push.js; this boot-time pass
-  // is the primary rotation repair, not the service worker's event handler.
+  // syncToPreference brings THIS phone's subscription into line with the
+  // account's stored notification preference (business rule 39) — enrolling it
+  // when the account prefers push and permission is already granted,
+  // un-enrolling it when the account has gone back to email. It has to happen
+  // at BOOT, not when the More tab is opened: the whole point of storing the
+  // preference on the account is that a device the operator never touches
+  // again still honours a choice made somewhere else. It also re-posts an
+  // already-granted subscription on the way past, so a rotated push endpoint
+  // self-heals — see the comment in push.js; this boot-time pass is the
+  // primary rotation repair, not the service worker's event handler.
+  //
+  // A failed preference read falls back to the bare reconcile, so a network
+  // blip costs the sync but never the rotation repair.
   var _pushInitDone = false;
   function initPushOnce() {
     if (_pushInitDone || !window.polarisPush) return;
     _pushInitDone = true;
     polarisPush.registerSW()
-      .then(function () { return polarisPush.reconcileSubscription("mobile"); })
+      .then(function () { return api.push.preference(); })
+      .then(function (r) { return polarisPush.syncToPreference((r && r.preference) || "email", "mobile"); })
+      .catch(function () { return polarisPush.reconcileSubscription("mobile"); })
       .catch(function () { /* push is optional — never block boot */ });
   }
 

@@ -867,6 +867,11 @@ const api = {
     key:         ()       => request("GET", "/push-subscriptions/key"),
     subscribe:   (sub)    => request("POST", "/push-subscriptions", sub),
     unsubscribe: (endpoint) => request("DELETE", "/push-subscriptions", { endpoint }),
+    // How THIS account wants to be alerted: "email" | "push" | "any". Stored
+    // server-side rather than per browser, so a sign-in on a new device knows
+    // to enroll (or un-enroll) itself without being told again.
+    preference:     ()     => request("GET", "/me/notification-preference"),
+    setPreference:  (preference) => request("PUT", "/me/notification-preference", { preference }),
   },
   maintenanceSchedules: {
     list:    ()      => request("GET", "/maintenance-schedules"),

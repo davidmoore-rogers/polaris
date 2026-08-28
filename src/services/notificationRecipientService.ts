@@ -44,6 +44,11 @@ import {
   rankMeets,
 } from "../api/middleware/permissions.js";
 import {
+  normalizeNotificationPreference,
+  preferenceAllowsTransport,
+  type NotificationPreference,
+} from "./notificationPreferenceService.js";
+import {
   type DeliveryTarget,
   type ChannelType,
   type EmailRecipients,
@@ -129,6 +134,14 @@ export interface RecipientUser {
    * we could not read keeps the button, and the page refuses if it must.
    */
   canAcknowledge: boolean;
+  /**
+   * How this account wants to be alerted — "email" | "push" | "any". Read on
+   * every recipient resolution but consulted ONLY by a notify action that
+   * opted in (`respectUserPreference`) inside an action group offering both
+   * methods; see business rule 39. Unknown / unset normalizes to "email",
+   * which is the pre-feature behaviour for every account.
+   */
+  notificationPreference: NotificationPreference;
 }
 
 interface IndexedUser extends RecipientUser {
@@ -149,7 +162,13 @@ interface IndexedUser extends RecipientUser {
 
 /** Project an indexed user down to the recipient shape callers see. */
 function toRecipient(u: IndexedUser): RecipientUser {
-  return { id: u.id, email: u.email, displayName: u.displayName, canAcknowledge: u.canAcknowledge };
+  return {
+    id: u.id,
+    email: u.email,
+    displayName: u.displayName,
+    canAcknowledge: u.canAcknowledge,
+    notificationPreference: u.notificationPreference,
+  };
 }
 
 // ─── User tag index (short-TTL cache) ───────────────────────────────────────
@@ -180,6 +199,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       ssoGroups: true,
       authProvider: true,
       roleId: true,
+      notificationPreference: true,
       role: { select: { regionTags: true, otherTags: true, permissions: true } },
     },
   });
@@ -207,6 +227,7 @@ function loadUserIndex(): Promise<IndexedUser[]> {
       canAcknowledge: u.role
         ? rankMeets(permissionOf(normalizePermissions(u.role.permissions), "alerts"), "write")
         : true,
+      notificationPreference: normalizeNotificationPreference(u.notificationPreference),
     });
   }
   return index;
@@ -515,6 +536,37 @@ export function splitAckVariants(
   return out;
 }
 
+/**
+ * Would honouring this recipient's preference withhold the alert from them
+ * ENTIRELY, rather than merely route it?
+ *
+ * A preference chooses between channels; it never means "don't tell me". So a
+ * push-preferring account with no enrolled device still gets the email, and an
+ * email-preferring account with no address still gets the push. Without this
+ * the two halves cancel out: the preference filter drops them from the channel
+ * they didn't pick, and the channel they DID pick has nowhere to send — and
+ * nothing anywhere reports a recipient who simply wasn't on the alert.
+ *
+ * This is the only thing Polaris can honestly check. A subscription EXISTS or
+ * it does not; whether the phone is on, online, or looked at is NOT knowable —
+ * a 201 from a push service means it accepted the message for later delivery,
+ * not that it arrived. A dead endpoint is discovered later still, at send time,
+ * when it answers 404/410 and the drain prunes it.
+ *
+ * Pure — exported for the tests, because the failure mode is silent in exactly
+ * the direction that matters.
+ */
+export function preferenceWithholds(
+  pref: unknown,
+  transport: string,
+  reach: { hasPushDevice: boolean; hasEmail: boolean },
+): boolean {
+  if (preferenceAllowsTransport(pref, transport)) return false;
+  // They refuse THIS transport — honour that only if the one they asked for
+  // can actually reach them.
+  return transport === "email" ? reach.hasPushDevice : reach.hasEmail;
+}
+
 export interface ExpandDeliveriesOptions {
   /** `region:` tags mined from the RULE's scope (recipientScopeRegion routing). */
   scopeRegionTags?: string[];
@@ -548,6 +600,20 @@ export interface ExpandDeliveriesOptions {
    *  reminder is never mistaken for an escalation by anything reading the
    *  delivery history. */
   repeat?: { attempt: number };
+  /**
+   * May a target's `respectUserPreference` flag actually filter recipients?
+   *
+   * Set by the CALLER (automationActionService), because the question it
+   * answers — does this action group carry both an email and a push channel? —
+   * is about the actions[] list being executed, which no single target can
+   * see. Business rule 39: in a single-method group the preference is ignored
+   * outright, since honouring it there would delete the alert for anyone who
+   * prefers the method on offer instead of routing it.
+   *
+   * Default false, so a caller that never opts in behaves exactly as it did
+   * before the feature even if a stored target carries the flag.
+   */
+  enforceUserPreference?: boolean;
 }
 
 export async function expandDeliveries(
@@ -555,7 +621,7 @@ export async function expandDeliveries(
   targets: DeliveryTarget[] | undefined,
   opts: ExpandDeliveriesOptions = {},
 ): Promise<number> {
-  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat, followUp } = opts;
+  const { scopeRegionTags, assetRegionTags, assetContactEmails, composedEmail, escalation, repeat, enforceUserPreference, followUp } = opts;
   if (!targets || targets.length === 0) return 0;
 
   // Resolve the referenced channels once (type + enabled).
@@ -605,13 +671,63 @@ export async function expandDeliveries(
     return _regionLevels;
   };
 
-  const usersForTarget = async (t: DeliveryTarget): Promise<RecipientUser[]> => {
+  // userId -> how many browsers that account has enrolled. Read ONLY when a
+  // preference filter is about to drop someone, so a send that never opts in
+  // issues no extra query; memoized per notification like the region index
+  // above. Same groupBy listRecipientUsers runs for the builder's "no push
+  // device" warning — the two ask the same question at different times, one
+  // to warn the author and one to protect the recipient.
+  let _pushCounts: Map<string, number> | null = null;
+  const pushDeviceCounts = async (): Promise<Map<string, number>> => {
+    if (!_pushCounts) {
+      const grouped = await prisma.pushSubscription.groupBy({ by: ["userId"], _count: { _all: true } });
+      _pushCounts = new Map(grouped.map((g) => [g.userId, g._count._all]));
+    }
+    return _pushCounts;
+  };
+
+  const usersForTarget = async (t: DeliveryTarget, transport: string): Promise<RecipientUser[]> => {
     const map = new Map<string, RecipientUser>();
     const addUsers = (us: RecipientUser[]) => us.forEach((u) => map.set(u.id, u));
+    // Drop recipients whose own preference refuses this transport — but ONLY
+    // when the action asked for it AND the caller confirmed the action group
+    // offers both methods (business rule 39). Applied to USERS alone: a typed
+    // address or an address-book contact has no account and therefore no
+    // preference, and withholding their copy on a preference they never
+    // expressed would be inventing one for them.
+    //
+    // And never to the point of delivering NOTHING: preferenceWithholds keeps
+    // anyone whose preferred channel cannot reach them (no enrolled device, or
+    // no address), so the preference routes the alert instead of deleting it.
+    const keep = async (us: RecipientUser[]): Promise<RecipientUser[]> => {
+      if (!enforceUserPreference || !t.respectUserPreference) return us;
+      const refusing = us.filter((u) => !preferenceAllowsTransport(u.notificationPreference, transport));
+      if (refusing.length === 0) return us;
+      // Only now is the device lookup worth paying for.
+      const counts = transport === "email" ? await pushDeviceCounts() : null;
+      const drop = new Set(
+        refusing
+          .filter((u) => preferenceWithholds(u.notificationPreference, transport, {
+            hasPushDevice: (counts?.get(u.id) ?? 0) > 0,
+            hasEmail: !!u.email?.trim(),
+          }))
+          .map((u) => u.id),
+      );
+      return us.filter((u) => !drop.has(u.id));
+    };
     // Broadcast modes first — recipientAllUsers subsumes every other source, so
     // resolving it short-circuits the rest rather than unioning redundantly.
-    if (t.recipientAllUsers) return await resolveAllUsers();
-    if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
+    //
+    // Both are WEB PUSH modes, and stay so on a multi-channel action: the
+    // toggles live in the builder's push block and read as "tell every device",
+    // so letting them widen the email half of the same action would mail the
+    // whole roster off a control that never said so. Save-time validation
+    // already refuses them on a single-channel email action; this keeps the
+    // runtime honest for the mixed one it now permits.
+    if (transport === "web_push") {
+      if (t.recipientAllUsers) return await keep(await resolveAllUsers());
+      if (t.recipientAllRegions) addUsers(await resolveUsersInAnyRegion());
+    }
     if (t.recipientRegions?.length) addUsers(await resolveUsersByRegions(t.recipientRegions));
     if (t.recipientRoles?.length) addUsers(await resolveUsersByRoles(t.recipientRoles));
     if (t.recipientUserIds?.length) addUsers(await resolveRecipientUsersByIds(t.recipientUserIds));
@@ -636,8 +752,21 @@ export async function expandDeliveries(
     // taken from the region catalogue, so matching a same-named "other" tag
     // would deliver to the wrong people.
     if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags));
-    return Array.from(map.values());
+    return await keep(Array.from(map.values()));
   };
+
+  // The email channel a FAILED web push can fall back to.
+  //
+  // expandDeliveries is called with ONE action's targets (automationActionService
+  // passes actionsToTargets([action])), so "an email channel among these targets"
+  // is exactly "an email channel on this action" — which is the only fallback
+  // that needs no operator decision. A push-ONLY action has nowhere to fall back
+  // to and keeps the existing warning; picking some other channel's SMTP config
+  // would be Polaris inventing a destination nobody configured for this alert.
+  const fallbackChannelId = targets
+    .map((t) => byId.get(t.channelId))
+    .find((ch) => ch && ch.enabled && isChannelType(ch.type) && CHANNEL_TRANSPORT[ch.type as ChannelType] === "email")?.id
+    ?? null;
 
   // Rule-level Cc/Bcc resolve once per notification, then apply per email target.
   const ccResolved = composedEmail ? await resolveEmailRecipients(composedEmail.cc) : [];
@@ -677,7 +806,7 @@ export async function expandDeliveries(
       // contact is an address, not an account, so there's no push endpoint to
       // reach — the web_push branch below deliberately ignores this flag.
       const contactAddrs = t.recipientAssetContacts ? assetContactEmails ?? [] : [];
-      const targetUsers = await usersForTarget(t);
+      const targetUsers = await usersForTarget(t, "email");
       const owners = buildAddressOwnerMap(targetUsers, t.addresses, contactAddrs);
 
       if (composedBody) {
@@ -712,7 +841,7 @@ export async function expandDeliveries(
         }
       }
     } else if (transport === "web_push") {
-      const users = await usersForTarget(t);
+      const users = await usersForTarget(t, "web_push");
       const subs = users.length
         ? await prisma.pushSubscription.findMany({
             where: { userId: { in: users.map((u) => u.id) } },
@@ -725,11 +854,22 @@ export async function expandDeliveries(
           })
         : [];
       const cannotAck = new Set(users.filter((u) => !u.canAcknowledge).map((u) => u.id));
+      const byUserEmail = new Map(
+        users.filter((u) => u.email?.trim()).map((u) => [u.id, u.email!.trim().toLowerCase()] as const),
+      );
       for (const s of subs) {
         add(channel.id, "web_push", s.endpoint, {
           p256dh: s.p256dh,
           auth: s.auth,
           surface: s.surface,
+          // Everything the drain needs to email this person instead if the
+          // endpoint turns out to be dead (404/410). Stamped HERE because by
+          // the time the drain finds out, the subscription row has been pruned
+          // and there is nothing left saying whose it was. Absent when the
+          // action carries no email channel, or the account has no address.
+          ...(fallbackChannelId && byUserEmail.get(s.userId)
+            ? { fallback: { userId: s.userId, channelId: fallbackChannelId, address: byUserEmail.get(s.userId) } }
+            : {}),
           ...(cannotAck.has(s.userId) ? { noAck: true } : {}),
           ...(followUp ? { followUp } : {}),
         });

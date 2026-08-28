@@ -208,10 +208,17 @@
   }
 
   function recordNotifyDeps(action, label, cat, deps) {
-    if (action.channelId) {
-      var ch = nameOf(cat.channels, action.channelId);
+    // Every channel the action delivers through — `channelIds` when the action
+    // is multi-channel, its primary otherwise. An import that resolved only
+    // the primary would report an automation as fully wired while a second
+    // channel it needs is missing on the target install.
+    var chIds = (action.channelIds && action.channelIds.length)
+      ? action.channelIds
+      : (action.channelId ? [action.channelId] : []);
+    chIds.forEach(function (id) {
+      var ch = nameOf(cat.channels, id);
       if (ch) deps.add("deliveryChannel", ch.name, label, ch.unresolved);
-    }
+    });
     recordEmailBox(action, label + " recipients", cat, deps);
     (action.recipientTags || []).forEach(function (t) {
       deps.add("tag", t, label + " recipients");

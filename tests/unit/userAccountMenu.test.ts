@@ -2,10 +2,10 @@
  * tests/unit/userAccountMenu.test.ts — the page-header account menu
  * (`openUserMenu` in public/js/app.js).
  *
- * Push enrollment, two-factor enrollment and logout live behind the user
- * badge, which means a regression here doesn't misalign a button — it removes
- * the only way to log out from every page at once. The theme toggle is NOT
- * here: it sits at the bottom of the sidebar (see sidebarThemeToggleDom).
+ * The notification preference, two-factor enrollment and logout live behind
+ * the user badge, which means a regression here doesn't misalign a button — it
+ * removes the only way to log out from every page at once. The theme toggle is
+ * NOT here: it sits at the bottom of the sidebar (see sidebarThemeToggleDom).
  *
  * openUserMenu is pulled out of app.js rather than evaluating the whole file
  * (119 KB with polling loops that would fire here); everything it reaches for
@@ -41,7 +41,7 @@ interface Item {
   onSelect?: () => void;
 }
 
-function open(opts: { push?: Item | null; totp?: Item | null } = {}) {
+function open(opts: { pref?: Item | null; totp?: Item | null } = {}) {
   const captured: { items: Item[]; opts: Record<string, unknown>; anchor: unknown } =
     { items: [], opts: {}, anchor: null };
   const fetches: string[] = [];
@@ -50,7 +50,7 @@ function open(opts: { push?: Item | null; totp?: Item | null } = {}) {
   g.showRowMenu = (anchor: unknown, items: Item[], o: Record<string, unknown>) => {
     captured.anchor = anchor; captured.items = items; captured.opts = o;
   };
-  g._pushMenuItem = () => (opts.push === undefined ? null : opts.push);
+  g._notifPrefMenuItem = () => (opts.pref === undefined ? null : opts.pref);
   g._totpMenuItem = () => (opts.totp === undefined ? null : opts.totp);
   g._csrfHeaders = () => ({ "x-csrf-token": "t" });
   g.ICONS = { logout: "<svg id='logout'/>", bell: "<svg id='bell'/>", shield: "<svg id='shield'/>" };
@@ -64,40 +64,43 @@ function open(opts: { push?: Item | null; totp?: Item | null } = {}) {
 
 describe("openUserMenu", () => {
   it("offers logout even when nothing conditional is available", () => {
-    // Push (browser support / alerts:read / a configured channel) and 2FA
-    // (local accounts only) are both conditional. Logout is not — losing it
-    // would strand the user. With neither, there is nothing for a separator
-    // to separate, so the menu is Logout alone.
+    // The notification preference (alerts:read, and only once the account's
+    // stored choice has resolved) and 2FA (local accounts only) are both
+    // conditional. Logout is not — losing it would strand the user. With
+    // neither, there is nothing for a separator to separate, so the menu is
+    // Logout alone.
     expect(open().labels).toEqual(["Logout"]);
   });
 
   it("carries no theme row — the toggle lives in the sidebar", () => {
-    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} } });
+    const r = open({ pref: { label: "Notifications: Email", icon: "<svg/>", onSelect: () => {} } });
     expect(r.labels).not.toContain("Light Mode");
     expect(r.labels).not.toContain("Dark Mode");
   });
 
-  it("slots the push row above the logout separator", () => {
-    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} } });
-    expect(r.labels).toEqual(["Enable push", "—", "Logout"]);
+  it("slots the notification-preference row above the logout separator", () => {
+    // It names the CURRENT setting rather than an action, because the row is
+    // the way into the three-way chooser, not a toggle (business rule 39).
+    const r = open({ pref: { label: "Notifications: Email", icon: "<svg/>", onSelect: () => {} } });
+    expect(r.labels).toEqual(["Notifications: Email", "—", "Logout"]);
   });
 
-  it("slots the two-factor row after push, still above the separator", () => {
+  it("slots the two-factor row after the preference, still above the separator", () => {
     const r = open({
-      push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} },
+      pref: { label: "Notifications: Push", icon: "<svg/>", onSelect: () => {} },
       totp: { label: "Set up two-factor auth", icon: "<svg/>", onSelect: () => {} },
     });
-    expect(r.labels).toEqual(["Enable push", "Set up two-factor auth", "—", "Logout"]);
+    expect(r.labels).toEqual(["Notifications: Push", "Set up two-factor auth", "—", "Logout"]);
   });
 
   it("omits the two-factor row for an SSO account without disturbing the rest", () => {
-    const r = open({ push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} }, totp: null });
-    expect(r.labels).toEqual(["Enable push", "—", "Logout"]);
+    const r = open({ pref: { label: "Notifications: Email", icon: "<svg/>", onSelect: () => {} }, totp: null });
+    expect(r.labels).toEqual(["Notifications: Email", "—", "Logout"]);
   });
 
   it("marks logout destructive and gives every row an icon", () => {
     const r = open({
-      push: { label: "Enable push", icon: "<svg/>", onSelect: () => {} },
+      pref: { label: "Notifications: Email", icon: "<svg/>", onSelect: () => {} },
       totp: { label: "Set up two-factor auth", icon: "<svg/>", onSelect: () => {} },
     });
     const logout = r.items[r.items.length - 1];

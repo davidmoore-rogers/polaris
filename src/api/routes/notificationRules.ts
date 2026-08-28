@@ -97,7 +97,9 @@ notificationRulesRouter.post("/preview", requirePermission("automationManagement
  */
 const testDeliverySchema = z.object({
   rule: previewInputSchema,
-  path: z.object({ index: z.number().int().min(0).max(199) }),
+  // channelId picks WHICH of a multi-channel notify action's channels to test;
+  // omitted = its primary, i.e. every pre-multi-channel client.
+  path: z.object({ index: z.number().int().min(0).max(199), channelId: z.string().max(100).optional() }),
   target: z.enum(["delivery", "event"]).default("delivery"),
   assetId: z.string().max(100).optional(),
 });

@@ -404,16 +404,17 @@
       + '<div class="list-divider"></div>'
       + menuRow("events", "i-event", "Events", "Audit log · last 7 days")
 
-      // Hidden until wirePushRow() resolves polarisPush.status(): the row is
-      // meaningless (and sometimes actively wrong) until we know whether the
-      // browser supports push and whether the server has Web Push configured.
+      // Hidden until wireNotifPrefRow() resolves the account's preference: the
+      // row names a current setting, and naming the wrong one is worse than
+      // showing nothing for a moment.
       + '<div class="section-head" id="push-section-head" style="display:none;">Notifications</div>'
       + '<button class="list-item two-line" id="push-toggle-row" style="display:none;">'
       + '  <span class="leading"><svg viewBox="0 0 24 24"><use href="#i-bell"/></svg></span>'
       + '  <div class="content">'
-      + '    <div class="headline">Push notifications</div>'
+      + '    <div class="headline">Notification preference</div>'
       + '    <div class="supporting" id="push-status-label">Checking…</div>'
       + '  </div>'
+      + '  <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>'
       + '</button>'
 
       + '<div class="section-head" id="install-section-head" style="display:none;">App</div>'
@@ -481,7 +482,7 @@
       });
     }
 
-    wirePushRow();
+    wireNotifPrefRow();
     wireInstallRow();
 
     document.getElementById("sign-out-btn").addEventListener("click", function () {
@@ -508,80 +509,162 @@
   }
 
   // ─── Push notifications row ────────────────────────────────────────────
-  // Six states. The resolved status is held in a closure so the click handler
-  // can branch SYNCHRONOUSLY — awaiting status() inside the handler burns the
-  // click's transient user activation and Safari then refuses the permission
+  // Notification preference row.
+  //
+  // There is no push on/off switch here any more — enrollment is not a
+  // decision, it is the consequence of one. The operator says how they want to
+  // be alerted (Email / Push / both), the answer is stored on the ACCOUNT, and
+  // this phone reconciles its own subscription to it. Which is what makes the
+  // choice mean the same thing on every device they sign in on.
+  //
+  // The resolved push status is held in a closure so the sheet's buttons can
+  // branch SYNCHRONOUSLY — awaiting status() inside the handler burns the
+  // tap's transient user activation and Safari then refuses the permission
   // prompt (see the ordering comment in push.js).
-  function wirePushRow() {
+  var PREF_LABELS = { email: "Email", push: "Push", any: "Email and push" };
+  var PREF_ORDER = ["email", "push", "any"];
+
+  function wireNotifPrefRow() {
     var head = document.getElementById("push-section-head");
     var row = document.getElementById("push-toggle-row");
     var label = document.getElementById("push-status-label");
     if (!head || !row || !label) return;
 
-    if (!window.polarisPush || !polarisPush.isSupported()) return; // stays hidden
-
+    var supported = !!(window.polarisPush && polarisPush.isSupported());
+    var iosNeedsInstall = supported && window.PolarisInstall &&
+      PolarisInstall.isIos() && !PolarisInstall.isStandalone();
     var state = null;
+    var pref = null;
     var busy = false;
 
-    function show(text, dimmed) {
+    function paint() {
+      if (!pref) return;
       head.style.display = "";
       row.style.display = "";
-      row.style.opacity = dimmed ? ".6" : "";
-      label.textContent = text;
-    }
-
-    function paint(st) {
-      state = st;
-      // Server has no Web Push channel configured — keep the control hidden
-      // rather than offer a button that can only error. Mirrors automations.js.
-      if (!st || !st.enabledOnServer) { head.style.display = "none"; row.style.display = "none"; return; }
-
-      // iOS grants Web Push ONLY to an installed home-screen app. On iOS 16.4+
-      // "PushManager" in window is true even in plain Safari, so isSupported()
-      // passes and a naive UI would offer a button that always throws.
-      if (window.PolarisInstall && PolarisInstall.isIos() && !PolarisInstall.isStandalone()) {
-        show("Add to Home Screen to enable push", true);
-        return;
+      var line = PREF_LABELS[pref] || pref;
+      // The second half of the line is about THIS phone, not the account: the
+      // preference can be perfectly saved and still reach nothing here.
+      if (pref !== "email") {
+        if (iosNeedsInstall) line += " · Add to Home Screen to receive push here";
+        else if (!supported) line += " · this browser can't receive push";
+        else if (state && state.enabledOnServer === false) line += " · push isn't set up on this server";
+        else if (state && state.permission === "denied") line += " · blocked in your browser settings";
+        else if (state && !state.subscribed) line += " · tap to allow push on this phone";
       }
-      // "denied" is sticky: requestPermission() resolves instantly with no UI,
-      // so re-prompting is pointless. Only browser settings can undo it.
-      if (st.permission === "denied") { show("Blocked — allow notifications in your browser settings", true); return; }
-      if (st.subscribed) { show("On — tap to turn off", false); return; }
-      show("Off — tap to turn on", false);
+      label.textContent = line;
     }
 
     row.addEventListener("click", function () {
-      if (busy || !state) return;
+      if (busy || !pref) return;
+      openPrefSheet();
+    });
 
-      if (window.PolarisInstall && PolarisInstall.isIos() && !PolarisInstall.isStandalone()) {
+    function openPrefSheet() {
+      var scrim = document.createElement("div");
+      scrim.className = "scrim";
+      var sheet = document.createElement("div");
+      sheet.className = "sheet";
+      // Only the SERVER having no Web Push channel makes the push options
+      // pointless. An unsupported or blocked BROWSER does not: the preference
+      // belongs to the account, and the operator's laptop may receive what
+      // this phone can't.
+      var pushOffered = !state || state.enabledOnServer !== false;
+      sheet.innerHTML = ''
+        + '<div class="sheet-handle"></div>'
+        + '<h3 class="sheet-title" style="margin:0 0 4px;">Notify me by</h3>'
+        + '<p style="margin:0 0 12px;color:var(--md-on-surface-variant);font-size:14px;">'
+        + 'This applies to every device you sign in on. Choosing push enrolls them automatically.</p>'
+        + PREF_ORDER.map(function (v) {
+            var blocked = v !== "email" && !pushOffered;
+            return '<button class="list-item" data-pref="' + v + '"'
+              + (blocked ? ' disabled style="opacity:.5;"' : '') + '>'
+              + '  <span class="leading">' + (v === pref ? '<svg viewBox="0 0 24 24"><use href="#i-check"/></svg>' : '') + '</span>'
+              + '  <div class="content"><div class="headline">' + PREF_LABELS[v] + '</div>'
+              + (blocked ? '<div class="supporting">Web Push isn\'t configured on this server</div>' : '')
+              + '</div>'
+              + '</button>';
+          }).join('')
+        + '<div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px;">'
+        + '  <button id="pref-cancel" style="padding:10px 16px;border-radius:20px;border:1px solid var(--md-outline);background:transparent;color:inherit;font:inherit;">Cancel</button>'
+        + '</div>';
+      document.body.appendChild(scrim);
+      document.body.appendChild(sheet);
+      function close() { scrim.remove(); sheet.remove(); }
+      scrim.addEventListener("click", close);
+      sheet.querySelector("#pref-cancel").addEventListener("click", close);
+      Array.prototype.forEach.call(sheet.querySelectorAll("[data-pref]"), function (b) {
+        b.addEventListener("click", function () {
+          var next = b.getAttribute("data-pref");
+          close();
+          // Straight into choose() with the tap still counting as activation.
+          choose(next);
+        });
+      });
+    }
+
+    function choose(next) {
+      if (busy || next === pref) return;
+      // iOS grants Web Push ONLY to an installed home-screen app. On iOS 16.4+
+      // "PushManager" in window is true even in plain Safari, so isSupported()
+      // passes and a naive flow would prompt and always throw. Send them to the
+      // install page instead of saving a preference this phone can't honour.
+      if (next !== "email" && iosNeedsInstall) {
         PolarisRouter.go("more/install");
         return;
       }
-      if (state.permission === "denied") {
-        PolarisTabs.showSnackbar("Notifications are blocked for this site in your browser settings.");
-        return;
-      }
-
       busy = true;
-      var wasSubscribed = !!state.subscribed;
-      label.textContent = wasSubscribed ? "Turning off…" : "Turning on…";
+      var wantPush = next !== "email";
+      var needPrompt = wantPush && supported && state && state.permission !== "granted";
+      // No await before enable() — see the note above.
+      var enroll = needPrompt
+        ? polarisPush.enable({ surface: "mobile" }).then(
+            function () { return null; },
+            function (err) { return (err && err.message) || "This browser refused push notifications."; })
+        : Promise.resolve(null);
 
-      // No await before enable() — see the closure note above.
-      var action = wasSubscribed
-        ? polarisPush.disable()
-        : polarisPush.enable({ surface: "mobile" });
-
-      action.then(function () {
-        PolarisTabs.showSnackbar(wasSubscribed ? "Push notifications turned off" : "Push notifications turned on");
+      enroll.then(function (enrollErr) {
+        return api.push.setPreference(next).then(function () {
+          pref = next;
+          // Reconcile what the attempt left behind — in particular, choosing
+          // Email must un-enroll this phone.
+          return (supported ? polarisPush.syncToPreference(next, "mobile") : Promise.resolve(""))
+            .then(function () {
+              PolarisTabs.showSnackbar(enrollErr
+                ? "Saved: " + PREF_LABELS[next] + ". " + enrollErr
+                : "Notifications: " + PREF_LABELS[next]);
+            });
+        });
       }).catch(function (err) {
-        PolarisTabs.showSnackbar((err && err.message) || "Couldn't change push notifications");
+        PolarisTabs.showSnackbar((err && err.message) || "Couldn't save your notification preference");
       }).then(function () {
         busy = false;
-        return polarisPush.status().then(paint).catch(function () {});
+        if (!supported) { paint(); return; }
+        return polarisPush.status()
+          .then(function (st) { state = st; paint(); })
+          .catch(function () { paint(); });
       });
-    });
+    }
 
-    polarisPush.status().then(paint).catch(function () { /* stays hidden */ });
+    // Boot: read the account's choice, bring this phone into line with it
+    // (silently — syncToPreference never prompts), then paint.
+    //
+    // Wrapped, not just .catch()ed: this runs INSIDE the More tab's render, so
+    // a synchronous throw here (an api build without the endpoint, say) would
+    // take the whole tab down with it — sign-out, theme and the nav rows
+    // included. A notification preference is never worth that.
+    Promise.resolve()
+      .then(function () { return api.push.preference(); })
+      .then(function (r) {
+        pref = (r && r.preference) || "email";
+        return supported ? polarisPush.syncToPreference(pref, "mobile") : null;
+      })
+      .catch(function () { pref = pref || "email"; })
+      .then(function () {
+        if (!supported) { paint(); return; }
+        return polarisPush.status()
+          .then(function (st) { state = st; paint(); })
+          .catch(function () { paint(); });
+      });
   }
 
   // ─── Add-to-Home-Screen row ────────────────────────────────────────────
