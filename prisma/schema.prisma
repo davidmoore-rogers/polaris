@@ -2283,16 +2283,22 @@ model AssetApRadio {
   channel      Int?
   bandwidthMhz Int?
 
-  // Transmit power. FortiOS reports `oper_txpower` as a PERCENTAGE of the
-  // radio's ceiling; the MIB reports dBm, and only the MIB carries the floor
-  // and ceiling. Kept as separate columns rather than one normalized number
-  // because converting between them needs a per-model maximum Polaris does
-  // not have — showing "70%" and "17 dBm" as what each source actually said
-  // beats inventing a conversion.
+  // Transmit power, from two sources that do not agree on a unit and are not
+  // made to. FortiOS states `oper_txpower` as a PERCENTAGE of the radio's
+  // ceiling, so that one is named for what it is. The AP's own MIB publishes
+  // fapRadioTxPowerConfig / Oper / Max as bare Integer32 with NO UNITS clause
+  // and no range — the module simply does not say whether they are dBm or a
+  // percentage — so those three keep unit-neutral names and are rendered
+  // without a unit rather than with a guessed one. Converting between the two
+  // would need a per-model ceiling Polaris does not have.
+  //
+  // `txPowerConfig` is what the profile ASKED for and `txPowerOper` what the
+  // radio is actually running: the gap between them is what DARRP did. The
+  // MIB publishes no minimum, which is why there is no column for one.
   txPowerPct    Int?
-  txPowerDbm    Int?
-  txPowerMinDbm Int?
-  txPowerMaxDbm Int?
+  txPowerConfig Int?
+  txPowerOper   Int?
+  txPowerMax    Int?
   // "auto" (DARRP / auto-power) vs a fixed level, as the source words it.
   txPowerMode   String?
 

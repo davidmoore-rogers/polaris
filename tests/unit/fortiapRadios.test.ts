@@ -76,9 +76,9 @@ describe("parseFortiapRadios power", () => {
   it("reads oper_txpower as a percentage, leaving the dBm trio null", () => {
     const r = parseFortiapRadios({ radio: [{ "radio-id": 1, oper_txpower: 70 }] })?.[0];
     expect(r?.txPowerPct).toBe(70);
-    expect(r?.txPowerDbm).toBeNull();
-    expect(r?.txPowerMinDbm).toBeNull();
-    expect(r?.txPowerMaxDbm).toBeNull();
+    expect(r?.txPowerOper).toBeNull();
+    expect(r?.txPowerConfig).toBeNull();
+    expect(r?.txPowerMax).toBeNull();
   });
 
   it("carries the power mode as the source words it", () => {

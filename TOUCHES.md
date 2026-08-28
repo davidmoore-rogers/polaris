@@ -5056,7 +5056,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **Public API:** `persistApRadioInventory(assetId, radios, source, now?)` -> `{ radios, vaps, removedRadios }` (write one AP's whole inventory) and `getApRadioInventory(assetId)` -> `ApRadioWithVaps[]` (the radios with their SSIDs nested, ordered radio index then SSID).
 
-**Used by:** `discoveryEngine.syncDhcpSubnets`'s FortiAP loop (source `"fortios"`, gated on the AP being online AND the parsed row carrying a `radio` array) and `api/routes/assets.ts` `GET /assets/:id/system-info` (the read). The SNMP writer (`source="snmp"`, off `fapRadioTable`) is the planned second writer and is not wired yet.
+**Used by:** `discoveryEngine.syncDhcpSubnets`'s FortiAP loop (source `"fortios"`, gated on the AP being online AND the parsed row carrying a `radio` array), `monitoringService`'s SNMP system-info pass (source `"snmp"`, `collectApRadiosSnmp` behind the same `assetType==="access_point"` gate as the station walk), and `api/routes/assets.ts` `GET /assets/:id/system-info` (the read).
 
 **Writes:** `AssetApRadio`, `AssetApVap` — one transaction per AP.
 
@@ -5066,6 +5066,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - **Written from DISCOVERY, not the monitor pass** — deliberately. System-info only runs for an AP whose interfaces stream resolves to SNMP, so hanging the REST half off that path would leave the tree empty on exactly the APs that have SNMP disabled, which is most of a real fleet. Discovery reaches every managed AP.
 - **Two sources, complementary columns, merge per column.** The controller knows the SSIDs, the BSSIDs and a power PERCENTAGE; the MIB knows dBm plus the floor and ceiling. A null from a source that doesn't collect a column never erases what the other established. The cost, stated so nobody rediscovers it as a bug: **a column cannot be cleared back to null by a scrape** — a stored tx-power floor survives until some source reports a different one. That is the right trade for inventory two sources describe from different angles and the WRONG one for a reading, which is why nothing fluctuating (channel utilization, noise floor) is stored here at all.
 - **Radio identity is NOT merged.** Both sources enumerate every radio, so a `radioIndex` absent from a scrape is a radio that is genuinely gone — its row is deleted, and so are its VAPs, which hang off `(assetId, radioIndex)` with **no FK of their own to cascade from**. Deleting the radio without them would strand every SSID it carried.
+- **VAP identity is reconciled on the BSSID, not the name.** The two sources do not agree on a name — FortiOS publishes the VAP OBJECT's name, the MIB publishes only the SSID — so matching by name alone had each source inserting its own row and deleting the other's on every pass, resetting `firstSeen` and flickering the tree. The BSSID is matched first and the name is an attribute of the matched row; the controller's name wins a disagreement (it is the operator's own), unless another VAP on that radio already holds it, since the unique key is `(assetId, radioIndex, vapName)`. Where NEITHER side publishes a BSSID the reconciliation has nothing to work with and the row alternates — known limit, pinned by a test.
 - **The undefined-vs-empty contract runs one level down too.** A radio sample with no `vaps` field was not asked about its SSIDs and keeps the ones it has; `vaps: []` means it was asked and is broadcasting nothing. `parseFortiapRadios` returns `undefined` (not `[]`) for a row with no `radio` array for the same reason, and the discovery caller checks `Array.isArray` before calling at all.
 - **`txPowerPct` and `txPowerDbm` are separate columns.** FortiOS reports a percentage of the radio's ceiling, the MIB reports dBm, and converting between them needs a per-model maximum Polaris does not have. Showing what each source actually said beats inventing a conversion.
 - **Channel width never comes from `bandwidth_rx` / `bandwidth_tx`** — those are throughput counters on the same radio object. `parseChannelWidthMhz` reads width-named keys only and drops anything that isn't a real 802.11 width.
@@ -5073,7 +5074,8 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 **Change checklist:**
 - Adding a column both sources can report → add it to `RADIO_MERGE_FIELDS` / `VAP_MERGE_FIELDS`, or the merge silently ignores it.
 - Adding a fluctuating READING → it does not belong in these tables; it belongs in a sample table with rollups.
-- Wiring the SNMP writer → it must enumerate ALL radios (identity is delete-replace) and must leave `vaps` undefined unless it actually walked the VAP table.
+- Touching tx power → the MIB's three objects have NO `UNITS` clause, so `txPowerConfig` / `txPowerOper` / `txPowerMax` are stored and RENDERED without a unit. `txPowerPct` is the controller's percentage and is the only one that may carry a unit label. Do not "normalize" them together: the conversion needs a per-model ceiling Polaris does not have.
+- The SNMP writer enumerates ALL radios (identity is delete-replace) and leaves `vaps` undefined unless the VAP walk actually answered — a failed VAP walk that wiped would take the controller's SSIDs with it and the next discovery run would put them back.
 
 ## services/arpTableService.ts
 

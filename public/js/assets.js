@@ -8525,20 +8525,23 @@ function _wirelessChip(text, title) {
 }
 
 /**
- * Transmit power as the SOURCES actually reported it — a percentage from the
- * controller, dBm (with the floor/ceiling) from the AP's own MIB. Deliberately
- * not normalized into one number: converting a percentage to dBm needs a
- * per-model maximum Polaris does not have, so a made-up dBm would read as a
- * measurement. Both are shown when both are known.
+ * Transmit power as the SOURCES actually reported it. The controller states a
+ * PERCENTAGE of the radio's ceiling and is labelled as one. The AP's own MIB
+ * publishes fapRadioTxPowerConfig / Oper / Max as bare integers with no UNITS
+ * clause at all, so those are rendered WITHOUT a unit — appending "dBm" to a
+ * number the module never called dBm would read as a measurement. Shown as
+ * "<oper> (cfg <config>, max <max>)": the gap between configured and operating
+ * is what DARRP did to the radio.
  */
 function _radioPowerLabel(r) {
   var bits = [];
-  if (r.txPowerDbm != null) {
-    var dbm = r.txPowerDbm + " dBm";
-    if (r.txPowerMinDbm != null && r.txPowerMaxDbm != null) {
-      dbm += " (" + r.txPowerMinDbm + "–" + r.txPowerMaxDbm + ")";
-    }
-    bits.push(dbm);
+  if (r.txPowerOper != null) {
+    var parts = [];
+    if (r.txPowerConfig != null) parts.push("cfg " + r.txPowerConfig);
+    if (r.txPowerMax != null) parts.push("max " + r.txPowerMax);
+    bits.push(r.txPowerOper + (parts.length ? " (" + parts.join(", ") + ")" : ""));
+  } else if (r.txPowerMax != null) {
+    bits.push("max " + r.txPowerMax);
   }
   if (r.txPowerPct != null) bits.push(r.txPowerPct + "%");
   if (!bits.length) return "—";

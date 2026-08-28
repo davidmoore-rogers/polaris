@@ -102,6 +102,12 @@ import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEven
 import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";
 import { parseFortiapTelemetrySnapshot } from "../utils/fortiapMonitorRow.js";
+import type { ApRadioSample, ApVapSample } from "../utils/fortiapMonitorRow.js";
+import {
+  FAP_RADIO_OID, FAP_VAP_OID, decodeRadioMode, decodeChannelWidth, decodeRadioType,
+  parseStationInfoCount, parseVapSuffix,
+} from "../utils/fortiapRadioSnmp.js";
+import { persistApRadioInventory } from "./apRadioService.js";
 import { normalizeFortiapInterfaceName, fortiapInterfaceAliases } from "../utils/fortiapInterfaceAlias.js";
 import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
 import { deriveRadioBand } from "../utils/fortiapRadioBand.js";
@@ -4094,6 +4100,10 @@ export interface SystemInfoSample {
    * assets; FortiOS-REST AP telemetry path stays undefined.
    */
   wirelessStations?: WirelessStationSample[];
+  /** The AP's radios + the SSIDs each one broadcasts (FORTINET-FORTIAP-MIB's
+   *  fapRadioTable + fapVapTable). Absent when the tables could not be read —
+   *  "unknown, do not wipe", the same contract as the two above. */
+  apRadios?: ApRadioSample[];
   /**
    * MCLAG ICL peers (FortiSwitch only), from the parent FortiGate's
    * switch-controller managed-switch CMDB. Same undefined/[] semantics as LLDP:
@@ -7900,12 +7910,25 @@ async function collectSystemInfoSnmp(
     // undefined/[] semantics as lldpNeighbors: undefined leaves stored rows
     // alone, [] wipes them.
     let wirelessStations: WirelessStationSample[] | undefined;
+    let apRadios: ApRadioSample[] | undefined;
     if (opts.assetType === "access_point") {
       const endWireless = startPhase("systeminfo.snmp.wireless_walk");
       try {
         wirelessStations = await collectWirelessStationsSnmp(session);
       } catch { /* leave undefined */ }
       endWireless({ stations: wirelessStations?.length ?? null });
+
+      // The two levels ABOVE those stations. Same undefined/[] contract, and
+      // the same gate — fapRadioTable is FORTINET-FORTIAP-MIB-specific and
+      // firing it at every SNMP device would burn worker time on hardware
+      // that cannot answer. Discovery writes the same tables from the
+      // controller; the two sources carry complementary columns and the
+      // persist layer merges them per column.
+      const endRadios = startPhase("systeminfo.snmp.ap_radio_walk");
+      try {
+        apRadios = await collectApRadiosSnmp(session);
+      } catch { /* leave undefined */ }
+      endRadios({ radios: apRadios?.length ?? null });
     }
 
     return {
@@ -7918,6 +7941,7 @@ async function collectSystemInfoSnmp(
       lldpNeighbors,
       lldpSource: opts.includeLldp !== false ? "snmp" : undefined,
       wirelessStations,
+      apRadios,
       detectedModel,
     };
   }, opts.timeoutMs);
@@ -8403,6 +8427,126 @@ async function collectWirelessStationsSnmp(session: any): Promise<WirelessStatio
     });
   }
   return out;
+}
+
+
+/**
+ * Walk FORTINET-FORTIAP-MIB's radio + VAP tables and return one sample per
+ * radio, each carrying the SSIDs it broadcasts — the SNMP half of the same
+ * inventory discovery writes from the controller's managed_ap row.
+ *
+ * `undefined` when the radio table could not be read at all (not a FortiAP, no
+ * FORTINET-FORTIAP-MIB, SNMP refused): the persist layer then leaves stored
+ * rows alone. An AP that answered with zero radios returns [], which wipes.
+ *
+ * The VAP half is separately optional and deliberately so. A radio whose VAP
+ * rows could not be read carries `vaps: undefined`, which preserves the SSIDs
+ * the controller already established rather than clearing them — the two
+ * sources name a VAP differently (FortiOS by its object name, the MIB by its
+ * SSID), so a failed VAP walk that wiped would take the controller's names
+ * with it and the next discovery run would put them back. Churn, on the tree
+ * an operator is reading.
+ */
+async function collectApRadiosSnmp(session: any): Promise<ApRadioSample[] | undefined> {
+  const [modes, countries, stationInfos, types, txConfigs, txOpers, txMaxes, widths, channels] = await Promise.all([
+    snmpWalk(session, FAP_RADIO_OID.mode).catch(() => undefined),
+    snmpWalk(session, FAP_RADIO_OID.country).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.stationInfo).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.type).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.txPowerConfig).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.txPowerOper).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.txPowerMax).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.channelWidth).catch(() => new Map()),
+    snmpWalk(session, FAP_RADIO_OID.channelOper).catch(() => new Map()),
+  ]);
+  // `mode` is the discriminator: every radio row has one, including a disabled
+  // radio, so its absence means the table itself is unreadable rather than
+  // "this AP has no radios". A radio that answers nothing else still appears.
+  if (modes === undefined) return undefined;
+
+  const vaps = await collectApVapsSnmp(session);
+
+  const out: ApRadioSample[] = [];
+  for (const suffix of Array.from(modes.keys()).sort((a, b) => Number(a) - Number(b))) {
+    const radioIndex = Number(suffix);
+    if (!Number.isInteger(radioIndex)) continue;
+    const typeInfo = decodeRadioType(types.get(suffix));
+    const channel = snmpVbToNumber(channels.get(suffix));
+    out.push({
+      radioIndex,
+      radioType: typeInfo.label,
+      // The type enum names the band outright for seven of its eight members,
+      // which beats deriving it from the channel; plain 802.11n and anything
+      // outside the enum fall through to the shared derivation.
+      band: typeInfo.band ?? deriveRadioBand(typeInfo.label, channel ?? null),
+      mode: decodeRadioMode(modes.get(suffix)),
+      channel: channel ?? null,
+      bandwidthMhz: decodeChannelWidth(widths.get(suffix)),
+      // The controller's percentage is a different column; these three are the
+      // MIB's own unit-less integers. See utils/fortiapRadioSnmp.ts.
+      txPowerPct: null,
+      txPowerConfig: snmpVbToNumber(txConfigs.get(suffix)) ?? null,
+      txPowerOper: snmpVbToNumber(txOpers.get(suffix)) ?? null,
+      txPowerMax: snmpVbToNumber(txMaxes.get(suffix)) ?? null,
+      txPowerMode: null,
+      // The radio's own BSSID is not published by this table — only per-VAP
+      // BSSIDs are — so it stays with whatever the controller established.
+      baseBssid: null,
+      clientCount: parseStationInfoCount(snmpVbToString(stationInfos.get(suffix))),
+      countryCode: snmpVbToString(countries.get(suffix)).trim() || null,
+      ...(vaps ? { vaps: vaps.get(radioIndex) ?? [] } : {}),
+    });
+  }
+  return out;
+}
+
+/**
+ * Walk fapVapTable into radioIndex -> the VAPs on that radio. `undefined` when
+ * the table could not be read; a radio with no rows in a readable table gets
+ * an empty list from the caller, which correctly means "broadcasting nothing".
+ *
+ * The MIB publishes no VAP object NAME — only the SSID — so `vapName` is the
+ * SSID here, while the controller uses the FortiOS object name. That mismatch
+ * is resolved in the persist layer by matching on BSSID, which both sources do
+ * publish; without it the two writers would each create their own row for the
+ * same VAP and take turns deleting the other's.
+ */
+async function collectApVapsSnmp(session: any): Promise<Map<number, ApVapSample[]> | undefined> {
+  const [ssids, bssids, statuses, vlans, staCounts] = await Promise.all([
+    snmpWalk(session, FAP_VAP_OID.ssid).catch(() => undefined),
+    snmpWalk(session, FAP_VAP_OID.bssid).catch(() => new Map()),
+    snmpWalk(session, FAP_VAP_OID.status).catch(() => new Map()),
+    snmpWalk(session, FAP_VAP_OID.vlanId).catch(() => new Map()),
+    snmpWalk(session, FAP_VAP_OID.staCount).catch(() => new Map()),
+  ]);
+  if (ssids === undefined) return undefined;
+
+  const byRadio = new Map<number, ApVapSample[]>();
+  for (const suffix of ssids.keys()) {
+    const idx = parseVapSuffix(String(suffix));
+    if (!idx) continue;
+    const ssid = snmpVbToString(ssids.get(suffix)).trim();
+    // A VAP with no SSID has nothing to key on and nothing to show. The MIB
+    // hands back an empty string for an unconfigured WLAN slot, which is what
+    // this drops — a real hidden SSID still has a name, it just isn't beaconed.
+    if (!ssid) continue;
+    // An administratively-down VAP is still inventory, but a VAP the radio
+    // reports as DOWN is not broadcasting; keep it out of the tree rather than
+    // showing an SSID nobody can join.
+    const status = snmpVbToNumber(statuses.get(suffix));
+    if (status === 0) continue;
+    const bssidRaw = bssids.get(suffix);
+    const list = byRadio.get(idx.radioIndex) ?? [];
+    list.push({
+      vapName: ssid,
+      ssid,
+      bssid: bssidRaw ? snmpMacFromBuffer(bssidRaw) : null,
+      vlanId: snmpVbToNumber(vlans.get(suffix)) ?? null,
+      clientCount: snmpVbToNumber(staCounts.get(suffix)) ?? null,
+    });
+    byRadio.set(idx.radioIndex, list);
+  }
+  return byRadio;
 }
 
 function parseLldpPortId(subtype: number | null, raw: unknown): string | null {
@@ -8914,6 +9058,17 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
     const endWireless = startPhase("systeminfo.persist.wireless");
     await persistWirelessStations(assetId, d.wirelessStations);
     endWireless({ stations: d.wirelessStations.length });
+    stopWrite();
+  }
+  // Radio + broadcast-SSID inventory (FortiAP only), the two levels above
+  // those stations. Same undefined/[] semantics again. The controller half
+  // of this runs in discovery; persistApRadioInventory merges the two per
+  // column, so whichever ran last does not erase what the other established.
+  if (Array.isArray(d.apRadios)) {
+    const stopWrite = startSampleWriteTimer("asset_ap_radios");
+    const endRadios = startPhase("systeminfo.persist.ap_radios");
+    const res = await persistApRadioInventory(assetId, d.apRadios, "snmp");
+    endRadios({ radios: res.radios, vaps: res.vaps });
     stopWrite();
   }
   // MCLAG ICL peers (FortiSwitch only). Same undefined/[] semantics as LLDP:

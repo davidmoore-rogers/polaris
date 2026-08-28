@@ -294,9 +294,9 @@ export interface ApRadioSample {
   channel:       number | null;
   bandwidthMhz:  number | null;
   txPowerPct:    number | null;
-  txPowerDbm:    number | null;
-  txPowerMinDbm: number | null;
-  txPowerMaxDbm: number | null;
+  txPowerOper:    number | null;
+  txPowerConfig: number | null;
+  txPowerMax: number | null;
   txPowerMode:   string | null;
   baseBssid:     string | null;
   clientCount:   number | null;
@@ -430,13 +430,13 @@ export function parseFortiapRadios(row: Record<string, unknown>): ApRadioSample[
           ?? r.channel_bw ?? r["channel-bw"] ?? r.bandwidth_mhz ?? r.channel_bonding ?? r["channel-bonding"],
       ) ?? null,
       // `oper_txpower` is a PERCENTAGE of the radio's ceiling on FortiOS, not
-      // dBm. The dBm reading and the floor/ceiling come from the MIB instead,
-      // which is why they stay null here rather than being back-computed from
-      // a percentage against a maximum Polaris does not know.
+      // a unit-neutral integer. The configured/operating/maximum trio comes
+      // from the MIB instead, which is why those stay null here rather than
+      // being back-computed from a percentage against a ceiling nobody knows.
       txPowerPct: pickNum(r, ["oper_txpower", "oper-txpower", "txpower", "power_level", "power-level"]) ?? null,
-      txPowerDbm: pickNum(r, ["oper_txpower_dbm", "txpower_dbm", "tx_power_dbm"]) ?? null,
-      txPowerMinDbm: null,
-      txPowerMaxDbm: null,
+      txPowerOper: pickNum(r, ["oper_txpower_dbm", "txpower_dbm", "tx_power_dbm"]) ?? null,
+      txPowerConfig: null,
+      txPowerMax: null,
       txPowerMode: pickStr(r, ["txpower_mode", "txpower-mode", "power_mode", "auto_power_level"]) || null,
       baseBssid: pickStr(r, ["base_bssid", "base-bssid", "bssid"]).toUpperCase() || null,
       clientCount: pickNum(r, ["client_count", "num_clients", "sta_count", "clients"]) ?? null,

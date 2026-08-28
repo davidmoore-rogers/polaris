@@ -12,9 +12,10 @@
  *    quietly disagrees with the client count;
  *  - the per-radio client count is counted from the rows below it rather than
  *    taken from the controller's own tally, which disagrees mid-roam;
- *  - transmit power is rendered as the sources reported it (a percentage from
- *    the controller, dBm from the MIB) and never converted, since converting
- *    needs a per-model maximum Polaris does not have;
+ *  - transmit power is rendered as the sources reported it — a percentage
+ *    from the controller, and the MIB's bare integers WITHOUT a unit, since
+ *    that module publishes no UNITS clause and appending "dBm" to a number
+ *    nobody called dBm would read as a measurement;
  *  - an AP with no radio inventory yet still gets the old flat table, so the
  *    tab never regresses to empty while discovery fills it in.
  *
@@ -84,15 +85,15 @@ function makeRadios() {
   return [
     {
       radioIndex: 1, band: "2.4GHz", mode: "ap", radioType: "802.11n", channel: 6,
-      bandwidthMhz: 20, txPowerPct: 70, txPowerDbm: null, txPowerMinDbm: null,
-      txPowerMaxDbm: null, txPowerMode: null, baseBssid: "AA:BB:CC:00:00:00",
+      bandwidthMhz: 20, txPowerPct: 70, txPowerOper: null, txPowerConfig: null,
+      txPowerMax: null, txPowerMode: null, baseBssid: "AA:BB:CC:00:00:00",
       clientCount: 99, countryCode: "US", source: "fortios",
       vaps: [{ vapName: "corp-2g", ssid: "CORP", bssid: "AA:BB:CC:00:00:01", vlanId: 10, clientCount: null }],
     },
     {
       radioIndex: 2, band: "5GHz", mode: "ap", radioType: "802.11ax", channel: 149,
-      bandwidthMhz: 80, txPowerPct: 100, txPowerDbm: 17, txPowerMinDbm: 1,
-      txPowerMaxDbm: 20, txPowerMode: "auto", baseBssid: "AA:BB:CC:00:00:10",
+      bandwidthMhz: 80, txPowerPct: 100, txPowerOper: 17, txPowerConfig: 1,
+      txPowerMax: 20, txPowerMode: "auto", baseBssid: "AA:BB:CC:00:00:10",
       clientCount: 99, countryCode: "US", source: "snmp",
       vaps: [
         { vapName: "corp-5g", ssid: "CORP", bssid: "AA:BB:CC:00:00:11", vlanId: 10, clientCount: null },
@@ -175,9 +176,12 @@ describe("_renderWirelessTree", () => {
   it("shows power as each source reported it, never converted", () => {
     g._renderWirelessTree(container, makeRadios(), [], ASSET, null);
     const text = container.textContent || "";
-    // Radio 2 has both: dBm with the floor/ceiling from the MIB, % from the controller.
-    expect(text).toContain("17 dBm (1–20)");
+    // Radio 2 has both: the MIB's trio, unit-less because the module states
+    // no unit, and the controller's percentage, labelled as one.
+    expect(text).toContain("17 (cfg 1, max 20)");
     expect(text).toContain("100%");
+    // Never invent a unit for the MIB's integers.
+    expect(text).not.toContain("17 dBm");
     // Radio 1 has only the controller's percentage.
     expect(text).toContain("70%");
   });
