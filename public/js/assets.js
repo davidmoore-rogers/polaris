@@ -5555,6 +5555,7 @@ function _assetGeneralTabHTML(a) {
       viewRow("Type", ASSET_TYPE_LABELS[a.assetType] || a.assetType) +
       viewRow("Status", a.status ? a.status.charAt(0).toUpperCase() + a.status.slice(1) : "-") +
       authorizationRowHTML(a) +
+      apProfileRowHTML(a) +
       viewRow("Location", a.location || a.learnedLocation) +
       ((a.latitude != null && a.longitude != null)
         ? viewRow("Coordinates", a.latitude.toFixed(4) + ", " + a.longitude.toFixed(4) + (a.coordSource === "manual" ? " (manual)" : ""), true)
@@ -15375,6 +15376,21 @@ function authorizationRowHTML(asset) {
   var badge = '<span style="display:inline-block;padding:1px 8px;border-radius:4px;font-size:0.8rem;background:' +
     color + ';color:#000;font-weight:600">' + escapeHtml(label) + '</span>';
   return '<div class="detail-row"><span class="detail-label">Authorization</span><span class="detail-value">' + badge + '</span></div>';
+}
+
+// Render the AP Profile row on the asset details General tab — the FortiOS
+// wtp-profile the controller has this AP bound to, stamped onto
+// fortinetTopology.profile by FMG/FortiGate discovery. That object decides the
+// AP's radios, SSIDs and power, so it's the first thing to check when one AP
+// in a site behaves unlike its neighbours. Renders nothing for other asset
+// types or before a discovery cycle has stamped it (pre-feature discoveries
+// self-heal on the next run).
+function apProfileRowHTML(asset) {
+  if (!asset || asset.assetType !== "access_point") return "";
+  var topo = asset.fortinetTopology;
+  var profile = topo && typeof topo === "object" ? topo.profile : null;
+  if (!profile || typeof profile !== "string") return "";
+  return viewRow("AP Profile", profile);
 }
 
 // Render HA cluster topology on the asset details General tab. Three rows

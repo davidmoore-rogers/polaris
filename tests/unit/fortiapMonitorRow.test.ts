@@ -222,6 +222,31 @@ describe("parseFortiapMonitorRow authorization state", () => {
   });
 });
 
+describe("parseFortiapMonitorRow profile", () => {
+  it("captures wtp_profile as the AP profile", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", wtp_profile: "FAP231F-office" });
+    expect(parsed.profile).toBe("FAP231F-office");
+  });
+
+  it("accepts the hyphenated CMDB spelling, preferring it when both are present", () => {
+    expect(parseFortiapMonitorRow({ "wtp-profile": "warehouse" }).profile).toBe("warehouse");
+    expect(parseFortiapMonitorRow({ "wtp-profile": "warehouse", wtp_profile: "office" }).profile)
+      .toBe("warehouse");
+  });
+
+  it("is empty when the firmware omits the field", () => {
+    expect(parseFortiapMonitorRow({ name: "AP-1", status: "connected" }).profile).toBe("");
+  });
+
+  // The profile doubles as the model fallback for rows with no model of their
+  // own — carrying it in its own right must not disturb that.
+  it("still stands in for a missing model without losing the profile", () => {
+    const parsed = parseFortiapMonitorRow({ name: "AP-1", wtp_profile: "FAP231F-office" });
+    expect(parsed.model).toBe("FAP231F-office");
+    expect(parsed.profile).toBe("FAP231F-office");
+  });
+});
+
 describe("parseFortiapMonitorRow osVersion (cached-fallback rejection)", () => {
   // Production incident 2026-07: FortiOS managed_ap rows carry TWO version
   // representations — os_version (live running firmware, canonical

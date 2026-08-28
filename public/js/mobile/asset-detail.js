@@ -626,6 +626,15 @@
         row("Authorization", escapeHtml(authState.charAt(0).toUpperCase() + authState.slice(1)));
       }
     }
+    // AP Profile — the wtp-profile the controller binds this AP to
+    // (fortinetTopology.profile). Desktop General tab renders the same row.
+    if (asset.assetType === "access_point") {
+      var apProfile = asset.fortinetTopology && typeof asset.fortinetTopology === "object"
+        ? asset.fortinetTopology.profile : null;
+      if (apProfile && typeof apProfile === "string") {
+        row("AP Profile", escapeHtml(apProfile));
+      }
+    }
     row("IP", asset.ipAddress ? '<span class="mono">' + escapeHtml(asset.ipAddress) + '</span>' : null);
     row("MAC", asset.macAddress ? '<span class="mono">' + escapeHtml(asset.macAddress) + '</span>' : null);
     row("Hostname", asset.hostname);

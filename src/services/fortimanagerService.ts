@@ -1113,6 +1113,11 @@ export interface DiscoveredFortiAP {
   // Authorization row on the asset details General tab. Empty when the
   // firmware omits the field.
   authorizationState: string;
+  // AP profile the WTP is bound to on the controller (`wtp_profile`).
+  // Stamped onto fortinetTopology.profile + the fortiap observed blob;
+  // drives the AP Profile row on the asset details General tab. Empty when
+  // the firmware omits the field.
+  profile: string;
   osVersion: string;
   // Wired uplink to the controller. peerSource records HOW we learned it:
   //   "lldp"            — from the AP's own LLDP table (system_description starts with "FortiSwitch-")

@@ -1442,6 +1442,7 @@ function buildFortiapObservedBlob(
     baseMac?: string;
     status?: string;
     authorizationState?: string;
+    profile?: string;
     osVersion?: string;
     peerSwitch?: string;
     peerPort?: string;
@@ -1474,6 +1475,9 @@ function buildFortiapObservedBlob(
     // Controller admission state ("authorized" / "discovered" / ...) —
     // mirrors the fortiswitch blob's `state` field.
     state: ap.authorizationState || null,
+    // AP profile the controller binds this WTP to — the object that decides
+    // its radios, SSIDs and power.
+    profile: ap.profile || null,
     controllerFortigate: ap.device || null,
     controllerSerial: ap.deviceSerial || null,
     parentSwitch: ap.peerSwitch || null,
@@ -3668,6 +3672,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         // managed_ap's `state` field — distinct from `status` (connectivity).
         // Surfaced as the Authorization row on the asset details General tab.
         state: ap.authorizationState || null,
+        // AP profile (`wtp_profile`) — the FortiOS object that decides this
+        // AP's radios, SSIDs and power. Surfaced as the AP Profile row on the
+        // asset details General tab.
+        profile: ap.profile || null,
         // AP-local uplink port (lan1, lan2, wbh0 …) — preferred from
         // wan_status.interface, falls back to LLDP local_port. Mirrors
         // the FortiSwitch fortinetTopology.uplinkInterface convention.

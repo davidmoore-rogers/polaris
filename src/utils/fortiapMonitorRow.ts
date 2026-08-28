@@ -166,6 +166,15 @@ export interface ParsedFortiapRow {
   // firmware omits the field. Surfaced as the Authorization row on the
   // asset details General tab via fortinetTopology.state.
   authorizationState: string;
+  // AP profile the controller has this WTP bound to (`wtp_profile`) — the
+  // FortiOS object that decides its radios, SSIDs and power. Empty when the
+  // firmware omits the field. Surfaced as the AP Profile row on the asset
+  // details General tab via fortinetTopology.profile. Note the overlap with
+  // `model`, which falls back to this same field when the row carries no
+  // model of its own: that fallback stays (a blank model reads worse than a
+  // profile name), but the profile is now carried in its own right rather
+  // than only as that stand-in.
+  profile:     string;
   osVersion:   string;
   // Wired uplink + mesh + AP-local port from the LLDP/wan_status block.
   peerSwitch?:        string;
@@ -223,6 +232,9 @@ export function parseFortiapMonitorRow(row: Record<string, unknown>): ParsedFort
     baseMac:    ALL_ZERO_MAC.test(rawApMac) ? "" : rawApMac,
     status:     str(row.status) || str(row.state) || "",
     authorizationState: str(row.state).trim(),
+    // Hyphenated form first: the monitor endpoint answers `wtp_profile`, but
+    // the wtp CMDB (and some proxied FMG shapes) spell it `wtp-profile`.
+    profile:    (str(row["wtp-profile"]) || str(row.wtp_profile)).trim(),
     // os_version is the live running firmware; version/firmware_version are
     // cached display-format values that lag upgrades — accept them only in
     // the canonical shape (see isCanonicalFortiapVersion). A row with no
