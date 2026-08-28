@@ -124,14 +124,18 @@ describe("probeLossSeriesFrom", () => {
 
   it("anchors at the first successful probe, so a recovered device doesn't read its outage back as loss", () => {
     // 40 minutes dark, then 20 clean: the engine discards the pre-recovery
-    // samples (business rule 29b), so the chart must too or its caption would
+    // samples (business rule 29b), so the RATIO must too or its caption would
     // say 66.7 % about a device that is now answering every probe.
     const rows = probes(60, Array.from({ length: 40 }, (_, i) => i));
     const s = probeLossSeriesFrom(rows, 2 * 60_000);
     expect(s.ratioPct).toBe(0);
-    // Nothing before the recovery is plotted either — the picture and the
-    // caption describe the same samples.
-    expect(s.points.every((p) => p.t >= min(40).getTime() - 2 * 60_000)).toBe(true);
+    // The LINE keeps the outage (2026-08-28): trimming it too sent an email
+    // whose loss chart started when the device came back, so the thing the
+    // operator was paged about was missing from the graph explaining it.
+    expect(s.points.some((p) => p.t < min(40).getTime() && p.v === 100)).toBe(true);
+    expect(s.points[0]!.t).toBe(min(0).getTime());
+    // ...and the caption's narrower span is marked rather than left implicit.
+    expect(s.measuredFromMs).toBe(min(40).getTime());
   });
 
   it("anchors at the recovery when the outage STARTED mid-window (the first-success anchor's blind spot)", () => {
@@ -144,8 +148,11 @@ describe("probeLossSeriesFrom", () => {
     expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(50);
     const s = probeLossSeriesFrom(rows, 2 * 60_000, min(40).getTime());
     expect(s.ratioPct).toBe(0);
-    // And the outage is off the chart too, so the picture matches the caption.
-    expect(s.points.every((p) => p.t >= min(40).getTime() - 2 * 60_000)).toBe(true);
+    // The outage is still drawn — between the clean start and the clean tail,
+    // which is exactly the shape the recipient needs to see — and the marker
+    // says where the 0 % is measured from.
+    expect(s.points.some((p) => p.t >= min(10).getTime() && p.t < min(40).getTime() && p.v === 100)).toBe(true);
+    expect(s.measuredFromMs).toBe(min(40).getTime());
   });
 
   it("takes the LATER of the two anchors, and a stale recovery stamp is inert", () => {
@@ -167,6 +174,14 @@ describe("probeLossSeriesFrom", () => {
     const s = probeLossSeriesFrom(rows, 2 * 60_000, min(20).getTime());
     expect(s.ratioPct).toBe(100);
     expect(s.points.length).toBeGreaterThan(0);
+    // Nothing was excluded, so there is nothing to mark.
+    expect(s.measuredFromMs).toBeNull();
+  });
+
+  it("marks nothing on an ordinary clean window — the caption covers the whole picture", () => {
+    expect(probeLossSeriesFrom(probes(30, []), 2 * 60_000).measuredFromMs).toBeNull();
+    // A recovery stamp older than the window trims no rows either.
+    expect(probeLossSeriesFrom(probes(30, [5]), 2 * 60_000, T0 - 3_600_000).measuredFromMs).toBeNull();
   });
 
   it("skips empty buckets rather than plotting a polling gap as perfect health", () => {
@@ -182,7 +197,7 @@ describe("probeLossSeriesFrom", () => {
   });
 
   it("has no ratio for an empty window", () => {
-    expect(probeLossSeriesFrom([], 2 * 60_000)).toEqual({ points: [], ratioPct: null });
+    expect(probeLossSeriesFrom([], 2 * 60_000)).toEqual({ points: [], ratioPct: null, measuredFromMs: null });
   });
 });
 
