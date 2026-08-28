@@ -1851,22 +1851,23 @@ function _addAssetMenuItems() {
 }
 
 /**
- * The row menu's remote-access verbs — the same Open HTTPS / Open SSH the asset
- * slide-over header carries (`_managementAccessButtonsHTML`), so an operator
- * can reach a device's management UI without opening it first.
+ * The row menu's remote-access verbs — the same Open HTTPS / Open RDP / Open
+ * SSH the asset slide-over header carries (`_managementAccessButtonsHTML`), so
+ * an operator can reach a device's management surface without opening it first.
  *
- * Gated identically to the slide-over: `_assetMgmtAccess` reads
- * `Asset.managementAccess` (the `allowaccess` list captured during
- * FMG/FortiGate discovery) and offers only the protocols the device actually
- * permits; a device whose access list could not be read (the best-effort
- * switch path, `protocols == null`) gets both optimistically. A row with no
- * management surface — every endpoint, every asset from a non-Fortinet
- * discovery — contributes nothing, so its menu is unchanged.
+ * Gated identically to the slide-over, through the ONE shared
+ * `_assetMgmtAccess`: a Fortinet device offers only the protocols its captured
+ * `allowaccess` permits (both optimistically when the list could not be read —
+ * the best-effort switch path, `protocols == null`), and a server offers RDP +
+ * SSH off its TYPE, nothing having ever read a Windows or Linux host's access
+ * config. A row with no management surface — every endpoint, every asset from
+ * a non-Fortinet discovery with no inferable type — contributes nothing, so
+ * its menu is unchanged.
  *
- * SSH is ONE item here, not the header's split button: a row menu is a flat
- * list with no room for a caret, so it performs the operator's stored default
- * (`_sshAction()` — open an ssh:// link, or copy the command) and leaves the
- * ssh://-vs-copy and default-user choices on the slide-over that owns them.
+ * RDP and SSH are ONE item each here, not the header's split buttons: a row
+ * menu is a flat list with no room for a caret, so each performs the
+ * operator's stored default (`_sshAction()` / `_rdpAction()`) and leaves the
+ * delivery and default-user choices on the slide-over that owns them.
  */
 function _managementAccessMenuItems(a) {
   var info = _assetMgmtAccess(a);
@@ -1877,6 +1878,15 @@ function _managementAccessMenuItems(a) {
       label: "Open HTTPS",
       title: "Open https://" + info.mgmtIp + " in a new tab",
       onSelect: function () { window.open("https://" + info.mgmtIp, "_blank", "noopener"); },
+    });
+  }
+  if (info.showRdp) {
+    items.push({
+      label: "Open RDP",
+      title: _rdpAction() === "copy"
+        ? "Copy an mstsc command for " + info.mgmtIp
+        : "Open a Remote Desktop session to " + info.mgmtIp,
+      onSelect: function () { _doRdpLaunch(info.mgmtIp, _rdpAction()); },
     });
   }
   if (info.showSsh) {
@@ -15144,17 +15154,30 @@ function ipViewRow(asset) {
 // Shape: { source, interfaceName, profileName, mgmtIp, protocols, https, ssh,
 // snmp, checkedAt }. protocols === null means the access list could not be read
 // (best-effort switch path) — we then render buttons optimistically.
+// A SERVER's verbs come from its TYPE, not from a captured access list: no
+// discovery source reads a Windows or Linux host's management surface, so
+// there is no allowaccess to consult and never will be. RDP + SSH are
+// therefore offered optimistically — the same "unknown is not denied" posture
+// the best-effort FortiSwitch path (`protocols == null`) already takes, and
+// the same `unverified` note in the options menu. Deliberately NOT extended to
+// `workstation`: an operator reaches a server from inventory, and every
+// endpoint row growing two dead verbs is how a row menu stops being read.
 function _assetMgmtAccess(asset) {
-  var ma = asset && asset.managementAccess;
-  if (!ma || typeof ma !== "object") return null;
-  var mgmtIp = ma.mgmtIp || asset.ipAddress || null;
+  if (!asset) return null;
+  var ma = (asset.managementAccess && typeof asset.managementAccess === "object") ? asset.managementAccess : null;
+  // { rdp, ssh } for the types whose access is inferred; null for the rest.
+  var byType = asset.assetType === "server" ? { rdp: true, ssh: true } : null;
+  if (!ma && !byType) return null;
+  var mgmtIp = (ma && ma.mgmtIp) || asset.ipAddress || null;
   if (!mgmtIp) return null;
-  var unknown = ma.protocols == null; // null/undefined → couldn't read (switch)
+  // null/undefined → couldn't read (switch); no blob at all → never readable (server).
+  var unknown = !ma || ma.protocols == null;
   return {
     ma: ma,
     mgmtIp: mgmtIp,
-    showHttps: !!(ma.https || unknown),
-    showSsh: !!(ma.ssh || unknown),
+    showHttps: !!(ma && (ma.https || unknown)),
+    showRdp: !!(byType && byType.rdp),
+    showSsh: !!(ma ? (ma.ssh || unknown) : byType.ssh),
     unknown: unknown,
   };
 }
@@ -15192,10 +15215,26 @@ function _managementAccessButtonsHTML(asset) {
     html += '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-https" ' +
       'title="Open https://' + escapeHtml(info.mgmtIp) + ' in a new tab">Open HTTPS</button>';
   }
+  var hint = info.unknown
+    ? '<div class="dropdown-heading">Access state unverified for this device</div>'
+    : "";
+  if (info.showRdp) {
+    html += '<span class="btn-dropdown-wrap" id="asset-rdp-wrap">' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-rdp" ' +
+        'title="Open a Remote Desktop session to ' + escapeHtml(info.mgmtIp) + '">Open RDP</button>' +
+      '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-rdp-caret" ' +
+        'title="RDP options" style="padding-left:6px;padding-right:6px">&#9662;</button>' +
+      '<div class="btn-dropdown-menu" id="asset-rdp-menu">' +
+        hint +
+        '<button data-rdp="file">Download .rdp file</button>' +
+        '<button data-rdp="uri">Open rdp:// link</button>' +
+        '<button data-rdp="copy">Copy mstsc command</button>' +
+        '<div class="dropdown-divider"></div>' +
+        '<button data-rdp="setuser">Set default RDP user&hellip;</button>' +
+      '</div>' +
+    '</span>';
+  }
   if (info.showSsh) {
-    var hint = info.unknown
-      ? '<div class="dropdown-heading">Access state unverified for this device</div>'
-      : "";
     html += '<span class="btn-dropdown-wrap" id="asset-ssh-wrap">' +
       '<button type="button" class="btn btn-sm btn-secondary" id="btn-asset-ssh" ' +
         'title="Open an SSH session to ' + escapeHtml(info.mgmtIp) + '">Open SSH</button>' +
@@ -15257,6 +15296,96 @@ function _doSshLaunch(mgmtIp, action) {
     window.location.href = "ssh://" + target;
   }
 }
+// RDP prefs mirror the SSH pair above: `polaris-rdp-action` ∈ {file, uri,
+// copy} and `polaris-rdp-user` an optional default username stamped into the
+// generated file / URI.
+//
+// The default is the .rdp FILE, not a URI, because mstsc.exe — the client on
+// every Windows box — registers no URL scheme at all: `rdp://` is honored only
+// by the Microsoft Remote Desktop app family (Store / macOS / iOS / Android),
+// whereas the `.rdp` file association is mstsc's and always has been. So the
+// default reaches a session wherever an RDP client exists, and the URI stays
+// available for the operators whose client handles it.
+function _rdpUser() {
+  try { return (localStorage.getItem("polaris-rdp-user") || "").trim(); } catch (e) { return ""; }
+}
+function _rdpAction() {
+  var v = null;
+  try { v = localStorage.getItem("polaris-rdp-action"); } catch (e) {}
+  return (v === "uri" || v === "copy") ? v : "file";
+}
+/**
+ * Minimal .rdp descriptor — the address, a maximized window, the optional
+ * username. CRLF-joined and CRLF-terminated because the consumer is a Windows
+ * client. No credential is ever written: `prompt for credentials` leaves the
+ * password prompt to the client, so nothing sensitive lands in the download.
+ */
+function _rdpFileBody(host, user) {
+  var lines = ["full address:s:" + host, "screen mode id:i:2", "prompt for credentials:i:1"];
+  if (user) lines.push("username:s:" + user);
+  return lines.join("\r\n") + "\r\n";
+}
+/** Microsoft's RDP URI scheme: .rdp keys, & separated, value types inline. */
+function _rdpUri(host, user) {
+  var uri = "rdp://full%20address=s:" + encodeURIComponent(host) + ":3389";
+  if (user) uri += "&username=s:" + encodeURIComponent(user);
+  return uri;
+}
+function _doRdpLaunch(mgmtIp, action) {
+  var user = _rdpUser();
+  if (action === "copy") {
+    // mstsc takes no username flag, so the user pref is a file/URI-only field.
+    var cmd = "mstsc /v:" + mgmtIp;
+    copyTextToClipboard(cmd).then(function (ok) {
+      showToast(ok ? "Copied: " + cmd : "Copy failed — " + cmd, ok ? "success" : "error");
+    });
+    return;
+  }
+  if (action === "uri") {
+    window.location.href = _rdpUri(mgmtIp, user);
+    return;
+  }
+  var name = mgmtIp.replace(/[^A-Za-z0-9._-]/g, "_") + ".rdp";
+  var blob = new Blob([_rdpFileBody(mgmtIp, user)], { type: "application/x-rdp" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast("Downloaded " + name + " — open it to start the session");
+}
+
+/**
+ * Wire ONE remote-access split button: the primary button performs the
+ * operator's stored default, the caret toggles the options menu, and picking
+ * an action both performs it and becomes the new default. The SSH and RDP
+ * groups are structurally identical (same markup, same toggle/close dance,
+ * same "setuser" escape hatch), so they share this wiring rather than each
+ * carrying a copy that can drift.
+ */
+function _wireRemoteAccessMenu(cfg) {
+  var btn = document.getElementById("btn-asset-" + cfg.kind);
+  if (btn) btn.addEventListener("click", function () { cfg.launch(cfg.action()); });
+  var caret = document.getElementById("btn-asset-" + cfg.kind + "-caret");
+  var menu = document.getElementById("asset-" + cfg.kind + "-menu");
+  if (!caret || !menu) return;
+  caret.addEventListener("click", function (e) { e.stopPropagation(); menu.classList.toggle("open"); });
+  menu.addEventListener("click", function (e) { e.stopPropagation(); });
+  menu.querySelectorAll("button[data-" + cfg.kind + "]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      menu.classList.remove("open");
+      var act = b.getAttribute("data-" + cfg.kind);
+      if (act === "setuser") { cfg.setUser(); return; }
+      // Otherwise: remember as the new default, then perform it now.
+      try { localStorage.setItem(cfg.actionKey, act); } catch (e) {}
+      cfg.launch(act);
+    });
+  });
+}
+
 function _wireManagementAccessButtons(asset) {
   var info = _assetMgmtAccess(asset);
   if (!info) return;
@@ -15266,40 +15395,38 @@ function _wireManagementAccessButtons(asset) {
       window.open("https://" + info.mgmtIp, "_blank", "noopener");
     });
   }
-  var sshBtn = document.getElementById("btn-asset-ssh");
-  if (sshBtn) {
-    sshBtn.addEventListener("click", function () { _doSshLaunch(info.mgmtIp, _sshAction()); });
-  }
-  var sshCaret = document.getElementById("btn-asset-ssh-caret");
-  var sshMenu = document.getElementById("asset-ssh-menu");
-  if (sshCaret && sshMenu) {
-    sshCaret.addEventListener("click", function (e) { e.stopPropagation(); sshMenu.classList.toggle("open"); });
-    sshMenu.addEventListener("click", function (e) { e.stopPropagation(); });
-    sshMenu.querySelectorAll("button[data-ssh]").forEach(function (b) {
-      b.addEventListener("click", function () {
-        sshMenu.classList.remove("open");
-        var act = b.getAttribute("data-ssh");
-        if (act === "setuser") {
-          var cur = _sshUser();
-          var v = window.prompt("Default SSH username for ssh:// links and copied commands (leave blank for none):", cur);
-          if (v !== null) {
-            try { localStorage.setItem("polaris-ssh-user", v.trim()); } catch (e) {}
-            showToast(v.trim() ? "SSH user set to " + v.trim() : "SSH user cleared");
-          }
-          return;
-        }
-        // uri | copy: remember as the new default, then perform it now.
-        try { localStorage.setItem("polaris-ssh-action", act); } catch (e) {}
-        _doSshLaunch(info.mgmtIp, act);
-      });
-    });
-    if (!_assetSshCloserWired) {
-      _assetSshCloserWired = true;
-      document.addEventListener("click", function () {
-        var m = document.getElementById("asset-ssh-menu");
+  _wireRemoteAccessMenu({
+    kind: "ssh",
+    actionKey: "polaris-ssh-action",
+    action: _sshAction,
+    launch: function (act) { _doSshLaunch(info.mgmtIp, act); },
+    setUser: function () {
+      var v = window.prompt("Default SSH username for ssh:// links and copied commands (leave blank for none):", _sshUser());
+      if (v === null) return;
+      try { localStorage.setItem("polaris-ssh-user", v.trim()); } catch (e) {}
+      showToast(v.trim() ? "SSH user set to " + v.trim() : "SSH user cleared");
+    },
+  });
+  _wireRemoteAccessMenu({
+    kind: "rdp",
+    actionKey: "polaris-rdp-action",
+    action: _rdpAction,
+    launch: function (act) { _doRdpLaunch(info.mgmtIp, act); },
+    setUser: function () {
+      var v = window.prompt("Default RDP username for generated .rdp files and rdp:// links — DOMAIN\\user or user@domain (leave blank for none):", _rdpUser());
+      if (v === null) return;
+      try { localStorage.setItem("polaris-rdp-user", v.trim()); } catch (e) {}
+      showToast(v.trim() ? "RDP user set to " + v.trim() : "RDP user cleared");
+    },
+  });
+  if (!_assetRemoteMenuCloserWired) {
+    _assetRemoteMenuCloserWired = true;
+    document.addEventListener("click", function () {
+      ["asset-ssh-menu", "asset-rdp-menu"].forEach(function (id) {
+        var m = document.getElementById(id);
         if (m) m.classList.remove("open");
       });
-    }
+    });
   }
 }
 
@@ -19198,7 +19325,7 @@ function _wireAssetEventsTab(assetId) {
 // loaded on assets.html / map.html.
 
 var _assetExportCloserWired = false; // document-level menu closer, once per page
-var _assetSshCloserWired = false;    // document-level closer for the SSH options menu
+var _assetRemoteMenuCloserWired = false; // document-level closer for the SSH + RDP options menus
 
 // Hostname → filename-safe fragment for the export filenames.
 function _assetExportSubject(asset) {

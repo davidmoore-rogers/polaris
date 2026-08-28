@@ -111,6 +111,8 @@ beforeEach(() => {
   g.releaseAssetQuarantine = () => {};
   g._sshAction = () => "uri";
   g._doSshLaunch = () => {};
+  g._rdpAction = () => "file";
+  g._doRdpLaunch = () => {};
   withPerms(true, true);
   expect(typeof assetMenuItems, "assets.js no longer declares _assetMenuItems").toBe("function");
 });
@@ -251,6 +253,35 @@ describe("_managementAccessMenuItems", () => {
   it("is not gated on assets:write — reaching a device is not editing it", () => {
     withPerms(false, false);
     expect(labels(mgmtMenuItems(mgmtAsset()))).toEqual(["Open HTTPS", "Open SSH"]);
+  });
+
+  it("offers a server RDP + SSH off its TYPE, with no access list to read", () => {
+    // Nothing reads a Windows or Linux host's management surface, so the verbs
+    // come from the asset type — and HTTPS is not among them: a server's :443
+    // is the application, not a management UI.
+    const srv = endpoint({ assetType: "server", ipAddress: "10.0.0.9" });
+    expect(labels(mgmtMenuItems(srv))).toEqual(["Open RDP", "Open SSH"]);
+    // Still needs an address to dial.
+    expect(mgmtMenuItems(endpoint({ assetType: "server", ipAddress: null }))).toEqual([]);
+    // And no other type inherits it — a workstation menu is unchanged.
+    expect(mgmtMenuItems(endpoint())).toEqual([]);
+  });
+
+  it("never offers RDP for a Fortinet device", () => {
+    expect(labels(mgmtMenuItems(mgmtAsset()))).not.toContain("Open RDP");
+    expect(labels(mgmtMenuItems(mgmtAsset({ protocols: null })))).not.toContain("Open RDP");
+  });
+
+  it("performs the operator's stored RDP default rather than a second menu", () => {
+    const launched: Array<[string, string]> = [];
+    g._doRdpLaunch = (ip: string, act: string) => { launched.push([ip, act]); };
+    g._rdpAction = () => "copy";
+    withPerms(true, true);
+    const rdp = mgmtMenuItems(endpoint({ assetType: "server", ipAddress: "10.0.0.9" }))
+      .find((i) => i.label === "Open RDP")!;
+    expect(rdp.title).toContain("Copy an mstsc command");
+    rdp.onSelect!();
+    expect(launched).toEqual([["10.0.0.9", "copy"]]);
   });
 });
 
