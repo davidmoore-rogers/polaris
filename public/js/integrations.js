@@ -493,6 +493,11 @@ async function _warnIfNoBlocksForIntegrationType(integrationType, integrationNam
 // the FortiGate credentials block too; those stay visible in both transports
 // now, because a proxy-mode integration still needs them for any stream set to
 // REST API.
+//
+// The "more than 10 FortiGates" figure in the parallelism hint is the SAME
+// number as FMG_PROXY_GATE_ADVISORY_THRESHOLD in
+// src/services/integrationHealthService.ts, which drives the sidebar advisory.
+// Change both together — two numbers for one decision is worse than either.
 function _fmgToggleDirectMode(useDirect) {
   var directBlock = document.getElementById("f-direct-mode-block");
   var parallelInput = document.getElementById("f-discoveryParallelism");
@@ -3613,7 +3618,7 @@ function _fmgDirectModeBlockHTML(d) {
       '</div>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Bypass FortiManager proxy to directly poll discovered FortiGates. Some information is still gathered through FortiManager.</p>' +
       '<div id="f-direct-mode-block" style="' + (d.useProxy === false ? "" : "display:none;") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.25rem">' +
-        '<div class="form-group" style="margin-bottom:0"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently. Recommended when monitoring more than 20 FortiGates — proxy mode polls them one at a time.</p></div>' +
+        '<div class="form-group" style="margin-bottom:0"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently. Recommended when monitoring more than 10 FortiGates — proxy mode polls them one at a time.</p></div>' +
       '</div>' +
       // Credentials sit OUTSIDE #f-direct-mode-block on purpose. They are not
       // direct-mode-only: every FortiOS REST monitoring collector builds its

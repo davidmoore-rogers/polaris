@@ -4198,6 +4198,29 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/integrationHealthService.ts
+
+**What it owns:** the payload behind `GET /api/v1/integrations/health-summary` — the sidebar's 30-second poll, running on every page for every signed-in session. Two unrelated signals share one response deliberately: `failed` (enabled integrations whose most recent connection test failed) and `proxyAdvice` (enabled FortiManager integrations still on the proxy transport whose fleet has outgrown it). Neither is worth a second poll.
+
+**Public API:** `getIntegrationHealthSummary()` (the whole payload), `selectProxyAdvice(integrations, gateCountById, threshold?)` and `integrationIsFmgProxyMode(config)` (pure, unit-tested), `FMG_PROXY_GATE_ADVISORY_THRESHOLD` (= 10).
+
+**Cross-service deps:** prisma only (two `integration.findMany` + one `asset.groupBy`).
+
+**Used by:** `src/api/routes/integrations.ts` `GET /health-summary` (thin wrapper); `public/js/app.js` `pollFailedIntegrations()` renders both halves into the sidebar (`#integration-failed-status`, `#fmg-proxy-advice`).
+
+**Invariants:**
+- **Gate counts come from ONE `asset.groupBy`, never a count per integration.** This runs every 30 s per session; the fleet-size rule applies at 2000 assets.
+- **Proxy is the DEFAULT**: `useProxy !== false`. An absent flag is a proxy-mode integration — reading it as direct would silence the advisory for exactly the installs that never touched the setting.
+- The threshold comparison is **strictly greater-than**: a fleet sitting exactly on the line is supported, not advised.
+- A missing groupBy row is **zero** gates, not an unknown — a proxy integration that has discovered nothing must not be advised.
+- The advisory is about **THROUGHPUT, not capability**. `/sys/proxy/json` is serialized at concurrency 1 by FMG (see fmgWorker.ts) so a poll cycle grows linearly with gate count, while direct mode parallelises up to 20. Proxy mode's separate inability to collect a FortiGate's REST monitoring streams is a real but distinct (and fixable) problem — keep it out of this copy or the advisory reads as wrong the moment that lands.
+
+**When changing this:**
+- `FMG_PROXY_GATE_ADVISORY_THRESHOLD` is duplicated as operator-facing copy in the Direct Polling hint in `public/js/integrations.js`. **Change both together** — a modal and a sidebar advising different things about the same fleet is worse than either number being slightly off.
+- Adding a third signal to this response: keep it cheap and slow-moving. Anything needing sub-30 s freshness, or a query that scales with asset count, does not belong on a poll every session runs.
+
+---
+
 ## services/fmgActivityService.ts
 
 **What it owns:** DB-backed heartbeat of every local `FmgWorker`'s proxy + native lane state. The role that runs FMG traffic (discovery in split-role prod, the single process in "all" mode) writes a snapshot of `getAllFmgWorkers()` to the `fmgActivitySnapshot` Setting row every 2 s. The web role reads the same row back to render "Active FMG Calls" on the integrations page — bridging the in-memory state across the multi-process split.
