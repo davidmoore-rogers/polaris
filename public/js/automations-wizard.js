@@ -90,6 +90,15 @@ function isDynamicKind(kind) {
   return !!DYNAMIC_PILL_KINDS[kind] || kind === DYNAMIC_LEVEL_KIND;
 }
 
+/**
+ * Fold a typed fragment and a label to one comparable form. The entries are
+ * written with a typographic apostrophe and nobody types one, so "asset's"
+ * — the obvious thing to type — matched nothing at all.
+ */
+function recipNeedle(s) {
+  return String(s || "").toLowerCase().replace(/[’']/g, "");
+}
+
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
   var userIds = [], addresses = [], roles = [], regions = [], levels = [];
@@ -1563,117 +1572,32 @@ async function openAutomationWizard(existing, opts) {
       return '<option value="' + escapeHtml(c.id) + '"' + (c.id === selId ? " selected" : "") + '>' + escapeHtml(lbl) + '</option>';
     }).join("");
   }
-  // `forPush` annotates each user with their enrolled device count. Push is
-  // opt-in PER BROWSER, so selecting a user is not the same as being able to
-  // reach them — without this you configure an action that delivers nothing.
-  function userMultiSelect(selectedIds, cls, forPush) {
-    var sel = new Set(selectedIds || []);
-    var users = _ruleRecipientUsers || [];
-    if (!users.length) return '<select multiple class="' + cls + '" size="4" style="width:100%" disabled><option>No users found</option></select>';
-    var opts = users.map(function (u) {
-      var label = (u.displayName || u.username) + (u.email ? " <" + u.email + ">" : " (no email)");
-      if (forPush) {
-        var n = u.pushDevices || 0;
-        label = (u.displayName || u.username) + (n ? " — " + n + " device" + (n === 1 ? "" : "s") : " — no push device");
-      }
-      return '<option value="' + escapeHtml(u.id) + '"' + (sel.has(u.id) ? " selected" : "") + '>' + escapeHtml(label) + '</option>';
-    }).join("");
-    return '<select multiple class="' + cls + '" size="4" style="width:100%">' + opts + '</select>';
-  }
-
-  /**
-   * Region chips for the push "specific regions" picker. The catalogue rides
-   * /automations/scope-options (NOT /map/regions, which needs mapRegions:read).
-   *
-   * A stored region that is no longer in the catalogue — renaming a map region
-   * retags assets but leaves user regionTags behind — still renders, flagged,
-   * and stays removable. Silently dropping it would delete recipients nobody
-   * asked to remove. Mirrors regionPickerHtml in users.js.
-   */
-  function regionPickerHtml(selected) {
-    var sel = (selected || []).slice();
-    var selLower = {};
-    sel.forEach(function (r) { selLower[String(r).toLowerCase()] = true; });
-    var known = (_awScopeOptions && _awScopeOptions.regions) || [];
-    var knownLower = {};
-    known.forEach(function (r) { knownLower[String(r).toLowerCase()] = true; });
-    var orphans = sel.filter(function (r) { return !knownLower[String(r).toLowerCase()]; });
-
-    if (!known.length && !orphans.length) {
-      return '<p class="hint" style="margin:2px 0">No map regions defined yet — draw them on the Device Map first.</p>';
-    }
-    var chip = function (name, isOrphan) {
-      var on = !!selLower[String(name).toLowerCase()];
-      return '<button type="button" class="tag-chip na-region-chip' + (isOrphan ? " na-unknown" : "") + '" ' +
-        'data-region="' + escapeHtml(name) + '" data-selected="' + (on ? "1" : "0") + '" ' +
-        'title="' + escapeHtml(isOrphan ? name + " — no longer a map region" : name) + '" ' +
-        'style="cursor:pointer' + (on ? "" : ";opacity:.55") + '">' + escapeHtml(name) + "</button>";
-    };
-    return '<div class="na-region-picker tag-chip-list" style="margin:2px 0">' +
-      known.map(function (r) { return chip(r, false); }).join("") +
-      orphans.map(function (r) { return chip(r, true); }).join("") +
-      "</div>";
-  }
-
-  /**
-   * Role chips for the push recipient block. Ids in the DOM, names on screen —
-   * a rename must not reroute an automation.
-   */
-  function rolePickerHtml(selected) {
-    var sel = {};
-    (selected || []).forEach(function (id) { sel[id] = true; });
-    var known = awRoles();
-    if (!known.length) return '<p class="hint" style="margin:2px 0">No roles found.</p>';
-    var chips = known.map(function (r) {
-      var on = !!sel[r.id];
-      return '<button type="button" class="tag-chip na-role-chip" data-role="' + escapeHtml(r.id) + '" ' +
-        'data-selected="' + (on ? "1" : "0") + '" title="' + escapeHtml(r.name) + '" ' +
-        'style="cursor:pointer' + (on ? "" : ";opacity:.55") + '">' + escapeHtml(r.name) + "</button>";
-    }).join("");
-    // A role the automation targets that no longer exists still shows, so it
-    // can be seen and removed rather than silently dropped.
-    var orphans = (selected || []).filter(function (id) { return !known.some(function (r) { return r.id === id; }); });
-    var orphanChips = orphans.map(function (id) {
-      return '<button type="button" class="tag-chip na-role-chip na-unknown" data-role="' + escapeHtml(id) + '" ' +
-        'data-selected="1" title="This role no longer exists" style="cursor:pointer">(unknown role)</button>';
-    }).join("");
-    return '<div class="na-role-picker tag-chip-list" style="margin:2px 0">' + chips + orphanChips + "</div>";
-  }
-
-  function collectRoles(box) {
-    if (!box) return [];
-    return Array.from(box.querySelectorAll('.na-role-chip[data-selected="1"]'))
-      .map(function (el) { return el.getAttribute("data-role"); })
-      .filter(Boolean);
-  }
-
-  function collectRegions(box) {
-    if (!box) return [];
-    return Array.from(box.querySelectorAll('.na-region-chip[data-selected="1"]'))
-      .map(function (el) { return el.getAttribute("data-region"); })
-      .filter(Boolean);
-  }
-
   /**
    * "Sends to all 47 users (12 with a push device)" — a checked-by-default
    * broadcast should say out loud how many people it reaches, rather than
-   * looking like an empty recipient list.
+   * looking like an empty recipient list. The device half is the point: the
+   * count of ACCOUNTS is not the count of people who will see anything.
    */
-  function pushReachLine(mode, regions) {
+  function pushReachAllLine() {
     var users = _ruleRecipientUsers || [];
-    var chosen;
-    if (mode === "all") chosen = users;
-    else if (mode === "regions") {
-      // The builder has no per-user region data, so this counts only what it
-      // can see; the server resolves the real set at fire time.
-      return regions && regions.length
-        ? "Sends to every user tagged with: " + regions.join(", ") + "."
-        : "No regions selected — this action will reach nobody.";
-    } else return "";
-    if (!chosen.length) return "";
-    var withPush = chosen.filter(function (u) { return (u.pushDevices || 0) > 0; }).length;
-    return "Sends to all " + chosen.length + " user" + (chosen.length === 1 ? "" : "s") +
+    if (!users.length) return "";
+    var withPush = users.filter(function (u) { return (u.pushDevices || 0) > 0; }).length;
+    return "Sends to all " + users.length + " user" + (users.length === 1 ? "" : "s") +
       " (" + withPush + " with a push device" + (withPush === 0 ? " — nobody would be reached" : "") + ").";
+  }
+
+  /** userId → enrolled push-browser count, off the recipient-users payload the
+   *  wizard already loaded. Handed to the address-book picker so its "Push
+   *  devices" column needs no endpoint of its own. */
+  function pushDeviceMap() {
+    var out = {};
+    (_ruleRecipientUsers || []).forEach(function (u) { out[u.id] = u.pushDevices || 0; });
+    return out;
+  }
+  /** The suggestion-row badge for one account on a push box. */
+  function pushDeviceBadge(userId) {
+    var n = (pushDeviceMap()[userId]) || 0;
+    return n ? n + " device" + (n === 1 ? "" : "s") : "no push device";
   }
 
   /** Warning line under a push recipient picker, or "" when everyone's reachable. */
@@ -5235,6 +5159,28 @@ async function openAutomationWizard(existing, opts) {
   }
 
   /**
+   * Dynamic recipients matching the typed fragment — "Asset's Region Users" and
+   * friends, which until now existed ONLY behind the Address book button, so
+   * typing the thing you wanted matched nothing and read as "we don't have it".
+   *
+   * The catalogue itself comes from the address-book module, which already owns
+   * it for the picker's panes; a second copy here would drift. To-only,
+   * mirroring `pillAllowedInField` — suggesting one into Cc would look like it
+   * worked and then send to nobody. Listed FIRST because, as in the picker, it
+   * isn't a search hit: it's the standing answer to "whoever owns the device".
+   */
+  function dynamicSuggestions(q, field, mode) {
+    if (field !== "to") return [];
+    var needle = recipNeedle(q);
+    var book = window.PolarisAddressBook;
+    if (!book || !book.dynamicEntries) return [];
+    return book.dynamicEntries(awRegionMaxLevel()).filter(function (e) {
+      if (!pillAllowedInField(e.source, field, mode)) return false;
+      return recipNeedle(e.name).indexOf(needle) !== -1;
+    });
+  }
+
+  /**
    * Roles matching the typed fragment, as suggestion entries. Local — the role
    * list is small, already loaded with the wizard, and doesn't belong in
    * /contacts/search, which is the ADDRESS book.
@@ -5318,15 +5264,29 @@ async function openAutomationWizard(existing, opts) {
   }
 
   /**
-   * May a pill of this kind live in this field? The two dynamic kinds are
-   * To-only: the wire shape has no per-field slot for them (they're flags on the
-   * ACTION, while Cc/Bcc are EmailRecipients lists), and at fire time the
-   * expander folds contact addresses into the To owner map. Allowing the drop
-   * would look like it worked and then send to nobody.
+   * May a pill of this kind live in this box? Two independent gates, and both
+   * exist because the alternative is a pill that looks accepted and then
+   * reaches nobody:
+   *
+   *  - FIELD. The dynamic kinds are To-only: the wire shape has no per-field
+   *    slot for them (they're flags on the ACTION, while Cc/Bcc are
+   *    EmailRecipients lists), and at fire time the expander folds contact
+   *    addresses into the To owner map.
+   *  - MODE. A `push` box takes only what resolves to an ACCOUNT, because a
+   *    push subscription hangs off a user. `usersForTarget` on the web_push
+   *    transport ignores `addresses` and `recipientAssetContacts` outright, so
+   *    those two are refused at the box rather than silently dropped at
+   *    delivery (business rule 25's posture: say no where the operator is
+   *    looking).
    */
-  function pillAllowedInField(kind, field) {
+  // Every kind that resolves to ACCOUNTS.
+  var PUSH_PILL_KINDS = { user: true, role: true, region: true, deviceRegion: true, deviceRegionLevel: true };
+  function pillAllowedInField(kind, field, mode) {
+    if (mode === "push" && !PUSH_PILL_KINDS[kind]) return false;
     return !isDynamicKind(kind) || field === "to";
   }
+  /** The mode a box was built in, read back off the DOM (see recipBoxHtml). */
+  function boxMode(box) { return (box && box.getAttribute("data-mode")) || "email"; }
 
   /**
    * One address-book picker entry → a pill. The picker's `source` is the
@@ -5344,11 +5304,18 @@ async function openAutomationWizard(existing, opts) {
     return { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
   }
 
-  function recipBoxHtml(field, label, pills, withBook) {
-    var placeholder = field === "to" ? "Type a name, address, role or region…" : "";
+  function recipBoxHtml(field, label, pills, withBook, mode) {
+    // The To hint names “asset’s…” because the dynamic recipients are the one
+    // thing here nobody would think to TYPE — they read as a picker feature.
+    // The push variant omits "address" for the same reason the box refuses
+    // one: there is no subscription behind an address.
+    var placeholder = field !== "to" ? ""
+      : mode === "push"
+        ? "Type a name, role, region or “asset’s…”"
+        : "Type a name, address, role, region or “asset’s…”";
     return '<div class="na-recip-row">' +
       '<label class="na-recip-label">' + escapeHtml(label) + "</label>" +
-      '<div class="na-recip-box" data-field="' + field + '">' +
+      '<div class="na-recip-box" data-field="' + field + '" data-mode="' + (mode || "email") + '">' +
         (pills || []).map(pillHtml).join("") +
         '<input type="text" class="na-recip-input" autocomplete="off" spellcheck="false" ' +
                'placeholder="' + escapeHtml(placeholder) + '" aria-label="Add a ' + escapeHtml(label) + ' recipient">' +
@@ -5409,6 +5376,7 @@ async function openAutomationWizard(existing, opts) {
     host.querySelectorAll(".na-recip-box").forEach(function (box) {
       var input = box.querySelector(".na-recip-input");
       var sugg = box.querySelector(".aw-suggest");
+      var mode = boxMode(box);
       var items = [];
       var idx = -1;
 
@@ -5426,8 +5394,14 @@ async function openAutomationWizard(existing, opts) {
           return;
         }
         sugg.innerHTML = items.map(function (e, i) {
-          var badge = e.source === "user" ? "user" : e.source === "contact" ? "contact" : e.source;
+          var badge = e.source === "user" ? "user"
+            : e.source === "contact" ? "contact"
+              : isDynamicKind(e.source) ? "dynamic" : e.source;
           var label = e.email ? (e.name ? e.name + " — " + e.email : e.email) : (e.name || "");
+          // On a push box the count IS the useful half of the row: an account
+          // with no enrolled browser is picked exactly as easily as one with
+          // three, and nothing else on screen tells them apart.
+          if (mode === "push" && e.source === "user") badge = pushDeviceBadge(e.id);
           return '<div class="aw-suggest-item" data-i="' + i + '" title="' + escapeHtml(e.email || e.description || "") + '">' +
             escapeHtml(label) +
             ' <span style="opacity:.6;font-size:.85em">' + escapeHtml(badge) + "</span></div>";
@@ -5439,7 +5413,9 @@ async function openAutomationWizard(existing, opts) {
       function entryToPill(e) {
         // A Polaris account becomes a USER pill and a role a ROLE pill — both
         // keyed by id, which survives a rename; only a bare address is stored
-        // as the string itself.
+        // as the string itself. The dynamic sources share the picker's mapping
+        // so a pill built by typing is identical to one picked from the book.
+        if (isDynamicKind(e.source)) return pickerEntryToPill(e);
         if (e.source === "role") return { kind: "role", value: e.id, label: e.name };
         if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
         return e.source === "user"
@@ -5455,6 +5431,12 @@ async function openAutomationWizard(existing, opts) {
         }
         var raw = input.value.trim();
         if (!raw) return;
+        if (mode === "push") {
+          // A typed address has no subscription behind it, so committing one
+          // would add a recipient the push transport ignores at fire time.
+          showToast("A push alert reaches a Polaris account — pick a user, role or region, not an address", "error");
+          return;
+        }
         if (!EMAIL_RE.test(raw)) { showToast('"' + raw + '" is not a valid email address', "error"); return; }
         if (addPill(box, { kind: "address", value: raw.toLowerCase(), label: raw.toLowerCase() })) onChange();
         input.value = "";
@@ -5465,18 +5447,26 @@ async function openAutomationWizard(existing, opts) {
         var q = input.value.trim();
         clearTimeout(suggestTimer);
         if (q.length < 2) { closeSuggest(); return; }
-        // Roles and regions resolve LOCALLY and show immediately — both
-        // catalogues are already loaded, so the list shouldn't wait on a
-        // network round trip (or disappear when the caller lacks
-        // contacts:read).
-        var local = roleSuggestions(q).concat(regionSuggestions(q));
+        // Dynamic recipients, roles and regions resolve LOCALLY and show
+        // immediately — all three catalogues are already loaded, so the list
+        // shouldn't wait on a network round trip (or disappear when the caller
+        // lacks contacts:read).
+        var local = dynamicSuggestions(q, box.getAttribute("data-field"), mode)
+          .concat(roleSuggestions(q), regionSuggestions(q));
         if (!canReadContacts()) { openSuggest(local); return; }
         openSuggest(local);
         suggestTimer = setTimeout(function () {
           api.contacts.search(q, true).then(function (r) {
             // Ignore a response that lost the race with newer typing.
             if (input.value.trim() !== q) return;
-            openSuggest(local.concat((r && r.entries) || []));
+            // On a push box the search half is narrowed to Polaris ACCOUNTS:
+            // contacts and directory hits are addresses, which this transport
+            // cannot reach, and offering them is how an operator builds an
+            // action that delivers nothing.
+            var hits = ((r && r.entries) || []).filter(function (e) {
+              return pillAllowedInField(e.source === "user" ? "user" : "address", "to", mode);
+            });
+            openSuggest(local.concat(hits));
           }).catch(function () { /* keep the local matches already shown */ });
         }, 250);
       });
@@ -5531,7 +5521,17 @@ async function openAutomationWizard(existing, opts) {
 
       var book = ev.target.closest && ev.target.closest(".na-book");
       if (book) {
-        var res = await window.PolarisAddressBook.openPicker({ field: "to" });
+        // The mode travels with the request: in push mode the picker adds a
+        // "Push devices" column, withholds the rows push cannot reach, and
+        // offers To alone. Counts ride along rather than being fetched there,
+        // since this file already holds them.
+        var srcBox = book.closest(".na-recip-row").querySelector(".na-recip-box");
+        var bookMode = boxMode(srcBox);
+        var res = await window.PolarisAddressBook.openPicker(
+          bookMode === "push"
+            ? { field: "to", mode: "push", pushDevices: pushDeviceMap() }
+            : { field: "to" },
+        );
         if (!res) return;
         var dest = host.querySelector('.na-recip-box[data-field="' + res.field + '"]');
         if (!dest) return;
@@ -5539,11 +5539,13 @@ async function openAutomationWizard(existing, opts) {
         res.entries.forEach(function (e) {
           var p = pickerEntryToPill(e);
           if (!p) return;
-          if (!pillAllowedInField(p.kind, res.field)) { refused++; return; }
+          if (!pillAllowedInField(p.kind, res.field, boxMode(dest))) { refused++; return; }
           if (addPill(dest, p)) added++;
         });
         if (refused) {
-          showToast("“Asset’s …” recipients can only go in To — they resolve per alert, and Cc/Bcc are fixed lists", "error");
+          showToast(bookMode === "push"
+            ? "A push alert reaches a Polaris account — contacts and typed addresses have no subscription behind them"
+            : "“Asset’s …” recipients can only go in To — they resolve per alert, and Cc/Bcc are fixed lists", "error");
         }
         if (added) onChange();
       }
@@ -5573,7 +5575,7 @@ async function openAutomationWizard(existing, opts) {
       if (!box || !host.contains(box) || !_naDragEl || _naDragEl.parentNode === box) return;
       // No cue for a field this kind can't live in, so the drop is refused
       // before the operator lets go rather than after.
-      if (!pillAllowedInField(_naDragEl.getAttribute("data-kind"), box.getAttribute("data-field"))) return;
+      if (!pillAllowedInField(_naDragEl.getAttribute("data-kind"), box.getAttribute("data-field"), boxMode(box))) return;
       ev.preventDefault();
       ev.dataTransfer.dropEffect = "move";
       if (_naDragCue !== box) {
@@ -5592,7 +5594,7 @@ async function openAutomationWizard(existing, opts) {
         label: _naDragEl.getAttribute("data-label") || "",
         unknown: _naDragEl.hasAttribute("data-unknown"),
       };
-      if (!pillAllowedInField(p.kind, box.getAttribute("data-field"))) {
+      if (!pillAllowedInField(p.kind, box.getAttribute("data-field"), boxMode(box))) {
         // Keep the pill where it was: it resolves per alert, and Cc/Bcc are
         // fixed lists with no slot for it in the wire shape.
         showToast("“" + p.label + "” can only be a To recipient", "error");
@@ -5698,15 +5700,25 @@ async function openAutomationWizard(existing, opts) {
             "</div>" +
             '<p class="hint" style="margin:0 0 6px">Anything in Cc or Bcc sends <strong>one</strong> message with the full To list visible, instead of a separate email per recipient.</p>';
         } else {
-          // Push keeps the account picker: its device-count annotations and the
-          // reachability warning are load-bearing, and To/Cc/Bcc are meaningless
-          // for a push endpoint. Above it sit the two broadcast toggles.
+          // Push mirrors the email shape: ONE To field of the same pills,
+          // because the recipients ARE the same vocabulary (accounts, roles,
+          // map regions, and the region-dynamic entries) — only addresses and
+          // asset contacts fall away, having no subscription behind them.
+          // There is no Cc or Bcc: a push is delivered per endpoint, so a
+          // "copy" is just another recipient. Above the field sit the two
+          // broadcast toggles.
           //
-          // BOTH DEFAULT TO CHECKED on a NEW action (operator decision): a push
-          // automation usually does mean "tell everyone", and unchecking is one
-          // click. On a STORED action they reflect what was saved — `isNew`
-          // keeps an old rule that listed three people from silently becoming a
-          // fleet-wide broadcast on next edit.
+          // What the old account multi-select did that a pill list must keep
+          // doing: SAY WHO IS UNREACHABLE. Push is opt-in per browser, so a
+          // named user with no enrolled device is a recipient that silently
+          // receives nothing — the warning under the field, and the picker's
+          // "Push devices" column, are the only places that admit it.
+          //
+          // BOTH TOGGLES DEFAULT TO CHECKED on a NEW action (operator
+          // decision): a push automation usually does mean "tell everyone",
+          // and unchecking is one click. On a STORED action they reflect what
+          // was saved — `isNew` keeps an old rule that listed three people
+          // from silently becoming a fleet-wide broadcast on next edit.
           var isNew = !action.channelId;
           var allUsers = isNew ? action.recipientAllUsers !== false : !!action.recipientAllUsers;
           var allRegions = isNew ? action.recipientAllRegions !== false : !!action.recipientAllRegions;
@@ -5714,21 +5726,16 @@ async function openAutomationWizard(existing, opts) {
             '<label style="display:block;font-size:0.8rem;margin:0 0 4px"><input type="checkbox" class="na-all-users"' +
               (allUsers ? " checked" : "") + '> <strong>Send to All Users</strong></label>' +
             '<div class="na-users-block"' + (allUsers ? ' style="display:none"' : "") + '>' +
-              '<label style="font-size:0.8rem">Send to user accounts</label>' +
-              userMultiSelect(action.recipientUserIds, "na-users", isPush) +
+              '<div class="na-recips">' +
+                recipBoxHtml("to", "To", recipientsToPills(action, _ruleRecipientUsers, awRoles(), awRegionMaxLevel()), canReadContacts(), "push") +
+              "</div>" +
               '<div class="na-push-warn">' + pushReachWarning(action.recipientUserIds) + "</div>" +
-              '<label style="font-size:0.8rem;margin-top:6px;display:block">…or everyone with a role</label>' +
-              rolePickerHtml(action.recipientRoles) +
             "</div>" +
             '<label style="display:block;font-size:0.8rem;margin:6px 0 4px"><input type="checkbox" class="na-all-regions"' +
               (allRegions ? " checked" : "") + (allUsers ? " disabled" : "") +
               '> <strong>Send to All User Regions</strong></label>' +
-            '<div class="na-regions-block"' + (allUsers || allRegions ? ' style="display:none"' : "") + '>' +
-              '<label style="font-size:0.8rem">Send to specific regions</label>' +
-              regionPickerHtml(action.recipientRegions) +
-            "</div>" +
-            // "All users" already covers every region, so the region controls
-            // are disabled rather than left to look meaningful but change nothing.
+            // "All users" already covers every region, so the region toggle is
+            // disabled rather than left to look meaningful but change nothing.
             '<p class="hint na-region-note" style="margin:4px 0 0' + (allUsers ? "" : ";display:none") + '">' +
               "“All Users” already includes everyone in every region." +
             "</p>" +
@@ -5737,19 +5744,14 @@ async function openAutomationWizard(existing, opts) {
         }
         // Device-region routing (match users' region tags against the TRIGGERING
         // asset's own region: tag at fire time) and address-book ownership (the
-        // contacts whose device filter covers it) are RECIPIENTS, so on email
-        // they're pills in the To field alongside everyone else — added from the
-        // address-book picker's Regions tab. They were checkboxes here, which
-        // split "who gets this alert" across two controls and left the To field
-        // looking empty when the answer was "whoever owns the box".
-        //
-        // Push keeps the device-region CHECKBOX: that branch has no token field
-        // to put a pill in, and its recipients are the account multi-select.
-        // Asset contacts stay email-only either way — a contact is an address,
-        // not an account, so there is no push endpoint behind it.
-        if (!isEmailType(ch.type)) {
-          h += '<label style="display:block;font-size:0.8rem;margin:0"><input type="checkbox" class="na-device-region"' + (action.recipientDeviceRegion ? " checked" : "") + '> …or users associated with the triggering device’s region (its region: tag)</label>';
-        }
+        // contacts whose device filter covers it) are RECIPIENTS, so they are
+        // pills in the To field alongside everyone else, on push as well as on
+        // email — added by typing or from the address-book picker's Regions
+        // tab. They were checkboxes, which split "who gets this alert" across
+        // two controls and left the To field looking empty when the answer was
+        // "whoever owns the box". Asset contacts stay EMAIL-ONLY (a contact is
+        // an address, not an account, so there is no push endpoint behind it) —
+        // enforced by the To field's own kind list, not by a second control.
         // Legacy scope-region routing (replaced by device-region in the
         // builder): rendered ONLY when the edited action already carries it,
         // so editing an old rule can't silently drop the recipients.
@@ -5758,59 +5760,58 @@ async function openAutomationWizard(existing, opts) {
         }
         fbox.innerHTML = h;
         var recips = fbox.querySelector(".na-recips");
+        // Assigned below on a push channel; every pill edit has to refresh the
+        // reachability line as well as the summary, and the box's onChange is
+        // the only place that sees them all (typing, picker, drag, delete).
+        var onPillsChanged = null;
         if (recips) {
           wireRecipBoxes(recips, function () {
             row.querySelector(".aw-action-summary").textContent =
               actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: ch.id });
+            if (onPillsChanged) onPillsChanged();
           });
         }
         // Recompute the reachability warning as the operator changes the
         // selection, rather than only on first paint.
         if (isPush) {
-          var sel = fbox.querySelector(".na-users");
-          var warnBox = fbox.querySelector(".na-push-warn");
-          if (sel && warnBox) {
-            sel.addEventListener("change", function () {
-              var ids = Array.from(sel.selectedOptions).map(function (o) { return o.value; });
-              warnBox.innerHTML = pushReachWarning(ids);
-            });
-          }
-          // Broadcast toggles: reveal the matching picker, keep the region
-          // controls inert while "All Users" covers everyone, and keep the
-          // resolved-count line honest.
+          // Broadcast toggles: reveal the To field, keep the region toggle
+          // inert while "All Users" covers everyone, and keep the resolved-
+          // count line honest.
           var allUsersEl = fbox.querySelector(".na-all-users");
           var allRegionsEl = fbox.querySelector(".na-all-regions");
           var usersBlock = fbox.querySelector(".na-users-block");
-          var regionsBlock = fbox.querySelector(".na-regions-block");
           var noteEl = fbox.querySelector(".na-region-note");
           var reachEl = fbox.querySelector(".na-reach");
+          var warnBox = fbox.querySelector(".na-push-warn");
+          var toBoxEl = fbox.querySelector('.na-recip-box[data-field="to"]');
+          // Recomputed from the PILLS on every change, so removing the one
+          // person with a device is called out the moment it happens.
+          var syncWarn = function () {
+            if (!warnBox || !toBoxEl) return;
+            var ids = pillsOf(toBoxEl)
+              .filter(function (x) { return x.kind === "user"; })
+              .map(function (x) { return x.value; });
+            warnBox.innerHTML = pushReachWarning(ids);
+          };
           var syncPush = function () {
             var au = allUsersEl.checked;
             usersBlock.style.display = au ? "none" : "";
             allRegionsEl.disabled = au;
-            regionsBlock.style.display = au || allRegionsEl.checked ? "none" : "";
             if (noteEl) noteEl.style.display = au ? "" : "none";
             if (reachEl) {
               reachEl.textContent = au
-                ? pushReachLine("all")
+                ? pushReachAllLine()
                 : allRegionsEl.checked
-                  ? "Sends to every user who carries at least one region tag."
-                  : pushReachLine("regions", collectRegions(fbox));
+                  ? "Sends to every user who carries at least one region tag, plus anyone named above."
+                  : "";
             }
+            syncWarn();
             row.querySelector(".aw-action-summary").textContent =
               actionSummary(collectActionCore("notify", box) || { type: "notify", channelId: ch.id });
           };
           allUsersEl.addEventListener("change", syncPush);
           allRegionsEl.addEventListener("change", syncPush);
-          // Region chips toggle in place (the users.js picker idiom).
-          fbox.addEventListener("click", function (ev) {
-            var chip = ev.target.closest && ev.target.closest(".na-region-chip, .na-role-chip");
-            if (!chip) return;
-            var on = chip.getAttribute("data-selected") === "1";
-            chip.setAttribute("data-selected", on ? "0" : "1");
-            chip.style.opacity = on ? ".55" : "";
-            syncPush();
-          });
+          onPillsChanged = syncWarn;
           syncPush();
         }
       };
@@ -5963,9 +5964,20 @@ async function openAutomationWizard(existing, opts) {
       var chSel = box.querySelector(".na-channel");
       if (!chSel || !chSel.value) return null;
       var a = { type: "notify", channelId: chSel.value };
-      // Email channels: To pills. Push: the account multi-select.
+      // Push broadcast toggles. "All Users" subsumes every narrower source, so
+      // nothing under it is collected — persisting a recipient list the UI
+      // isn't showing would resurface on the next edit. Read BEFORE the pills,
+      // because it decides whether they count. Both are absent on an email
+      // action, where the To field is the only answer.
+      var allUsersEl2 = box.querySelector(".na-all-users");
+      var allRegionsEl2 = box.querySelector(".na-all-regions");
+      var broadcastAll = !!(allUsersEl2 && allUsersEl2.checked);
+      if (broadcastAll) a.recipientAllUsers = true;
+      else if (allRegionsEl2 && allRegionsEl2.checked) a.recipientAllRegions = true;
+      // To pills — the same collection on email and push, since the push box
+      // is the same control with a narrower kind list.
       var toBox = box.querySelector('.na-recip-box[data-field="to"]');
-      if (toBox) {
+      if (toBox && !broadcastAll) {
         var to = pillsToRecipients(pillsOf(toBox));
         if (to.recipientUserIds) a.recipientUserIds = to.recipientUserIds;
         if (to.addresses) a.addresses = to.addresses;
@@ -5977,30 +5989,6 @@ async function openAutomationWizard(existing, opts) {
         if (to.recipientDeviceRegionLevels) a.recipientDeviceRegionLevels = to.recipientDeviceRegionLevels;
         if (to.recipientAssetContacts) a.recipientAssetContacts = true;
       }
-      // Push broadcast modes. "All users" subsumes everything, so the narrower
-      // pickers aren't collected under it — persisting a stale user list the UI
-      // isn't showing would resurface on the next edit.
-      var allUsersEl2 = box.querySelector(".na-all-users");
-      var allRegionsEl2 = box.querySelector(".na-all-regions");
-      if (allUsersEl2 && allUsersEl2.checked) {
-        a.recipientAllUsers = true;
-      } else {
-        if (allRegionsEl2 && allRegionsEl2.checked) a.recipientAllRegions = true;
-        else if (allRegionsEl2) {
-          var regs = collectRegions(box);
-          if (regs.length) a.recipientRegions = regs;
-        }
-        var userSel = box.querySelector(".na-users");
-        if (userSel && !userSel.disabled) {
-          var uids = Array.from(userSel.selectedOptions).map(function (o) { return o.value; }).filter(Boolean);
-          if (uids.length) a.recipientUserIds = uids;
-        }
-        var pushRoles = collectRoles(box);
-        if (pushRoles.length) a.recipientRoles = pushRoles;
-      }
-      // Push only — the email branch carries this as a To pill (above).
-      var devRegEl = box.querySelector(".na-device-region");
-      if (devRegEl && devRegEl.checked) a.recipientDeviceRegion = true;
       // Legacy scope-region checkbox renders only on actions that already
       // carried the flag — unchecking it drops the flag deliberately.
       var regEl = box.querySelector(".na-scope-region");

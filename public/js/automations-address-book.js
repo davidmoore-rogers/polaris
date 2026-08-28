@@ -877,6 +877,20 @@
       '</div>';
   }
 
+  /**
+   * Can a WEB PUSH actually reach this entry? Users, roles, map regions and
+   * the region-dynamic entries all resolve to ACCOUNTS, which is what a push
+   * subscription hangs off. A contact or a directory hit is a bare address,
+   * and `usersForTarget` on the push transport ignores `addresses` entirely —
+   * so offering one would let an operator pick a recipient who provably gets
+   * nothing, which is the exact failure this picker's device counts exist to
+   * make visible.
+   */
+  function pushReachable(en) {
+    return !!en && (en.source === "user" || en.source === "region" ||
+      en.source === "deviceRegion" || en.source === "deviceRegionLevel");
+  }
+
   function sourceBadge(src) {
     var label = src === "user" ? "Polaris user"
       : src === "contact" ? "Contact"
@@ -904,6 +918,20 @@
    */
   function openPicker(opts) {
     var field = (opts && opts.field) || "to";
+    // PUSH MODE. Opened from a web-push Notify action, whose recipients are
+    // ACCOUNTS rather than addresses. Four differences, all of them the same
+    // point: an address is not a push endpoint. A "Push devices" column says
+    // how many browsers each user actually enrolled (push is opt-in PER
+    // BROWSER, so a perfectly reasonable-looking pick can deliver nothing);
+    // rows push cannot reach lose their checkbox; the Responsible-Contacts
+    // entry and "+ New contact" are withheld; and the footer offers To alone,
+    // since a push action has no Cc or Bcc.
+    //
+    // Counts ride IN from the caller (`pushDevices`, userId -> n) rather than
+    // being fetched here: the wizard already holds them on the
+    // /automations/recipient-users payload it loaded to build the pills.
+    var isPush = !!(opts && opts.mode === "push");
+    var pushDevices = (opts && opts.pushDevices) || {};
     return new Promise(function (resolve) {
       var chosen = {};       // pickKey → entry
       var settled = null;
@@ -915,11 +943,12 @@
         Z_PICKER,
         "Address book",
         pickerBodyHtml(),
-        '<button class="btn btn-secondary" type="button" data-ab="new">+ New contact</button>' +
+        (isPush ? "" : '<button class="btn btn-secondary" type="button" data-ab="new">+ New contact</button>') +
         '<span style="flex:1"></span>' +
         '<button class="btn btn-secondary" type="button" data-ab="add-to">Add to To</button>' +
-        '<button class="btn btn-secondary" type="button" data-ab="add-cc">Add to Cc</button>' +
-        '<button class="btn btn-secondary" type="button" data-ab="add-bcc">Add to Bcc</button>',
+        (isPush ? "" :
+          '<button class="btn btn-secondary" type="button" data-ab="add-cc">Add to Cc</button>' +
+          '<button class="btn btn-secondary" type="button" data-ab="add-bcc">Add to Bcc</button>'),
         function () { resolve(settled); },
         true,
       );
@@ -935,11 +964,34 @@
        * The picker's columns: the shared four, wrapped in a selection checkbox
        * and an Edit cell. Both panes use them, so a region reads like a person.
        */
+      /**
+       * The "Push devices" cell. Zero is called out rather than left blank:
+       * a user with no enrolled browser is the single most common reason a
+       * push automation is configured correctly and still delivers nothing,
+       * and it is invisible everywhere else.
+       */
+      function pushDeviceCell(en) {
+        if (en.source === "user") {
+          var n = pushDevices[en.id] || 0;
+          return n
+            ? escapeHtml(n + " device" + (n === 1 ? "" : "s"))
+            : '<span style="color:var(--color-warning)">none</span>';
+        }
+        // A group entry resolves to many accounts at fire time, so a count
+        // here would be a guess; an unreachable row says WHY it is unpickable.
+        return pushReachable(en)
+          ? '<span style="color:var(--color-text-tertiary)">—</span>'
+          : '<span style="color:var(--color-text-tertiary)">no Polaris account</span>';
+      }
+
       function pickCols() {
-        return [
+        var cols = [
           {
             width: "36px",
             cell: function (en) {
+              // No checkbox on a row push cannot reach — refusing the pick is
+              // honest where a warning after the fact is not.
+              if (isPush && !pushReachable(en)) return "";
               var key = pickKey(en);
               return '<input type="checkbox" data-ab-pick="' + escapeHtml(key) + '"' +
                 (chosen[key] ? " checked" : "") + ">";
@@ -958,14 +1010,28 @@
             },
           },
         ];
+        // Before Source, so the two columns that say whether this row will
+        // actually receive anything sit together.
+        if (isPush) cols.splice(4, 0, { label: "Push devices", width: "130px", cell: pushDeviceCell });
+        return cols;
       }
+
+      /** The People pane's dynamic head — withheld in push mode, where
+       *  "Asset's Responsible Contacts" resolves to addresses with no account
+       *  behind them and so reaches nobody over push. */
+      function peopleHead() { return isPush ? [] : PEOPLE_DYNAMIC; }
 
       function render() {
         var box = q("#ab-pick-results");
         // The dynamic entry heads the list unconditionally — it is not a search
         // result, so a query that matches nobody must not hide it.
-        box.innerHTML = abTable(pickCols(), PEOPLE_DYNAMIC.concat(entries),
-          entries.length ? "" : '<p class="hint" style="margin:8px 0 0">No people match that search.</p>');
+        var hint = entries.length ? "" : '<p class="hint" style="margin:8px 0 0">No people match that search.</p>';
+        if (isPush) {
+          hint += '<p class="hint" style="margin:8px 0 0">Push reaches <strong>Polaris accounts</strong>, so ' +
+            'contacts and directory hits are listed but not selectable — there is no browser subscription behind ' +
+            'an address. A user showing <strong>none</strong> has not turned push on in any browser yet.</p>';
+        }
+        box.innerHTML = abTable(pickCols(), peopleHead().concat(entries), hint);
       }
 
       /**
@@ -1024,7 +1090,7 @@
         var key = cb.getAttribute("data-ab-pick");
         // Both panes' pools, so a selection survives switching tabs — every
         // paint re-reads the checkbox state from `chosen`.
-        var pool = entries.concat(PEOPLE_DYNAMIC, regionDynamicEntries(regionMaxLevel), regionEntries);
+        var pool = entries.concat(peopleHead(), regionDynamicEntries(regionMaxLevel), regionEntries);
         var entry = null;
         for (var i = 0; i < pool.length; i++) if (pickKey(pool[i]) === key) entry = pool[i];
         if (cb.checked && entry) chosen[key] = entry;
@@ -1040,7 +1106,10 @@
         }
       });
 
-      root.querySelector('[data-ab="new"]').addEventListener("click", async function () {
+      // Absent in push mode: a freshly created contact is an address, which
+      // push cannot reach, so offering to make one here would be a dead end.
+      var newBtn = root.querySelector('[data-ab="new"]');
+      if (newBtn) newBtn.addEventListener("click", async function () {
         var created = await openEditor(null);
         if (created) {
           // Auto-select what the operator just added — they opened the editor
@@ -1054,7 +1123,9 @@
       });
 
       ["to", "cc", "bcc"].forEach(function (f) {
-        root.querySelector('[data-ab="add-' + f + '"]').addEventListener("click", function () {
+        var btn = root.querySelector('[data-ab="add-' + f + '"]');
+        if (!btn) return; // push mode renders To alone
+        btn.addEventListener("click", function () {
           var picked = Object.keys(chosen).map(function (k) { return chosen[k]; });
           if (!picked.length) { showToast("Select at least one recipient", "error"); return; }
           settled = { field: f, entries: picked };
@@ -1080,6 +1151,13 @@
   }
 
   window.PolarisAddressBook = {
+    // The dynamic catalogue, for the wizard's recipient TYPEAHEAD: typing
+    // “asset’s” there has to offer the same entries this picker heads its
+    // panes with, and a second copy of the list would drift. `maxLevel` is the
+    // caller's, since the region levels are loaded per surface.
+    dynamicEntries: function (maxLevel) {
+      return PEOPLE_DYNAMIC.concat(regionDynamicEntries(maxLevel));
+    },
     renderTab: renderTab,
     openEditor: function (c) { return openEditor(c).then(function (r) { renderTab(); return r; }); },
     openPicker: openPicker,

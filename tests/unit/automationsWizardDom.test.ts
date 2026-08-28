@@ -71,7 +71,12 @@ beforeAll(() => {
       // merged in at the route, not by buildSchemaCatalog, and without it every
       // dimension control falls back to a plain text box.
       schema: async () => ({ ...buildSchemaCatalog(), dimensionPickers: dimensionPickerMeta() }),
-      recipientUsers: async () => ({ users: [{ id: "u1", username: "op", displayName: "Op", email: "op@x.com" }] }),
+      // pushDevices is what the push branch's warning line and the address-book
+      // picker's device column read; "op" has one browser enrolled, "quiet" none.
+      recipientUsers: async () => ({ users: [
+        { id: "u1", username: "op", displayName: "Op", email: "op@x.com", pushDevices: 1 },
+        { id: "u2", username: "quiet", displayName: "Quiet", email: "quiet@x.com", pushDevices: 0 },
+      ] }),
       scopeOptions: async () => ({
         manufacturers: ["Fortinet Inc."],
         models: ["FGT-60F"],
@@ -94,9 +99,16 @@ beforeAll(() => {
         windowHours: 3,
       }),
     },
+    // The recipient typeahead calls this on every keystroke once the caller
+    // holds contacts:read (permAtLeast is stubbed true), 250ms after the local
+    // matches are already on screen.
+    contacts: { search: async () => ({ entries: [] }) },
     assets: { tags: async () => ({ tags: ["region:Atlanta", "prod"] }) },
     assetTypes: { list: async () => ({ types: [{ name: "server", label: "Server" }, { name: "switch", label: "Switch" }] }) },
-    deliveryChannels: { list: async () => ({ channels: [{ id: "c1", name: "NOC email", type: "smtp", enabled: true }] }) },
+    deliveryChannels: { list: async () => ({ channels: [
+      { id: "c1", name: "NOC email", type: "smtp", enabled: true },
+      { id: "c2", name: "Browser push", type: "web_push", enabled: true },
+    ] }) },
     automationScripts: { list: async () => ({ scripts: [{ id: "sc1", name: "restart-svc", interpreter: "bash", runTarget: "either", timeoutSec: 60 }] }) },
   };
   // Module-scope caches normally owned by automations.js (loaded first on the page).
@@ -130,6 +142,12 @@ beforeAll(() => {
   // missing module here reproduces the "wizard silently fails to open" bug.
   const cbSrc = readFileSync(resolve(__dirname, "../../public/js/condition-builder.js"), "utf8");
   (0, eval)(cbSrc);
+  // The address book, loaded before the wizard on every page that carries it.
+  // It owns the dynamic-recipient catalogue ("Asset's Region Users" and
+  // friends) that the wizard's recipient typeahead offers, so a missing module
+  // here reproduces a typeahead that silently knows about nobody.
+  const abSrc = readFileSync(resolve(__dirname, "../../public/js/automations-address-book.js"), "utf8");
+  (0, eval)(abSrc);
   const src = readFileSync(resolve(__dirname, "../../public/js/automations-wizard.js"), "utf8");
   (0, eval)(src);
   // Export / import / view-code. Loaded on every page that loads the wizard.
@@ -2483,5 +2501,159 @@ describe("automation export / import / view code", () => {
 
     expect(savedPayloads.length).toBe(0);
     expect(toastErrors.join(" ")).toMatch(/state probe/i);
+  });
+});
+
+describe("dynamic recipient typeahead", () => {
+  const notifyRule = {
+    id: "r-recip",
+    name: "CPU",
+    description: null,
+    enabled: true,
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 90, forDurationSec: 0 },
+    scope: { allAssets: true },
+    reset: { mode: "auto" },
+    cooldownSec: null,
+    actions: [{ type: "notify", channelId: "c1", addresses: ["noc@example.invalid"] }],
+  };
+
+  /** Open on the stored rule and land on the actions step. */
+  async function openOnStep5(): Promise<void> {
+    doc.body.innerHTML = "";
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(JSON.parse(JSON.stringify(notifyRule)));
+    await new Promise((r) => setTimeout(r, 20));
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+  }
+
+  /** Type into one recipient box and read back what it offered. */
+  function suggestionsFor(field: string, typed: string): string[] {
+    const win = g.window as InstanceType<typeof Window>;
+    const box = doc.querySelector('#aw-step-5 .na-recip-box[data-field="' + field + '"]')!;
+    const input = box.querySelector(".na-recip-input") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    input.value = typed;
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    return Array.from(box.querySelectorAll(".aw-suggest.open .aw-suggest-item")).map((el) => el.textContent || "");
+  }
+
+  it("offers the dynamic recipients for a straight-apostrophe \"asset's\"", async () => {
+    await openOnStep5();
+    expect(toastErrors).toEqual([]);
+    // The entries are written with a typographic apostrophe; nobody types one,
+    // so this is the fold that decides whether the feature is findable at all.
+    const hits = suggestionsFor("to", "asset's");
+    expect(hits.join(" | ")).toContain("Asset’s Responsible Contacts");
+    expect(hits.join(" | ")).toContain("Asset’s Region Users");
+    // Badged as what they are, not as their raw source name.
+    expect(hits.every((h) => h.includes("dynamic"))).toBe(true);
+    // No level entries: the stubbed catalogue reports no nesting, and on a flat
+    // one "L1 Region Users" is a synonym for the entry above it.
+    expect(hits.join(" | ")).not.toContain("L1 Region Users");
+  });
+
+  it("picking one adds the same pill the address-book picker would", async () => {
+    await openOnStep5();
+    suggestionsFor("to", "responsible");
+    const box = doc.querySelector('#aw-step-5 .na-recip-box[data-field="to"]')!;
+    const item = box.querySelector(".aw-suggest.open .aw-suggest-item") as unknown as { getAttribute: (a: string) => string };
+    expect(item).toBeTruthy();
+    // mousedown is what commits — the click never lands, since blur closes the list.
+    const win = g.window as InstanceType<typeof Window>;
+    (item as unknown as { dispatchEvent: (e: unknown) => void })
+      .dispatchEvent(new win.Event("mousedown", { bubbles: true }));
+    const pill = box.querySelector('.tag-chip[data-kind="assetContacts"]')!;
+    expect(pill).toBeTruthy();
+    expect(pill.getAttribute("data-value")).toBe("1");
+    expect(pill.getAttribute("data-label")).toBe("Asset’s Responsible Contacts");
+  });
+
+  it("does not offer them in Cc, where they would send to nobody", async () => {
+    await openOnStep5();
+    expect(suggestionsFor("cc", "asset's")).toEqual([]);
+    expect(doc.querySelector('#aw-step-5 .na-recip-box[data-field="cc"] .aw-suggest-empty')).toBeTruthy();
+  });
+});
+
+describe("web push recipients", () => {
+  const pushRule = {
+    id: "r-push",
+    name: "CPU",
+    description: null,
+    enabled: true,
+    severity: "warning",
+    trigger: { type: "asset_metric", metric: "cpuPct", aggregation: "avg", windowSec: 300, operator: ">=", threshold: 90, forDurationSec: 0 },
+    scope: { allAssets: true },
+    reset: { mode: "auto" },
+    cooldownSec: null,
+    // A STORED action, so the two broadcast toggles reflect what was saved
+    // rather than defaulting to checked the way a new one does.
+    actions: [{ type: "notify", channelId: "c2", recipientUserIds: ["u1", "u2"], recipientDeviceRegion: true }],
+  };
+
+  async function openPushStep5(): Promise<Element> {
+    doc.body.innerHTML = "";
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)(JSON.parse(JSON.stringify(pushRule)));
+    await new Promise((r) => setTimeout(r, 20));
+    (doc.querySelector('.stepper-step[data-step="5"]') as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    return doc.querySelector("#aw-step-5 .aw-action .aw-action-fields")!;
+  }
+
+  it("mirrors the email field: one To box of pills, no Cc/Bcc, no account multi-select", async () => {
+    const fields = await openPushStep5();
+    expect(toastErrors).toEqual([]);
+    expect(fields.querySelector('.na-recip-box[data-field="to"]')).toBeTruthy();
+    expect(fields.querySelector('.na-recip-box[data-field="cc"]')).toBeFalsy();
+    expect(fields.querySelector('.na-recip-box[data-field="bcc"]')).toBeFalsy();
+    // The controls the pill field replaced are gone, including the separate
+    // device-region checkbox — it is a pill now, like everywhere else.
+    expect(fields.querySelector(".na-users")).toBeFalsy();
+    expect(fields.querySelector(".na-role-picker")).toBeFalsy();
+    expect(fields.querySelector(".na-region-picker")).toBeFalsy();
+    expect(fields.querySelector(".na-device-region")).toBeFalsy();
+    // Stored recipients round-trip into pills, dynamic entry included.
+    const box = fields.querySelector('.na-recip-box[data-field="to"]')!;
+    expect(box.getAttribute("data-mode")).toBe("push");
+    const kinds = Array.from(box.querySelectorAll(":scope > .tag-chip")).map((el) => el.getAttribute("data-kind"));
+    expect(kinds).toEqual(["deviceRegion", "user", "user"]);
+    // ...and the Address book button comes with it: the picker is where the
+    // per-user device counts live.
+    expect(fields.querySelector(".na-book")).toBeTruthy();
+    // The broadcast toggles survive — they are capabilities no pill can express.
+    expect(fields.querySelector(".na-all-users")).toBeTruthy();
+    expect(fields.querySelector(".na-all-regions")).toBeTruthy();
+  });
+
+  it("names the users who would receive nothing", async () => {
+    const fields = await openPushStep5();
+    // u2 has no enrolled browser; picking them is not the same as reaching them.
+    expect(fields.querySelector(".na-push-warn")!.textContent).toContain("Quiet");
+    expect(fields.querySelector(".na-push-warn")!.textContent).toContain("1 of 2");
+  });
+
+  it("refuses a typed address — push reaches an account, not a mailbox", async () => {
+    const fields = await openPushStep5();
+    const win = g.window as InstanceType<typeof Window>;
+    const box = fields.querySelector('.na-recip-box[data-field="to"]')!;
+    const input = box.querySelector(".na-recip-input") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    input.value = "someone@example.invalid";
+    input.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(box.querySelector('.tag-chip[data-kind="address"]')).toBeFalsy();
+    expect(toastErrors.join(" ")).toMatch(/Polaris account/i);
+  });
+
+  it("offers no Responsible Contacts entry, which has no subscription behind it", async () => {
+    const fields = await openPushStep5();
+    const win = g.window as InstanceType<typeof Window>;
+    const box = fields.querySelector('.na-recip-box[data-field="to"]')!;
+    const input = box.querySelector(".na-recip-input") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    input.value = "asset's";
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    const hits = Array.from(box.querySelectorAll(".aw-suggest.open .aw-suggest-item")).map((el) => el.textContent || "");
+    expect(hits.join(" | ")).toContain("Asset’s Region Users");
+    expect(hits.join(" | ")).not.toContain("Responsible Contacts");
   });
 });
