@@ -26,6 +26,7 @@ type Recipients = {
   addresses?: string[];
   recipientRoles?: string[];
   recipientRegions?: string[];
+  recipientTags?: string[];
   recipientDeviceRegion?: boolean;
   recipientAssetContacts?: boolean;
 };
@@ -231,6 +232,7 @@ describe("region + dynamic pills", () => {
       recipientDeviceRegion: true,
       recipientAssetContacts: true,
       recipientRegions: ["Ashfield"],
+      recipientTags: ["Facilities"],
       recipientRoles: ["r-noc"],
       recipientUserIds: ["u1"],
       addresses: ["noc@example.com"],
@@ -243,5 +245,36 @@ describe("region + dynamic pills", () => {
     // same thing to the server, but absent is what an untouched rule looks like.
     expect(recipientsToPills({ recipientDeviceRegion: false }, USERS, ROLES)).toEqual([]);
     expect(pillsToRecipients([])).toEqual({});
+  });
+});
+
+/**
+ * Registry-tag pills, from the address book's Tags list.
+ *
+ * Kept apart from regions on purpose: a region matches User.regionTags ONLY
+ * (resolveUsersByRegions) while a tag matches the flattened region-plus-other
+ * scope (resolveRecipientUsers), so folding the two kinds together would make a
+ * same-named row reach different people depending on which list it was picked
+ * from.
+ */
+describe("registry tag pills", () => {
+  it("maps a tag pill to recipientTags, deduped and apart from regions", () => {
+    expect(pillsToRecipients([
+      { kind: "tag", value: "Facilities", label: "Facilities" },
+      { kind: "tag", value: "Facilities", label: "Facilities" },
+      { kind: "region", value: "Ashfield", label: "Ashfield" },
+    ])).toEqual({ recipientRegions: ["Ashfield"], recipientTags: ["Facilities"] });
+  });
+
+  it("does NOT lower-case a tag — it is a registry name, not an address", () => {
+    expect(pillsToRecipients([{ kind: "tag", value: "PCI", label: "PCI" }]))
+      .toEqual({ recipientTags: ["PCI"] });
+  });
+
+  it("renders a STORED recipientTags back as pills", () => {
+    // The field predates the picker offering it. Dropping it on read would let
+    // an edit of an old rule silently un-route everyone it reached.
+    const out = recipientsToPills({ recipientTags: ["Facilities"] }, USERS, ROLES);
+    expect(out).toEqual([{ kind: "tag", value: "Facilities", label: "Facilities" }]);
   });
 });

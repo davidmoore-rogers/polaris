@@ -309,6 +309,14 @@ export async function resolveEmailRecipients(r: EmailRecipients | null | undefin
       if (u.email) out.add(u.email.trim().toLowerCase());
     }
   }
+  // Registry tags resolve through the FLATTENED scope, matching what
+  // usersForTarget does with the same field on the action — a Cc pill and a To
+  // pill for one tag must reach the same people.
+  if (r.recipientTags?.length) {
+    for (const u of await resolveRecipientUsers(r.recipientTags)) {
+      if (u.email) out.add(u.email.trim().toLowerCase());
+    }
+  }
   return Array.from(out);
 }
 
@@ -510,7 +518,12 @@ export async function expandDeliveries(
       if (names.length) addUsers(await resolveUsersByRegions(names));
     }
     if (t.recipientScopeRegion && scopeRegionTags?.length) addUsers(await resolveRecipientUsers(scopeRegionTags));
-    if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags)); // legacy
+    // Registry tags. Matches the FLATTENED region-plus-other scope, not
+    // regionSet: a tag is a tag whichever dimension a user carries it in, which
+    // is exactly the asymmetry with recipientRegions above — that one is a name
+    // taken from the region catalogue, so matching a same-named "other" tag
+    // would deliver to the wrong people.
+    if (t.recipientTags?.length) addUsers(await resolveRecipientUsers(t.recipientTags));
     return Array.from(map.values());
   };
 

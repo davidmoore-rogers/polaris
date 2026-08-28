@@ -82,8 +82,8 @@ describe("_userMenuItems", () => {
     // These three are unconditional, which is what guarantees the trigger can
     // never open an empty menu.
     const l = labels(userMenuItems(local()));
-    expect(l).toContain("Change role…");
-    expect(l).toContain("Tags…");
+    expect(l).toContain("Change Role");
+    expect(l).toContain("Assign Tags");
     expect(l).toContain("Delete");
   });
 

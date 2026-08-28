@@ -1148,7 +1148,14 @@ export const deliveryTargetSchema = z.object({
   recipientAllUsers: z.boolean().optional(),
   recipientAllRegions: z.boolean().optional(),
   recipientRegions: z.array(z.string().max(100)).max(200).optional(),
-  recipientTags: z.array(z.string().max(100)).max(200).optional(), // legacy tag-routing (kept for back-compat)
+  // Registry tag NAMES → every user whose effective tag scope carries one.
+  // Authored from the address book's Tags list (and the recipient typeahead),
+  // which offers the tag registry minus the Map Regions category — those
+  // rows are the region catalogue under another name and route through
+  // recipientRegions, which matches region tags ONLY. This one matches the
+  // FLATTENED region-plus-other scope (resolveRecipientUsers), the semantics it
+  // has always had as the back-compat field it started life as.
+  recipientTags: z.array(z.string().max(100)).max(200).optional(),
 });
 
 // ─── Rule-level email composition + escalation ──────────────────────────────
@@ -1169,6 +1176,11 @@ const emailRecipientsSchema = z
     // action because the To/Cc/Bcc token fields treat a pill the same wherever
     // it is dropped — the same reason roles are resolvable in Cc/Bcc.
     recipientRegions: z.array(z.string().max(100)).max(200).optional(),
+    // Registry tag names, same story: the picker lets a tag pill be dropped in
+    // Cc as readily as in To, and this schema is `.strict()` — a shape the
+    // builder can produce but the parser rejects fails the whole save with an
+    // unrecognized-key error naming a field the operator never typed.
+    recipientTags: z.array(z.string().max(100)).max(200).optional(),
   })
   .strict();
 

@@ -157,9 +157,15 @@ beforeAll(() => {
         },
         options: {
           regions: ["Ashfield", "Memphis"],
-          // Nested: Memphis contains Ashfield, so the Regions pane has one row
+          // Nested: Memphis contains Ashfield, so the Tags pane has one row
           // at each level and the Level column has something to tell apart.
           regionLevels: { maxLevel: schemaMaxLevel, byName: { ashfield: 1, memphis: 2 } },
+          // The tag registry, Map Regions rows already dropped server-side —
+          // those are the region catalogue above under their `region:` names.
+          tagCatalog: [
+            { name: "Facilities", category: "Teams" },
+            { name: "Datacenter", category: "Sites" },
+          ],
         },
       }),
       create: async (body: Record<string, unknown>) => { created.push(body); return { contact: { id: "new", ...body } }; },
@@ -247,25 +253,32 @@ describe("renderTab", () => {
     expect(text).toContain("Contact");
   });
 
-  it("browses the region catalogue in its own pane", async () => {
+  it("browses the region and tag catalogues in one pane", async () => {
     await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
     await flush();
-    const regions = doc.getElementById("ab-tab-regions") as unknown as { textContent: string };
-    expect(regions.textContent).toContain("Ashfield");
-    expect(regions.textContent).toContain("Memphis");
-    // Read-only: regions are drawn on the Device Map, never edited here.
-    expect(doc.querySelectorAll("#ab-tab-regions [data-ab-edit]")).toHaveLength(0);
+    const tags = doc.getElementById("ab-tab-tags") as unknown as { textContent: string };
+    // Every row names the PEOPLE it reaches, not the label they carry.
+    expect(tags.textContent).toContain("Ashfield Users");
+    expect(tags.textContent).toContain("Memphis Users");
+    expect(tags.textContent).toContain("Facilities Users");
+    expect(tags.textContent).toContain("Datacenter Users");
+    // Told apart by source, since the two match differently at fire time.
+    expect(tags.textContent).toContain("Region");
+    expect(tags.textContent).toContain("Tag");
+    // Read-only: regions are drawn on the Device Map and tags live in the
+    // registry — neither is edited here.
+    expect(doc.querySelectorAll("#ab-tab-tags [data-ab-edit]")).toHaveLength(0);
   });
 
-  it("shows each region's nesting level in the Regions pane", async () => {
+  it("shows each region's nesting level in the Tags pane", async () => {
     await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
     await flush();
-    const head = doc.querySelector("#ab-tab-regions thead") as unknown as { textContent: string };
+    const head = doc.querySelector("#ab-tab-tags thead") as unknown as { textContent: string };
     expect(head.textContent).toContain("Level");
     // Level sits in its own column, second — and the container reads HIGHER
     // than the region it contains, which is the whole point of showing it.
     const levelOf = (name: string) => {
-      const rows = Array.from(doc.querySelectorAll("#ab-tab-regions tbody tr")) as unknown as {
+      const rows = Array.from(doc.querySelectorAll("#ab-tab-tags tbody tr")) as unknown as {
         textContent: string;
         querySelectorAll: (sel: string) => unknown[];
       }[];
@@ -275,6 +288,8 @@ describe("renderTab", () => {
     };
     expect(levelOf("Ashfield")).toBe("L1");
     expect(levelOf("Memphis")).toBe("L2");
+    // A registry tag has no place in the nesting — an em dash, never "L1".
+    expect(levelOf("Facilities")).toBe("—");
   });
 
   it("leaves the level blank when the catalogue could not be levelled", async () => {
@@ -290,7 +305,7 @@ describe("renderTab", () => {
     try {
       await (window as unknown as { PolarisAddressBook: { renderTab: () => Promise<void> } }).PolarisAddressBook.renderTab();
       await flush();
-      const regions = doc.getElementById("ab-tab-regions") as unknown as { textContent: string };
+      const regions = doc.getElementById("ab-tab-tags") as unknown as { textContent: string };
       expect(regions.textContent).toContain("Ashfield");
       expect(regions.textContent).not.toContain("L1");
     } finally {
@@ -600,26 +615,27 @@ describe("picker selection", () => {
     expect(overlays()).toHaveLength(1); // still open
   });
 
-  it("offers a Regions tab holding the two dynamic entries and the catalogue", async () => {
+  it("offers a Tags tab holding the dynamic entries and both catalogues", async () => {
     (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
       .PolarisAddressBook.openPicker({ field: "to" });
     await flush(5);
 
-    // People is the landing pane; Regions is hidden but present, so switching
+    // People is the landing pane; Tags is hidden but present, so switching
     // keeps the search term and the current selection.
-    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as
+    const pane = doc.querySelector('[data-ab-pane="tags"]') as unknown as
       { style: { display: string }; textContent: string };
     expect(pane).toBeTruthy();
     expect(pane.style.display).toBe("none");
 
-    click(doc.querySelector('[data-ab-tab="regions"]'));
+    click(doc.querySelector('[data-ab-tab="tags"]'));
     expect(pane.style.display).toBe("");
-    // Region users head the Regions list; responsible CONTACTS are people, so
+    // Region users head the Tags list; responsible CONTACTS are people, so
     // they head the People list instead (asserted below).
     expect(pane.textContent).toContain("Region Users");
     expect(pane.textContent).not.toContain("Responsible Contacts");
-    expect(pane.textContent).toContain("Ashfield");
-    expect(pane.textContent).toContain("Memphis");
+    expect(pane.textContent).toContain("Ashfield Users");
+    expect(pane.textContent).toContain("Memphis Users");
+    expect(pane.textContent).toContain("Facilities Users");
   });
 
   it("offers NO level entries while the region catalogue is flat", async () => {
@@ -629,8 +645,8 @@ describe("picker selection", () => {
     (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
       .PolarisAddressBook.openPicker({ field: "to" });
     await flush(5);
-    click(doc.querySelector('[data-ab-tab="regions"]'));
-    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as { textContent: string };
+    click(doc.querySelector('[data-ab-tab="tags"]'));
+    const pane = doc.querySelector('[data-ab-pane="tags"]') as unknown as { textContent: string };
     expect(pane.textContent).toContain("Region Users");
     expect(pane.textContent).not.toContain("L1 Region Users");
     expect(pane.textContent).not.toContain("L2 Region Users");
@@ -642,8 +658,8 @@ describe("picker selection", () => {
     (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<unknown> } })
       .PolarisAddressBook.openPicker({ field: "to" });
     await flush(5);
-    click(doc.querySelector('[data-ab-tab="regions"]'));
-    const pane = doc.querySelector('[data-ab-pane="regions"]') as unknown as { textContent: string };
+    click(doc.querySelector('[data-ab-tab="tags"]'));
+    const pane = doc.querySelector('[data-ab-pane="tags"]') as unknown as { textContent: string };
     expect(pane.textContent).toContain("L1 Region Users");
     expect(pane.textContent).toContain("L2 Region Users");
     expect(pane.textContent).not.toContain("L3 Region Users");
@@ -658,7 +674,7 @@ describe("picker selection", () => {
       PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ field: string; entries: Array<Record<string, unknown>> }> };
     }).PolarisAddressBook.openPicker({ field: "to" });
     await flush(5);
-    click(doc.querySelector('[data-ab-tab="regions"]'));
+    click(doc.querySelector('[data-ab-tab="tags"]'));
     const box = doc.querySelector('[data-ab-pick="deviceRegionLevel|deviceRegionLevel:2"]') as unknown as
       { checked: boolean; dispatchEvent: (e: unknown) => void };
     expect(box).toBeTruthy();
@@ -699,11 +715,12 @@ describe("picker selection", () => {
     const p = (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ field: string; entries: { source: string; id: string }[] } | null> } })
       .PolarisAddressBook.openPicker({ field: "cc" });
     await flush(5);
-    click(doc.querySelector('[data-ab-tab="regions"]'));
+    click(doc.querySelector('[data-ab-tab="tags"]'));
 
-    const boxes = Array.from(doc.querySelectorAll('[data-ab-pane="regions"] [data-ab-pick]'));
-    // deviceRegion, Ashfield, Memphis — assetContacts lives in People now.
-    expect(boxes.length).toBe(3);
+    const boxes = Array.from(doc.querySelectorAll('[data-ab-pane="tags"] [data-ab-pick]'));
+    // deviceRegion, Ashfield, Memphis, Facilities, Datacenter — assetContacts
+    // lives in People now.
+    expect(boxes.length).toBe(5);
     const tick = (el: unknown) => {
       (el as { checked: boolean }).checked = true;
       (el as { dispatchEvent: (e: unknown) => void }).dispatchEvent(new win.Event("change", { bubbles: true }));
@@ -719,7 +736,30 @@ describe("picker selection", () => {
     expect(res!.entries.find((e) => e.source === "region")!.id).toBe("Ashfield");
   });
 
-  it("keeps a People selection when the operator looks at Regions", async () => {
+  it("returns a registry tag as a `tag` entry, apart from regions", async () => {
+    // The two route differently at fire time — a region matches User.regionTags
+    // only, a tag matches the flattened scope — so the picker must not blur
+    // them into one source just because they share a pane.
+    const p = (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ entries: { source: string; id: string }[] } | null> } })
+      .PolarisAddressBook.openPicker({ field: "to" });
+    await flush(5);
+    click(doc.querySelector('[data-ab-tab="tags"]'));
+
+    const box = doc.querySelector('[data-ab-pick="tag|Facilities"]') as unknown as
+      { checked: boolean; dispatchEvent: (e: unknown) => void };
+    expect(box).toBeTruthy();
+    box.checked = true;
+    box.dispatchEvent(new win.Event("change", { bubbles: true }));
+    click(doc.querySelector('[data-ab="add-to"]'));
+    await flush();
+
+    const res = await p;
+    expect(res!.entries).toHaveLength(1);
+    expect(res!.entries[0].source).toBe("tag");
+    expect(res!.entries[0].id).toBe("Facilities");
+  });
+
+  it("keeps a People selection when the operator looks at Tags", async () => {
     const p = (window as unknown as { PolarisAddressBook: { openPicker: (o: unknown) => Promise<{ entries: { source: string }[] } | null> } })
       .PolarisAddressBook.openPicker({ field: "to" });
     await flush(5);
@@ -729,7 +769,7 @@ describe("picker selection", () => {
     person.checked = true;
     person.dispatchEvent(new win.Event("change", { bubbles: true }));
 
-    click(doc.querySelector('[data-ab-tab="regions"]'));
+    click(doc.querySelector('[data-ab-tab="tags"]'));
     click(doc.querySelector('[data-ab-tab="people"]'));
     click(doc.querySelector('[data-ab="add-to"]'));
     await flush();

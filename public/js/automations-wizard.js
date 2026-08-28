@@ -101,7 +101,7 @@ function recipNeedle(s) {
 
 /** Pills → the payload halves. Order preserved, duplicates dropped. */
 function pillsToRecipients(pills) {
-  var userIds = [], addresses = [], roles = [], regions = [], levels = [];
+  var userIds = [], addresses = [], roles = [], regions = [], tags = [], levels = [];
   var out = {};
   (pills || []).forEach(function (p) {
     if (!p || !p.value) return;
@@ -115,6 +115,12 @@ function pillsToRecipients(pills) {
     if (p.kind === "user") { if (userIds.indexOf(p.value) === -1) userIds.push(p.value); }
     else if (p.kind === "role") { if (roles.indexOf(p.value) === -1) roles.push(p.value); }
     else if (p.kind === "region") { if (regions.indexOf(p.value) === -1) regions.push(p.value); }
+    // Registry tags are their OWN kind, not folded in with regions: a region
+    // matches User.regionTags only (resolveUsersByRegions), while a tag matches
+    // the flattened region-plus-other scope (resolveRecipientUsers). Same-named
+    // rows would otherwise reach different people depending on which list the
+    // operator happened to pick from.
+    else if (p.kind === "tag") { if (tags.indexOf(p.value) === -1) tags.push(p.value); }
     else {
       var a = String(p.value).trim().toLowerCase();
       if (a && addresses.indexOf(a) === -1) addresses.push(a);
@@ -124,6 +130,7 @@ function pillsToRecipients(pills) {
   if (addresses.length) out.addresses = addresses;
   if (roles.length) out.recipientRoles = roles;
   if (regions.length) out.recipientRegions = regions;
+  if (tags.length) out.recipientTags = tags;
   if (levels.length) out.recipientDeviceRegionLevels = levels.slice().sort(function (a, b) { return a - b; });
   return out;
 }
@@ -161,6 +168,12 @@ function recipientsToPills(rec, users, roles, maxLevel) {
   });
   ((rec && rec.recipientRegions) || []).forEach(function (name) {
     out.push({ kind: "region", value: name, label: name });
+  });
+  // Tag routing predates the picker offering it (the field was carried for
+  // back-compat and nothing emitted it); it is now the Tags list's own output,
+  // so a stored value has to round-trip as a pill or the next save drops it.
+  ((rec && rec.recipientTags) || []).forEach(function (name) {
+    out.push({ kind: "tag", value: name, label: name });
   });
   ((rec && rec.recipientRoles) || []).forEach(function (id) {
     // Roles are stored by ID, so a renamed role keeps routing; a DELETED one
@@ -247,7 +260,6 @@ function recipientDisplayLabels(rec, catalogs) {
   var users = cat.users || [];
   if (rec.recipientAllUsers) out.push("All users");
   if (rec.recipientAllRegions) out.push("All region users");
-  (rec.recipientTags || []).forEach(function (t) { out.push("Tag: " + t); });
   recipientsToPills(rec, users, cat.roles || [], 0).forEach(function (p) {
     if (p.kind === "user") {
       var u = null;
@@ -257,6 +269,8 @@ function recipientDisplayLabels(rec, catalogs) {
       out.push("Role: " + p.label);
     } else if (p.kind === "region") {
       out.push("Region: " + p.label);
+    } else if (p.kind === "tag") {
+      out.push("Tag: " + p.label);
     } else {
       out.push(p.label);
     }
@@ -1340,7 +1354,7 @@ async function openAutomationWizard(existing, opts) {
   }
   // Scope-picker option lists (distinct manufacturers/models + IPAM subnets) —
   // refreshed every open, they're one cheap query each.
-  var _awScopeOptions = { manufacturers: [], models: [], interfaceNames: [], subnets: [], regions: [] };
+  var _awScopeOptions = { manufacturers: [], models: [], interfaceNames: [], subnets: [], regions: [], tagCatalog: [] };
   try { _awScopeOptions = await api.automations.scopeOptions(); } catch (_e) {}
   if (_awScopeOptions && Array.isArray(_awScopeOptions.roles)) _ruleScopeRoles = _awScopeOptions.roles;
   try { var _cd = await api.deliveryChannels.list(); _ruleChannels = (_cd && _cd.channels) || []; }
@@ -3708,6 +3722,8 @@ async function openAutomationWizard(existing, opts) {
     if (a.recipientAssetContacts) bits.push("responsible contacts");
     var regions = (a.recipientRegions || []).length;
     if (regions) bits.push(regions + " region" + (regions === 1 ? "" : "s"));
+    var tags = (a.recipientTags || []).length;
+    if (tags) bits.push(tags + " tag" + (tags === 1 ? "" : "s"));
     var roles = (a.recipientRoles || []).length;
     if (roles) bits.push(roles + " role" + (roles === 1 ? "" : "s"));
     var named = (a.recipientUserIds || []).length + (a.addresses || []).length;
@@ -5206,6 +5222,29 @@ async function openAutomationWizard(existing, opts) {
       });
   }
 
+  /**
+   * Registry tags matching the typed fragment. Local for the same reason roles
+   * and regions are — the catalogue rode in with /scope-options, and a tag is
+   * not an address, so /contacts/search never returns one.
+   *
+   * `tagCatalog` already excludes the Map Regions category: those rows ARE the
+   * region catalogue under their `region:` registry names, they are offered by
+   * regionSuggestions with their nesting level, and they route through the
+   * region-only matcher. Listing them twice would put the same people behind
+   * two entries that reach different sets.
+   */
+  function tagSuggestions(q) {
+    var needle = String(q || "").toLowerCase();
+    return ((_awScopeOptions && _awScopeOptions.tagCatalog) || [])
+      .filter(function (t) { return String(t && t.name).toLowerCase().indexOf(needle) !== -1; })
+      .map(function (t) {
+        return {
+          source: "tag", id: t.name, email: "", name: t.name,
+          description: "Every user tagged " + t.name + (t.category ? " · " + t.category : ""),
+        };
+      });
+  }
+
   function canReadContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "read"); }
   function canAddContacts() { return typeof permAtLeast === "function" && permAtLeast("contacts", "write"); }
 
@@ -5213,11 +5252,12 @@ async function openAutomationWizard(existing, opts) {
   // The qualifier is what keeps a region called "Ashfield" from reading like a
   // person called "Ashfield" in a list that mixes both.
   var PILL_QUALIFIER = {
-    role: "role:", region: "region:", deviceRegion: "dynamic:",
+    role: "role:", region: "region:", tag: "tag:", deviceRegion: "dynamic:",
     deviceRegionLevel: "dynamic:", assetContacts: "dynamic:",
   };
   var PILL_TITLE = {
     region: "Every user tagged with this region",
+    tag: "Every user carrying this tag",
     deviceRegion: "At fire time: the users whose region tags match the TRIGGERING device’s region (any level)",
     deviceRegionLevel: "At fire time: the users tagged with the region this many levels out from the TRIGGERING device’s own region",
     assetContacts: "At fire time: the address-book contacts whose device filter covers the TRIGGERING device",
@@ -5267,8 +5307,9 @@ async function openAutomationWizard(existing, opts) {
    *    delivery (business rule 25's posture: say no where the operator is
    *    looking).
    */
-  // Every kind that resolves to ACCOUNTS.
-  var PUSH_PILL_KINDS = { user: true, role: true, region: true, deviceRegion: true, deviceRegionLevel: true };
+  // Every kind that resolves to ACCOUNTS. `tag` rides the same reasoning as
+  // `region` — it names user tags, not addresses.
+  var PUSH_PILL_KINDS = { user: true, role: true, region: true, tag: true, deviceRegion: true, deviceRegionLevel: true };
   function pillAllowedInField(kind, field, mode) {
     if (mode === "push" && !PUSH_PILL_KINDS[kind]) return false;
     return !isDynamicKind(kind) || field === "to";
@@ -5284,6 +5325,7 @@ async function openAutomationWizard(existing, opts) {
   function pickerEntryToPill(e) {
     if (!e) return null;
     if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
+    if (e.source === "tag") return { kind: "tag", value: e.id, label: e.id };
     if (e.source === "deviceRegion") return { kind: "deviceRegion", value: "1", label: e.name };
     if (e.source === "deviceRegionLevel") return { kind: DYNAMIC_LEVEL_KIND, value: String(e.level), label: e.name };
     if (e.source === "assetContacts") return { kind: "assetContacts", value: "1", label: e.name };
@@ -5406,6 +5448,7 @@ async function openAutomationWizard(existing, opts) {
         if (isDynamicKind(e.source)) return pickerEntryToPill(e);
         if (e.source === "role") return { kind: "role", value: e.id, label: e.name };
         if (e.source === "region") return { kind: "region", value: e.id, label: e.id };
+        if (e.source === "tag") return { kind: "tag", value: e.id, label: e.id };
         return e.source === "user"
           ? { kind: "user", value: e.id, label: e.name || e.email }
           : { kind: "address", value: e.email, label: e.name ? e.name + " <" + e.email + ">" : e.email };
@@ -5435,12 +5478,12 @@ async function openAutomationWizard(existing, opts) {
         var q = input.value.trim();
         clearTimeout(suggestTimer);
         if (q.length < 2) { closeSuggest(); return; }
-        // Dynamic recipients, roles and regions resolve LOCALLY and show
-        // immediately — all three catalogues are already loaded, so the list
-        // shouldn't wait on a network round trip (or disappear when the caller
-        // lacks contacts:read).
+        // Dynamic recipients, roles, regions and tags resolve LOCALLY and show
+        // immediately — every one of those catalogues is already loaded, so the
+        // list shouldn't wait on a network round trip (or disappear when the
+        // caller lacks contacts:read).
         var local = dynamicSuggestions(q, box.getAttribute("data-field"), mode)
-          .concat(roleSuggestions(q), regionSuggestions(q));
+          .concat(roleSuggestions(q), regionSuggestions(q), tagSuggestions(q));
         if (!canReadContacts()) { openSuggest(local); return; }
         openSuggest(local);
         suggestTimer = setTimeout(function () {
@@ -5971,6 +6014,7 @@ async function openAutomationWizard(existing, opts) {
         if (to.addresses) a.addresses = to.addresses;
         if (to.recipientRoles) a.recipientRoles = to.recipientRoles;
         if (to.recipientRegions) a.recipientRegions = to.recipientRegions;
+        if (to.recipientTags) a.recipientTags = to.recipientTags;
         // The two dynamic pills — on an email action these REPLACE the old
         // checkboxes, so they're collected from the To field and nowhere else.
         if (to.recipientDeviceRegion) a.recipientDeviceRegion = true;
@@ -6338,7 +6382,8 @@ async function openAutomationWizard(existing, opts) {
         var hasTo = (a.recipientUserIds && a.recipientUserIds.length) || (a.addresses && a.addresses.length) ||
           (a.recipientRoles && a.recipientRoles.length);
         var hasRecip = hasTo || a.recipientDeviceRegion || a.recipientScopeRegion || a.recipientAssetContacts ||
-          a.recipientAllUsers || a.recipientAllRegions || (a.recipientRegions && a.recipientRegions.length);
+          a.recipientAllUsers || a.recipientAllRegions || (a.recipientRegions && a.recipientRegions.length) ||
+          (a.recipientTags && a.recipientTags.length);
         if (!hasRecip) return label + " (" + ch.name + "): choose at least one recipient.";
         // A Cc/Bcc-only action silently sends NOTHING: expandDeliveries skips a
         // target whose resolved To list is empty (Graph rejects an empty To).

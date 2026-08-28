@@ -29,7 +29,7 @@ import {
   evaluateScopeCondition,
 } from "./notificationTypes.js";
 import { isBlockedOutboundHost } from "../utils/netGuard.js";
-import { listRegions } from "./mapRegionService.js";
+import { listRegions, REGION_TAG_CATEGORY } from "./mapRegionService.js";
 import { regionLevelIndex } from "./regionHierarchyService.js";
 import { ipInCidr } from "../utils/cidr.js";
 import { invalidateDownDetectionCache } from "./downDetectionService.js";
@@ -221,6 +221,15 @@ export async function listScopeOptions(): Promise<{
    *  global level is asset-relative-wrong on an uneven tree. */
   regionLevels: { maxLevel: number; byName: Record<string, number> };
   roles: { id: string; name: string }[];
+  /** The TAG REGISTRY, for the recipient pickers' Tags list — every operator
+   *  tag an automation can route to, with the category it is filed under so the
+   *  list groups the way the registry page does. Distinct from `tags` on the
+   *  filter-schema payloads, which is the set of tags the INVENTORY currently
+   *  carries: a tag can scope users without being on a single device, and
+   *  routing to it still reaches them. Map Regions rows are excluded — they are
+   *  the region catalogue under another name, already carried (with levels) by
+   *  `regions`, and routing to a region matches region tags ONLY. */
+  tagCatalog: { name: string; category: string }[];
 }> {
   // MONITORED devices only. These lists exist to be picked from, and a
   // manufacturer or model that only unmonitored inventory reports is a choice
@@ -230,7 +239,7 @@ export async function listScopeOptions(): Promise<{
   // event and change triggers fire on them. The subnet list is IPAM, not
   // inventory, so it is unfiltered by the same reasoning.
   const monitoredOnly = { monitored: true } as const;
-  const [mfrRows, modelRows, ifNameRows, subnets, regions, regionLevelsOut, roles] = await Promise.all([
+  const [mfrRows, modelRows, ifNameRows, subnets, regions, regionLevelsOut, roles, tagRows] = await Promise.all([
     prisma.asset.findMany({
       select: { manufacturer: true },
       distinct: ["manufacturer"],
@@ -285,6 +294,17 @@ export async function listScopeOptions(): Promise<{
     // same reason regions do — GET /roles is gated `roles:read`, which an
     // automation editor may not hold.
     prisma.role.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }).catch(() => []),
+    // The tag registry, for the same reason the region catalogue rides here:
+    // GET /server-settings/tags is behind serverSettingsSystem:read, which
+    // someone editing an automation or browsing the address book need not hold.
+    // Tiny table — a few dozen rows on the largest install.
+    prisma.tag
+      .findMany({
+        select: { name: true, category: true },
+        where: { category: { not: REGION_TAG_CATEGORY } },
+        orderBy: [{ category: "asc" }, { name: "asc" }],
+      })
+      .catch(() => [] as { name: string; category: string | null }[]),
   ]);
   return {
     manufacturers: mfrRows.map((r) => r.manufacturer).filter((m): m is string => !!m && m.trim() !== ""),
@@ -296,6 +316,9 @@ export async function listScopeOptions(): Promise<{
     regions: regions.map((r) => r.name).filter((n) => !!n && n.trim() !== "").sort(),
     regionLevels: regionLevelsOut,
     roles,
+    tagCatalog: tagRows
+      .filter((t) => !!t.name && t.name.trim() !== "")
+      .map((t) => ({ name: t.name, category: (t.category || "General").trim() || "General" })),
   };
 }
 

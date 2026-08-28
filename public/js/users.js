@@ -247,8 +247,8 @@ function renderUsersBody() {
 function _userMenuItems(u) {
   var isSelf = currentUsername === u.username;
   var items = [
-    { label: "Change role…", onSelect: function () { openChangeRoleModal(u.id, u.username, u.role ? u.role.id : ""); } },
-    { label: "Tags…", title: "Per-user region + tag scope", onSelect: function () { openUserTagScopeModal(u.id, u.username); } },
+    { label: "Change Role", onSelect: function () { openChangeRoleModal(u.id, u.username, u.role ? u.role.id : ""); } },
+    { label: "Assign Tags", title: "Per-user tag scope (regions included)", onSelect: function () { openUserTagScopeModal(u.id, u.username); } },
   ];
   if (!isIdpManaged(u)) {
     items.push({ label: "Reset password…", onSelect: function () { openResetPasswordModal(u.id, u.username); } });
@@ -356,29 +356,64 @@ function openChangeRoleModal(id, username, currentRoleId) {
   });
 }
 
+/**
+ * Assign Tags — the per-user half of the two tag dimensions.
+ *
+ * ONE picker, not two. A map region is already a registry tag (mapRegionService
+ * mints `region:<name>` in the locked "Map Regions" category on every region
+ * save), so the tag picker below was listing every region alongside a separate
+ * Region Scope control above it: the same names twice, in one dialog.
+ *
+ * The two DIMENSIONS still exist on the wire. `User.regionTags` is what
+ * region-ONLY routing reads (resolveUsersByRegions, the level-scoped recipient
+ * entries, "My regions" on the Device Map), so folding regions into otherTags
+ * would take those users out of it silently. The PREFIX carries the split
+ * instead: the picker is seeded with each region tag under its registry name
+ * (`region:<name>`) and the save routes anything so prefixed back to
+ * regionTags, bare. A region with no registry row — catalogue unreadable,
+ * or the polygon deleted out from under the assignment — round-trips as an
+ * unregistered chip under the same name rather than being dropped.
+ */
+function _splitUserTagScope(tags) {
+  var regionTags = [];
+  var otherTags = [];
+  (tags || []).forEach(function (t) {
+    var v = String(t || "").trim();
+    if (!v) return;
+    if (/^region:/i.test(v)) {
+      var bare = v.slice("region:".length).trim();
+      if (bare && regionTags.indexOf(bare) === -1) regionTags.push(bare);
+    } else if (otherTags.indexOf(v) === -1) {
+      otherTags.push(v);
+    }
+  });
+  return { regionTags: regionTags, otherTags: otherTags };
+}
+
 function openUserTagScopeModal(id, username) {
   var user = _usersRaw.filter(function (u) { return u.id === id; })[0];
   var current = (user && Array.isArray(user.regionTags)) ? user.regionTags.slice() : [];
   var currentOther = (user && Array.isArray(user.otherTags)) ? user.otherTags.slice() : [];
+  var seeded = current.map(function (n) { return "region:" + n; }).concat(currentOther);
   var help =
     '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
       'Per-user tag scope for <strong>' + escapeHtml(username) + '</strong>. ' +
-      'Empty = unrestricted. Effective scope is the union of the role\'s tags, ' +
-      'these per-user tags, and any tags granted by the user\'s IdP groups.' +
+      'Empty = unrestricted. Effective scope is the union of the tags on the ' +
+      'user&rsquo;s role, these per-user tags, and any granted by the ' +
+      'user&rsquo;s IdP groups. Map regions appear as ' +
+      '<code>region:&lt;name&gt;</code> under the <strong>Map Regions</strong> group.' +
     '</p>';
   var body = help +
-    '<div class="form-group"><label>Region Scope</label>' + regionPickerHtml("f-user-regions", current) + '</div>' +
-    '<div class="form-group"><label>Tags</label>' + otherTagsPickerHtml("f-user-other", currentOther) + '</div>';
+    '<div class="form-group"><label>Tags</label>' + otherTagsPickerHtml("f-user-other", seeded) + '</div>';
   var footer = '<button class="btn btn-secondary" id="btn-cancel">Cancel</button><button class="btn btn-primary" id="btn-save">Save</button>';
-  openModal("User Tag Scope", body, footer);
+  openModal("Assign Tags", body, footer);
   document.getElementById("btn-cancel").addEventListener("click", closeModal);
   document.getElementById("btn-save").addEventListener("click", async function () {
     var btn = this;
     btn.disabled = true;
     try {
-      var regionTags = collectRegionPicker("f-user-regions");
-      var otherTags = collectOtherTags("f-user-other");
-      await api.users.updateRegions(id, { regionTags: regionTags, otherTags: otherTags });
+      var split = _splitUserTagScope(collectOtherTags("f-user-other"));
+      await api.users.updateRegions(id, { regionTags: split.regionTags, otherTags: split.otherTags });
       closeModal();
       showToast("Tag scope updated for " + username);
       loadUsers();
@@ -1712,6 +1747,12 @@ function collectRegionPicker(idPrefix) {
 // assignment alone. Used in the role slide-over, the per-user tag modal, and
 // the Group Mappings slide-over.
 
+// The one category the tag registry refuses hand-created rows in: every tag in
+// it is minted by a Device Map region save (REGION_TAG_CATEGORY in
+// mapRegionService, which is the authority). Mirrored here so the Category box
+// never suggests it.
+var REGION_TAG_CATEGORY = "Map Regions";
+
 // Catalogue state. Loaded once per page load by loadTagList().
 var _tagList = [];              // registry tag names, category-then-name order
 var _tagByName = {};            // lower(name) → the registry row
@@ -1804,7 +1845,7 @@ function otherTagsPickerHtml(idPrefix, selected) {
   var gridHtml = "";
   if (_tagCatalogLoaded) {
     if (_tagList.length === 0) {
-      gridHtml = '<div style="font-size:0.85rem;color:var(--color-text-tertiary);padding:0.5rem;border:1px dashed var(--color-border);border-radius:6px">No tags defined yet. Add one below, or manage the full registry on Server Settings → Identification.</div>';
+      gridHtml = '<div class="other-tags-empty" style="font-size:0.85rem;color:var(--color-text-tertiary);padding:0.5rem;border:1px dashed var(--color-border);border-radius:6px">No tags defined yet. Add one below, or manage the full registry on Server Settings → Identification.</div>';
     } else {
       var groups = [];
       var byCat = {};
@@ -1830,10 +1871,34 @@ function otherTagsPickerHtml(idPrefix, selected) {
   var addHint = !_tagCatalogLoaded
     ? "Tags are stored on this assignment as typed."
     : (canCreateRegistryTags()
-        ? "A name that isn't in the list above is created as a new tag."
+        ? "A name that isn't in the list above is created as a new tag in the category beside it."
         : "A name that isn't in the list above applies to this assignment only — creating registry tags requires Server Settings full write.");
+  // The Category box only appears for a caller who can actually create a
+  // registry row. Without that grant a typed name attaches to this assignment
+  // alone — there is no row for a category to land on, and offering the field
+  // would ask for a value that is then discarded. Map Regions is left out of
+  // the suggestions on purpose: the registry refuses a hand-created tag in it
+  // (mapRegionService owns every row there), so offering it would only produce
+  // a 409 the operator did nothing to deserve.
+  var catList = idPrefix + "-cats";
+  var catHtml = "";
+  if (canCreateRegistryTags()) {
+    var cats = [];
+    _tagList.forEach(function (n) {
+      var c = tagCategoryFor(n);
+      if (c && c !== REGION_TAG_CATEGORY && cats.indexOf(c) === -1) cats.push(c);
+    });
+    if (cats.indexOf("General") === -1) cats.unshift("General");
+    catHtml = '<input type="text" class="other-tags-category" list="' + escapeHtml(catList) + '" ' +
+        'placeholder="Category" autocomplete="off" title="Category for a tag created from this box" ' +
+        'style="width:150px;flex:0 0 150px" value="General">' +
+      '<datalist id="' + escapeHtml(catList) + '">' +
+        cats.map(function (c) { return '<option value="' + escapeHtml(c) + '"></option>'; }).join("") +
+      '</datalist>';
+  }
   var addRow = '<div class="other-tags-add" style="display:flex;gap:0.4rem;margin-top:0.25rem">' +
       '<input type="text" class="other-tags-input" placeholder="Type a tag, press Enter" autocomplete="off" style="flex:1;min-width:0">' +
+      catHtml +
       '<button type="button" class="btn btn-sm btn-secondary other-tags-add-btn">Add</button>' +
     '</div>' +
     '<div style="font-size:0.78rem;color:var(--color-text-tertiary);margin-top:0.25rem">' + escapeHtml(addHint) + '</div>';
@@ -1873,6 +1938,10 @@ function _syncOtherTagChipNote(picker) {
 // reads the way it will after a reload instead of showing the tag twice.
 function _promoteOtherTagChip(picker, name) {
   var want = String(name).toLowerCase();
+  // The registry is no longer empty, so the empty-state note would otherwise
+  // sit directly above the pill it is denying the existence of.
+  var emptyNote = picker.querySelector(".other-tags-empty");
+  if (emptyNote) emptyNote.remove();
   picker.querySelectorAll(".other-tag-chip").forEach(function (c) {
     if ((c.getAttribute("data-tag") || "").toLowerCase() === want) c.remove();
   });
@@ -1882,7 +1951,23 @@ function _promoteOtherTagChip(picker, name) {
   picker.querySelectorAll(".other-tags-cat").forEach(function (g) {
     if (g.getAttribute("data-category") === cat) grid = g.querySelector(".other-tag-pill-grid");
   });
-  if (!grid) grid = picker.querySelector(".other-tag-pill-grid");
+  if (!grid) {
+    // A tag created in a BRAND NEW category has no group to join. Append one
+    // rather than dropping the pill into whichever grid happened to be first,
+    // which would file it under someone else's heading until the next reload.
+    var host = picker.querySelector(".other-tags-add");
+    var block = document.createElement("div");
+    block.className = "other-tags-cat";
+    block.setAttribute("data-category", cat);
+    block.style.marginBottom = "0.5rem";
+    block.innerHTML =
+      '<div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary);margin-bottom:0.25rem">' +
+        escapeHtml(cat) +
+      '</div><div class="other-tag-pill-grid" style="display:flex;flex-wrap:wrap;gap:0.4rem"></div>';
+    if (host) picker.insertBefore(block, host);
+    else picker.appendChild(block);
+    grid = block.querySelector(".other-tag-pill-grid");
+  }
   if (grid) grid.insertAdjacentHTML("beforeend", otherTagPillHtml(name, true));
 }
 
@@ -1916,10 +2001,14 @@ async function addOtherTagChips(input) {
   _syncOtherTagChipNote(picker);
 
   if (!fresh.length || !canCreateRegistryTags()) return;
+  // Read once, after the chips are in: the box is shared by every name in the
+  // comma-separated batch, and blank means the server's own default.
+  var catEl = picker.querySelector(".other-tags-category");
+  var category = catEl && catEl.value.trim() ? catEl.value.trim() : "General";
   for (var i = 0; i < fresh.length; i++) {
     var name = fresh[i];
     try {
-      var created = await api.serverSettings.createTag({ name: name });
+      var created = await api.serverSettings.createTag({ name: name, category: category });
       if (created && created.name) {
         _tagByName[String(created.name).toLowerCase()] = created;
         if (_tagList.indexOf(created.name) === -1) _tagList.push(created.name);

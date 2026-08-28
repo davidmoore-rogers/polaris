@@ -488,6 +488,48 @@
     },
   };
 
+  /**
+   * The routable TAG rows, built from one filter-schema payload.
+   *
+   * Every row here names a set of USERS reached by a tag on their scope, so
+   * they all read "<tag> Users" — what the operator is choosing is the
+   * people, not the label. Two sources, deliberately kept apart because they
+   * match differently at fire time:
+   *
+   *   region → resolveUsersByRegions, which matches User.regionTags ONLY.
+   *             Regions come from `options.regions` rather than out of the
+   *             registry (where they exist as `region:<name>` in the Map
+   *             Regions category) because that list carries the nesting LEVEL
+   *             the column shows, and needs no mapRegions:read.
+   *   tag    → resolveRecipientUsers, which matches the flattened region-plus-
+   *             other scope. `options.tagCatalog` is the registry with the Map
+   *             Regions rows already dropped, so a region can't appear twice
+   *             under two matching rules.
+   *
+   * Regions first: they are the older vocabulary and the one the dynamic
+   * asset-relative entries above them belong to.
+   */
+  function tagRoutingEntries(schema) {
+    var opts = (schema && schema.options) || {};
+    var levels = (opts.regionLevels && opts.regionLevels.byName) || {};
+    var regions = (opts.regions || []).map(function (name) {
+      return {
+        source: "region", id: name, name: name + " Users",
+        level: levels[String(name).toLowerCase()],
+        description: "Every user tagged with the " + name + " region",
+      };
+    });
+    var tags = (opts.tagCatalog || []).map(function (t) {
+      var name = (t && t.name) || String(t || "");
+      return {
+        source: "tag", id: name, name: name + " Users",
+        description: "Every user tagged " + name +
+          (t && t.category ? " · " + t.category : ""),
+      };
+    });
+    return regions.concat(tags);
+  }
+
   // ─── Tab surface ───────────────────────────────────────────────────────────
 
   /**
@@ -521,7 +563,7 @@
     return '' +
       '<div class="page-tabs" id="ab-tab-tabs" style="margin-bottom:10px">' +
         '<button type="button" class="page-tab active" data-ab-ttab="people">People</button>' +
-        '<button type="button" class="page-tab" data-ab-ttab="regions">Regions</button>' +
+        '<button type="button" class="page-tab" data-ab-ttab="tags">Tags</button>' +
       '</div>' +
       '<div data-ab-tpane="people">' +
         '<div class="form-group" style="margin-bottom:8px">' +
@@ -533,14 +575,15 @@
         '</div>' +
         '<div id="ab-tab-results"><p class="empty-state">Loading…</p></div>' +
       '</div>' +
-      '<div data-ab-tpane="regions" style="display:none">' +
-        '<p class="hint" style="margin-top:0">Regions come from the polygons drawn on the Device Map. ' +
-          'An automation’s <strong>Notify</strong> action can route to a region to reach every user tagged ' +
-          'with it, or to the region of the device that triggered the alert. Nothing here is edited on this ' +
-          'page — draw or rename a region on the Device Map, and tag users with it under Users. ' +
-          '<strong>Level</strong> follows from how the polygons nest: L1 is an innermost region, and each level ' +
-          'above it contains the one below.</p>' +
-        '<div id="ab-tab-regions"><p class="empty-state">Loading…</p></div>' +
+      '<div data-ab-tpane="tags" style="display:none">' +
+        '<p class="hint" style="margin-top:0">Every tag an automation’s <strong>Notify</strong> action can ' +
+          'route to, and the users each one reaches. Map regions come from the polygons drawn on the Device Map; ' +
+          'the rest are the tag registry. Nothing here is edited on this page — draw or rename a region on the ' +
+          'Device Map, manage tags under Server Settings → Identification, and assign either to people with ' +
+          '<strong>Assign Tags</strong> under Users. ' +
+          '<strong>Level</strong> applies to regions only and follows from how the polygons nest: L1 is an ' +
+          'innermost region, and each level above it contains the one below.</p>' +
+        '<div id="ab-tab-tags"><p class="empty-state">Loading…</p></div>' +
       '</div>';
   }
 
@@ -685,27 +728,22 @@
     box.innerHTML = abTable(tabPeopleCols(), rows, hint);
   }
 
-  function loadTabRegions() {
-    var box = document.getElementById("ab-tab-regions");
+  function loadTabTags() {
+    var box = document.getElementById("ab-tab-tags");
     if (!box) return;
     var cols = [AB_CELLS.name, AB_CELLS.level, AB_CELLS.description, AB_CELLS.source];
+    // Levels and the registry both ride the filter-schema payload — GET
+    // /map/regions is gated `mapRegions:read` and GET /server-settings/tags
+    // behind `serverSettingsSystem:read`, neither of which someone browsing the
+    // address book need hold.
     return loadFilterSchema().then(function (schema) {
-      // Levels ride the filter-schema payload alongside the names themselves —
-      // GET /map/regions is gated `mapRegions:read`, which someone browsing the
-      // address book need not hold. Keyed lower-cased, as the server derives it.
-      var levels = (schema.options && schema.options.regionLevels && schema.options.regionLevels.byName) || {};
-      var regions = ((schema.options && schema.options.regions) || []).map(function (name) {
-        return {
-          source: "region", id: name, name: name,
-          level: levels[String(name).toLowerCase()],
-          description: "Every user tagged with this region",
-        };
-      });
-      box.innerHTML = abTable(cols, regions, regions.length ? "" :
-        '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>');
+      var rows = tagRoutingEntries(schema);
+      box.innerHTML = abTable(cols, rows, rows.length ? "" :
+        '<p class="hint" style="margin:8px 0 0">No tags or map regions are defined yet — draw regions on the ' +
+        'Device Map, or add tags under Server Settings → Identification.</p>');
     }).catch(function (err) {
       box.innerHTML = '<p class="empty-state">' +
-        escapeHtml((err && err.message) || "Failed to load the region catalogue") + "</p>";
+        escapeHtml((err && err.message) || "Failed to load the tag catalogue") + "</p>";
     });
   }
 
@@ -789,7 +827,7 @@
       host._abShell = true;
       wireTab(host);
     }
-    await Promise.all([loadTabPeople(), loadTabRegions()]);
+    await Promise.all([loadTabPeople(), loadTabTags()]);
   }
 
   // ─── Picker surface (opened from the wizard's recipient fields) ───────────
@@ -803,7 +841,8 @@
    *
    * They live in DIFFERENT panes, by what they resolve to: responsible contacts
    * are people out of this very address book, so they head the People list;
-   * region users are reached BY region, so they head the Regions list. Each sits
+   * region users are reached BY a tag on their scope, so they head the Tags
+   * list alongside the named regions and registry tags. Each sits
    * at the top of its pane rather than in the results, because it isn't a search
    * hit — it's the standing answer to "whoever owns the device".
    */
@@ -855,11 +894,11 @@
   function pickerBodyHtml() {
     return '' +
       // Two tabs rather than one merged list: people are SEARCHED (typeahead over
-      // users, contacts and the directory) while regions are BROWSED (a short
-      // fixed catalogue), and a search box over a dozen region names is noise.
+      // users, contacts and the directory) while tags are BROWSED (a short fixed
+      // catalogue), and a search box over a couple of dozen tag names is noise.
       '<div class="page-tabs" id="ab-pick-tabs" style="margin-bottom:10px">' +
         '<button type="button" class="page-tab active" data-ab-tab="people">People</button>' +
-        '<button type="button" class="page-tab" data-ab-tab="regions">Regions</button>' +
+        '<button type="button" class="page-tab" data-ab-tab="tags">Tags</button>' +
       '</div>' +
       '<div data-ab-pane="people">' +
         '<div class="form-group" style="margin-bottom:8px">' +
@@ -868,12 +907,12 @@
         '</div>' +
         '<div id="ab-pick-results"><p class="empty-state">Loading…</p></div>' +
       '</div>' +
-      '<div data-ab-pane="regions" style="display:none">' +
-        '<p class="hint" style="margin-top:0">Pick a region to reach every user tagged with it, or ' +
+      '<div data-ab-pane="tags" style="display:none">' +
+        '<p class="hint" style="margin-top:0">Pick a tag to reach every user carrying it, or ' +
           '<strong>Asset’s Region Users</strong>, which resolves from the region of the device that triggered the alert. ' +
           'Where regions are nested, <strong>L1</strong> is the device’s own region and higher levels are the regions ' +
           'that contain it — so L1 reaches the local team and L2 reaches whoever covers the division.</p>' +
-        '<div id="ab-pick-regions"><p class="empty-state">Loading…</p></div>' +
+        '<div id="ab-pick-tags"><p class="empty-state">Loading…</p></div>' +
       '</div>';
   }
 
@@ -887,7 +926,7 @@
    * make visible.
    */
   function pushReachable(en) {
-    return !!en && (en.source === "user" || en.source === "region" ||
+    return !!en && (en.source === "user" || en.source === "region" || en.source === "tag" ||
       en.source === "deviceRegion" || en.source === "deviceRegionLevel");
   }
 
@@ -896,16 +935,18 @@
       : src === "contact" ? "Contact"
         : src === "entra" ? "Entra"
           : src === "region" ? "Region"
-            : (src === "deviceRegion" || src === "deviceRegionLevel" || src === "assetContacts") ? "Dynamic"
-              : "Directory";
+            : src === "tag" ? "Tag"
+              : (src === "deviceRegion" || src === "deviceRegionLevel" || src === "assetContacts") ? "Dynamic"
+                : "Directory";
     return '<span class="badge" style="font-size:0.7rem">' + escapeHtml(label) + "</span>";
   }
 
   /**
    * Stable selection key. People key on the ADDRESS (so the same mailbox reached
    * as a user and as a contact is one selection, which is what the search's own
-   * dedupe already assumes); region and dynamic entries have no address, so they
-   * key on source + id.
+   * dedupe already assumes); tag, region and dynamic entries have no address, so
+   * they key on source + id — which is also what keeps a registry tag and a
+   * same-named region apart, since the two route through different fields.
    */
   function pickKey(e) {
     return e.email ? String(e.email).toLowerCase() : e.source + "|" + e.id;
@@ -936,7 +977,7 @@
       var chosen = {};       // pickKey → entry
       var settled = null;
       var entries = [];       // People pane (search results)
-      var regionEntries = []; // Regions pane (one row per map region)
+      var tagEntries = [];    // Tags pane (one row per map region + registry tag)
       var regionMaxLevel = 1;  // how deep nesting goes — decides the level entries
 
       var ui = buildOverlay(
@@ -1035,19 +1076,20 @@
       }
 
       /**
-       * The Regions pane: the two dynamic entries first — they're what an
-       * operator reaches for most, and they need no region catalogue at all —
-       * then one row per operator-drawn map region.
+       * The Tags pane: the dynamic entries first — they're what an operator
+       * reaches for most, and they need no catalogue at all — then one row per
+       * operator-drawn map region, then the tag registry.
        */
-      function renderRegions() {
-        var box = q("#ab-pick-regions");
+      function renderTags() {
+        var box = q("#ab-pick-tags");
         if (!box) return;
         box.innerHTML = abTable(
           pickCols(),
-          regionDynamicEntries(regionMaxLevel).concat(regionEntries),
-          regionEntries.length
+          regionDynamicEntries(regionMaxLevel).concat(tagEntries),
+          tagEntries.length
             ? ""
-            : '<p class="hint" style="margin:8px 0 0">No map regions are defined yet — draw them on the Device Map to route by region.</p>',
+            : '<p class="hint" style="margin:8px 0 0">No tags or map regions are defined yet — draw regions on ' +
+              'the Device Map, or add tags under Server Settings → Identification.</p>',
         );
       }
 
@@ -1064,7 +1106,7 @@
       }
 
       // Tab switching. Both panes stay in the DOM, so the People search term and
-      // the current selection survive a look at the Regions list.
+      // the current selection survive a look at the Tags list.
       root.querySelectorAll("[data-ab-tab]").forEach(function (btn) {
         btn.addEventListener("click", function () {
           var want = btn.getAttribute("data-ab-tab");
@@ -1090,7 +1132,7 @@
         var key = cb.getAttribute("data-ab-pick");
         // Both panes' pools, so a selection survives switching tabs — every
         // paint re-reads the checkbox state from `chosen`.
-        var pool = entries.concat(peopleHead(), regionDynamicEntries(regionMaxLevel), regionEntries);
+        var pool = entries.concat(peopleHead(), regionDynamicEntries(regionMaxLevel), tagEntries);
         var entry = null;
         for (var i = 0; i < pool.length; i++) if (pickKey(pool[i]) === key) entry = pool[i];
         if (cb.checked && entry) chosen[key] = entry;
@@ -1134,18 +1176,16 @@
       });
 
       load("");
-      // The region catalogue rides the filter-schema payload (which already
-      // carries options.regions from listScopeOptions), so the picker needs no
+      // Both catalogues ride the filter-schema payload (options.regions and
+      // options.tagCatalog, from listScopeOptions), so the picker needs no
       // second endpoint and no permission the address book lacks.
       loadFilterSchema().then(function (schema) {
-        regionEntries = ((schema.options && schema.options.regions) || []).map(function (name) {
-          return { source: "region", id: name, name: name, description: "Every user tagged with this region" };
-        });
+        tagEntries = tagRoutingEntries(schema);
         var lv = schema.options && schema.options.regionLevels;
         regionMaxLevel = lv && typeof lv.maxLevel === "number" ? lv.maxLevel : 1;
-        renderRegions();
+        renderTags();
       }).catch(function () {
-        renderRegions(); // degrade to the two dynamic entries — they need no catalogue
+        renderTags(); // degrade to the dynamic entries — they need no catalogue
       });
     });
   }

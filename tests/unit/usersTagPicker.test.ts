@@ -36,6 +36,8 @@ vi.mock("../../src/db.js", () => ({ prisma: {} }));
 const g = globalThis as Record<string, any>;
 let otherTagsPickerHtml: (idPrefix: string, selected: string[]) => string;
 let collectOtherTags: (idPrefix: string) => string[];
+let addOtherTagChips: (input: unknown) => Promise<void>;
+let splitUserTagScope: (tags: string[]) => { regionTags: string[]; otherTags: string[] };
 
 interface TagRow { name: string; color: string; category: string }
 
@@ -109,8 +111,12 @@ beforeAll(() => {
   (0, eval)(readFileSync(resolve(__dirname, "../../public/js/users.js"), "utf8"));
   otherTagsPickerHtml = g.otherTagsPickerHtml as typeof otherTagsPickerHtml;
   collectOtherTags = g.collectOtherTags as typeof collectOtherTags;
+  addOtherTagChips = g.addOtherTagChips as typeof addOtherTagChips;
+  splitUserTagScope = g._splitUserTagScope as typeof splitUserTagScope;
   expect(typeof otherTagsPickerHtml, "users.js no longer declares otherTagsPickerHtml").toBe("function");
   expect(typeof collectOtherTags, "users.js no longer declares collectOtherTags").toBe("function");
+  expect(typeof addOtherTagChips, "users.js no longer declares addOtherTagChips").toBe("function");
+  expect(typeof splitUserTagScope, "users.js no longer declares _splitUserTagScope").toBe("function");
 });
 
 beforeEach(() => {
@@ -186,5 +192,124 @@ describe("collectOtherTags", () => {
 
   it("returns [] for a picker that isn't on the page", () => {
     expect(collectOtherTags("f-nope")).toEqual([]);
+  });
+});
+
+/**
+ * The Category box beside the tag input.
+ *
+ * Creating a registry row from this picker used to file every tag under the
+ * server's "General" default with no way to say otherwise, so a tag added while
+ * assigning scope landed in a category nobody chose and had to be moved on the
+ * registry page afterwards.
+ */
+describe("tag creation category", () => {
+  it("offers a Category box, defaulted to General, to a caller who may create tags", () => {
+    mount([]);
+    const box = g.document.querySelector(".other-tags-category") as any;
+    expect(box).toBeTruthy();
+    expect(box.value).toBe("General");
+    // The existing categories are suggestions, not a closed list -- a new one
+    // is typed straight in.
+    const opts = Array.from(g.document.querySelectorAll("datalist option")).map(
+      (o: any) => o.getAttribute("value"),
+    );
+    expect(opts).toContain("Compliance");
+    expect(opts).toContain("General");
+  });
+
+  it("never suggests Map Regions, which the registry refuses by hand", () => {
+    // Every row in that category is minted by a Device Map region save, so a
+    // hand-created sibling is a 409 the operator did nothing to earn.
+    setCatalog(true, CATALOG.concat([{ name: "region:Ashfield", color: "#4fc3f7", category: "Map Regions" }]));
+    mount([]);
+    const opts = Array.from(g.document.querySelectorAll("datalist option")).map(
+      (o: any) => o.getAttribute("value"),
+    );
+    expect(opts).not.toContain("Map Regions");
+  });
+
+  it("hides the Category box from a caller who cannot create registry rows", () => {
+    // Without the grant a typed name attaches to this assignment alone, so
+    // there is no row for a category to land on.
+    const perm = g.permAtLeast;
+    g.permAtLeast = (key: string, level: string) => !(key === "serverSettingsSystem" && level === "fullwrite");
+    try {
+      mount([]);
+      expect(g.document.querySelector(".other-tags-category")).toBeNull();
+    } finally {
+      g.permAtLeast = perm;
+    }
+  });
+
+  it("sends the typed category through to the registry create", async () => {
+    const posted: any[] = [];
+    const orig = g.api.serverSettings.createTag;
+    g.api.serverSettings.createTag = async (b: any) => {
+      posted.push(b);
+      return { name: b.name, category: b.category, color: "#9e9e9e" };
+    };
+    try {
+      mount([]);
+      const cat = g.document.querySelector(".other-tags-category") as any;
+      cat.value = "Sites";
+      const input = g.document.querySelector(".other-tags-input") as any;
+      input.value = "Memphis-DC";
+      await addOtherTagChips(input);
+      expect(posted).toEqual([{ name: "Memphis-DC", category: "Sites" }]);
+    } finally {
+      g.api.serverSettings.createTag = orig;
+    }
+  });
+
+  it("files a brand-new category under its own heading rather than someone else's", async () => {
+    const orig = g.api.serverSettings.createTag;
+    g.api.serverSettings.createTag = async (b: any) => ({ name: b.name, category: b.category, color: "#9e9e9e" });
+    try {
+      mount([]);
+      (g.document.querySelector(".other-tags-category") as any).value = "Sites";
+      const input = g.document.querySelector(".other-tags-input") as any;
+      input.value = "Memphis-DC";
+      await addOtherTagChips(input);
+      const group = g.document.querySelector('.other-tags-cat[data-category="Sites"]') as any;
+      expect(group).toBeTruthy();
+      expect(group.querySelector('.other-tag-pill[data-tag="Memphis-DC"]')).toBeTruthy();
+      // Promoted, not duplicated: the chip it was added as is gone.
+      expect(chips()).toEqual([]);
+    } finally {
+      g.api.serverSettings.createTag = orig;
+    }
+  });
+});
+
+/**
+ * Assign Tags folds the old Region Scope control into this one picker, so the
+ * PREFIX is now what keeps the two stored dimensions apart. Getting this wrong
+ * takes a scoped operator out of every region-only consumer -- the level-scoped
+ * recipient entries, "My regions" on the Device Map -- with the tag still
+ * visibly on their account.
+ */
+describe("_splitUserTagScope", () => {
+  it("routes region-prefixed names to regionTags, bare, and the rest to otherTags", () => {
+    expect(splitUserTagScope(["region:Ashfield", "PCI", "region:Memphis"])).toEqual({
+      regionTags: ["Ashfield", "Memphis"],
+      otherTags: ["PCI"],
+    });
+  });
+
+  it("matches the prefix case-insensitively", () => {
+    // The registry row is `region:<name>`, but a hand-typed chip need not be.
+    expect(splitUserTagScope(["Region:Ashfield"]).regionTags).toEqual(["Ashfield"]);
+  });
+
+  it("drops blanks and duplicates without dropping a real assignment", () => {
+    expect(splitUserTagScope(["", "  ", "region:Ashfield", "region:Ashfield", "PCI", "PCI"])).toEqual({
+      regionTags: ["Ashfield"],
+      otherTags: ["PCI"],
+    });
+  });
+
+  it("keeps a bare prefix out of regionTags rather than storing an empty region", () => {
+    expect(splitUserTagScope(["region:", "PCI"])).toEqual({ regionTags: [], otherTags: ["PCI"] });
   });
 });
