@@ -487,8 +487,12 @@ async function _warnIfNoBlocksForIntegrationType(integrationType, integrationNam
 // Toggle FMG integration form between proxy and direct modes.
 // `useDirect=true` means bypass FMG and query each FortiGate directly;
 // the on-disk integration field stays `useProxy` (true=proxy) — only the
-// UI semantics are inverted. Shows/hides the FortiGate credentials block
-// and locks the parallelism input.
+// UI semantics are inverted.
+//
+// Toggles ONLY the direct-mode-only knob (parallelism). It used to show/hide
+// the FortiGate credentials block too; those stay visible in both transports
+// now, because a proxy-mode integration still needs them for any stream set to
+// REST API.
 function _fmgToggleDirectMode(useDirect) {
   var directBlock = document.getElementById("f-direct-mode-block");
   var parallelInput = document.getElementById("f-discoveryParallelism");
@@ -3595,6 +3599,11 @@ function monitorSettingsFormHTML(s, opts) {
 // `f-fortigateApiToken`, `f-fortigateVerifySsl`) all stay so
 // `getFormConfig()` and `_fmgToggleDirectMode()` keep reading them unchanged.
 // UI semantic: checked = direct (useProxy=false); unchecked = proxy.
+//
+// `#f-direct-mode-block` now wraps ONLY the genuinely direct-mode-only knob
+// (parallelism). The FortiGate REST credentials moved out below it and are
+// always visible, because they are not a property of the transport — see the
+// comment at that block.
 function _fmgDirectModeBlockHTML(d) {
   return sectionHeading("Direct polling") +
     '<div style="background:rgba(79,195,247,0.08);border:1px solid rgba(79,195,247,0.2);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
@@ -3604,7 +3613,19 @@ function _fmgDirectModeBlockHTML(d) {
       '</div>' +
       '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Bypass FortiManager proxy to directly poll discovered FortiGates. Some information is still gathered through FortiManager.</p>' +
       '<div id="f-direct-mode-block" style="' + (d.useProxy === false ? "" : "display:none;") + 'border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.25rem">' +
-        '<div class="form-group"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently. Recommended when monitoring more than 20 FortiGates — proxy mode polls them one at a time.</p></div>' +
+        '<div class="form-group" style="margin-bottom:0"><label>Parallel FortiGate Queries</label><div style="display:flex;align-items:center;gap:8px"><input type="number" id="f-discoveryParallelism" value="' + (d.useProxy === false ? (d.discoveryParallelism || 5) : 1) + '" min="1" max="20" style="width:80px"><span id="f-parallelism-note" style="color:var(--color-text-tertiary);font-size:0.85rem">gates at once</span></div><p class="hint">Up to 20 FortiGates concurrently. Recommended when monitoring more than 20 FortiGates — proxy mode polls them one at a time.</p></div>' +
+      '</div>' +
+      // Credentials sit OUTSIDE #f-direct-mode-block on purpose. They are not
+      // direct-mode-only: every FortiOS REST monitoring collector builds its
+      // config from these same two fields via buildFortinetConfig(), in BOTH
+      // transports — so while they lived inside the collapsible block, a
+      // proxy-mode integration had no way to supply the credential its own
+      // CPU/memory, temperature and interface streams need, and those streams
+      // failed with "FortiManager direct-mode API token not configured" on
+      // every tick with no field on screen to fix it.
+      '<div style="border-top:1px solid rgba(79,195,247,0.2);padding-top:0.75rem;margin-top:0.75rem">' +
+        '<div style="font-weight:500;margin-bottom:0.35rem">FortiGate REST credentials</div>' +
+        '<p style="font-size:0.82rem;color:var(--color-text-secondary);line-height:1.5;margin:0 0 0.6rem 0">Used by Direct Polling above, and by any monitoring stream set to REST API — including under FortiManager proxy. Leave blank if every stream uses ICMP or SNMP.</p>' +
         '<div class="form-group"><label>FortiGate API User</label><input type="text" id="f-fortigateApiUser" value="' + escapeHtml(d.fortigateApiUser || "") + '" placeholder="e.g. polaris-ro"><p class="hint">REST API admin username configured on each managed FortiGate</p></div>' +
         '<div class="form-group"><label>FortiGate API Token</label><input type="password" id="f-fortigateApiToken" value="' + (d.fortigateApiTokenPlaceholder ? "" : escapeHtml(d.fortigateApiToken || "")) + '" placeholder="' + (d.fortigateApiTokenPlaceholder || "Bearer token") + '"><p class="hint">Bearer token for the above admin. Must be the same across all managed FortiGates.</p></div>' +
         '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0">' +
