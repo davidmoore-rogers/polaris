@@ -1479,6 +1479,47 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
     // when present. Detail tier needs no extra query: its own newest
     // successful sample already is the answer.
     const lastSuccessAt = pick.tier === "detail" ? null : await readLastMonitorSuccessAt(id, since);
+    // WHICH MISSES ARE ALREADY A VERDICT. The chart replays the leaky bucket to
+    // colour its dive (business rule 30 + 36): amber while the count is short
+    // of the covering automation's `missedPolls`, red once it reaches it — the
+    // same split the Last-30-min strip draws directly above it. It rides this
+    // payload rather than a second request because the chart renders the moment
+    // this resolves, and a threshold arriving later would repaint the outage
+    // under the operator. `passive: true` means no automation covers the device,
+    // so nothing may go red. Reads the resolver's cached index — no query in the
+    // steady state — and degrades to null rather than failing the history.
+    const downCoverage = await describeDownDetectionFor(id).catch(() => null);
+    // The counterpart count: how many probes must ANSWER before the device
+    // reads Up again (business rule 36). The chart needs it for the same reason
+    // the strip does — the climb out of an outage stays purple until the run is
+    // served, which is LONGER than the bucket's drain whenever the automation's
+    // reset asks for more. Resolving it costs an asset read only when the
+    // automation actually sets a reset hold; without one the answer is the
+    // missed-poll count itself and no cadence is involved.
+    let recoveryPolls: number | null = null;
+    const downWinner = downCoverage?.winner ?? null;
+    if (downWinner) {
+      if (!downWinner.recoverySustainSec) {
+        recoveryPolls = downWinner.threshold;
+      } else {
+        const ctx = await prisma.asset.findUnique({
+          where: { id },
+          select: {
+            assetType: true, discoveredByIntegrationId: true, monitorIntervalSec: true,
+            cpuMemoryIntervalSec: true, temperatureIntervalSec: true, systemInfoIntervalSec: true,
+            probeTimeoutMs: true,
+            discoveredByIntegration: { select: { type: true } },
+          },
+        });
+        if (ctx) {
+          const resolved = await resolveMonitorSettings({
+            ...ctx,
+            discoveredByIntegrationType: ctx.discoveredByIntegration?.type ?? null,
+          });
+          recoveryPolls = recoveryPollsFor(downWinner, resolved.intervalSeconds);
+        }
+      }
+    }
     res.json({
       range: rangeLabel,
       since,
@@ -1486,6 +1527,9 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
       tier: pick.tier,
       bucketSeconds: pick.bucketSeconds,
       lastSuccessAt,
+      downDetection: downCoverage
+        ? { passive: downCoverage.passive, missedPolls: downWinner?.threshold ?? null, recoveryPolls }
+        : null,
       samples: result.samples,
       stats: result.stats,
     });

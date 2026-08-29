@@ -22,7 +22,9 @@
  */
 
 import { prisma } from "../db.js";
-import { foldProbeOutages, type OutageKind } from "./probeOutageService.js";
+import { foldProbeOutages, foldProbeRecoveries, replayProbeStates, type OutageKind } from "./probeOutageService.js";
+import { describeDownDetectionFor, recoveryPollsFor } from "./downDetectionService.js";
+import { resolveMonitorSettings } from "./monitoringService.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
@@ -121,7 +123,13 @@ const META: Record<ChartToken, { label: string; unit: string; color: string; per
   "chart.sensor": { label: "Sensor", unit: "", color: "#ea580c", percent: false },
   "chart.cpu": { label: "CPU", unit: "%", color: "#2563eb", percent: true },
   "chart.memory": { label: "Memory", unit: "%", color: "#7c3aed", percent: true },
-  "chart.responseTime": { label: "Response time", unit: " ms", color: "#0891b2", percent: false },
+  // The Up green, not a neutral accent. Response time is the one chart that is
+  // ABOUT reachability, so it speaks the same four colours as the Status pill
+  // and the Last-30-min strip — green up, purple paying it back, red down, grey
+  // explained — exactly as the device page's own response-time chart does.
+  // Flat hex (a mail client has no theme to read) picked from the daylight
+  // themes' --color-success, because the email card is white.
+  "chart.responseTime": { label: "Response time", unit: " ms", color: "#2e7d32", percent: false },
   "chart.probeLoss": { label: "Packet loss", unit: "%", color: "#dc2626", percent: true },
 };
 
@@ -280,6 +288,12 @@ async function loadResponseTimes(assetId: string, since: Date): Promise<SparkPoi
  *  is about a reading that is still arriving). */
 const FAIL_SPAN_TOKENS: ReadonlySet<ChartToken> = new Set(["chart.cpu", "chart.memory", "chart.responseTime"]);
 
+/** The charts that also draw the climb back OUT in purple. Just the one: the
+ *  response-time chart is the only email chart about a VERDICT rather than a
+ *  reading, which is the same line the in-app charts draw — CPU and memory keep
+ *  their own series colour there too, so purple cannot come to mean two things. */
+const RECOVER_SPAN_TOKENS: ReadonlySet<ChartToken> = new Set(["chart.responseTime"]);
+
 export interface FailSpanSeries {
   /**
    * Merged consecutive-failure spans, for the line dives. `kind` carries the
@@ -288,6 +302,14 @@ export interface FailSpanSeries {
    * the reader still sees that nothing was measured there.
    */
   spans: Array<{ from: number; to: number; kind: OutageKind }>;
+  /**
+   * Stretches where polls were ANSWERING with misses still outstanding — the
+   * climb back out. Only the response-time chart uses them (see
+   * RECOVER_SPAN_TOKENS); they ride this series because they are read from the
+   * same probe rows, and the plotted points — successes only — could not
+   * reconstruct the leaky bucket without the failures beside them.
+   */
+  recoverySpans: Array<{ from: number; to: number }>;
   /** How many polls failed in the window — the text fallback's number. */
   failedCount: number;
 }
@@ -299,22 +321,51 @@ export interface FailSpanSeries {
  * and a run still failing at the newest sample is OPEN — it extends to
  * `windowEndMs` (the chart's "now"), because a device that is down as the
  * email sends is down up to the right edge, not up to its last poll.
+ *
+ * `downThreshold` is the covering automation's missed-poll count, and it is
+ * what splits amber from red: misses below it are "missed" (the device is short
+ * of answers, not yet judged), the probe that reaches it turns the run red.
+ * `null` is the PASSIVE device — no automation defines down for it, so nothing
+ * may go red — and `undefined` means the caller could not resolve one, which
+ * leaves every miss plain red exactly as before.
+ *
+ * `recoveryPolls` is that automation's reset, already converted to a poll count:
+ * how many probes must ANSWER before the device is handed back its Up. It is
+ * what keeps the climb purple past the bucket's drain on a "down after 3 missed,
+ * up after 5 received" automation.
  */
 export function failSpansFrom(
   rows: Array<{ timestamp: Date; success: boolean; dependencyDown?: boolean | null }>,
   windowEndMs: number,
+  downThreshold?: number | null,
+  recoveryPolls = 0,
 ): FailSpanSeries {
-  // ONE fold, shared with the in-app charts (probeOutageService), so an email
-  // and the device page can't disagree about where an outage started and
-  // ended. `openToMs` is what carries a still-failing run out to the right
-  // edge: a device that is down as the email sends is down up to "now".
-  const windows = foldProbeOutages(
-    rows.map((r) => ({ timestamp: r.timestamp, failed: !r.success, dependency: r.dependencyDown === true })),
-    0,
-    windowEndMs,
-  );
+  // ONE replay behind BOTH halves — the amber/red split and the purple climb —
+  // and it is the same state machine the Last-30-min strip runs in the browser
+  // (probeOutageService.replayProbeStates mirrors _intermittencyStates). An
+  // email and the device page describing the same probe differently is exactly
+  // what this vocabulary exists to prevent.
+  //
+  // `undefined` threshold is the UNKNOWN case, distinct from passive: the replay
+  // still runs (the purple needs it) but no miss is labelled "missed", so every
+  // failure keeps the plain red dive it had before.
+  const classify = downThreshold !== undefined;
+  const base = rows.map((r) => ({
+    timestamp: r.timestamp,
+    failed: !r.success,
+    dependency: r.dependencyDown === true,
+  }));
+  const states = replayProbeStates(base, downThreshold ?? null, recoveryPolls);
+  const verdicts = base.map((v, i) => (
+    classify && v.failed && states[i] === "warning" ? { ...v, belowThreshold: true } : v
+  ));
+  // `openToMs` is what carries a still-failing run out to the right edge: a
+  // device that is down as the email sends is down up to "now".
+  const windows = foldProbeOutages(verdicts, 0, windowEndMs);
   return {
     spans: windows.map((w) => ({ from: w.from.getTime(), to: w.to.getTime(), kind: w.kind })),
+    recoverySpans: foldProbeRecoveries(base, downThreshold ?? null, recoveryPolls)
+      .map((w) => ({ from: w.from.getTime(), to: w.to.getTime() })),
     failedCount: rows.reduce((n, r) => (r.success ? n : n + 1), 0),
   };
 }
@@ -326,12 +377,59 @@ export function failSpansFrom(
  * failure the operator's configured cadence never declared.
  */
 async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<FailSpanSeries> {
-  const rows = await prisma.assetMonitorSample.findMany({
-    where: { assetId, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
-    orderBy: { timestamp: "asc" },
-    select: { timestamp: true, success: true, dependencyDown: true },
-  });
-  return failSpansFrom(rows, now.getTime());
+  const [rows, down] = await Promise.all([
+    prisma.assetMonitorSample.findMany({
+      where: { assetId, timestamp: { gte: since }, OR: [{ probeKind: null }, { probeKind: "primary" }] },
+      orderBy: { timestamp: "asc" },
+      select: { timestamp: true, success: true, dependencyDown: true },
+    }),
+    // Which automation defines down for this device, and at what count
+    // (business rule 36). Reads the resolver's cached index, so it costs no
+    // query in the steady state — and a failure here degrades to "no
+    // threshold", i.e. the plain red dive, never to no chart.
+    describeDownDetectionFor(assetId).catch(() => null),
+  ]);
+  // `passive` is a real answer, not a missing one: Polaris renders no verdict
+  // for the device, so its misses stay amber and never go red — the same rule
+  // the Last-30-min strip replays. A null result is the unknown case.
+  const downThreshold = down ? (down.passive ? null : down.winner?.threshold ?? null) : undefined;
+  return failSpansFrom(rows, now.getTime(), downThreshold, await resolveRecoveryPolls(assetId, down?.winner ?? null));
+}
+
+/**
+ * How many probes must ANSWER before this device reads Up again.
+ *
+ * Costs nothing in the common case: an automation with no reset hold is served
+ * by the missed-poll count itself, which is the bucket's own drain. Only an
+ * automation that asks for a LONGER confirmation run needs the device's cadence
+ * to convert its stored seconds back into polls, and only then is an asset row
+ * read. Failures degrade to the drain rather than to no chart.
+ */
+async function resolveRecoveryPolls(
+  assetId: string,
+  winner: { threshold: number; recoverySustainSec: number | null } | null,
+): Promise<number> {
+  if (!winner) return 0;
+  if (!winner.recoverySustainSec) return winner.threshold;
+  try {
+    const ctx = await prisma.asset.findUnique({
+      where: { id: assetId },
+      select: {
+        assetType: true, discoveredByIntegrationId: true, monitorIntervalSec: true,
+        cpuMemoryIntervalSec: true, temperatureIntervalSec: true, systemInfoIntervalSec: true,
+        probeTimeoutMs: true,
+        discoveredByIntegration: { select: { type: true } },
+      },
+    });
+    if (!ctx) return winner.threshold;
+    const resolved = await resolveMonitorSettings({
+      ...ctx,
+      discoveredByIntegrationType: ctx.discoveredByIntegration?.type ?? null,
+    });
+    return recoveryPollsFor(winner, resolved.intervalSeconds);
+  } catch {
+    return winner.threshold;
+  }
 }
 
 /** Bucket width for the packet-loss series — 30 points across the hour. */
@@ -574,7 +672,7 @@ export async function buildAlertCharts(
   let rt: SparkPoint[] = [];
   let loss: ProbeLossSeries = { points: [], ratioPct: null, measuredFromMs: null };
   let sensor: SensorSeries = { points: [], alarmSpans: [], unit: "", sensorClass: null };
-  let fail: FailSpanSeries = { spans: [], failedCount: 0 };
+  let fail: FailSpanSeries = { spans: [], recoverySpans: [], failedCount: 0 };
   try {
     const needTelemetry = wanted.has("chart.cpu") || wanted.has("chart.memory");
     const needFailSpans = [...wanted].some((t) => FAIL_SPAN_TOKENS.has(t));
@@ -628,6 +726,7 @@ export async function buildAlertCharts(
     // probeLossSeriesFrom.
     const avgOverride = isLoss ? loss.ratioPct : null;
     const withFailSpans = FAIL_SPAN_TOKENS.has(token) && fail.spans.length > 0;
+    const withRecoverSpans = RECOVER_SPAN_TOKENS.has(token) && fail.recoverySpans.length > 0;
     const svg = sparklineSvg(points, {
       label,
       unit,
@@ -636,6 +735,7 @@ export async function buildAlertCharts(
       threshold: opts?.thresholds?.[token] ?? null,
       ...(isSensor && sensor.alarmSpans.length ? { alarmSpans: sensor.alarmSpans } : {}),
       ...(withFailSpans ? { failSpans: fail.spans } : {}),
+      ...(withRecoverSpans ? { recoverSpans: fail.recoverySpans } : {}),
       // Only the loss chart sets this — where its caption's ratio starts, when
       // the anchor left part of the plotted window outside the measurement.
       ...(isLoss && loss.measuredFromMs ? { measuredFrom: loss.measuredFromMs } : {}),

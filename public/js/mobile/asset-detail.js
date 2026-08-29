@@ -697,14 +697,39 @@
         }
         return s.dependencyDown === true;
       }
+      // The COLOURS come from the shared replay of the monitor state machine
+      // (public/js/monitor-states.js), the same one the desktop chart and the
+      // Last-30-min strip run: up green, amber for a miss that has not reached
+      // the covering automation's count, red for the miss that IS the verdict,
+      // purple for a poll answering while misses are still outstanding. This is
+      // the one chart that is about a VERDICT rather than a reading, which is
+      // why it — and only it — carries five colours on every surface.
+      //
+      // `downDetection` rides the history payload, so the counts land with the
+      // samples and the chart cannot paint an outage and repaint it a moment
+      // later. Its ABSENCE is the unknown case: keep every miss red rather than
+      // invent a threshold to be amber about.
+      var dd = PolarisMonitorStates.fromPayload(resp.downDetection);
+      var states = PolarisMonitorStates.replay(
+        (resp.samples || []).map(function (s) { return { timestamp: s.timestamp, success: !isFailure(s) }; }),
+        dd.threshold, dd.recoveryPolls,
+      );
       var samples = [];
-      (resp.samples || []).forEach(function (s) {
-        if (hasResponse(s)) samples.push({ ts: s.timestamp, v: s.responseTimeMs });
-        else if (isFailure(s)) samples.push({ ts: s.timestamp, v: null, ok: false, dep: isDependency(s) });
+      (resp.samples || []).forEach(function (s, i) {
+        var status = (states[i] && states[i].status) || "up";
+        if (hasResponse(s)) samples.push({ ts: s.timestamp, v: s.responseTimeMs, rec: status === "recovering" });
+        else if (isFailure(s)) {
+          samples.push({
+            ts: s.timestamp, v: null, ok: false, dep: isDependency(s),
+            down: !dd.known || status === "down",
+          });
+        }
       });
       if (chartHost) {
         chartHost.innerHTML = PolarisCharts.lineChart({
-          series: [{ values: samples, color: "var(--md-primary)", fill: true }],
+          // The Up green rather than the app accent, mirroring desktop: the one
+          // chart about reachability speaks the same colours as the status pill.
+          series: [{ values: samples, color: "var(--md-success)", fill: true }],
           height: 120,
           yUnit: "ms",
           ariaLabel: "Response time over " + st.range,

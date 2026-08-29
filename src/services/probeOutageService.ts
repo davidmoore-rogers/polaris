@@ -52,13 +52,26 @@ import { pickSampleTierForAsset, type SampleTier } from "./sampleQueryRouter.js"
  *                  Charts draw the same shape in grey, because the claim is
  *                  "we could not reach it THROUGH the outage upstream", not
  *                  "this device broke".
+ *   "missed"     — the probes failed but the count has NOT yet reached the
+ *                  covering automation's `missedPolls` (business rule 36), so
+ *                  Polaris has not called the device down. Charts draw the same
+ *                  shape in amber — the Last-30-min strip's "Missed" cell — and
+ *                  the run turns red at the probe that crosses the threshold.
  *
  * A window is only "dependency" when EVERY failure in it was suppressed. A run
  * that starts before the parent goes down splits into an "outage" window and a
  * "dependency" one at the boundary, which is the honest reading: the first
- * misses were unexplained at the time they happened.
+ * misses were unexplained at the time they happened. A run that crosses the
+ * missed-poll threshold splits the same way and for the same reason: the early
+ * misses were not a verdict when they happened.
+ *
+ * Only a caller that KNOWS the threshold can produce "missed" — `readProbeOutages`
+ * never does, because the charts it feeds (CPU, memory, storage, interfaces) are
+ * about a reading rather than a verdict and draw one red dive either way. It
+ * reaches the response-time chart through `alertChartService.failSpansFrom`,
+ * which is handed the count.
  */
-export type OutageKind = "outage" | "dependency";
+export type OutageKind = "outage" | "dependency" | "missed";
 
 /** One contiguous stretch during which every response-time probe failed. */
 export interface OutageWindow {
@@ -73,6 +86,16 @@ export interface ProbeVerdict {
   failed: boolean;
   /** Failure taken while the parent was dark (AssetMonitorSample.dependencyDown). */
   dependency?: boolean;
+  /**
+   * Failure taken while the missed-poll count was still SHORT of the covering
+   * automation's threshold — a miss, not yet a verdict. Set only by callers
+   * that resolved the threshold; left undefined everywhere else, which keeps
+   * the window plain "outage" exactly as before.
+   *
+   * `dependency` outranks it: a miss the upstream explains is not being counted
+   * against this device at all, so its shade of "how bad" does not apply.
+   */
+  belowThreshold?: boolean;
 }
 
 /**
@@ -113,7 +136,7 @@ export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0, op
 
   for (const v of verdicts) {
     if (v.failed) {
-      const vKind: OutageKind = v.dependency ? "dependency" : "outage";
+      const vKind: OutageKind = v.dependency ? "dependency" : v.belowThreshold ? "missed" : "outage";
       // A change of kind mid-run ends the window and starts a new one — the
       // parent going dark part-way through does not retroactively explain the
       // misses that came before it, and its recovery does not leave the ones
@@ -126,6 +149,101 @@ export function foldProbeOutages(verdicts: ProbeVerdict[], bucketSeconds = 0, op
     }
   }
   close(true);
+  return windows;
+}
+
+/** One contiguous stretch of ANSWERED probes taken while missed polls were
+ *  still outstanding — the climb back out of an outage. */
+export interface RecoveryWindow {
+  from: Date;
+  to: Date;
+}
+
+/** What the Status pill would have read at each probe. The same four names the
+ *  Last-30-min strip paints, and therefore the same four colours the charts
+ *  draw: up green, warning amber, down red, recovering purple. */
+export type ProbeDisplayState = "up" | "warning" | "down" | "recovering";
+
+/**
+ * Replay the monitor state machine over an ascending run of probe verdicts,
+ * returning one display state per verdict.
+ *
+ * This is the leaky bucket of business rule 30 plus the recovery confirmation
+ * run of business rule 36, and it is a deliberate mirror of
+ * `_intermittencyStates` in `public/js/assets.js` — the browser copy the
+ * Last-30-min strip and the response-time chart share. The two exist because
+ * one runs on stored samples in the delivery path and one on the payload in a
+ * browser; if they ever disagree, an alert email and the device page describe
+ * the same probe differently, which is precisely the confusion the shared
+ * vocabulary exists to prevent.
+ *
+ * The rules, in the order they decide:
+ *
+ *   cf >= threshold                    down        (the verdict)
+ *   cf > 0, this probe missed          warning     (a miss, not yet a verdict)
+ *   cf > 0, this probe answered        recovering  (paying the debt off)
+ *   cf == 0, but the confirmation run
+ *   since the outage is still short    recovering  (rule 36's way back up)
+ *   otherwise                          up
+ *
+ * THE LEVEL DECIDES; this probe's own outcome only breaks the tie below the
+ * threshold. `threshold === null` is the PASSIVE device — no automation defines
+ * down for it, so nothing may ever read `down` — spelled `Infinity` rather than
+ * a second loop. `recoveryPolls` is the covering automation's reset already
+ * converted to a poll count; below the missed-poll count it changes nothing,
+ * because the bucket's drain is the floor.
+ *
+ * The bucket starts at zero and `sawDown` starts false: a window that opens
+ * mid-outage counts only the misses it can actually see rather than inventing a
+ * debt it has no samples for. Same assumption as the browser copy.
+ */
+export function replayProbeStates(
+  verdicts: ProbeVerdict[],
+  threshold: number | null,
+  recoveryPolls = 0,
+): ProbeDisplayState[] {
+  const thr = threshold === null
+    ? Infinity
+    : Number.isFinite(threshold) && threshold >= 1 ? Math.floor(threshold) : 3;
+  const rec = Number.isFinite(recoveryPolls) && recoveryPolls > 0 ? Math.floor(recoveryPolls) : 0;
+  let cf = 0;
+  let cs = 0;
+  let sawDown = false;
+  return verdicts.map((v) => {
+    cf = v.failed ? cf + 1 : Math.max(0, cf - 1);
+    cs = v.failed ? 0 : cs + 1;
+    if (cf >= thr) { sawDown = true; return "down"; }
+    if (cf > 0) return v.failed ? "warning" : "recovering";
+    if (sawDown && cs < rec) return "recovering";
+    sawDown = false;
+    return "up";
+  });
+}
+
+/**
+ * The stretches where the device was answering but had not yet been handed back
+ * its Up — every contiguous run of `recovering` from the replay above.
+ *
+ * That is more than the bucket's drain whenever the covering automation's reset
+ * asks for more answered polls than misses accrued: "down after 3 missed, up
+ * after 5 received" keeps the climb purple for all five (business rule 36), and
+ * a chart that stopped at three would say the device was Up two polls before
+ * Polaris said so.
+ */
+export function foldProbeRecoveries(
+  verdicts: ProbeVerdict[],
+  threshold: number | null = null,
+  recoveryPolls = 0,
+): RecoveryWindow[] {
+  const states = replayProbeStates(verdicts, threshold, recoveryPolls);
+  const windows: RecoveryWindow[] = [];
+  let open: RecoveryWindow | null = null;
+  states.forEach((state, i) => {
+    if (state !== "recovering") { open = null; return; }
+    const at = verdicts[i]!.timestamp;
+    if (open) open.to = at;
+    else { open = { from: at, to: at }; windows.push(open); }
+  });
   return windows;
 }
 

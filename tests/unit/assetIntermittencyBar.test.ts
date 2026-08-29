@@ -23,26 +23,21 @@
  *    purple until the run is served — but only for a device that actually went
  *    down, never for one that merely blipped.
  *
- * assets.js is a ~18k-line browser script with no module boundary, so the
- * function under test is sliced out by name — the approach of
- * tests/unit/assetPanelHistoryDom.test.ts.
+ * The replay itself lives in public/js/monitor-states.js — the Last-30-min
+ * strip, the desktop response-time chart and the phone's response-time chart
+ * all read it, so it is loaded here as the module it is. assets.js is still
+ * sliced by name for the STRIP's colour map, which is a property of the strip
+ * rather than of the replay.
  */
 
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { replayProbeStates } from "../../src/services/probeOutageService.js";
 import { resolve } from "node:path";
 
 const assetsLines = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8").split(/\r?\n/);
 
-function fnSrc(name: string): string {
-  const start = assetsLines.findIndex(
-    (l) => l.startsWith(`function ${name}(`) || l.startsWith(`async function ${name}(`),
-  );
-  if (start < 0) throw new Error(`assets.js: function ${name} not found`);
-  const end = assetsLines.findIndex((l, i) => i > start && l === "}");
-  if (end < 0) throw new Error(`assets.js: no end of function ${name}`);
-  return assetsLines.slice(start, end + 1).join("\n");
-}
+const statesSrc = readFileSync(resolve(__dirname, "../../public/js/monitor-states.js"), "utf8");
 
 type Sample = { timestamp: string; success: boolean };
 type State = {
@@ -54,7 +49,7 @@ type State = {
 };
 
 const _intermittencyStates = new Function(
-  `${fnSrc("_intermittencyStates")}; return _intermittencyStates;`,
+  `const window = {}; ${statesSrc}; return window.PolarisMonitorStates.replay;`,
 )() as (samples: Sample[], threshold?: number, recoveryPolls?: number) => State[];
 
 /** "..X.." → samples, where "." is a success and "x"/"X" a failed probe. */
@@ -221,5 +216,42 @@ describe("_intermittencyStates", () => {
     // #9575cd (149,117,205) that means maintenance elsewhere in the product.
     expect(map).toMatch(/recovering:\s*"rgba\(171,71,188,/);
     expect(map).not.toContain("149,117,205");
+  });
+});
+
+describe("the strip, the response-time chart and the alert email replay ONE machine", () => {
+  // Three surfaces draw these states: the Last-30-min strip and the
+  // response-time chart from _intermittencyStates in the browser, the alert
+  // email's chart from replayProbeStates on the server. The browser copy exists
+  // because it runs on a history payload; the server copy because it runs on
+  // stored samples in the delivery path. Neither can be deleted, so this pins
+  // them together — an operator must not read one story on the device page and
+  // a different one in the email about the same outage.
+  const server = (pattern: string, threshold: number | null, recoveryPolls = 0): string =>
+    replayProbeStates(
+      pattern.split("").map((c, i) => ({ timestamp: new Date(1_700_000_000_000 + i * 60_000), failed: c !== "." })),
+      threshold,
+      recoveryPolls,
+    )
+      .map((st) => ({ up: "g", recovering: "p", warning: "y", down: "r" })[st])
+      .join("");
+
+  const CASES: Array<[string, number | null, number]> = [
+    ["..xxx....",   3, 0],   // the plain drain
+    [".x.",         3, 0],   // a single miss never smears
+    ["xxx.x..",     3, 0],   // a blip on the climb re-fills the bucket
+    ["..xxx......", 3, 5],   // the reset asks for more answers than the drain
+    ["..xx....",    3, 5],   // a blip that never went down earns no hold
+    ["xxxxxxx",     3, 0],   // still down at the right edge
+    ["..xxxx...",   1, 0],   // down on the first miss
+    ["..xxxx...", null, 0],  // passive: never a verdict
+  ];
+
+  it.each(CASES)("agrees on %s (threshold %s, recovery %s)", (pattern, threshold, recoveryPolls) => {
+    // `null` is passive on BOTH sides — the browser copy takes it too, so it is
+    // passed through rather than collapsed to the default.
+    expect(server(pattern, threshold, recoveryPolls)).toBe(
+      run(pattern, threshold as unknown as number, recoveryPolls),
+    );
   });
 });

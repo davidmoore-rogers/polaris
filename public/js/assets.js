@@ -236,6 +236,21 @@ var _CHART_DEP_COLOR = "#9aa0a6";
 // A token, not a hex, so all three themes get their own success green.
 var _CHART_UP_COLOR = "var(--color-success)";
 
+// A missed poll that has NOT yet reached the covering automation's count. The
+// probe failed, but the device is short of answers rather than judged Down
+// (business rule 36) — the same "Missed" the Status pill reports and the same
+// amber cell the Last-30-min strip draws directly above this chart. Red is
+// reserved for a miss that IS the verdict, so the chart shows an outage
+// building rather than asserting one on the first dropped packet.
+//
+// EXACTLY the strip's amber (rgba(255,193,7,·)), not a deeper cousin picked for
+// contrast: the strip sits directly above this chart, so two ambers a shade
+// apart read as two different meanings rather than one. The polling-method
+// transition markers spend the same hue on this chart, but at a lighter opacity
+// and as full-height dashed lines with a dot above the plot — different shape,
+// different weight, and never on the baseline where a missed poll sits.
+var _CHART_MISS_COLOR = "#ffc107";
+
 // A poll that ANSWERED while missed polls are still outstanding. Same meaning
 // and same hue as the purple cell on the Last-30-min strip: the device is
 // answering, it just has not paid the debt off yet. Kept a flat hex for the
@@ -249,7 +264,14 @@ var _CHART_RECOVER_COLOR = "#ab47bc";
 // half green and half purple.
 function _chartPointColor(p, seriesColor) {
   if (p.ok) return p.rec ? _CHART_RECOVER_COLOR : seriesColor;
-  return p.dep ? _CHART_DEP_COLOR : _CHART_FAIL_COLOR;
+  // Grey outranks the amber/red split: a miss the upstream explains is not
+  // being counted against this device at all, so how close it sits to the
+  // threshold says nothing worth colouring.
+  if (p.dep) return _CHART_DEP_COLOR;
+  // `down` is set only by the charts that resolved the covering automation's
+  // count (today: response time). Everywhere else it is undefined and the miss
+  // stays red, which is what every other chart has always drawn.
+  return p.down === false ? _CHART_MISS_COLOR : _CHART_FAIL_COLOR;
 }
 
 // Failure-aware line rendering. `pts` is a time-ordered list of
@@ -11255,78 +11277,13 @@ function assetMonitoringViewHTML(a) {
 }
 
 /**
- * Replays the monitor state machine over a probe-sample stream and returns one
- * display state per sample, in order, each carrying the missed-poll count as it
- * stood after that probe.
- *
- * This is a MIRROR of recordProbeResult in src/services/monitoringService.ts,
- * and the two are only useful if they agree cell-for-cell with the pill above
- * the strip. The rule, in full (business rule 30):
- *
- *   cf = miss ? cf + 1 : max(0, cf - 1)          ← leaky bucket, not a run
- *   cf >= threshold                  → down       (red)
- *   cf > 0  and this probe missed    → warning    (amber, "Missed N")
- *   cf > 0  and this probe answered  → recovering (purple, paying the debt)
- *   cf == 0                          → up         (green)
- *
- * The level decides; this probe's outcome only breaks the tie below the
- * threshold. Worked examples at threshold 3 — one missed poll is green, amber,
- * green (a blip still never smears); a device going down and coming back is
- * green, amber, amber, RED, purple, purple, green, because paying three misses
- * back takes three answers.
- *
- * A failure during the climb back out re-fills the bucket, so it can go red
- * again on the way home. That is the point: the old run-length machine reset
- * the counter to zero on any single success, so an alternating device never
- * reached a verdict in either direction.
- *
- * The pre-window state is assumed fully recovered (cf = 0): only an outage
- * visible in the sample stream produces amber, red or purple cells.
- *
- * `threshold === null` is the PASSIVE case (business rule 36): no automation
- * defines Down for this device, so nothing may go red — that would assert a
- * verdict Polaris deliberately never reaches — but the bucket still runs, so a
- * passive device quietly accumulating misses still reads as one. `Infinity` is
- * how "never red" is spelled without a second loop.
+ * The Last-30-min strip's and the response-time chart's state replay — the
+ * shared one in public/js/monitor-states.js, which the phone app reads too.
+ * Kept as a local name because both call sites, the strip's legend and
+ * tests/unit/assetIntermittencyBar.test.ts all speak of it that way.
  */
 function _intermittencyStates(samples, threshold, recoveryPolls) {
-  var thr = threshold === null ? Infinity
-    : (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
-  // How many probes must ANSWER before the asset reads Up again — the covering
-  // automation's reset count, already converted to polls by the server. Below
-  // the missed-poll count it changes nothing: the bucket's drain is the floor.
-  var rec = (Number.isFinite(recoveryPolls) && recoveryPolls > 0) ? Math.floor(recoveryPolls) : 0;
-  var cf = 0;
-  var cs = 0;
-  // Whether this replay has SEEN the device go down. The server infers the same
-  // fact arithmetically (owesRecoveryConfirmation: at cf 0, a success run of
-  // `cs` means the bucket stood at `cs` when the run began), which it must,
-  // having no memory beyond the two counters. The replay has the whole window
-  // in hand, so it uses the observation directly — the inference needs a run
-  // that STARTED inside the window, and a bar whose first cells predate the
-  // outage would otherwise paint a healthy device amber on its third cell.
-  var sawDown = false;
-  return (samples || []).map(function (s) {
-    // Mirrors recordProbeResult exactly: a miss adds one, a success takes one
-    // back, floored at 0 — and the LEVEL decides the color, with this probe's
-    // outcome only breaking the tie below the threshold. If these two ever
-    // disagree the bar is telling the operator a different story than the pill.
-    cf = s.success ? Math.max(0, cf - 1) : cf + 1;
-    cs = s.success ? cs + 1 : 0;
-    var display;
-    if (cf >= thr) { display = "down"; sawDown = true; }
-    else if (cf > 0) display = s.success ? "recovering" : "warning";
-    else if (sawDown && cs < rec) display = "recovering";
-    else { display = "up"; sawDown = false; }
-    return {
-      timestamp: s.timestamp,
-      status: display,
-      missed: cf,
-      success: !!s.success,
-      // Only meaningful while the debt is paid but the confirmation run is not.
-      confirming: display === "recovering" && cf === 0 ? { done: cs, need: rec } : null,
-    };
-  });
+  return window.PolarisMonitorStates.replay(samples, threshold, recoveryPolls);
 }
 
 /**
@@ -11694,26 +11651,50 @@ function _renderMonitorChart(container, data, transitions) {
   var xFor = _chartXScale(padL, innerW, t0, t1);
   var yFor = _chartYScale(padT, innerH, 0, ceil);
 
-  // Failure-aware line: failed polls plot as red dots at 0 ms (the chart
-  // baseline) and stay connected to their neighbors — the connecting segment
-  // fades from blue into red (and back) so an outage reads as the line diving
-  // to zero rather than the old full-height vertical failure lines.
+  // Failure-aware line: failed polls plot as dots at 0 ms (the chart baseline)
+  // and stay connected to their neighbors — the connecting segment fades
+  // between the two colors so an outage reads as the line diving to zero rather
+  // than the old full-height vertical failure lines.
+  //
+  // The COLORS come from the same replay the Last-30-min strip runs
+  // (_intermittencyStates), not from a second copy of the leaky bucket: the
+  // strip sits directly above this chart and the two describing the same probe
+  // differently is exactly the confusion this vocabulary exists to prevent. Its
+  // four states ARE the four colors — up green, warning amber, down red,
+  // recovering purple — with grey layered on top for a miss the upstream
+  // explains. That is also what puts the automation's RESET in the picture: a
+  // "down after 3 missed, up after 5 received" automation keeps the climb
+  // purple for all five answers, not just the three the bucket's drain costs
+  // (business rule 36).
+  //
+  // `downDetection` rides the history payload so it lands with the samples;
+  // `passive` means no automation defines Down here, so nothing goes red. Its
+  // ABSENCE is the unknown case — an older payload, or a resolve that failed —
+  // and keeps every miss red rather than inventing a threshold to be amber
+  // about.
+  var dd = (data && data.downDetection) || null;
+  var thresholdKnown = !!dd;
+  var states = _intermittencyStates(
+    // Rollup tiers carry no per-sample `success`, so the bucket reads the same
+    // fully-failed-bucket rule the plot does: a bucket with any success in it
+    // answered. On those tiers the amber/red split is coarse by construction —
+    // a whole hour with zero successes is Down under any threshold — and it is
+    // exact on the detail tier, which is where an operator reads a flap.
+    samples.map(function (s) { return { timestamp: s.timestamp, success: !ptIsFailure(s) }; }),
+    dd ? (dd.passive ? null : dd.missedPolls) : null,
+    dd && !dd.passive && dd.recoveryPolls != null ? dd.recoveryPolls : 0,
+  );
+  var statusAt = function (i) { return (states[i] && states[i].status) || "up"; };
   var linePts = [];
-  // Pre-window state is assumed fully recovered, matching _intermittencyStates:
-  // a chart that opens mid-outage still starts its count at the first miss it
-  // can actually see, rather than inventing a debt it has no samples for.
-  var _lpCf = 0;
-  samples.forEach(function (s) {
-    // Same leaky bucket the state machine and the Last-30-min strip run
-    // (business rule 30): a miss adds one, an answer takes one back. Only
-    // `> 0` is needed here — the threshold decides red vs amber, and failed
-    // polls are already drawn as an outage, so the chart never has to know it.
+  samples.forEach(function (s, i) {
     if (ptHasResponse(s)) {
-      _lpCf = Math.max(0, _lpCf - 1);
-      linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true, rec: _lpCf > 0 });
+      linePts.push({ x: xFor(s.timestamp), y: yFor(s.responseTimeMs), ok: true, rec: statusAt(i) === "recovering" });
     } else if (ptIsFailure(s)) {
-      _lpCf += 1;
-      linePts.push({ x: xFor(s.timestamp), y: padT + innerH, ok: false, dep: ptIsDependency(s) });
+      linePts.push({
+        x: xFor(s.timestamp), y: padT + innerH, ok: false,
+        dep: ptIsDependency(s),
+        down: !thresholdKnown || statusAt(i) === "down",
+      });
     }
   });
 
@@ -11722,11 +11703,17 @@ function _renderMonitorChart(container, data, transitions) {
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
       " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
   }
-  function hitAttrs(s) {
+  function hitAttrs(s, i) {
+    var missedOnly = ptIsFailure(s) && thresholdKnown && statusAt(i) !== "down";
     var attrs = ' data-ts="' + escapeHtml(String(s.timestamp)) +
       '" data-rtt="' + (typeof s.responseTimeMs === "number" ? s.responseTimeMs : "") +
       '" data-ok="' + (ptHasResponse(s) ? "1" : "0") +
       '" data-dep="' + (ptIsFailure(s) && ptIsDependency(s) ? "1" : "0") +
+      // How many misses were outstanding after this probe, so a hover reads the
+      // same running tally the strip's tooltip states rather than only naming
+      // the color.
+      '" data-missed="' + ((states[i] && states[i].missed) || 0) +
+      '" data-miss-only="' + (missedOnly ? "1" : "0") +
       '" data-err="' + escapeHtml(s.error || "") + '"';
     // Rollup buckets carry aggregate stats — surface them in the tooltip so an
     // "Hourly avg"/"Daily avg" point reads as an average + min/max band + the
@@ -11745,12 +11732,12 @@ function _renderMonitorChart(container, data, transitions) {
   // the dot; failed samples keep a full-height 10px rect centered on the
   // sample's x so the tooltip fires anywhere in that column, not just on the
   // small red dot. Same pattern as the polling-method transition rect above.
-  var hitTargets = samples.map(function (s) {
+  var hitTargets = samples.map(function (s, i) {
     var x = xFor(s.timestamp);
     if (ptHasResponse(s)) {
-      return '<circle class="monitor-hit" cx="' + x + '" cy="' + yFor(s.responseTimeMs) + '" r="7" fill="transparent" style="cursor:crosshair"' + hitAttrs(s) + '/>';
+      return '<circle class="monitor-hit" cx="' + x + '" cy="' + yFor(s.responseTimeMs) + '" r="7" fill="transparent" style="cursor:crosshair"' + hitAttrs(s, i) + '/>';
     }
-    return '<rect class="monitor-hit" x="' + (x - 5) + '" y="' + padT + '" width="10" height="' + innerH + '" fill="transparent" style="cursor:crosshair"' + hitAttrs(s) + '/>';
+    return '<rect class="monitor-hit" x="' + (x - 5) + '" y="' + padT + '" width="10" height="' + innerH + '" fill="transparent" style="cursor:crosshair"' + hitAttrs(s, i) + '/>';
   }).join("");
 
   // Y-axis ticks
@@ -11862,12 +11849,24 @@ function _renderMonitorChart(container, data, transitions) {
     var ok = target.getAttribute("data-ok") === "1";
     var err = target.getAttribute("data-err");
     var dep = target.getAttribute("data-dep") === "1";
-    // A miss the upstream explains is stated as such and coloured grey, not
-    // red: the probe did fail, but nothing about THIS device is in question.
+    var missOnly = target.getAttribute("data-miss-only") === "1";
+    var missedN = Number(target.getAttribute("data-missed") || 0);
+    // Three ways a probe can fail and three things to say about it. A miss the
+    // upstream explains is grey — the probe did fail, but nothing about THIS
+    // device is in question. A miss that has not reached the covering
+    // automation's count is amber and says how many are outstanding, so a hover
+    // reads as the same running tally the strip above reports. Only a miss that
+    // IS the verdict is red.
     var danger = dep
       ? 'style="color:' + _CHART_DEP_COLOR + '"'
-      : 'style="color:var(--color-danger,#d32f2f)"';
-    var missText = dep ? "dependency down" : "no response";
+      : missOnly
+        ? 'style="color:' + _CHART_MISS_COLOR + '"'
+        : 'style="color:var(--color-danger,#d32f2f)"';
+    var missText = dep
+      ? "dependency down"
+      : missOnly
+        ? "missed poll — " + missedN + " outstanding"
+        : "no response · Down";
     if (target.getAttribute("data-rollup") === "1") {
       // Aggregated bucket: avg (+ min/max band) and the bucket's packet-loss %.
       var mn = target.getAttribute("data-min");

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { foldProbeOutages, serializeOutages } from "../../src/services/probeOutageService.js";
+import { foldProbeOutages, foldProbeRecoveries, replayProbeStates, serializeOutages } from "../../src/services/probeOutageService.js";
 
 const at = (min: number) => new Date(Date.UTC(2026, 7, 27, 12, min, 0));
 const v = (min: number, failed: boolean) => ({ timestamp: at(min), failed });
@@ -127,6 +127,103 @@ describe("foldProbeOutages — dependency classification", () => {
     expect(foldProbeOutages([v(1, true)])[0].kind).toBe("outage");
   });
 });
+
+describe("foldProbeRecoveries", () => {
+  // The same leaky bucket the monitor state machine runs (business rule 30),
+  // read back off the probe stream so the alert email can colour the climb out
+  // of an outage the way the device page does.
+  it("finds nothing when nothing was ever outstanding", () => {
+    expect(foldProbeRecoveries([v(0, false), v(1, false), v(2, false)])).toEqual([]);
+    expect(foldProbeRecoveries([])).toEqual([]);
+  });
+
+  it("ends the climb at the answer that drains the bucket, not at the first one", () => {
+    // Two misses, three answers: the first answer leaves one outstanding and is
+    // recovering, the second empties the bucket and is already Up. Purple stops
+    // at the first — the poll that pays the debt off is not still paying it.
+    const out = foldProbeRecoveries([v(0, true), v(1, true), v(2, false), v(3, false), v(4, false)]);
+    expect(out).toEqual([{ from: at(2), to: at(2) }]);
+  });
+
+  it("covers every answered poll while the debt is still large", () => {
+    const out = foldProbeRecoveries([v(0, true), v(1, true), v(2, true), v(3, false), v(4, false), v(5, false)]);
+    expect(out).toEqual([{ from: at(3), to: at(4) }]);
+  });
+
+  it("breaks the climb when the device drops out again", () => {
+    // A relapse is not one long recovery: the second stretch is a separate
+    // climb, and joining them would paint the outage between them purple.
+    const out = foldProbeRecoveries([v(0, true), v(1, true), v(2, false), v(3, true), v(4, false), v(5, false)]);
+    expect(out).toEqual([{ from: at(2), to: at(2) }, { from: at(4), to: at(4) }]);
+  });
+
+  it("assumes no debt before the window rather than inventing one", () => {
+    // A chart that opens mid-outage counts only the misses it can see — the
+    // same assumption the in-app chart's _lpCf makes.
+    expect(foldProbeRecoveries([v(0, false), v(1, false)])).toEqual([]);
+  });
+
+  it("keeps climbing past the drain when the reset asks for more answers", () => {
+    // "Down after 3 missed, up after 5 received": three misses take the device
+    // down, three answers pay the bucket off — and the automation still wants
+    // two more before it hands back Up. Stopping the purple at the drain would
+    // say the device was Up two polls before Polaris said so.
+    const probes = [
+      v(0, true), v(1, true), v(2, true),                    // 3 misses -> down
+      v(3, false), v(4, false), v(5, false),                 // bucket drains
+      v(6, false),                                           // confirmation run
+      v(7, false),                                           // 5th answer = Up
+      v(8, false),
+    ];
+    // Purple covers answers 1–4; the FIFTH is the one that hands back Up, so it
+    // is already green — "up after 5 received" counts the poll that gets there.
+    expect(foldProbeRecoveries(probes, 3, 5)).toEqual([{ from: at(3), to: at(6) }]);
+  });
+
+  it("changes nothing when the reset asks for no more than the drain costs", () => {
+    // Every automation authored before the reset became a poll count — the
+    // drain is the floor, so a reset at or below it is inert.
+    const probes = [v(0, true), v(1, true), v(2, true), v(3, false), v(4, false), v(5, false), v(6, false)];
+    expect(foldProbeRecoveries(probes, 3, 3)).toEqual([{ from: at(3), to: at(4) }]);
+  });
+});
+
+describe("replayProbeStates", () => {
+  it("walks a whole outage through the four states in order", () => {
+    // The arithmetic an operator reading the strip against their automation
+    // should be able to follow: down at 3 missed, up after 5 received.
+    const probes = [
+      v(0, false),                                  // up
+      v(1, true), v(2, true),                       // missed 1, 2
+      v(3, true),                                   // missed 3 -> down
+      v(4, false), v(5, false), v(6, false),        // bucket drains 2,1,0
+      v(7, false),                                  // confirming 4/5
+      v(8, false),                                  // 5th answer -> up
+      v(9, false),
+    ];
+    expect(replayProbeStates(probes, 3, 5)).toEqual([
+      "up", "warning", "warning", "down",
+      "recovering", "recovering", "recovering", "recovering",
+      "up", "up",
+    ]);
+  });
+
+  it("holds down while the level is high, whatever a single lucky packet says", () => {
+    // The LEVEL decides. One answer in the middle of a deep outage takes the
+    // bucket from 4 to 3, which is still at the threshold.
+    expect(replayProbeStates([v(0, true), v(1, true), v(2, true), v(3, true), v(4, false)], 3, 0))
+      .toEqual(["warning", "warning", "down", "down", "down"]);
+  });
+
+  it("never reaches down for a passive device", () => {
+    // No automation defines down here (business rule 36), so the bucket still
+    // runs and the misses still show — Polaris just renders no verdict.
+    expect(replayProbeStates([v(0, true), v(1, true), v(2, true), v(3, true)], null, 0))
+      .toEqual(["warning", "warning", "warning", "warning"]);
+  });
+});
+
+
 
 describe("serializeOutages", () => {
   it("emits ISO strings", () => {

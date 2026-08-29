@@ -159,8 +159,69 @@ describe("failSpansFrom", () => {
   });
 
   it("is empty when everything answered", () => {
-    expect(failSpansFrom([probe(0, true), probe(1, true)], END)).toEqual({ spans: [], failedCount: 0 });
-    expect(failSpansFrom([], END)).toEqual({ spans: [], failedCount: 0 });
+    expect(failSpansFrom([probe(0, true), probe(1, true)], END)).toEqual({ spans: [], recoverySpans: [], failedCount: 0 });
+    expect(failSpansFrom([], END)).toEqual({ spans: [], recoverySpans: [], failedCount: 0 });
+  });
+
+  it("reports the climb back out, ending at the poll that empties the bucket", () => {
+    // Two misses cost two answers. The first answer still has one outstanding
+    // and is the purple stretch; the second drains it and is already Up, so the
+    // recovery span ends at the FIRST answer — the same point the device page's
+    // own chart stops drawing purple.
+    const { recoverySpans } = failSpansFrom(
+      [probe(0, true), probe(1, false), probe(2, false), probe(3, true), probe(4, true), probe(5, true)],
+      END,
+    );
+    expect(recoverySpans).toEqual([{ from: T0 + 180_000, to: T0 + 180_000 }]);
+  });
+
+  it("does not call a device recovering when nothing was outstanding", () => {
+    expect(failSpansFrom([probe(0, true), probe(1, true), probe(2, true)], END).recoverySpans).toEqual([]);
+  });
+
+  it("splits a run into the misses that were only misses and the ones that were the verdict", () => {
+    // Threshold 3: the first two failures are amber, the third is where the
+    // device became Down. An email that paints all five red says the outage
+    // started two polls before Polaris agreed it had.
+    const { spans } = failSpansFrom(
+      [probe(0, true), probe(1, false), probe(2, false), probe(3, false), probe(4, false), probe(5, true)],
+      END,
+      3,
+    );
+    expect(spans).toEqual([
+      { from: T0 + 60_000, to: T0 + 120_000, kind: "missed" },
+      { from: T0 + 180_000, to: T0 + 240_000, kind: "outage" },
+    ]);
+  });
+
+  it("never goes red for a passive device", () => {
+    // No automation defines down here (business rule 36), so the misses show
+    // and the verdict does not.
+    const { spans } = failSpansFrom(
+      [probe(0, true), probe(1, false), probe(2, false), probe(3, false), probe(4, true)],
+      END,
+      null,
+    );
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 180_000, kind: "missed" }]);
+  });
+
+  it("keeps every miss red when the threshold could not be resolved", () => {
+    // Unknown is not passive. Without a count there is nothing to be amber
+    // ABOUT, so the dive stays exactly what it was before the split existed.
+    const { spans } = failSpansFrom(
+      [probe(0, true), probe(1, false), probe(2, false), probe(3, true)],
+      END,
+    );
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 120_000, kind: "outage" }]);
+  });
+
+  it("still calls a dependency-explained miss grey, whatever the count says", () => {
+    // Attribution outranks severity: how close a miss sits to the threshold
+    // says nothing worth colouring when it is not being counted against this
+    // device at all.
+    const dep = (min: number) => ({ ...probe(min, false), dependencyDown: true });
+    const { spans } = failSpansFrom([probe(0, true), dep(1), dep(2), dep(3), probe(4, true)], END, 3);
+    expect(spans).toEqual([{ from: T0 + 60_000, to: T0 + 180_000, kind: "dependency" }]);
   });
 });
 

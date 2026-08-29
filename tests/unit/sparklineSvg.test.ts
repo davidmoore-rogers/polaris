@@ -320,6 +320,107 @@ describe("failed-poll spans", () => {
   });
 });
 
+describe("missed-but-not-down spans", () => {
+  const window = { from: T0, to: T0 + 600_000 };
+  const answered = [
+    { t: T0, v: 10 }, { t: T0 + 60_000, v: 12 },
+    { t: T0 + 480_000, v: 40 }, { t: T0 + 540_000, v: 42 },
+  ];
+
+  it("dives AMBER while the count is short of the automation's threshold", () => {
+    // The probes failed, but Polaris has not called the device down — the same
+    // "Missed" the Status pill shows and the same amber cell the Last-30-min
+    // strip draws. Red would assert a verdict two polls early.
+    const svg = sparklineSvg(answered, {
+      label: "Response time",
+      failSpans: [{ from: T0 + 120_000, to: T0 + 240_000, kind: "missed" as const }],
+      ...window,
+    });
+    expect(svg).toContain("#ffc107");
+    expect(svg).not.toContain("#d32f2f");
+  });
+
+  it("turns red at the probe that reaches the count", () => {
+    // Two spans back to back: the misses that were only misses, then the ones
+    // that are the verdict. One colour for the pair would lose where the
+    // device actually became Down.
+    const svg = sparklineSvg(answered, {
+      label: "Response time",
+      failSpans: [
+        { from: T0 + 120_000, to: T0 + 180_000, kind: "missed" as const },
+        { from: T0 + 240_000, to: T0 + 420_000, kind: "outage" as const },
+      ],
+      ...window,
+    });
+    expect(svg).toContain("#ffc107");
+    expect(svg).toContain("#d32f2f");
+    // And it fades between them rather than jumping, like every other change.
+    expect(svg).toContain('stop-color="#ffc107"');
+  });
+
+  it("leaves an unlabelled span red, so nothing that never asked for amber gets it", () => {
+    const svg = sparklineSvg(answered, {
+      label: "CPU",
+      failSpans: [{ from: T0 + 120_000, to: T0 + 240_000 }],
+      ...window,
+    });
+    expect(svg).toContain("#d32f2f");
+    expect(svg).not.toContain("#ffc107");
+  });
+});
+
+describe("recovering spans", () => {
+  // A device answering again but still short of paying off its missed polls.
+  // The device page draws that stretch purple; an email about the same outage
+  // has to as well, or the operator learns the recovery twice.
+  const window = { from: T0, to: T0 + 600_000 };
+  const answered = [
+    { t: T0, v: 10 },
+    { t: T0 + 300_000, v: 40 },
+    { t: T0 + 360_000, v: 42 },
+    { t: T0 + 420_000, v: 20 },
+    { t: T0 + 480_000, v: 18 },
+  ];
+  const outage = [{ from: T0 + 60_000, to: T0 + 240_000 }];
+  const climb = [{ from: T0 + 300_000, to: T0 + 360_000 }];
+
+  it("paints the climb back out purple, not the series colour", () => {
+    const svg = sparklineSvg(answered, {
+      label: "Response time", color: "#2e7d32", failSpans: outage, recoverSpans: climb, ...window,
+    });
+    expect(svg).toContain('stroke="#ab47bc"');
+  });
+
+  it("returns to the series colour once the bucket is empty", () => {
+    // The points after the recovery span are Up again — the purple must not
+    // run to the end of the chart.
+    const svg = sparklineSvg(answered, {
+      label: "Response time", color: "#2e7d32", failSpans: outage, recoverSpans: climb, ...window,
+    });
+    expect(svg).toContain('stroke="#2e7d32"');
+    // Red dive, purple climb, green tail — three strokes, and a fade at each
+    // colour change rather than a jump.
+    expect((svg.match(/<polyline/g) ?? []).length).toBe(3);
+    expect(svg).toContain('stop-color="#ab47bc"');
+  });
+
+  it("fills the area under a recovering run in its own colour", () => {
+    // The fill follows the stroke; green pooling under a purple line would
+    // claim two things about the same minutes.
+    const svg = sparklineSvg(answered, {
+      label: "Response time", color: "#2e7d32", failSpans: outage, recoverSpans: climb, ...window,
+    });
+    expect(svg).toContain('<polygon fill="#ab47bc"');
+  });
+
+  it("is inert when no recovery spans are passed", () => {
+    // Every other chart is about a reading, not a verdict — purple must not
+    // leak into CPU or memory.
+    const svg = sparklineSvg(answered, { label: "CPU", color: "#2563eb", failSpans: outage, ...window });
+    expect(svg).not.toContain("#ab47bc");
+  });
+});
+
 describe("measuredFrom", () => {
   const T0 = Date.parse("2026-08-28T09:00:00Z");
   const hour = 60 * 60_000;

@@ -17,7 +17,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Window } from "happy-dom";
 
-type Point = { ts: string | number; v: number | null; ok?: boolean };
+type Point = { ts: string | number; v: number | null; ok?: boolean; dep?: boolean; rec?: boolean; down?: boolean };
 type Series = { values: Point[]; color?: string; fill?: boolean; gapFade?: boolean };
 type Prepared = { s: Series; pts: { ts: number; v: number | null; ok: boolean }[] };
 type Charts = {
@@ -36,6 +36,9 @@ function outage(fromMs: number, toMs: number): Outage {
 }
 
 const FAIL = "#d32f2f";
+const MISS = "#ffc107";
+const RECOVER = "#ab47bc";
+const DEP = "#9aa0a6";
 let charts: Charts;
 
 beforeAll(() => {
@@ -302,5 +305,85 @@ describe("lineChart missed-poll rendering", () => {
     expect(poly).not.toBeNull();
     // the middle vertex sits on the baseline, not interpolated between the peaks
     expect(poly![1].split(" ")[1]).toMatch(/,96\.0$/);
+  });
+});
+
+describe("the verdict palette — the response-time chart's five colours", () => {
+  // The phone draws the same chart the device page draws, so it draws the same
+  // colours: green up, amber for a miss that has not reached the covering
+  // automation's count, red for the miss that IS the verdict, purple for a poll
+  // answering while misses are still outstanding, grey when the upstream
+  // explains it. The states themselves come from the shared replay in
+  // public/js/monitor-states.js, which the caller runs; the chart's job is only
+  // to paint what it was handed, and these pin that it paints all five.
+  const ts = minutes(6);
+
+  it("paints a miss below the threshold amber, not red", () => {
+    const svg = charts.lineChart({
+      series: [{ values: [
+        { ts: ts[0], v: 10 },
+        { ts: ts[1], v: null, ok: false, down: false },
+        { ts: ts[2], v: 10 },
+      ] as Point[], color: "green" }],
+    });
+    expect(svg).toContain(MISS);
+    expect(svg).not.toContain(FAIL);
+  });
+
+  it("turns red at the miss that is the verdict, and fades between the two", () => {
+    const svg = charts.lineChart({
+      series: [{ values: [
+        { ts: ts[0], v: 10 },
+        { ts: ts[1], v: null, ok: false, down: false },
+        { ts: ts[2], v: null, ok: false, down: false },
+        { ts: ts[3], v: null, ok: false, down: true },
+        { ts: ts[4], v: 10 },
+      ] as Point[], color: "green" }],
+    });
+    expect(svg).toContain(MISS);
+    expect(svg).toContain(FAIL);
+    expect(svg).toContain('stop-color="' + MISS + '"');
+  });
+
+  it("paints an answered poll purple while misses are still outstanding", () => {
+    const svg = charts.lineChart({
+      series: [{ values: [
+        { ts: ts[0], v: null, ok: false, down: true },
+        { ts: ts[1], v: 10, rec: true },
+        { ts: ts[2], v: 10, rec: true },
+        { ts: ts[3], v: 10 },
+      ] as Point[], color: "green" }],
+    });
+    expect(svg).toContain(RECOVER);
+    expect(svg).toContain("green");
+  });
+
+  it("keeps grey ahead of the amber/red split", () => {
+    // A miss the upstream explains is not being counted against this device at
+    // all, so how close it sits to the threshold says nothing worth colouring.
+    const svg = charts.lineChart({
+      series: [{ values: [
+        { ts: ts[0], v: 10 },
+        { ts: ts[1], v: null, ok: false, dep: true, down: false },
+        { ts: ts[2], v: 10 },
+      ] as Point[], color: "green" }],
+    });
+    expect(svg).toContain(DEP);
+    expect(svg).not.toContain(MISS);
+  });
+
+  it("leaves a chart that resolved no threshold exactly as it was", () => {
+    // Every other stream — CPU, memory, interface counters — never asks for a
+    // verdict, so its misses stay red and nothing goes amber or purple.
+    const svg = charts.lineChart({
+      series: [{ values: [
+        { ts: ts[0], v: 10 },
+        { ts: ts[1], v: null, ok: false },
+        { ts: ts[2], v: 10 },
+      ] as Point[], color: "green" }],
+    });
+    expect(svg).toContain(FAIL);
+    expect(svg).not.toContain(MISS);
+    expect(svg).not.toContain(RECOVER);
   });
 });

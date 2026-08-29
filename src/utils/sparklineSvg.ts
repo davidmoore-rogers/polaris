@@ -95,11 +95,32 @@ export interface SparklineOptions {
    * `kind` picks the colour, not the shape: "outage" dives RED (nobody knows
    * why the device stopped answering), "dependency" dives GREY (it was
    * dependency-suppressed — its parent was dark, so the miss is accounted for
-   * and the device itself is not being accused of anything). Both still dive,
-   * because in neither case was anything measured. Omitted = "outage", which
-   * keeps every existing caller's behaviour.
+   * and the device itself is not being accused of anything), "missed" dives
+   * AMBER (the probes failed, but the count has not reached the covering
+   * automation's threshold, so Polaris has not called the device down —
+   * business rule 36). All three still dive, because in none of them was
+   * anything measured. Omitted = "outage", which keeps every existing caller's
+   * behaviour.
    */
-  failSpans?: Array<{ from: number; to: number; kind?: "outage" | "dependency" }>;
+  failSpans?: Array<{ from: number; to: number; kind?: "outage" | "dependency" | "missed" }>;
+  /**
+   * Spans (epoch ms) during which the device was ANSWERING but had not yet paid
+   * off its missed polls — the climb back out of an outage (business rule 30's
+   * leaky bucket). A plotted point inside one takes the recovering purple
+   * instead of the series colour, and the transitions in and out of it fade
+   * like every other colour change here.
+   *
+   * This is what completes the response-time chart's four-colour vocabulary in
+   * an email: green up, purple paying it back, red down, grey explained — the
+   * same four the Status pill, the Last-30-min strip and the device page's own
+   * response-time chart speak. An operator must not have to learn a recovery
+   * twice any more than they have to learn an outage twice.
+   *
+   * Response time is the one caller. Every other chart is about a READING
+   * rather than a verdict, so recolouring those would make purple mean two
+   * things — the same reason the in-app charts leave CPU and memory alone.
+   */
+  recoverSpans?: Array<{ from: number; to: number }>;
 }
 
 /** The missed-poll red. Shared with the in-app charts' _CHART_FAIL_COLOR so
@@ -107,6 +128,22 @@ export interface SparklineOptions {
  *  #dc2626 used for alarm bands and the threshold line, which are different
  *  claims. */
 const FAIL_COLOR = "#d32f2f";
+
+/** The missed-poll amber — the probes are failing but the count is still short
+ *  of the covering automation's threshold, so the device is not Down yet. Same
+ *  meaning as the Last-30-min strip's amber cell and the "Missed" Status pill,
+ *  and the SAME value — one yellow across the product, the way there is one red
+ *  and one grey. It is the lightest of the five against a white card, which is
+ *  the price of not having two ambers a shade apart mean two different things;
+ *  the 2px stroke and the 3px dot carry it. */
+const MISS_COLOR = "#ffc107";
+
+/** The recovering purple — a poll that ANSWERED while missed polls were still
+ *  outstanding. Same meaning and same hue as the purple cell on the Last-30-min
+ *  strip and the in-app charts' _CHART_RECOVER_COLOR: the device is answering,
+ *  it just has not paid the debt off yet. Deliberately the magenta-leaning 400,
+ *  not the muted lavender that means maintenance elsewhere. */
+const RECOVER_COLOR = "#ab47bc";
 
 /** The dependency-down grey. Same dive, drained of alarm: the upstream is what
  *  broke, and this device is only reporting that it sits behind it. Shared with
@@ -289,24 +326,37 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   const hasData = (a: number, b: number) =>
     guardMs > 0 && sampleTimes.some((st) => st > a - guardMs && st < b + guardMs);
 
-  const failTimes: Array<{ t: number; dep: boolean }> = [];
+  const failTimes: Array<{ t: number; kind: "outage" | "dependency" | "missed" }> = [];
   for (const sp of failSpans) {
     const a = Math.max(sp.from, from);
     const b = Math.min(sp.to, to);
     if (hasData(a, b)) continue;
-    const dep = sp.kind === "dependency";
-    failTimes.push({ t: a, dep });
-    if (b > a) failTimes.push({ t: b, dep });
+    const kind = sp.kind ?? "outage";
+    failTimes.push({ t: a, kind });
+    if (b > a) failTimes.push({ t: b, kind });
   }
 
-  type PlotPoint = { t: number; py: number; ok: boolean; dep?: boolean };
+  // The climb back out. Membership is a time test rather than a per-point flag
+  // because the caller reads the recovery windows from the PROBE stream, which
+  // holds the failures too — the plotted series is successes only and could not
+  // reconstruct the bucket on its own.
+  const recoverSpans = (opts.recoverSpans ?? []).filter((s) => s.to >= from && s.from <= to);
+  const recovering = (t: number): boolean => recoverSpans.some((s) => t >= s.from && t <= s.to);
+
+  type PlotPoint = { t: number; py: number; ok: boolean; kind?: "outage" | "dependency" | "missed"; rec?: boolean };
   const plot: PlotPoint[] = [
-    ...points.map((p) => ({ t: p.t, py: y(p.v), ok: true })),
-    ...failTimes.map((f) => ({ t: f.t, py: baseY, ok: false, dep: f.dep })),
+    ...points.map((p) => ({ t: p.t, py: y(p.v), ok: true, rec: recovering(p.t) })),
+    ...failTimes.map((f) => ({ t: f.t, py: baseY, ok: false, kind: f.kind })),
   ].sort((a, b) => a.t - b.t);
-  // One colour rule for every stroke, dot and gradient stop below, so a
-  // dependency dive can never come out half grey and half red.
-  const colorOf = (p: PlotPoint): string => (p.ok ? color : p.dep ? DEP_COLOR : FAIL_COLOR);
+  // One colour rule for every stroke, fill, dot and gradient stop below, so a
+  // dive can never come out half amber and half red, and the climb back out can
+  // never come out half purple and half green.
+  const colorOf = (p: PlotPoint): string =>
+    p.ok
+      ? p.rec ? RECOVER_COLOR : color
+      : p.kind === "dependency" ? DEP_COLOR
+      : p.kind === "missed" ? MISS_COLOR
+      : FAIL_COLOR;
 
   const defs: string[] = [];
   // Gradients are local defs, not external references — resvg resolves them
@@ -348,7 +398,7 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     if (run.length === 1) {
       // A lone point has no line to draw — mark it so it isn't invisible.
       // Failures get the bigger dot below either way.
-      if (run[0]!.ok) dotParts.push(`<circle cx="${x(run[0]!.t).toFixed(1)}" cy="${run[0]!.py.toFixed(1)}" r="3" fill="${color}"/>`);
+      if (run[0]!.ok) dotParts.push(`<circle cx="${x(run[0]!.t).toFixed(1)}" cy="${run[0]!.py.toFixed(1)}" r="3" fill="${stroke}"/>`);
     } else {
       lineParts.push(
         `<polyline fill="none" stroke="${stroke}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${rp.join(" ")}"/>`,
@@ -357,8 +407,11 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
       // baseline, so filling it would paint a zero-height sliver for nothing,
       // and filling ACROSS the outage is the interpolation we're avoiding.
       if (run[0]!.ok) {
+        // The run's OWN colour, not the series colour: a recovering stretch
+        // fills purple under its purple line rather than pooling green
+        // underneath it.
         areaParts.push(
-          `<polygon fill="${color}" fill-opacity="0.10" points="${x(run[0]!.t).toFixed(1)},${baseY} ${rp.join(" ")} ${x(run[run.length - 1]!.t).toFixed(1)},${baseY}"/>`,
+          `<polygon fill="${stroke}" fill-opacity="0.10" points="${x(run[0]!.t).toFixed(1)},${baseY} ${rp.join(" ")} ${x(run[run.length - 1]!.t).toFixed(1)},${baseY}"/>`,
         );
       }
     }

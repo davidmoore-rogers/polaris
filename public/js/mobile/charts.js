@@ -66,7 +66,30 @@
   // (utils/sparklineSvg.ts, the alert email); one outage looks the same on all
   // three surfaces.
   var DEP_COLOR = "#9aa0a6";
-  function failColorFor(p) { return p && p.dep ? DEP_COLOR : FAIL_COLOR; }
+  // The missed-poll amber and the recovering purple — the other two thirds of
+  // the response-time chart's verdict vocabulary. A miss that has NOT reached
+  // the covering automation's count is amber, because red asserts Down and
+  // spending it on the first dropped packet of a three-miss threshold dates the
+  // outage two polls early; a poll that ANSWERED while misses are still
+  // outstanding is purple, and stays purple until the automation's reset run is
+  // served (business rule 36). Same values as _CHART_MISS_COLOR /
+  // _CHART_RECOVER_COLOR on desktop, the Last-30-min strip's own cells, and
+  // MISS_COLOR / RECOVER_COLOR in utils/sparklineSvg.ts — one outage and one
+  // recovery look the same on all three surfaces; change one, change all.
+  var MISS_COLOR = "#ffc107";
+  var RECOVER_COLOR = "#ab47bc";
+
+  // The stroke/dot colour for one plot point. Port of `_chartPointColor` in
+  // public/js/assets.js — keep the two in step. Grey outranks the amber/red
+  // split (a miss the upstream explains is not counted against this device at
+  // all), and a point with no `down` flag stays red, which is every chart that
+  // never resolved a threshold.
+  function pointColorFor(p, seriesColor) {
+    if (p && p.ok) return p.rec ? RECOVER_COLOR : seriesColor;
+    if (p && p.dep) return DEP_COLOR;
+    return p && p.down === false ? MISS_COLOR : FAIL_COLOR;
+  }
+  function failColorFor(p) { return pointColorFor(p, null); }
 
   // Gradient ids must be unique per rendered chart — several charts share the
   // asset sheet's DOM (response time, CPU/memory, three SD-WAN charts).
@@ -131,7 +154,14 @@
       if (p.v == null && !failed) return;
       var t = +new Date(p.ts);
       if (!isFinite(t)) return;
-      pts.push({ ts: t, v: failed ? null : p.v, ok: !failed, dep: p.dep === true });
+      pts.push({
+        ts: t, v: failed ? null : p.v, ok: !failed, dep: p.dep === true,
+        // Carried through from the caller's replay of the monitor state machine
+        // (PolarisMonitorStates). `down === false` is the deliberate amber; both
+        // are undefined on every series that never resolved a threshold, which
+        // leaves those charts exactly as they were.
+        rec: p.rec === true, down: p.down,
+      });
     });
     pts.sort(function (a, b) { return a.ts - b.ts; });
     return pts;
@@ -177,7 +207,7 @@
     // Colour, not ok-ness, is what breaks a run: a red outage that runs into a
     // grey dependency stretch (the parent went down part-way through) has to
     // split, or the whole thing takes the first point's stroke.
-    function strokeFor(p) { return p.ok ? seriesColor : failColorFor(p); }
+    function strokeFor(p) { return pointColorFor(p, seriesColor); }
     function polyline(slice, p0) {
       if (slice.length < 2) return "";
       return '<polyline points="' + slice.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ") +
@@ -290,7 +320,7 @@
     prepared.forEach(function (e, si) {
       var color = e.s.color || "var(--md-primary)";
       var plot = e.pts.map(function (p) {
-        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok, dep: p.dep };
+        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok, dep: p.dep, rec: p.rec, down: p.down };
       });
       if (!plot.length) return;
 

@@ -1179,6 +1179,44 @@ diving a line that has data would misreport what is actually held.
 A counter reset is not a missed poll. Neither is a partial-loss rollup bucket —
 it still plots its average.
 
+### The reachability chart speaks verdicts, so it carries more than two colours
+
+Every chart above is about a READING, and a reading has two states: it arrived
+or it didn't. One chart is about a VERDICT instead — response time, the series
+that decides whether the device is up — and it reads as the status pill reads,
+sample by sample:
+
+| Colour | Meaning |
+| --- | --- |
+| green (`--color-success`) | answered, nothing outstanding |
+| amber `#ffc107` | a miss, but the count has not reached the threshold that declares Down |
+| red `#d32f2f` | the miss that IS the verdict, and every one after it |
+| purple `#ab47bc` | answered, but the misses are not paid off yet |
+| grey `#9aa0a6` | a miss the upstream explains — overrides amber and red both |
+
+Amber earns its place by what red claims. Red asserts "this device is down", so
+spending it on the first dropped packet of a three-miss threshold says the
+outage began two polls before the product agreed it had. Amber is the honest
+reading of a miss that is still only a miss.
+
+**Do not compute these in the renderer.** One replay module colours the sample
+strip, the chart beneath it, and the phone's copy of that chart — because the
+strip sits directly above the chart, and the phone is showing the same device to
+the same person, and any two of them describing one probe differently is the
+exact confusion this vocabulary exists to prevent. Give the amber the strip's
+own value, not a deeper one chosen for contrast: two yellows a shade apart read
+as two meanings. That replay is also
+what puts the recovery rule in the picture: when the config says "down after 3
+missed, up after 5 received", the climb stays purple for all five answers, not
+just the three it takes to drain the counter.
+
+The counts ride the history payload alongside the samples. A chart that fetches
+them separately paints an outage and then repaints it a moment later, in front
+of the operator.
+
+Every OTHER chart keeps its own series colour and its two states. Recolouring
+them would make green and purple mean two different things apiece.
+
 ### Bands are maintenance, not failure
 
 A translucent band across the plot means **the asset was in a maintenance
@@ -1201,11 +1239,21 @@ device is telling you it doesn't like it.
 ### What the email surface may and may not diverge on
 
 May: physical size, the raster palette (flat hex, no CSS variables — a mail
-client has no theme to read), no tooltips or hover targets, runs of same-state
-points collapsed into one polyline rather than a `<line>` per segment (a
-FortiGate can land thousands of points in an hour, and per-segment elements
+client has no theme to read; pick each colour's value for a WHITE card, since
+that is what the message renders on), no tooltips or hover targets, runs of
+same-state points collapsed into one polyline rather than a `<line>` per segment
+(a FortiGate can land thousands of points in an hour, and per-segment elements
 balloon the PNG — the phone port collapses them for the same reason).
 
-May not: the shape of an outage. Same red, same baseline dive, same fade
-between the series color and red at each transition, same rule about what
-counts as a missed poll in the first place.
+May not: the shape of an outage, **or which colour any part of it is**. Same
+baseline dive, same fade at each transition, same rule about what counts as a
+missed poll — and the same five-colour verdict palette on the reachability
+chart, including the amber that says a miss is not yet a verdict and the purple
+that says a device is answering but not yet trusted. An operator who learns to
+read a recovery on the device page must not have to learn it again from the
+email about the same outage.
+
+That is a claim about a state machine, not about a stylesheet, so it cannot be
+kept by copying colours: the server needs its own replay of the same rules, and
+a test has to run both copies over the same probe sequences and fail when they
+part.
