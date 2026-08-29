@@ -857,11 +857,31 @@ model Asset {
   lastUptimeSec            Int?
   lastRebootAt             DateTime?
   consecutiveFailures      Int         @default(0)
-  // Counts probe successes since the last failure. Drives the
-  // pending/warning -> up transition: an asset stays in pending or warning
-  // until consecutiveSuccesses reaches the resolved failureThreshold (the
-  // same value gates both directions). Reset to 0 on any failure.
+  // Counts probe successes since the last failure; reset to 0 on any failure.
+  // It stopped driving the warning -> up transition when the counter became a
+  // leaky bucket (business rule 30) — the bucket's own level decides that now.
+  // Its one remaining verdict is the RECOVERY CONFIRMATION RUN: when the
+  // covering down automation's reset asks for more answered polls than the
+  // drain provides, the asset holds in `recovering` until this reaches that
+  // count (business rule 36, `owesRecoveryConfirmation`). Still charted, and
+  // still a true fact about the device either way.
   consecutiveSuccesses     Int         @default(0)
+  // Does the asset owe its covering automation a confirmation run — i.e. has
+  // it read `down` since it last read `up`?
+  //
+  // The one bit of memory the two counters cannot reconstruct. At cf 0 a
+  // success run of N is ambiguous: either a bucket that drained from N, or a
+  // healthy device that has simply answered N times — and the confirmation
+  // hold must apply to the first and never to the second. Inferring it from
+  // `consecutiveSuccesses >= threshold` turns every blip on a healthy device
+  // into two amber cells; inferring it from the previous status loses the
+  // memory the moment a mid-run miss parks the asset in `warning`.
+  //
+  // Set when the machine reaches `down`, cleared when it reaches `up`, written
+  // in the same probe patch as the counters (no extra query). False on every
+  // pre-2026-08-29 row, which is correct: an asset mid-outage at upgrade time
+  // recovers on the drain the way it always did, and its next `down` arms it.
+  awaitingRecoveryConfirm  Boolean     @default(false)
 
   // Per-stream polling-method overrides. Each accepts the 5-way enum
   // "rest_api" | "snmp" | "winrm" | "ssh" | "icmp" or null (= inherit from

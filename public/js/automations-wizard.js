@@ -1510,6 +1510,7 @@ async function openAutomationWizard(existing, opts) {
       resetSentence = _sent.resetSentence, invertedTree = _sent.invertedTree,
       isBooleanMetric = _sent.isBooleanMetric, stateMapOf = _sent.stateMapOf,
       isDownDetectionLeaf = _sent.isDownDetectionLeaf, missedPollsOf = _sent.missedPollsOf,
+      isDownDetectionTrigger = _sent.isDownDetectionTrigger,
       downDetectionMeta = _sent.downDetectionMeta,
       monStatusWord = _sent.monStatusWord,
       CMP_PHRASE = _sent.CMP_PHRASE, INV_CMP = _sent.INV_CMP;
@@ -3943,9 +3944,21 @@ async function openAutomationWizard(existing, opts) {
       // Counted in polls like every hold on the trigger step: recovery is
       // judged on readings too, so "stay cleared for 3" means three readings
       // back under the line. Seconds remain what is stored (data-sec).
+      // On a DOWN automation this count is not just the alert's clock: the probe
+      // loop holds the device in Recovering until that many polls have answered
+      // (business rule 36), so the pill and the alert end together. Say so here
+      // — it is the difference between a number that delays an email and one
+      // that changes what the Assets list reads.
+      var downReset = isDownDetectionTrigger(tr);
       var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for ' +
         '<input type="number" id="aw-sustain-min" class="aw-poll-input" data-sec="' + (reset.sustainSec || 0) + '" min="0" value="' +
         pollsFromSec(reset.sustainSec || 0, awCadence().sec) + '" style="width:80px"> polls (0 = reset immediately)' +
+        (downReset
+          ? '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">' +
+            'On a down automation this is the way back for the device itself: it reads <strong>Recovering</strong> ' +
+            'until that many polls have answered, then <strong>Up</strong> — and the alert clears with it. ' +
+            'Fewer than the missed-poll count changes nothing, since the device still has to answer once per miss.</p>'
+          : '') +
         '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
       var autoExtras = "";
       if (numeric) {

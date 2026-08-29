@@ -163,8 +163,13 @@ import { decodePortList, derivePortVlans, isVlanId, type PortVlanConfig, type Vl
 import { matchTrunkPeer, parseTrunkPortMap, trunkMemberMap, type TrunkPortEntry } from "../utils/fortiswitchTrunkMap.js";
 import { joinStateRows } from "../utils/stateProbes.js";
 import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
-import { resolveDownThreshold } from "./downDetectionService.js";
-import { isConfigStatusEdge, runsHeavyCadences, type MonitorStatus } from "../utils/monitorStatus.js";
+import { recoveryPollsFor, resolveDownDetection } from "./downDetectionService.js";
+import {
+  isConfigStatusEdge,
+  owesRecoveryConfirmation,
+  runsHeavyCadences,
+  type MonitorStatus,
+} from "../utils/monitorStatus.js";
 import {
   type PollingMethod,
   type AssetSourceKind,
@@ -228,6 +233,11 @@ export interface AssetMonitorSnapshot {
   lastUptimeSec?: number | null;
   consecutiveFailures: number;
   consecutiveSuccesses: number;
+  /** Owes a recovery confirmation run — see Asset.awaitingRecoveryConfirm.
+   *  REQUIRED, not optional: every producer of this snapshot feeds the state
+   *  machine, and a missing bit would silently read as "owes nothing" and let
+   *  a device out of its confirmation run on the drain alone. */
+  awaitingRecoveryConfirm: boolean;
   discoveredByIntegrationId: string | null;
   monitorIntervalSec: number | null;
   cpuMemoryIntervalSec: number | null;
@@ -10350,6 +10360,7 @@ export async function recordProbeResult(
       lastUptimeSec: true,
       consecutiveFailures: true,
       consecutiveSuccesses: true,
+      awaitingRecoveryConfirm: true,
       discoveredByIntegrationId: true,
       monitorIntervalSec: true,
       cpuMemoryIntervalSec: true,
@@ -10376,6 +10387,12 @@ export async function recordProbeResult(
         monitorStatus:        pending.monitorStatus,
         consecutiveFailures:  pending.consecutiveFailures,
         consecutiveSuccesses: pending.consecutiveSuccesses,
+        // The confirmation-run bit belongs to the same machine as the two
+        // counters, so it has to ride the same overlay: two probes inside one
+        // flush window would otherwise both read the pre-outage `false` and the
+        // second would decide a device that just went down owes no run.
+        awaitingRecoveryConfirm:
+          pending.awaitingRecoveryConfirm ?? loaded.awaitingRecoveryConfirm,
       }
     : loaded;
 
@@ -10405,13 +10422,21 @@ export async function recordProbeResult(
 
   // WHO decides this device is down: the covering down-detection automation,
   // most-specific-wins (business rule 18's ladder). null = no automation covers
-  // it, so we render no verdict at all and the asset reads "passive". Doubles
-  // as the recovery threshold, exactly as failureThreshold used to — the same
-  // number of confirmations either direction.
+  // it, so we render no verdict at all and the asset reads "passive".
+  //
+  // The SAME automation decides the way back. The bucket's drain is the floor —
+  // as many answers as it took misses, exactly as failureThreshold used to —
+  // and the automation's reset sustain raises it when the operator asked for a
+  // longer confirmation run ("down after 3 missed, reset after 5 received").
+  // Converted from the stored seconds at THIS asset's cadence, so a rule
+  // authored against a 60s interval still means five polls on a device polled
+  // every five minutes rather than one.
   //
   // One Map lookup in the steady state; see downDetectionService for why this
   // is safe on a per-probe path at 2000 assets.
-  const threshold = await resolveDownThreshold(assetId);
+  const verdict = await resolveDownDetection(assetId);
+  const threshold = verdict?.threshold ?? null;
+  const recoveryPolls = verdict ? recoveryPollsFor(verdict, effective.intervalSeconds) : 0;
 
   const now = new Date();
   const previousStatus = asset.monitorStatus ?? "unknown";
@@ -10484,6 +10509,13 @@ export async function recordProbeResult(
     nextStatus = "down";
   } else if (newCf > 0) {
     nextStatus = result.success ? "recovering" : "warning";
+  } else if (owesRecoveryConfirmation(asset.awaitingRecoveryConfirm, newCf, newCs, recoveryPolls)) {
+    // The debt is paid, but this asset has read `down` since it last read `up`
+    // and the covering automation asked for a longer confirmation run than the
+    // drain provided. Hold amber until the run is served. This is the ONE arrow
+    // that reads `newCs`, and the stored bit is what keeps it off the healthy
+    // devices whose success runs look identical from the counters alone.
+    nextStatus = "recovering";
   } else {
     nextStatus = "up";
   }
@@ -10538,6 +10570,12 @@ export async function recordProbeResult(
     lastResponseTimeMs: result.success ? result.responseTimeMs : null,
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
+    // Arm on the way down, disarm once the asset is genuinely back. Every other
+    // state leaves it alone (undefined ⇒ the flush's COALESCE keeps it), which
+    // is what carries the memory across a mid-run miss: a device parked in
+    // `warning` halfway through its confirmation run still owes the run.
+    awaitingRecoveryConfirm:
+      nextStatus === "down" ? true : nextStatus === "up" ? false : undefined,
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
     // The packet-loss anchor (business rule 29b): the success that ended an
     // outage. "down"/"unknown" are the only states a device leaves on a

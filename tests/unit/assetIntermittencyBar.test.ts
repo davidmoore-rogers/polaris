@@ -17,7 +17,11 @@
  *    this is the case a "success wins outright" machine gets wrong;
  *  - a blip during the climb back out re-fills the bucket and can go red again;
  *  - the pre-window state is fully recovered (count 0), or the first cells of
- *    every bar would be colored as if an outage were already in progress.
+ *    every bar would be colored as if an outage were already in progress;
+ *  - and the covering automation's RECOVERY count (business rule 36): when its
+ *    reset asks for more answered polls than the drain provides, the cells stay
+ *    purple until the run is served — but only for a device that actually went
+ *    down, never for one that merely blipped.
  *
  * assets.js is a ~18k-line browser script with no module boundary, so the
  * function under test is sliced out by name — the approach of
@@ -41,23 +45,29 @@ function fnSrc(name: string): string {
 }
 
 type Sample = { timestamp: string; success: boolean };
-type State = { timestamp: string; status: string; missed: number; success: boolean };
+type State = {
+  timestamp: string;
+  status: string;
+  missed: number;
+  success: boolean;
+  confirming: { done: number; need: number } | null;
+};
 
 const _intermittencyStates = new Function(
   `${fnSrc("_intermittencyStates")}; return _intermittencyStates;`,
-)() as (samples: Sample[], threshold?: number) => State[];
+)() as (samples: Sample[], threshold?: number, recoveryPolls?: number) => State[];
 
 /** "..X.." → samples, where "." is a success and "x"/"X" a failed probe. */
-function states(pattern: string, threshold?: number): State[] {
+function states(pattern: string, threshold?: number, recoveryPolls?: number): State[] {
   const samples = pattern.split("").map((c, i) => ({
     timestamp: new Date(1_700_000_000_000 + i * 60_000).toISOString(),
     success: c === ".",
   }));
-  return _intermittencyStates(samples, threshold);
+  return _intermittencyStates(samples, threshold, recoveryPolls);
 }
 /** Colors, one letter per sample. p = purple (recovering / paying the debt). */
-function run(pattern: string, threshold?: number): string {
-  return states(pattern, threshold)
+function run(pattern: string, threshold?: number, recoveryPolls?: number): string {
+  return states(pattern, threshold, recoveryPolls)
     .map((s) => ({ up: "g", recovering: "p", warning: "y", down: "r" }[s.status] ?? "?"))
     .join("");
 }
@@ -129,14 +139,75 @@ describe("_intermittencyStates", () => {
       { timestamp: "2026-08-25T00:01:00.000Z", success: false },
     ];
     expect(_intermittencyStates(samples, 3)).toEqual([
-      { timestamp: "2026-08-25T00:00:00.000Z", status: "up", missed: 0, success: true },
-      { timestamp: "2026-08-25T00:01:00.000Z", status: "warning", missed: 1, success: false },
+      { timestamp: "2026-08-25T00:00:00.000Z", status: "up", missed: 0, success: true, confirming: null },
+      { timestamp: "2026-08-25T00:01:00.000Z", status: "warning", missed: 1, success: false, confirming: null },
     ]);
   });
 
   it("tolerates an empty or absent sample list", () => {
     expect(_intermittencyStates([], 3)).toEqual([]);
     expect(_intermittencyStates(undefined as unknown as Sample[], 3)).toEqual([]);
+  });
+
+  // ── The covering automation's recovery count (business rule 36) ──────────
+  //
+  // "Down after 3 missed, reset after 5 received" is the shape that forced
+  // this: the bar went green on the third answer while the alert was still
+  // firing, which is Polaris disagreeing with itself in the one place an
+  // operator follows a device probe by probe.
+
+  it("holds purple until the automation's recovery count is served", () => {
+    // 3 misses = down. The drain alone would go green on answer 3; a reset
+    // asking for 5 keeps the last two cells purple.
+    expect(run("xxx.....", 3, 5)).toBe("yyrppppg");
+  });
+
+  it("counts the drain toward the recovery run rather than restarting it", () => {
+    // The 5 answers include the 3 that paid the debt — an operator who wrote
+    // "5 received" means five probes, not three plus five.
+    const s = states("xxx.....", 3, 5);
+    expect(s.filter((c) => c.success).findIndex((c) => c.status === "up")).toBe(4);
+  });
+
+  it("reports the confirmation run in the tooltip's subject", () => {
+    const s = states("xxx.....", 3, 5);
+    expect(s[5].confirming).toEqual({ done: 3, need: 5 });
+    expect(s[6].confirming).toEqual({ done: 4, need: 5 });
+    // While the bucket still has debt the cell is about the debt, not the run.
+    expect(s[4].confirming).toBeNull();
+    // And once the run is served it is an ordinary green.
+    expect(s[7].confirming).toBeNull();
+  });
+
+  it("leaves a blip alone — only a device that went DOWN owes the run", () => {
+    // Two misses against a threshold of 3 never reached down, so the second
+    // answer is green exactly as it was before the recovery count existed.
+    expect(run("xx..", 3, 5)).toBe("yypg");
+  });
+
+  it("is a no-op when the reset asks for no more than the drain", () => {
+    expect(run("xxx.....", 3, 3)).toBe(run("xxx.....", 3));
+    expect(run("xxx.....", 3, 0)).toBe(run("xxx.....", 3));
+    expect(run("xxx.....", 3, 2)).toBe(run("xxx.....", 3));
+  });
+
+  it("does not extend a deep outage that already out-drained the count", () => {
+    // 7 misses cost 7 answers to drain — the asset is still DOWN for the first
+    // four of them (the bucket has to fall under 3) — and a 5-poll reset adds
+    // nothing on top, because the drain already exceeded it.
+    expect(run("xxxxxxx........", 3, 5)).toBe("yyrrrrrrrrrppgg");
+    expect(run("xxxxxxx........", 3, 5)).toBe(run("xxxxxxx........", 3));
+  });
+
+  it("re-arms after a fresh outage, not once per window", () => {
+    expect(run("xxx.....xxx.....", 3, 5)).toBe("yyrppppgyyrppppg");
+  });
+
+  it("never paints a healthy window purple on its third cell", () => {
+    // The server infers "was down" from the counters; the replay cannot, so it
+    // tracks the observation. Without that, a bar opening on a device that has
+    // been up for hours reads cs >= threshold at cf 0 and goes amber.
+    expect(run("..........", 3, 5)).toBe("gggggggggg");
   });
 
   it("the renderer's color map covers every state the replay can emit", () => {

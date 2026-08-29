@@ -82,7 +82,51 @@ export function runsHeavyCadences(a: {
 }): boolean {
   if (a.dependencySuppressed) return false;
   if (a.monitorStatus === "up") return true;
+  // A `recovering` asset whose bucket has drained is answering every probe and
+  // is only still amber because its automation asked for more confirmations
+  // (owesRecoveryConfirmation). Stalling telemetry through that hold would let
+  // a reset count silently decide how fresh an asset's charts are, which is not
+  // what it was set to decide. Unreachable before the recovery count existed —
+  // `recovering` implied cf > 0 — so this widens nothing retroactively.
+  if (a.monitorStatus === "recovering") return (a.consecutiveFailures ?? 0) === 0;
   return a.monitorStatus === "passive" && (a.consecutiveFailures ?? 0) === 0;
+}
+
+/**
+ * Is the asset still owing answered polls before it may read `up`?
+ *
+ * The leaky bucket alone says `up` the moment the debt is paid — `threshold`
+ * answers after `threshold` misses. A down automation whose reset asks for MORE
+ * than that (business rule 36) holds the asset in `recovering` until its count
+ * is served, so the pill and the automation agree about when a device is back.
+ *
+ * Three inputs, and each one is load-bearing:
+ *
+ *   • `awaitingRecoveryConfirm` — the asset has read `down` since it last read
+ *     `up`. ONLY such a device owes a run. This is a stored bit rather than
+ *     something derived because at cf 0 a success run of N is ambiguous between
+ *     a bucket that drained from N and a healthy device that has answered N
+ *     times: deriving it painted two amber cells into every ordinary blip.
+ *   • `consecutiveFailures` must be 0 — while the bucket still holds debt the
+ *     LEVEL owns the verdict, and this arrow must not reach past it.
+ *   • `consecutiveSuccesses` is the run so far. It counts the answers that
+ *     drained the bucket too: an operator who writes "5 received" means five
+ *     probes, not the drain plus five more. A miss anywhere zeroes it, so the
+ *     run has to be clean — which is the point of asking for one.
+ *
+ * `recoveryPolls <= threshold` (no reset sustain, or one no longer than the
+ * drain) makes this constantly false — the pre-2026-08-29 behavior, and what
+ * every automation that resets immediately still gets.
+ */
+export function owesRecoveryConfirmation(
+  awaitingRecoveryConfirm: boolean,
+  consecutiveFailures: number,
+  consecutiveSuccesses: number,
+  recoveryPolls: number,
+): boolean {
+  if (!awaitingRecoveryConfirm) return false;
+  if (consecutiveFailures !== 0) return false;
+  return consecutiveSuccesses < recoveryPolls;
 }
 
 /**

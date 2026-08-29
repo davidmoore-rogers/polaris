@@ -4542,12 +4542,18 @@ function _paintDownDetectionHint(eff, asset) {
   var resolved = eff.resolved || {};
   var txt = "Down after <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
   if (calc) {
-    var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+    var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs, dd.recoveryPolls);
     txt += " ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) +
       " at this device's " + c.interval + "s poll interval";
   }
   if (dd.automationName) txt += ", set by <strong>" + escapeHtml(dd.automationName) + "</strong>";
   txt += ".";
+  // The way back is the same automation's answer, so it belongs in the same
+  // sentence — an operator who set "5 received polls" is otherwise left to
+  // discover on the strip that Up takes longer than Down did.
+  if (dd.recoveryPolls > dd.missedPolls) {
+    txt += " Back to Up after <strong>" + dd.recoveryPolls + " received polls</strong>.";
+  }
   if (dd.conflict) {
     txt += " <span style=\"color:var(--color-warning)\">Another equally-specific automation asks for " +
       dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +
@@ -11283,20 +11289,43 @@ function assetMonitoringViewHTML(a) {
  * passive device quietly accumulating misses still reads as one. `Infinity` is
  * how "never red" is spelled without a second loop.
  */
-function _intermittencyStates(samples, threshold) {
+function _intermittencyStates(samples, threshold, recoveryPolls) {
   var thr = threshold === null ? Infinity
     : (Number.isFinite(threshold) && threshold >= 1) ? Math.floor(threshold) : 3;
+  // How many probes must ANSWER before the asset reads Up again — the covering
+  // automation's reset count, already converted to polls by the server. Below
+  // the missed-poll count it changes nothing: the bucket's drain is the floor.
+  var rec = (Number.isFinite(recoveryPolls) && recoveryPolls > 0) ? Math.floor(recoveryPolls) : 0;
   var cf = 0;
+  var cs = 0;
+  // Whether this replay has SEEN the device go down. The server infers the same
+  // fact arithmetically (owesRecoveryConfirmation: at cf 0, a success run of
+  // `cs` means the bucket stood at `cs` when the run began), which it must,
+  // having no memory beyond the two counters. The replay has the whole window
+  // in hand, so it uses the observation directly — the inference needs a run
+  // that STARTED inside the window, and a bar whose first cells predate the
+  // outage would otherwise paint a healthy device amber on its third cell.
+  var sawDown = false;
   return (samples || []).map(function (s) {
     // Mirrors recordProbeResult exactly: a miss adds one, a success takes one
     // back, floored at 0 — and the LEVEL decides the color, with this probe's
     // outcome only breaking the tie below the threshold. If these two ever
     // disagree the bar is telling the operator a different story than the pill.
     cf = s.success ? Math.max(0, cf - 1) : cf + 1;
-    var display = cf >= thr ? "down"
-      : cf > 0 ? (s.success ? "recovering" : "warning")
-      : "up";
-    return { timestamp: s.timestamp, status: display, missed: cf, success: !!s.success };
+    cs = s.success ? cs + 1 : 0;
+    var display;
+    if (cf >= thr) { display = "down"; sawDown = true; }
+    else if (cf > 0) display = s.success ? "recovering" : "warning";
+    else if (sawDown && cs < rec) display = "recovering";
+    else { display = "up"; sawDown = false; }
+    return {
+      timestamp: s.timestamp,
+      status: display,
+      missed: cf,
+      success: !!s.success,
+      // Only meaningful while the debt is paid but the confirmation run is not.
+      confirming: display === "recovering" && cf === 0 ? { done: cs, need: rec } : null,
+    };
   });
 }
 
@@ -11323,6 +11352,8 @@ async function _renderIntermittencyBar(assetId, effP) {
   // fails we fall back to a sensible default so the bar still renders.
   var allSamples = [];
   var threshold = 3;
+  var recoveryPolls = 0;
+  var downAutomation = null;
   try {
     var results = await Promise.all([
       api.assets.monitorHistory(assetId, "1h").catch(function () { return null; }),
@@ -11337,6 +11368,10 @@ async function _renderIntermittencyBar(assetId, effP) {
     var ddInfo = results[1] && results[1].downDetection;
     if (ddInfo && ddInfo.passive) threshold = null;
     else if (ddInfo && Number.isFinite(ddInfo.missedPolls)) threshold = ddInfo.missedPolls;
+    if (ddInfo && !ddInfo.passive) {
+      if (Number.isFinite(ddInfo.recoveryPolls)) recoveryPolls = ddInfo.recoveryPolls;
+      downAutomation = ddInfo.automationName || null;
+    }
     if (results[1] && results[1].resolved) {
       // Populate the shared cache so stale-banner slots see the resolved
       // class/integration cadence as soon as this fetch lands (covers the
@@ -11351,7 +11386,7 @@ async function _renderIntermittencyBar(assetId, effP) {
     slot.innerHTML = '<span style="font-size:0.78rem;color:var(--color-text-tertiary)">No samples in the last 30 minutes</span>';
     return;
   }
-  var states = _intermittencyStates(allSamples, threshold).slice(-30);
+  var states = _intermittencyStates(allSamples, threshold, recoveryPolls).slice(-30);
 
   // Color map mirrors badge-monitor-* hues so the bar reads as the same
   // visual vocabulary as the pill above it. This bar only ever emits
@@ -11384,12 +11419,25 @@ async function _renderIntermittencyBar(assetId, effP) {
     var color = colors[st.status] || colors.unknown;
     var n = st.missed || 0;
     var what;
-    if (!st.success)   what = "Missed " + n + " (+1)";
-    else if (n > 0)    what = "Received — " + n + " missed outstanding (−1)";
-    else               what = "Received — recovered";
+    if (!st.success)        what = "Missed " + n + " (+1)";
+    else if (n > 0)         what = "Received — " + n + " missed outstanding (−1)";
+    else if (st.confirming) what = "Received — confirming recovery " + st.confirming.done + "/" + st.confirming.need;
+    else                    what = "Received — recovered";
     if (st.status === "down") what += " · Down";
     return '<div title="' + escapeHtml(ts + " · " + what) + '" style="flex:1;background:' + color + '"></div>';
   }).join("");
+  // Name the automation the bar is drawn from. Both counts are its counts —
+  // the missed-poll threshold that turns a cell red and the confirmation run
+  // that keeps it purple — so an operator reading the strip against their
+  // automation can see the two numbers rather than infer them from the colors.
+  var legend;
+  if (threshold === null) {
+    legend = 'No down automation covers this device — Polaris renders no verdict';
+  } else {
+    legend = 'Down after ' + threshold + ' missed · Up after ' +
+      (recoveryPolls > threshold ? recoveryPolls : threshold) + ' received' +
+      (downAutomation ? ' — ' + escapeHtml(downAutomation) : '');
+  }
   slot.innerHTML =
     '<div style="display:flex;height:14px;width:100%;border:1px solid var(--color-border);border-radius:3px;overflow:hidden;gap:1px;background:var(--color-bg-primary)">' +
       cellHTML +
@@ -11398,7 +11446,8 @@ async function _renderIntermittencyBar(assetId, effP) {
       '<span>30m ago</span>' +
       '<span>' + states.length + ' sample' + (states.length === 1 ? '' : 's') + '</span>' +
       '<span>now</span>' +
-    '</div>';
+    '</div>' +
+    '<div style="font-size:0.7rem;color:var(--color-text-tertiary);margin-top:2px">' + legend + '</div>';
 }
 
 /**
@@ -19070,10 +19119,14 @@ function _paintAssetDownDetectionPanel(assetId) {
     txt += dd.automationName ? "<strong>" + escapeHtml(dd.automationName) + "</strong>" : "an automation";
     txt += " — <strong>" + dd.missedPolls + " missed poll" + (dd.missedPolls === 1 ? "" : "s") + "</strong>";
     if (calc) {
-      var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs);
+      var c = calc(dd.missedPolls, resolved.intervalSeconds, resolved.probeTimeoutMs, dd.recoveryPolls);
       txt += ", ≈ " + window.PolarisMonitorDownAfter.human(c.realSec) + " at this device's " + c.interval + "s poll interval";
     }
     txt += ".";
+    if (dd.recoveryPolls > dd.missedPolls) {
+      txt += " The same automation decides the way back: <strong>" + dd.recoveryPolls +
+        " received polls</strong> before it reads Up again.";
+    }
     if (dd.conflict) {
       txt += ' <span style="color:var(--color-warning)">Another equally-specific automation asks for ' +
         dd.conflict.counts.filter(function (n) { return n !== dd.conflict.chosen; }).join(" / ") +

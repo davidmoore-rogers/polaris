@@ -12,10 +12,19 @@
  *   cf >= threshold              → down
  *   cf > 0, this probe missed    → warning     ("Missed N")
  *   cf > 0, this probe answered  → recovering  (answering, misses outstanding)
+ *   cf == 0, run not yet served  → recovering  (confirming — see below)
  *   cf == 0                      → up
  *
  * The LEVEL decides and this probe's outcome only breaks the tie below the
  * threshold, so one answered packet cannot repaint a deep outage.
+ *
+ * The one place the SUCCESS counter decides anything is the confirmation run:
+ * a covering automation whose reset asks for more answered polls than the drain
+ * provides ("down after 3 missed, reset after 5 received") holds the asset in
+ * `recovering` until `cs` reaches that count — business rule 36, the predicate
+ * being `owesRecoveryConfirmation` in utils/monitorStatus.ts. Below the missed
+ * count it changes nothing, which covers every automation authored before it
+ * and every one that resets immediately.
  *
  * The threshold is the missed-poll count from the covering down-detection
  * automation (downDetectionService), NOT a Monitor Settings value. A NULL
@@ -33,31 +42,44 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { owesRecoveryConfirmation } from "../../src/utils/monitorStatus.js";
 
 type Status = "up" | "warning" | "recovering" | "down" | "unknown" | "passive";
 
 interface MachineState {
   status: Status;
   cf:     number;  // consecutiveFailures — the bucket
-  cs:     number;  // consecutiveSuccesses — maintained, but decides nothing
+  cs:     number;  // consecutiveSuccesses — decides only the confirmation run
+  /** Asset.awaitingRecoveryConfirm — has read `down` since it last read `up`. */
+  awaiting: boolean;
 }
 
-/** Pure transition — same logic as recordProbeResult, threshold parameterized. */
-function step(prev: MachineState, success: boolean, threshold: number | null): MachineState {
+/** Pure transition — same logic as recordProbeResult, counts parameterized. */
+function step(
+  prev: MachineState,
+  success: boolean,
+  threshold: number | null,
+  recoveryPolls = 0,
+): MachineState {
   const newCf = success ? Math.max(0, prev.cf - 1) : prev.cf + 1;
   const newCs = success ? prev.cs + 1 : 0;
   let next: Status;
   if (threshold === null)      next = "passive";
   else if (newCf >= threshold) next = "down";
   else if (newCf > 0)          next = success ? "recovering" : "warning";
+  else if (owesRecoveryConfirmation(prev.awaiting, newCf, newCs, recoveryPolls)) next = "recovering";
   else                         next = "up";
-  return { status: next, cf: newCf, cs: newCs };
+  // Armed on the way down, disarmed once the asset is genuinely back; every
+  // other outcome carries the prior value, which is what survives a mid-run
+  // miss parking the asset in `warning`.
+  const awaiting = next === "down" ? true : next === "up" ? false : prev.awaiting;
+  return { status: next, cf: newCf, cs: newCs, awaiting };
 }
 
 /** A device sitting at `cf` outstanding misses. The prior STATUS is deliberately
  *  not an input any more — the bucket carries all the history the verdict needs. */
 function at(cf: number): MachineState {
-  return { status: "up", cf, cs: 0 };
+  return { status: "up", cf, cs: 0, awaiting: false };
 }
 
 /** Drive a pattern: "." answered, "x" missed. Returns the state after the run. */
@@ -164,14 +186,93 @@ describe("monitor status state machine — flapping", () => {
     expect(s).toMatchObject({ status: "down", cf: 3 });
   });
 
-  it("consecutiveSuccesses is still maintained but decides nothing", () => {
-    // Kept because it is a true fact about the device and is charted; the
-    // machine stopped consulting it when recovery became the bucket draining.
+  it("consecutiveSuccesses decides nothing while the bucket still has debt", () => {
+    // It is a true fact about the device and is charted; while the bucket has
+    // debt the LEVEL alone picks the verdict. The success counter gets a say in
+    // exactly one place, the confirmation run below.
     let s = at(5);
     s = step(s, true, 3); expect(s.cs).toBe(1);
     s = step(s, true, 3); expect(s.cs).toBe(2);
     expect(s.status).toBe("down"); // cf=3, still at the threshold
     s = step(s, false, 3); expect(s.cs).toBe(0);
+  });
+});
+
+describe("the covering automation's recovery count (business rule 36)", () => {
+  it("holds recovering until the reset's count of answers is served", () => {
+    let s = drive("xxx", 3);                                      // down, cf=3
+    s = step(s, true, 3, 5); expect(s.status).toBe("recovering");  // cf=2
+    s = step(s, true, 3, 5); expect(s.status).toBe("recovering");  // cf=1
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "recovering", cf: 0, cs: 3 });
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "recovering", cf: 0, cs: 4 });
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "up", cf: 0, cs: 5 });
+  });
+
+  it("counts the drain toward the run rather than restarting it after", () => {
+    // "5 received" means five probes, not the three that paid the debt plus
+    // five more — the operator is describing the device coming back, once.
+    let s = drive("xxx", 3);
+    let answers = 0;
+    while (s.status !== "up" && answers < 20) { s = step(s, true, 3, 5); answers++; }
+    expect(answers).toBe(5);
+  });
+
+  it("only a device that actually went DOWN owes the run", () => {
+    // Two misses against a threshold of 3 never reached down. The second answer
+    // is `up` exactly as it was before the count existed.
+    let s = drive("xx", 3);
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "recovering", cf: 1 });
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "up", cf: 0, cs: 2 });
+  });
+
+  it("leaves a device that never left up alone, however long its success run", () => {
+    // The guard that keeps a healthy device from turning amber on its Nth
+    // answer: its run began at cf 0, not at cf >= threshold.
+    let s: MachineState = { status: "up", cf: 0, cs: 0, awaiting: false };
+    for (let i = 0; i < 10; i++) {
+      s = step(s, true, 3, 5);
+      expect(s.status).toBe("up");
+    }
+  });
+
+  it("is a no-op when the reset asks for no more than the drain", () => {
+    for (const rec of [0, 1, 3]) {
+      let s = drive("xxx", 3);
+      s = step(s, true, 3, rec);
+      s = step(s, true, 3, rec);
+      s = step(s, true, 3, rec);
+      expect(s).toMatchObject({ status: "up", cf: 0 });
+    }
+  });
+
+  it("does not extend a deep outage that already out-drained the count", () => {
+    let s = drive("xxxxxxx", 3);   // cf=7
+    let answers = 0;
+    while (s.status !== "up" && answers < 20) { s = step(s, true, 3, 5); answers++; }
+    expect(answers).toBe(7);       // the debt, not the reset, governs here
+  });
+
+  it("a miss during the confirmation run sends it back through the bucket", () => {
+    let s = drive("xxx", 3);
+    s = step(s, true, 3, 5);
+    s = step(s, true, 3, 5);
+    s = step(s, true, 3, 5);       // cf=0, cs=3 — confirming
+    s = step(s, false, 3, 5);      // cf=1, cs=0
+    expect(s).toMatchObject({ status: "warning", cf: 1, cs: 0 });
+    // The run restarts from zero, so the asset cannot reach up by having
+    // answered five times across an interrupted stretch.
+    s = step(s, true, 3, 5); expect(s).toMatchObject({ status: "recovering", cf: 0, cs: 1 });
+  });
+
+  it("goes straight up at threshold 1 only when the reset asks for nothing", () => {
+    // Threshold 1 has no drain to speak of — one miss is down, one answer pays
+    // it off — so it is the case where the reset count is the ONLY thing still
+    // holding the asset back. Driven rather than hand-built, because the run is
+    // owed by having actually reached down.
+    const down = step(at(0), false, 1);
+    expect(down).toMatchObject({ status: "down", awaiting: true });
+    expect(step(down, true, 1).status).toBe("up");
+    expect(step(down, true, 1, 3).status).toBe("recovering");
   });
 });
 
@@ -244,9 +345,38 @@ describe("parity with the real transition in monitoringService.ts", () => {
     expect(src).toContain('nextStatus = "passive"');
   });
 
-  it("no longer reaches a verdict from consecutiveSuccesses", () => {
-    // `newCs` may still be WRITTEN (it is a real column) but must not appear in
-    // any comparison against the threshold.
+  it("arms the confirmation bit on down and disarms it on up, nowhere else", () => {
+    // The stored bit is the whole reason a healthy device's success run and a
+    // drained bucket stay distinguishable, and the reason a mid-run miss does
+    // not release the asset early. Both halves have to be in the patch.
+    expect(src).toContain('nextStatus === "down" ? true : nextStatus === "up" ? false : undefined,');
+    // And the machine must READ the stored bit rather than re-deriving it,
+    // which is the entire reason the column exists.
+    expect(src).toContain("awaitingRecoveryConfirm: true,");
+  });
+
+  it("reaches a verdict from consecutiveSuccesses in exactly one place", () => {
+    // `newCs` decides nothing on its own — the ONE arrow that reads it is the
+    // confirmation run, and it reads it through the shared predicate rather
+    // than by comparing against the threshold inline, which is what the old
+    // run-length machine did and what this guard was written to keep out.
     expect(src).not.toContain("newCs >= threshold");
+    expect(src).toContain(
+      "owesRecoveryConfirmation(asset.awaitingRecoveryConfirm, newCf, newCs, recoveryPolls)",
+    );
+  });
+
+  it("resolves the recovery count from the SAME automation as the threshold", () => {
+    // Two lookups would let the two directions drift onto different rules.
+    expect(src).toContain("const verdict = await resolveDownDetection(assetId);");
+    expect(src).toContain("recoveryPollsFor(verdict, effective.intervalSeconds)");
+  });
+
+  it("orders the confirmation arrow AFTER the bucket's own three", () => {
+    // It may only decide at cf 0. Ahead of the `newCf > 0` tie it would hold a
+    // device with outstanding misses in recovering on a missed probe.
+    const tieAt     = src.indexOf("} else if (newCf > 0) {");
+    const confirmAt = src.indexOf("} else if (owesRecoveryConfirmation(");
+    expect(confirmAt).toBeGreaterThan(tieAt);
   });
 });

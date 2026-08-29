@@ -1900,6 +1900,59 @@ export function isDownDetectionTrigger(trigger: Trigger): boolean {
   );
 }
 
+/**
+ * The reset sustain, in seconds, when it is a RECOVERY COUNT and not merely the
+ * alert's clock — i.e. an automatic reset that asks the recovery to hold.
+ *
+ * On a down-detection automation the wizard's reset step already asks the
+ * question in polls ("N received polls before reset"), and rule 36 made the
+ * automation the authority on what `down` means. The two together mean the
+ * count has to reach the STATE MACHINE, not just the alert row: an operator who
+ * writes "down after 3 missed, reset after 5 received" is describing the pill,
+ * and a device that went green at 3 while the alert sat firing for another 5
+ * was Polaris disagreeing with itself in the one place an operator watches
+ * probe by probe (the asset's intermittency strip).
+ *
+ * Null for every other reset mode. `manual` / `timed` / `condition` / `event`
+ * say nothing about how many probes must answer, and a `condition` tree in
+ * particular is its own recovery authority (business rule 32a) — layering a
+ * poll count under it would give one alert two clocks that disagree.
+ *
+ * Takes `unknown` so the down-detection index can hand it a raw Prisma JSON
+ * column without parsing the whole rule first; it is on the index BUILD path
+ * (once per TTL), never the per-probe path.
+ */
+export function downRecoverySustainSec(reset: unknown): number | null {
+  const r = reset as { mode?: unknown; sustainSec?: unknown } | null | undefined;
+  if (!r || typeof r !== "object" || r.mode !== "auto") return null;
+  return typeof r.sustainSec === "number" && r.sustainSec > 0 ? r.sustainSec : null;
+}
+
+/**
+ * Has this rule's reset sustain been CONSUMED by the monitor state machine?
+ *
+ * True exactly when a down-detection trigger carries an auto reset with a hold:
+ * `recordProbeResult` is holding the asset in `recovering` until the count is
+ * met, so the engine must not charge the same wait a second time — and it must
+ * not treat `recovering` as recovered, or the alert would clear on the FIRST
+ * answered packet, which is earlier than it cleared before this existed.
+ * `notificationEngine.recoveredMeets` is the single reader.
+ */
+export function downRecoveryConsumesSustain(trigger: Trigger, reset: ResetConfig): boolean {
+  return isDownDetectionTrigger(trigger) && downRecoverySustainSec(reset) !== null;
+}
+
+/**
+ * The monitor states a `monitorStatus == down` alert stays FIRING through when
+ * its sustain is consumed by the state machine. `down` is the obvious one;
+ * `recovering` is the corridor the asset climbs on its way back, and the whole
+ * point of the count is that the corridor is not yet a recovery. `warning`
+ * belongs here too — a device that answered once and then missed again is
+ * further from recovered than one that is climbing, and letting it clear the
+ * alert would reward flapping.
+ */
+export const DOWN_ALERT_HOLDING_STATES: readonly string[] = ["down", "recovering", "warning"];
+
 // ─── Input schema (accepts v2 AND legacy bodies; canonical output is v2) ────
 
 const ruleInputBaseSchema = z.object({

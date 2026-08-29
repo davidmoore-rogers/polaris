@@ -82,6 +82,13 @@ export interface ProbePatch {
    *  undefined preserves the prior stamp. The packet-loss ratio's recovery
    *  anchor — see Asset.recoveryStartedAt and business rule 29b. */
   recoveryStartedAt?: Date;
+  /** Armed on the transition INTO down, disarmed on the transition into up;
+   *  undefined on every other outcome preserves the prior value. Carries the
+   *  confirmation run across a mid-run miss — see Asset.awaitingRecoveryConfirm
+   *  and business rule 36. Note the preserve-on-absent here is over a BOOLEAN,
+   *  so the merge and the flush both have to use `??` / COALESCE rather than
+   *  truthiness: `false` is a real value that must land. */
+  awaitingRecoveryConfirm?: boolean;
   /** Set only on a SUCCESSFUL probe — advances Asset.lastSeen/lastSeenSource so
    *  polling is the authority for presence on monitored assets. Undefined on a
    *  failed probe so a down asset's lastSeen freezes at its last success
@@ -145,6 +152,10 @@ export function enqueueProbePatch(assetId: string, patch: ProbePatch): void {
       // recovery probe in the same 2s window must not erase the recovery
       // anchor, or the loss ratio silently keeps counting the outage.
       recoveryStartedAt: patch.recoveryStartedAt ?? existing.recoveryStartedAt,
+      // Same rule, and `??` is load-bearing: a patch disarming the run carries
+      // `false`, which `||` would discard in favour of the armed `true`.
+      awaitingRecoveryConfirm:
+        patch.awaitingRecoveryConfirm ?? existing.awaitingRecoveryConfirm,
       // A failed probe (no lastSeen) merging onto a successful one in the same
       // window must not erase the success's presence stamp.
       lastSeen: patch.lastSeen ?? existing.lastSeen,
@@ -211,7 +222,7 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
       `($${p++}::text, $${p++}::text, $${p++}::timestamp, ` +
       `$${p++}::int, $${p++}::int, $${p++}::int, $${p++}::timestamp, ` +
       `$${p++}::int, $${p++}::timestamp, $${p++}::timestamp, $${p++}::text, ` +
-      `$${p++}::timestamp)`,
+      `$${p++}::timestamp, $${p++}::boolean)`,
     );
     params.push(
       id,
@@ -228,6 +239,7 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
       patch.lastSeen ? patch.lastSeen.toISOString() : null,
       patch.lastSeenSource ?? null,
       patch.recoveryStartedAt ? patch.recoveryStartedAt.toISOString() : null,
+      patch.awaitingRecoveryConfirm ?? null,
     );
   }
   const sql =
@@ -246,9 +258,10 @@ async function writeBatch(rows: ReadonlyArray<readonly [string, ProbePatch]>): P
     `"lastRebootAt"           = COALESCE(v.reboot_at, t."lastRebootAt"), ` +
     `"lastSeen"               = COALESCE(v.last_seen, t."lastSeen"), ` +
     `"lastSeenSource"         = COALESCE(v.last_seen_source, t."lastSeenSource"), ` +
-    `"recoveryStartedAt"      = COALESCE(v.recovery_started_at, t."recoveryStartedAt") ` +
+    `"recoveryStartedAt"      = COALESCE(v.recovery_started_at, t."recoveryStartedAt"), ` +
+    `"awaitingRecoveryConfirm" = COALESCE(v.awaiting_recovery_confirm, t."awaitingRecoveryConfirm") ` +
     `FROM (VALUES ${tuples.join(", ")}) ` +
-    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at, last_seen, last_seen_source, recovery_started_at) ` +
+    `AS v(id, status, last_monitor_at, rt, cf, cs, changed_at, uptime_sec, reboot_at, last_seen, last_seen_source, recovery_started_at, awaiting_recovery_confirm) ` +
     `WHERE t."id" = v.id`;
   await prisma.$executeRawUnsafe(sql, ...params);
 }

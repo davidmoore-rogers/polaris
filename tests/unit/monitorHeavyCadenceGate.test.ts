@@ -26,9 +26,24 @@ describe("runsHeavyCadences", () => {
   });
 
   it("does NOT run for the in-flux / unreachable states", () => {
-    for (const s of ["warning", "recovering", "down", "unknown", null]) {
+    for (const s of ["warning", "down", "unknown", null]) {
       expect(runsHeavyCadences(a(s))).toBe(false);
     }
+    // Recovering with misses still outstanding is in-flux like the rest — a
+    // device three misses deep that has answered once is not somewhere to point
+    // a full SNMP walk.
+    expect(runsHeavyCadences(a("recovering", { consecutiveFailures: 1 }))).toBe(false);
+  });
+
+  describe("recovering", () => {
+    it("RUNS once the bucket has drained — the confirmation run is not an outage", () => {
+      // Reachable only since the recovery confirmation run existed (business
+      // rule 36): before it, `recovering` implied outstanding misses. The asset
+      // is answering every probe and is amber only because its automation asked
+      // for more confirmations, which is not a thing that should decide how
+      // fresh its charts are.
+      expect(runsHeavyCadences(a("recovering", { consecutiveFailures: 0 }))).toBe(true);
+    });
   });
 
   it("dependency suppression beats every status, including up", () => {

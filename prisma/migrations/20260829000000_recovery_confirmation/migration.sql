@@ -1,0 +1,13 @@
+-- The recovery confirmation run (business rule 36).
+--
+-- A `monitor status is down` automation already decides how many MISSED polls
+-- make a device down; its reset now decides how many RECEIVED polls make it up
+-- again. Holding the asset in `recovering` until that count is served needs one
+-- bit the two probe counters cannot reconstruct: at consecutiveFailures 0, a
+-- success run is indistinguishable from a drained bucket, so the machine has to
+-- remember whether the asset actually went down.
+--
+-- Defaults false, which is exactly right for existing rows: an asset in the
+-- middle of an outage at upgrade time recovers on the bucket's drain the way it
+-- always did, and the first `down` after the upgrade arms it.
+ALTER TABLE "assets" ADD COLUMN "awaitingRecoveryConfirm" BOOLEAN NOT NULL DEFAULT false;

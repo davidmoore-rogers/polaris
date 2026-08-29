@@ -73,6 +73,8 @@ import {
   DEVICE_FILTER_DIMENSIONS,
   deviceFilterMatch,
   type DeviceFilterAsset,
+  downRecoveryConsumesSustain,
+  DOWN_ALERT_HOLDING_STATES,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { decorateRelationLeafHits } from "./scopeRelationIndex.js";
@@ -867,6 +869,20 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
 }
 
 /**
+ * The clear-sustain the ENGINE still owes, in seconds.
+ *
+ * Zero on a down automation whose sustain the monitor state machine already
+ * served by holding the asset in `recovering` (business rule 36) — charging it
+ * again would make "reset after 5 received polls" mean five polls of recovering
+ * followed by five more minutes of a firing alert about a device that has been
+ * green the whole time.
+ */
+function engineSustainSec(rule: { trigger: Trigger; reset: ResetConfig }): number {
+  if (downRecoveryConsumesSustain(rule.trigger, rule.reset)) return 0;
+  return rule.reset.sustainSec ?? 0;
+}
+
+/**
  * Has a FIRING condition recovered, honoring hysteresis? Without a
  * clearThreshold (or for non-numeric readings) recovery is simply !meets —
  * the legacy behavior. With one, recovery requires the value to cross the
@@ -877,6 +893,19 @@ export function readingMeets(trigger: Trigger, value: number | string | boolean 
  */
 export function recoveredMeets(trigger: Trigger, reset: ResetConfig, value: number | string | boolean | null): boolean {
   const meets = readingMeets(trigger, value);
+  // A down automation whose reset sustain was consumed by the monitor state
+  // machine (business rule 36) recovers when the asset actually reads `up`, not
+  // the instant it stops reading `down`. Without this the alert would clear on
+  // the FIRST answered packet — `recovering` is not `down`, so plain `!meets`
+  // is true there — which is sooner than it cleared before the count existed,
+  // the exact opposite of what asking for a longer confirmation run means.
+  if (downRecoveryConsumesSustain(trigger, reset)) {
+    // An absent reading still counts as recovered, matching every other branch:
+    // the asset stopped reporting a status at all, and the vanished-state sweep
+    // owns that case.
+    if (value === null || value === undefined) return true;
+    return !DOWN_ALERT_HOLDING_STATES.includes(String(value).toLowerCase());
+  }
   if (reset.mode !== "auto" || reset.clearThreshold == null) return !meets;
   if ((trigger.type !== "asset_metric" && trigger.type !== "host_metric") || typeof value !== "number") return !meets;
   return !compareNum(value, trigger.operator, reset.clearThreshold);
@@ -1347,7 +1376,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
             });
           }
         } else {
-          const sustainSec = rule.reset.sustainSec ?? 0;
+          const sustainSec = engineSustainSec(rule);
           if (sustainSec <= 0) {
             if (hasBands) await fireResolved(rule, reading, st, now);
             await recover(rule, st, reading, now);
@@ -1757,7 +1786,7 @@ async function applySustainedRecovery(
     }
     await recover(rule, st, reading, now);
   };
-  const sustainSec = rule.reset.sustainSec ?? 0;
+  const sustainSec = engineSustainSec(rule);
   if (sustainSec <= 0) {
     await clear();
   } else if (!st.recoveredSince) {

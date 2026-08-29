@@ -20,7 +20,7 @@
 (function () {
   "use strict";
 
-  function calc(thr, intervalSec, timeoutMs) {
+  function calc(thr, intervalSec, timeoutMs, recoveryPolls) {
     thr = Math.min(100, Math.max(1, Number(thr) > 0 ? Math.round(Number(thr)) : 3));
     var interval = Number(intervalSec) > 0 ? Math.round(Number(intervalSec)) : 60;
     var timeoutSec = Math.ceil((Number(timeoutMs) > 0 ? Number(timeoutMs) : 5000) / 1000);
@@ -30,17 +30,26 @@
     // feeds packet loss only, never this decision). The first miss itself costs
     // up to the probe timeout.
     var realSec = interval * Math.max(0, thr - 1) + timeoutSec;
+    // How many probes must ANSWER before the device reads Up again. The drain
+    // is the floor — as many answers as it took misses — and the covering
+    // automation's reset raises it when the operator asked for a longer
+    // confirmation run (business rule 36). Omitted / 0 = the drain alone, which
+    // is what every automation that resets immediately gets.
+    var rec = Math.min(100, Math.max(thr, Number(recoveryPolls) > 0 ? Math.round(Number(recoveryPolls)) : 0));
     return {
       threshold: thr,
       interval: interval,
       timeoutSec: timeoutSec,
       realSec: realSec,
+      recoveryPolls: rec,
+      recoverySec: interval * Math.max(0, rec - 1) + timeoutSec,
       note: "= " + thr + " consecutive missed poll" + (thr === 1 ? "" : "s") +
         " ≈ " + realSec + "s from the first miss" +
         (thr > 1
           ? " (" + (thr - 1) + " × the " + interval + "s interval, plus up to the " + timeoutSec + "s timeout on the first)"
           : " (up to the " + timeoutSec + "s probe timeout)") + "." +
-        " Recovery to Up needs " + thr + " consecutive success" + (thr === 1 ? "" : "es") + "." +
+        " Recovery to Up needs " + rec + " consecutive success" + (rec === 1 ? "" : "es") +
+        (rec > thr ? " — the automation's reset asks for more than the " + thr + " the drain alone costs." : ".") +
         " Measured from the first missed poll — the wait for that first poll is another poll interval on top.",
     };
   }

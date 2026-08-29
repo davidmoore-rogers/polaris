@@ -46,6 +46,7 @@ import { createTtlCache } from "../utils/ttlCache.js";
 import { logEvent } from "./eventLogService.js";
 import {
   DEFAULT_MISSED_POLLS,
+  downRecoverySustainSec,
   isDownDetectionTrigger,
   scopeRank,
   deviceFilterMatch,
@@ -75,6 +76,20 @@ export const DOWN_DETECTION_TTL_MS = 60_000;
 /** The winning automation for one asset. */
 export interface DownWinner {
   threshold: number;
+  /**
+   * The automation's reset sustain in SECONDS, or null when it neither resets
+   * automatically nor asks for a hold.
+   *
+   * On a down-detection automation this is not only the alert's clock:
+   * `recordProbeResult` converts it to a poll count at the asset's own cadence
+   * and holds the asset in `recovering` until that many probes have answered,
+   * so the automation owns the way back UP as well as the way down. Seconds
+   * rather than polls because seconds are what the column stores — the wizard
+   * collects polls and multiplies by the cadence it read at authoring time, and
+   * converting back at probe time rather than trusting that frozen arithmetic
+   * is what keeps the count honest after someone changes the interval.
+   */
+  recoverySustainSec: number | null;
   ruleId: string;
   ruleName: string;
   rank: number;
@@ -97,6 +112,7 @@ export interface DownRule {
   scope: RuleScope;
   rank: number;
   threshold: number;
+  recoverySustainSec: number | null;
   dimensionFilter: Parameters<typeof deviceFilterMatch>[0];
 }
 
@@ -243,11 +259,24 @@ export function pickDownWinner(rules: DownRule[], asset: ScopeAsset, sink?: Down
     }
   }
 
-  return { threshold: winner.threshold, ruleId: winner.id, ruleName: winner.name, rank: winner.rank };
+  return {
+    threshold: winner.threshold,
+    recoverySustainSec: winner.recoverySustainSec,
+    ruleId: winner.id,
+    ruleName: winner.name,
+    rank: winner.rank,
+  };
 }
 
 /** Digest a stored rule row into the shape the per-asset walk wants. */
-function toDownRule(row: { id: string; name: string; createdAt: Date; trigger: unknown; scope: unknown }): DownRule | null {
+function toDownRule(row: {
+  id: string;
+  name: string;
+  createdAt: Date;
+  trigger: unknown;
+  scope: unknown;
+  reset?: unknown;
+}): DownRule | null {
   const trigger = row.trigger as unknown as Trigger;
   if (!trigger || !isDownDetectionTrigger(trigger)) return null;
   const scope = (row.scope ?? {}) as RuleScope;
@@ -261,6 +290,7 @@ function toDownRule(row: { id: string; name: string; createdAt: Date; trigger: u
     // A rule authored before the count existed still governs its devices — at
     // the number that was in force when it was written.
     threshold: typeof missed === "number" && missed > 0 ? missed : DEFAULT_MISSED_POLLS,
+    recoverySustainSec: downRecoverySustainSec(row.reset),
     dimensionFilter: (trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] }).dimensionFilter,
   };
 }
@@ -277,10 +307,12 @@ function pickFallback(rules: DownRule[]): DownWinner | null {
 async function buildDownDetectionIndex(): Promise<DownDetectionIndex> {
   const startedAt = Date.now();
 
-  // Query 1 — the rule set. Small table by nature (tens of rows).
+  // Query 1 — the rule set. Small table by nature (tens of rows). `reset` rides
+  // along because on a down automation the reset sustain is the RECOVERY count
+  // as well as the alert's clock — see DownWinner.recoverySustainSec.
   const rows = await prisma.notificationRule.findMany({
     where: { enabled: true },
-    select: { id: true, name: true, createdAt: true, trigger: true, scope: true },
+    select: { id: true, name: true, createdAt: true, trigger: true, scope: true, reset: true },
   });
   const rules = rows.map(toDownRule).filter((r): r is DownRule => r !== null);
 
@@ -397,19 +429,64 @@ async function getIndex(): Promise<DownDetectionIndex> {
   }
 }
 
+/** What the covering automation says about one asset, both directions. */
+export interface DownDetectionVerdict {
+  /** Missed polls before the asset reads `down`. */
+  threshold: number;
+  /** The reset sustain in seconds, or null — see DownWinner. */
+  recoverySustainSec: number | null;
+}
+
 /**
- * The asset's missed-poll threshold, or null when no automation covers it
+ * The covering automation's verdict for one asset, or null when none covers it
  * (= passive). ONE Map lookup in the steady state.
  */
-export async function resolveDownThreshold(assetId: string): Promise<number | null> {
+export async function resolveDownDetection(assetId: string): Promise<DownDetectionVerdict | null> {
   const idx = await getIndex();
-  const hit = idx.byAsset.get(assetId);
-  if (hit) return hit.threshold;
+  const hit = idx.byAsset.get(assetId) ?? idx.fallback;
   // Absent from the snapshot: either genuinely uncovered, or discovered since
   // the last rebuild. An all-assets automation covers ANY asset by definition,
-  // so answering from it is exact and can never over-claim — a narrower rule
-  // could only raise the specificity, and it converges within one TTL.
-  return idx.fallback?.threshold ?? null;
+  // so answering from the fallback is exact and can never over-claim — a
+  // narrower rule could only raise the specificity, and it converges within one
+  // TTL.
+  if (!hit) return null;
+  return { threshold: hit.threshold, recoverySustainSec: hit.recoverySustainSec };
+}
+
+/**
+ * The asset's missed-poll threshold alone, or null when no automation covers
+ * it. Kept as its own export because most callers only ask the down question;
+ * `resolveDownDetection` is the one the probe loop wants.
+ */
+export async function resolveDownThreshold(assetId: string): Promise<number | null> {
+  return (await resolveDownDetection(assetId))?.threshold ?? null;
+}
+
+/**
+ * How many probes must ANSWER before an asset governed by this verdict reads
+ * `up` again, at the cadence it is actually polled at.
+ *
+ * The floor is the missed-poll count itself: the leaky bucket has to drain
+ * whatever debt it accumulated, so a deep outage always costs at least that
+ * many answers regardless of what the reset asks for (business rule 30). The
+ * reset only ever RAISES the bar — an automation that resets immediately, or
+ * one with no auto reset at all, keeps exactly the pre-2026-08-29 behavior.
+ *
+ * Pure, and deliberately not memoized: it is two arithmetic ops on a value the
+ * probe path already has in hand.
+ */
+export function recoveryPollsFor(verdict: DownDetectionVerdict, intervalSec: number): number {
+  const { threshold, recoverySustainSec } = verdict;
+  if (!recoverySustainSec || !Number.isFinite(intervalSec) || intervalSec <= 0) return threshold;
+  // Round rather than ceil: the wizard produced these seconds by MULTIPLYING a
+  // whole number of polls by the same cadence, so rounding returns the operator
+  // their own number, while ceil would turn a 5-poll reset into 6 the moment a
+  // cadence lands on a value that does not divide evenly.
+  const polls = Math.round(recoverySustainSec / intervalSec);
+  // Cap at the same ceiling the missed-poll count carries (notificationTypes'
+  // `missedPolls` max), so a 24h sustain against a 30s cadence cannot park an
+  // asset in `recovering` for 2880 probes.
+  return Math.min(100, Math.max(threshold, polls));
 }
 
 /** Diagnostics for one asset: who governs it, at what count, and whether an

@@ -57,7 +57,7 @@ import {
   resolveMonitorSettingsWithProvenance,
 } from "../../services/monitoringService.js";
 import { getApRadioInventory } from "../../services/apRadioService.js";
-import { describeDownDetectionFor } from "../../services/downDetectionService.js";
+import { describeDownDetectionFor, recoveryPollsFor } from "../../services/downDetectionService.js";
 import { getArpEntryRetentionDays } from "../../services/sampleRetentionService.js";
 import { getCredential } from "../../services/credentialService.js";
 import { resolveConnectionPath } from "../../services/connectionPathService.js";
@@ -1371,6 +1371,13 @@ router.get("/:id/effective-monitor-settings", requirePermission("assets", "read"
       ? {
           passive:      downCoverage.passive,
           missedPolls:  downCoverage.winner?.threshold ?? null,
+          // The counterpart count: how many probes must ANSWER before the asset
+          // reads `up` again. Resolved here rather than left to the client to
+          // divide seconds by a cadence, so the intermittency strip's replay of
+          // the state machine reads the same number the probe loop applied.
+          recoveryPolls: downCoverage.winner
+            ? recoveryPollsFor(downCoverage.winner, result.resolved.intervalSeconds)
+            : null,
           automationId: downCoverage.winner?.ruleId ?? null,
           automationName: downCoverage.winner?.ruleName ?? null,
           // A tie is two equally-specific automations asking for different
