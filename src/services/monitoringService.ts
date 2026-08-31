@@ -57,6 +57,12 @@ import { retryOnDeadlock } from "../utils/dbRetry.js";
 // NOTE: agentlessProcessService imports back from this module with
 // `import type` only, so this pair can't cycle at runtime.
 import { collectProcessesSsh, collectProcessesWinrm, type AgentlessProcessResult } from "./agentlessProcessService.js";
+import {
+  collectHostSsh, collectHostWinrm, collectEventLogSsh, collectEventLogWinrm,
+  type AgentlessEventLogEntry,
+} from "./agentlessHostService.js";
+import { ingestOsEventLog, getAgentEventLogConfig } from "./osEventLogService.js";
+import type { WinRmConnection } from "../utils/winrm.js";
 import { AppError } from "../utils/errors.js";
 import { matchesWildcard } from "../utils/integrationFilter.js";
 import { applyTransform } from "../utils/symbolTransforms.js";
@@ -95,7 +101,9 @@ import { fetchVcenterQuickStats, fetchVcenterHostSnapshot } from "./vcenterServi
 import {
   fmgProxyRest,
   resolveDeviceMgmtIpViaFmg,
+  fetchRosterConnectivity,
   type FortiManagerConfig,
+  type RosterDeviceStatus,
 } from "./fortimanagerService.js";
 import { logEvent, logEventsBatch, buildConnectionChangedEvent } from "./eventLogService.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
@@ -179,6 +187,7 @@ import {
   isMethodValidForStream,
   assetSourceKindFromIntegrationType,
   isFortinetIntegrationType,
+  responseTimeProbeShouldQueue,
 } from "../utils/pollingCompatibility.js";
 import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
@@ -637,6 +646,23 @@ const classOverrideCache = new Map<string, MonitorOverrideSettings | null>();
 // generic integration-tier badge. Manual-tier rows are not eligible (no
 // pollInterval to inherit from).
 const tierSystemInfoFromPollIntervalCache = new Map<string, boolean>();
+// Sidecar: can this integration make a FortiOS REST call to the device at all?
+// Populated by the same load that already reads Integration.config, so the hot
+// resolver pays no extra query.
+//
+// True only for a FortiManager on the PROXY transport with NO FortiGate API
+// token configured. That pairing is the one where `rest_api` cannot possibly
+// succeed: every FortiOS collector builds its config via buildFortinetConfig(),
+// which has no useProxy branch — it dials the asset's own IP and requires
+// fortigateApiToken — so the call throws "FortiManager direct-mode API token
+// not configured" on every tick.
+//
+// Note this is NOT simply "proxy mode". A proxy-mode integration WITH a token
+// is a legitimate configuration — discovery and writes ride FMG, monitoring
+// reaches the gates directly — and its REST streams work fine. Gating on the
+// transport alone would break that, and would undo the change that made the
+// token reachable in proxy mode in the first place.
+const tierFortiosRestUnavailableCache = new Map<string, boolean>();
 
 function classCacheKey(integrationId: string | null, assetType: string): string {
   return `${integrationId ?? MANUAL_TIER_CACHE_KEY}:${assetType}`;
@@ -655,6 +681,7 @@ export function invalidateMonitorSettingsCache(scope?: {
     tierCache.clear();
     classOverrideCache.clear();
     tierSystemInfoFromPollIntervalCache.clear();
+    tierFortiosRestUnavailableCache.clear();
     return;
   }
   const tierKey = scope.integrationId === null ? MANUAL_TIER_CACHE_KEY : scope.integrationId;
@@ -664,11 +691,13 @@ export function invalidateMonitorSettingsCache(scope?: {
       // legacy key clear still works.
       tierCache.delete(MANUAL_TIER_CACHE_KEY);
       tierSystemInfoFromPollIntervalCache.delete(MANUAL_TIER_CACHE_KEY);
+      tierFortiosRestUnavailableCache.delete(MANUAL_TIER_CACHE_KEY);
     } else if (scope.assetType) {
       // Per-class evict — Phase 2 cache key is `${integrationId}:${assetType}`.
       const k = `${tierKey}:${scope.assetType}`;
       tierCache.delete(k);
       tierSystemInfoFromPollIntervalCache.delete(k);
+      tierFortiosRestUnavailableCache.delete(k);
     } else {
       // Whole-integration evict — walk every `<integrationId>:<assetType>`
       // entry. Integration config writes (PUT /integrations/:id, per-class
@@ -677,6 +706,7 @@ export function invalidateMonitorSettingsCache(scope?: {
         if (k.startsWith(`${tierKey}:`)) {
           tierCache.delete(k);
           tierSystemInfoFromPollIntervalCache.delete(k);
+      tierFortiosRestUnavailableCache.delete(k);
         }
       }
     }
@@ -799,15 +829,66 @@ function readMibIdFromJson(v: unknown): string | null {
  *   credentialed method (and a credential) to enable telemetry/interfaces
  *   on a manually-created asset.
  */
-function defaultPollingForSource(
+/**
+ * When a FortiOS REST call cannot be assembled (FMG on the proxy transport with
+ * no FortiGate API token), which (stream, assetType) pairs can STILL ride
+ * `rest_api`?
+ *
+ * Exactly one: response time for a managed FortiSwitch or FortiAP. That read
+ * goes to the PARENT gate's controller table through fetchViaFortinetTransport,
+ * which is the one monitoring path that honours `useProxy` and therefore works
+ * with FMG's own credential. Everything else — including a firewall's own
+ * response-time probe — goes through buildFortinetConfig() and needs the direct
+ * token.
+ *
+ * Shared by the source default and the resolver's validity gate so the two
+ * cannot disagree about what is collectable.
+ */
+export function fortiosRestUsable(stream: Stream, assetType: string | null | undefined): boolean {
+  const isManagedChild = assetType === "switch" || assetType === "access_point";
+  return stream === "responseTime" && isManagedChild;
+}
+
+export function defaultPollingForSource(
   source: AssetSourceKind,
   stream: Stream,
+  opts?: { assetType?: string | null; fortiosRestUnavailable?: boolean },
 ): PollingMethod | null {
   // Cross-transport streams default to "disabled" everywhere — they're opt-in
   // (operator picks agent / SNMP / SSH / WinRM, or REST for eventLog on a
   // FortiGate). Keeping them off by default means no behavior change for
   // existing fleets until an operator turns them on at some tier.
   if (stream === "processes" || stream === "eventLog") return "disabled";
+
+  // ── FortiManager proxy transport with no FortiGate API token ─────────────
+  // The REST defaults below assume Polaris can make a FortiOS call to the
+  // device. On an FMG in proxy mode with no direct token that is impossible:
+  // every FortiOS collector builds its config via buildFortinetConfig(), which
+  // has no useProxy branch — it dials the asset's own IP and requires
+  // fortigateApiToken. So `rest_api` on cpuMemory / temperature / interfaces
+  // meant a 409 every tick, forever, on an integration left at its defaults.
+  //
+  // `disabled` is the honest state: Polaris is not collecting these, and now
+  // says so instead of failing repeatedly. Supplying the token flips this
+  // condition off and the normal REST defaults return — so this narrows what
+  // Polaris CLAIMS, never what it can do.
+  //
+  // Response time is deliberately UNCHANGED (icmp). Pointing it elsewhere would
+  // silently change how up/down is decided for every gate on every affected
+  // install, which is not a default's business.
+  //
+  // Managed switches and APs are the exception: their responseTime rides the
+  // parent gate's controller table via fetchViaFortinetTransport, which IS
+  // transport-aware and genuinely works through the proxy with no direct token.
+  // That is the one FortiOS read proxy mode serves by itself, so it stays on
+  // rest_api — downgrading it to icmp would be a real regression, since plenty
+  // of FortiLink-managed devices are not directly pingable.
+  if (opts?.fortiosRestUnavailable && source === "fortimanager") {
+    if (fortiosRestUsable(stream, opts.assetType)) return "rest_api";
+    if (stream === "responseTime") return "icmp";
+    return "disabled";
+  }
+
   if (isFortinetIntegrationType(source)) {
     // FortiOS exposes lldp-neighbors but most fleets don't enable LLDP per
     // interface, so the endpoint returns nothing on every probe. Default
@@ -1056,6 +1137,16 @@ async function loadIntegrationTierSettings(integrationId: string, assetType: str
   }
   tierCache.set(cacheKey, result);
   tierSystemInfoFromPollIntervalCache.set(cacheKey, systemInfoFromPollInterval);
+  // Proxy is the DEFAULT on a FortiManager integration, so an absent flag is
+  // proxy — the same `!== false` reading every other consumer uses. Presence of
+  // the token is what decides whether REST is reachable at all; its value is
+  // never needed here.
+  tierFortiosRestUnavailableCache.set(
+    cacheKey,
+    integration?.type === "fortimanager" &&
+      cfg.useProxy !== false &&
+      !String(cfg.fortigateApiToken || "").trim(),
+  );
   return result;
 }
 
@@ -1348,6 +1439,12 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
   // Resolve the asset's source kind once — drives both the polling default
   // and the compatibility check at every layer.
   const sourceKind = assetSourceKindFromIntegrationType(asset.discoveredByIntegrationType ?? null);
+  // Read from the sidecar the tier load above just populated — no extra query.
+  // Only meaningful for an integration-backed asset; manual-tier assets have no
+  // transport to be on.
+  const fortiosRestUnavailable = asset.discoveredByIntegrationId
+    ? tierFortiosRestUnavailableCache.get(`${asset.discoveredByIntegrationId}:${asset.assetType}`) === true
+    : false;
 
   const merged: ResolvedMonitorSettings = { ...tier3 };
   // Every field starts attributed to tier 3; each adopting layer below
@@ -1445,8 +1542,24 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
     classVal: PollingMethod | null | undefined,
     assetVal: string | null | undefined,
   ): void {
-    const ok = (m: PollingMethod) => isPollingMethodCompatible(sourceKind, m) && isMethodValidForStream(stream, m);
-    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream);
+    // A stored `rest_api` on an FMG that cannot make a FortiOS call is skipped
+    // like any other incompatible value — the layer below stays, which is how
+    // the resolver has always handled a method the asset's source can't use.
+    // Without this, a per-class stream authored while the direct token was set
+    // (or while the integration was in bypass mode) keeps overriding the
+    // default and keeps throwing 409 on every tick, invisibly. Non-destructive:
+    // the stored value is untouched and returns the moment REST is reachable
+    // again.
+    const ok = (m: PollingMethod) => {
+      if (!isPollingMethodCompatible(sourceKind, m)) return false;
+      if (!isMethodValidForStream(stream, m)) return false;
+      if (m === "rest_api" && fortiosRestUnavailable && !fortiosRestUsable(stream, asset.assetType)) return false;
+      return true;
+    };
+    let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream, {
+      assetType: asset.assetType,
+      fortiosRestUnavailable,
+    });
     let tier: ProvenanceTier = "default";
     if (tierVal && ok(tierVal)) {
       resolved = tierVal;
@@ -1659,6 +1772,52 @@ async function resolveSnmpConfigForStream(
   return { error: errorLabel };
 }
 
+/**
+ * Credential chain for an agentless SSH / WinRM collector: the stream's
+ * effective asset credential → the class-override credential → the AD bind
+ * fallback. Lifted out of `runProcessesFor`, which had the only copy, so the
+ * cpuMemory / interfaces / storage collectors resolve identically — three
+ * hand-copies of a four-step chain is how they drift.
+ */
+async function resolveAgentlessCredConfig(
+  streamCred: { type: string; config: unknown } | null | undefined,
+  classCredentialId: string | null,
+  method: "ssh" | "winrm",
+  integration: { type: string; config: unknown } | null | undefined,
+): Promise<Record<string, unknown> | null> {
+  if (streamCred?.type === method) return (streamCred.config as Record<string, unknown>) || {};
+  const classCred = await loadClassOverrideStreamCredential(classCredentialId, method);
+  if (classCred) return (classCred.config as Record<string, unknown>) || {};
+  const isAdSrc = assetSourceKindFromIntegrationType(integration?.type ?? null) === "activedirectory";
+  if (isAdSrc && integration) {
+    const cfg = (integration.config as Record<string, unknown>) || {};
+    const username = String(cfg.bindDn || "");
+    const password = String(cfg.bindPassword || "");
+    if (username && password) {
+      return method === "winrm"
+        ? { username, password, useHttps: true, port: 5986 }
+        : { username, password, port: 22 };
+    }
+  }
+  return null;
+}
+
+/** Project a resolved SSH/WinRM credential into the WinRM connection shape. */
+function winrmConnFrom(host: string, credConfig: Record<string, unknown>, timeoutMs: number): WinRmConnection {
+  return {
+    host,
+    username:  String(credConfig.username || ""),
+    password:  String(credConfig.password || ""),
+    useHttps:  credConfig.useHttps !== false,
+    port:      typeof credConfig.port === "number" ? credConfig.port : undefined,
+    verifyTls: credConfig.verifyTls === true,
+    // PowerShell cold-start plus the WinRS Receive poll loop realistically need
+    // more headroom than a stream's default timeout — same floor runProcessesFor
+    // applies.
+    timeoutMs: Math.max(timeoutMs, 30_000),
+  };
+}
+
 async function loadSnmpCredentialConfigForFortinetAsset(
   effectiveCred: { type: string; config: unknown } | null | undefined,
   integration: { config?: unknown } | null | undefined,
@@ -1740,6 +1899,22 @@ export async function probeAsset(
     const polling   = effective.responseTimePolling;
     if (!polling) return finish(start, false, "No response-time polling method configured");
 
+    // "Disabled" means DO NOT POLL — it is not a transport, and it is not a
+    // failure. Without this branch the dispatch below falls all the way through
+    // to the unknown-method error, which `recordProbeResult` then writes as a
+    // failed sample that counts toward the covering automation's missedPolls —
+    // turning the operator's off-switch into a manufactured outage. The
+    // `skipped` contract is exactly right here for the same reason it is right
+    // for an unreachable vCenter: nothing was measured, so no sample, no counter
+    // movement, just the cadence anchor. The queue publishers gate on this too
+    // (computeDueWork + jobs/monitorAssets.ts), so in the steady state we never
+    // reach here — this stays as the correctness backstop for the
+    // operator-triggered /probe-now path and for a "disabled" already sitting in
+    // a JSON tier that no publisher gate can see.
+    if (polling === "disabled") {
+      return { success: false, responseTimeMs: 0, skipped: true };
+    }
+
     // Agent owns its own probe cadence and pushes samples directly via
     // POST /api/v1/agents/samples. The hot monitor loop must not call out
     // to the host; on-demand /probe-now is handled by agentChannelService
@@ -1763,6 +1938,16 @@ export async function probeAsset(
       (asset.assetType === "switch" || asset.assetType === "access_point")
     ) {
       return await probeFortinetController(asset, integration as any, start, timeoutMs);
+    }
+
+    // Asks FortiManager's own device database instead of the device. Needs no
+    // asset IP (FMG is the target), so it dispatches before the IP guard —
+    // which also means it reaches a gate Polaris has no route to.
+    if (polling === "fortimanager") {
+      if (!integration) {
+        return finish(start, false, "FortiManager polling requires a FortiManager integration");
+      }
+      return await probeFortimanagerNative(asset, integration as any, start);
     }
 
     // vCenter probes ask the vCenter SERVER about the asset, so they need no
@@ -2253,6 +2438,127 @@ interface VcenterQuickStatsCacheEntry {
   fetchedAt: number;
   fetchDurationMs: number;
   stats: Map<string, import("./vcenterService.js").VcenterVmQuickStats>;
+}
+
+// ─── FortiManager roster warm cache ────────────────────────────────────────
+//
+// Backs the "fortimanager" polling method: one NATIVE /dvmdb/adom/<adom>/device
+// read per integration per tick, serving every gate that integration manages.
+// Same TTL + promise-singleton shape as the controller-inventory and vCenter
+// caches above, and for the same reason — without the in-flight guard, N
+// workers waking on one 60s tick would each fire their own upstream call.
+//
+// Native reads are NOT in FMG's /sys/proxy/json concurrency-1 lane, so this is
+// genuinely cheap: ~187 gates cost one request rather than 187 serialized ones.
+interface FmgRosterCacheEntry {
+  fetchedAt: number;
+  fetchDurationMs: number;
+  /** Upper-cased serial → the chassis's reachability as FMG understands it. */
+  bySerial: Map<string, RosterDeviceStatus>;
+}
+
+const FMG_ROSTER_CACHE_TTL_MS = 30_000;
+const fmgRosterCache = new Map<string, FmgRosterCacheEntry>();
+const inflightFmgRoster = new Map<string, Promise<FmgRosterCacheEntry>>();
+
+async function fetchFmgRosterCached(
+  integration: { id: string; config: Record<string, unknown> },
+): Promise<FmgRosterCacheEntry> {
+  const cached = fmgRosterCache.get(integration.id);
+  if (cached && Date.now() - cached.fetchedAt < FMG_ROSTER_CACHE_TTL_MS) return cached;
+  const inflight = inflightFmgRoster.get(integration.id);
+  if (inflight) return inflight;
+
+  const p = (async (): Promise<FmgRosterCacheEntry> => {
+    const startedAt = performance.now();
+    try {
+      const rows = await fetchRosterConnectivity(
+        integration.config as unknown as FortiManagerConfig,
+        undefined,
+        integration.id,
+      );
+      const bySerial = new Map<string, RosterDeviceStatus>();
+      // A cluster primary appears at the top level AND inside ha_slave[]. The
+      // ha_slave row is the per-member one, so let it win — it is what carries
+      // a standby's own state, and for the primary the two agree.
+      for (const r of rows) {
+        const prev = bySerial.get(r.serial);
+        if (!prev || (!prev.haMember && r.haMember)) bySerial.set(r.serial, r);
+      }
+      const entry: FmgRosterCacheEntry = {
+        fetchedAt: Date.now(),
+        fetchDurationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+        bySerial,
+      };
+      fmgRosterCache.set(integration.id, entry);
+      return entry;
+    } finally {
+      inflightFmgRoster.delete(integration.id);
+    }
+  })();
+
+  inflightFmgRoster.set(integration.id, p);
+  return p;
+}
+
+/**
+ * Response-time probe that asks FortiManager rather than the device.
+ *
+ * Needs no asset IP — dispatched before the IP guard in probeAsset, like the
+ * controller and vCenter probes — and identifies the chassis by SERIAL. Never
+ * by name: `fortinetTopology.deviceName` is FMG's device name, which is known
+ * to diverge from the gate's configured hostname on real fleets (the trap
+ * utils/fortinetParentKey.ts exists for), and a name mismatch here would read
+ * as "gone from FortiManager".
+ *
+ * FMG unreachable ⇒ SKIPPED, not failed. Identical reasoning to the vCenter
+ * probe (business rule 30): the thing that answers for the device is not the
+ * device, so one FortiManager outage must never declare a whole fleet down at
+ * the same instant. A gate that FMG answers about and reports disconnected IS
+ * a real failure.
+ *
+ * Carries no uptime — FMG's roster has none — so this method drives no reboot
+ * detection. That is called out in the matrix header.
+ */
+async function probeFortimanagerNative(
+  asset: { serialNumber: string | null; hostname: string | null },
+  integration: { id: string; type: string; config: Record<string, unknown> },
+  start: number,
+): Promise<ProbeResult> {
+  if (integration.type !== "fortimanager") {
+    return finish(start, false, "FortiManager polling requires a FortiManager integration");
+  }
+  const serial = (asset.serialNumber || "").trim().toUpperCase();
+  if (!serial) {
+    return finish(start, false, "Cannot poll via FortiManager — asset has no serial number recorded");
+  }
+
+  let entry: FmgRosterCacheEntry;
+  try {
+    entry = await fetchFmgRosterCached(integration);
+  } catch (err: any) {
+    // Could not ASK. Not a measurement, so not a miss.
+    return { success: false, responseTimeMs: 0, skipped: true, error: err?.message || "FortiManager roster query failed" };
+  }
+
+  const row = entry.bySerial.get(serial);
+  if (!row) {
+    return {
+      success: false,
+      responseTimeMs: entry.fetchDurationMs,
+      error: "Not present in FortiManager's device roster",
+    };
+  }
+  if (!row.connected) {
+    return {
+      success: false,
+      responseTimeMs: entry.fetchDurationMs,
+      error: `FortiManager reports the device disconnected (${row.raw})`,
+    };
+  }
+  // The RTT is the shared upstream call's duration, not a measurement of the
+  // device — the same honesty the controller and vCenter probes apply.
+  return { success: true, responseTimeMs: entry.fetchDurationMs };
 }
 
 interface VcenterHostCacheEntry {
@@ -4245,8 +4551,24 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
       );
       return { supported: true, data };
     }
-    // winrm / ssh / icmp don't yet deliver telemetry. WinRM via WMI
-    // Enumerate-over-WS-Management is tracked separately.
+    // Agentless CPU/memory over SSH (Linux /proc) or WinRM (CIM). These
+    // silently returned {supported:false} until 2026-08-28 — accepted at every
+    // validator, recorded as a healthy tick, collecting nothing.
+    if (polling === "ssh" || polling === "winrm") {
+      const cred = await resolveAgentlessCredConfig(
+        asset.cpuMemoryCredential ?? asset.monitorCredential,
+        effective.cpuMemoryCredentialId,
+        polling,
+        integration,
+      );
+      if (!cred) return { supported: true, error: `No ${polling === "ssh" ? "SSH" : "WinRM"} credential selected` };
+      const res = polling === "ssh"
+        ? await collectHostSsh(targetIp, cred, { telemetry: true, interfaces: false, storage: false, timeoutMs: telemetryTimeout })
+        : await collectHostWinrm(winrmConnFrom(targetIp, cred, telemetryTimeout), { telemetry: true, interfaces: false, storage: false, timeoutMs: telemetryTimeout });
+      if (!res.telemetry) return { supported: true, error: "Host returned no CPU/memory reading" };
+      return { supported: true, data: res.telemetry };
+    }
+    // icmp carries no payload.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "Telemetry collection failed" };
@@ -4974,7 +5296,35 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       });
       return { supported: true, data };
     }
-    // winrm / ssh / icmp — no interfaces / storage / IPsec / LLDP support yet.
+    // Agentless interfaces + storage over SSH (sysfs / df) or WinRM
+    // (Get-NetAdapter / Get-Volume). Both streams ride ONE connection, which is
+    // the whole point at fleet scale — the handshake dominates, not the parse.
+    // Storage is gated on its own resolved method, like every other path here.
+    if (interfacesPolling === "ssh" || interfacesPolling === "winrm") {
+      const method = interfacesPolling;
+      const cred = await resolveAgentlessCredConfig(
+        asset.interfacesCredential ?? asset.monitorCredential,
+        effective.interfacesCredentialId,
+        method,
+        integration,
+      );
+      if (!cred) return { supported: true, error: `No ${method === "ssh" ? "SSH" : "WinRM"} credential selected` };
+      const wantStorage = effective.storagePolling === method;
+      const opts = { telemetry: false, interfaces: true, storage: wantStorage, timeoutMs: sysInfoTimeout };
+      const res = method === "ssh"
+        ? await collectHostSsh(targetIp, cred, opts)
+        : await collectHostWinrm(winrmConnFrom(targetIp, cred, sysInfoTimeout), opts);
+      // `undefined` from a failed command means "leave stored rows alone";
+      // only an empty ARRAY is a successful scrape that found nothing.
+      return {
+        supported: true,
+        data: {
+          interfaces: res.interfaces ?? [],
+          storage: wantStorage ? (res.storage ?? []) : [],
+        },
+      };
+    }
+    // icmp — no payload to gather.
     return { supported: false };
   } catch (err: any) {
     return { supported: true, error: err?.message || "System info collection failed" };
@@ -10687,11 +11037,20 @@ interface RunStats {
   fastFiltered: { collected: number; failed: number };
   /** Agentless (ssh/winrm) processes cadence — cursor mode only. */
   processes:    { collected: number; failed: number };
+  /** Agentless (ssh/winrm) OS event-log cadence — cursor mode only. */
+  eventLog:     { collected: number; failed: number };
   /** ICMP packet-loss sampler (warning/recovering assets only). */
   lossSample:   { collected: number; failed: number };
 }
 
-export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "lossSample";
+/**
+ * Per-poll cap on agentless event-log entries. The sink applies its own
+ * per-push and per-asset-hourly caps on top; this one bounds the SSH/WinRM
+ * payload and the parse, before any of that runs.
+ */
+const EVENT_LOG_MAX_ENTRIES_PER_POLL = 300;
+
+export type MonitorCadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "eventLog" | "lossSample";
 
 /**
  * Per-cadence outcome tally returned by the runFooFor() functions. Used by
@@ -11289,6 +11648,37 @@ export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promi
  *
  * Stamps `Asset.lastStorageAt` on every successful pass.
  */
+/**
+ * Persist a dedicated storage-cadence scrape. Shared by the SNMP and the
+ * agentless (ssh/winrm) paths so both stamp cadence and advance the anchor
+ * identically.
+ *
+ * This cadence walks ALL mountpaths, so each row is stamped by whether its
+ * mountPath is operator-pinned: pinned → "fast" (full retention + rollups),
+ * unpinned → "slow" (24h, never rolled up).
+ */
+async function persistStorageOnly(
+  assetId: string,
+  storage: StorageSample[],
+  monitoredStorage: string[],
+): Promise<void> {
+  const now = new Date();
+  const pinnedStorage = new Set(monitoredStorage);
+  if (storage.length > 0) {
+    enqueueStorageSamples(
+      storage.map((s) => ({
+        assetId,
+        timestamp: now,
+        cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
+        mountPath:  s.mountPath,
+        totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
+        usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
+      })),
+    );
+  }
+  await prisma.asset.update({ where: { id: assetId }, data: { lastStorageAt: now } });
+}
+
 export async function runStorageFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("storage", labels);
   try {
@@ -11305,15 +11695,47 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
     });
     const storagePolling = effective.storagePolling;
-    if (storagePolling !== "snmp") {
-      // Storage walk is SNMP-only when enabled.
+    // SNMP walks the hrStorageTable; ssh/winrm read df / Get-Volume. Every
+    // other method either has no storage story (icmp, rest_api — FortiOS
+    // publishes no mountable storage) or delivers it elsewhere: the agent
+    // pushes on its own schedule, and vCenter storage rides the system-info
+    // pass out of the warm cache rather than this dedicated cadence.
+    if (storagePolling !== "snmp" && storagePolling !== "ssh" && storagePolling !== "winrm") {
       recordWorkOutcome("storage", "success", labels);
       return "success";
     }
-    const targetIp = asset.ipAddress;
+    const targetIp = asset.ipAddress
+      || ((storagePolling === "ssh" || storagePolling === "winrm") ? (asset.dnsName || asset.hostname) : null);
     if (!targetIp) {
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
+    }
+
+    if (storagePolling === "ssh" || storagePolling === "winrm") {
+      const cred = await resolveAgentlessCredConfig(
+        asset.interfacesCredential ?? asset.monitorCredential,
+        effective.interfacesCredentialId,
+        storagePolling,
+        asset.discoveredByIntegration ?? null,
+      );
+      if (!cred) {
+        recordWorkOutcome("storage", "failure", labels);
+        return "failure";
+      }
+      const opts = { telemetry: false, interfaces: false, storage: true, timeoutMs: effective.storageTimeoutMs };
+      const res = await (storagePolling === "ssh"
+        ? collectHostSsh(targetIp, cred, opts)
+        : collectHostWinrm(winrmConnFrom(targetIp, cred, effective.storageTimeoutMs), opts)
+      ).catch(() => undefined);
+      // undefined = the command failed; leave stored rows alone rather than
+      // wiping a host's mounts because one scrape timed out.
+      if (!res?.storage) {
+        recordWorkOutcome("storage", "failure", labels);
+        return "failure";
+      }
+      await persistStorageOnly(assetId, res.storage, asset.monitoredStorage || []);
+      recordWorkOutcome("storage", "success", labels);
+      return "success";
     }
     // Storage shares the interfaces credential at probe time — there's no
     // per-stream storage credential column. Per-stream interfaces credential
@@ -11338,24 +11760,7 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
     }
-    const now = new Date();
-    // This dedicated SNMP storage stream walks ALL mountpaths, so stamp each
-    // row by whether its mountPath is operator-pinned (monitoredStorage):
-    // pinned → "fast" (full retention + rollups), unpinned → "slow" (24h).
-    const pinnedStorage = new Set(asset.monitoredStorage ?? []);
-    if (storage.length > 0) {
-      enqueueStorageSamples(
-        storage.map((s) => ({
-          assetId,
-          timestamp: now,
-          cadence:    pinnedStorage.has(s.mountPath) ? ("fast" as const) : ("slow" as const),
-          mountPath:  s.mountPath,
-          totalBytes: s.totalBytes != null ? BigInt(Math.round(s.totalBytes)) : null,
-          usedBytes:  s.usedBytes  != null ? BigInt(Math.round(s.usedBytes))  : null,
-        })),
-      );
-    }
-    await prisma.asset.update({ where: { id: assetId }, data: { lastStorageAt: now } });
+    await persistStorageOnly(assetId, storage, asset.monitoredStorage || []);
     recordWorkOutcome("storage", "success", labels);
     return "success";
   } catch (err) {
@@ -11385,6 +11790,116 @@ const PROCESS_PINS_INTERVAL_SEC = 60;
  * heavy tick (AD-lockout / fail2ban exposure). Failures are metrics + debug
  * log only — no Event spam.
  */
+/**
+ * Agentless OS event-log cadence (ssh / winrm).
+ *
+ * Feeds the SAME sink the agent's eventLog stream uses — `ingestOsEventLog`,
+ * which curates entries into the audit Event table and already applies the
+ * min-level filter, dedupe, per-push cap and per-asset hourly rate cap. So the
+ * only new work is collecting entries in that shape and honouring the global
+ * `agentEventLog` master switch, which gates BOTH paths: an operator who turned
+ * the feature off must not have an agentless poller keep filling the audit log.
+ *
+ * The collection window is derived from the stream's own interval rather than a
+ * fixed row count. A poll that asked for "the last N entries" would either miss
+ * a burst or re-ingest the same quiet hour repeatedly; asking for "everything
+ * since a bit longer ago than my last run" is the shape that neither drops nor
+ * duplicates. The overlap is deliberate and cheap — the sink dedupes.
+ *
+ * `lastEventLogAt` is stamped **even on failure**, exactly as
+ * `runProcessesFor` stamps its anchors: an agentless stream that re-fires every
+ * tick against a bad credential is an AD-lockout risk, and this is the one
+ * stream where a retry storm would also flood the table it writes into.
+ */
+export async function runEventLogFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("eventLog", labels);
+  try {
+    const asset = await prisma.asset.findUnique({
+      where: { id: assetId },
+      include: { monitorCredential: true, eventLogCredential: true, discoveredByIntegration: true },
+    });
+    if (!asset || !asset.monitored) {
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+    const effective = await resolveMonitorSettings({
+      ...asset,
+      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
+    });
+    const method = effective.eventLogPolling;
+    if (method !== "ssh" && method !== "winrm") {
+      // agent-mode assets self-collect; no other transport delivers this.
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+
+    // Master switch first — before any anchor write or network call, so a
+    // disabled feature costs nothing per tick.
+    const cfg = await getAgentEventLogConfig();
+    if (!cfg.enabled) {
+      recordWorkOutcome("eventLog", "success", labels);
+      return "success";
+    }
+
+    // Stamp the anchor up front so every exit below — success, failure, throw —
+    // leaves the cadence spaced. See the header.
+    const stampAnchor = () =>
+      prisma.asset.update({ where: { id: assetId }, data: { lastEventLogAt: new Date() } }).catch(() => {});
+
+    const targetIp = asset.ipAddress || asset.dnsName || asset.hostname;
+    if (!targetIp) {
+      await stampAnchor();
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+
+    const cred = await resolveAgentlessCredConfig(
+      asset.eventLogCredential ?? asset.monitorCredential,
+      effective.eventLogCredentialId,
+      method,
+      asset.discoveredByIntegration ?? null,
+    );
+    if (!cred) {
+      await stampAnchor();
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+
+    const intervalSec = effective.eventLogIntervalSeconds ?? 600;
+    // 1.5× the interval: enough overlap that a slow tick cannot open a hole,
+    // small enough that the duplicate load stays trivial. The sink dedupes.
+    const sinceMinutes = Math.max(1, Math.ceil((intervalSec * 1.5) / 60));
+    const opts = { sinceMinutes, maxEntries: EVENT_LOG_MAX_ENTRIES_PER_POLL, timeoutMs: Math.max(effective.eventLogTimeoutMs ?? 15_000, 30_000) };
+
+    let entries: AgentlessEventLogEntry[] | undefined;
+    try {
+      entries = method === "ssh"
+        ? await collectEventLogSsh(targetIp, cred, opts)
+        : await collectEventLogWinrm(winrmConnFrom(targetIp, cred, opts.timeoutMs), opts);
+    } catch (err) {
+      logger.debug({ err, assetId }, "Agentless event-log collection failed");
+      entries = undefined;
+    }
+
+    await stampAnchor();
+    if (entries === undefined) {
+      recordWorkOutcome("eventLog", "failure", labels);
+      return "failure";
+    }
+    if (entries.length > 0) {
+      await ingestOsEventLog(assetId, asset.hostname ?? null, entries, cfg);
+    }
+    recordWorkOutcome("eventLog", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, assetId }, "Agentless event-log cadence crashed");
+    recordWorkOutcome("eventLog", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
 export async function runProcessesFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("processes", labels);
   try {
@@ -11750,13 +12265,15 @@ export async function loadMonitorPassCandidates() {
       processesPolling: true,
       lastProcessesAt: true, lastProcessPinsAt: true,
       monitoredProcesses: true, mappedProcesses: true,
+      // Same, for the agentless event-log cadence.
+      eventLogPolling: true, lastEventLogAt: true,
       dependencySuppressed: true,
     },
   });
 }
 export type MonitorPassCandidate = Awaited<ReturnType<typeof loadMonitorPassCandidates>>[number];
 
-export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes" | "lossSample";
+export type MonitorWorkKind = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "processes" | "eventLog" | "lossSample";
 export type MonitorWork = { id: string; kind: MonitorWorkKind };
 /**
  * Effective probe spacing in seconds for one asset.
@@ -11797,6 +12314,7 @@ export interface DueMonitorWork {
   telemetries: MonitorWork[];
   systemInfos: MonitorWork[];
   processesWork: MonitorWork[];
+  eventLogWork: MonitorWork[];
   lossSamples: MonitorWork[];
 }
 
@@ -11828,6 +12346,7 @@ export async function computeDueWork(
   const telemetries: MonitorWork[]  = [];
   const systemInfos: MonitorWork[]  = [];
   const processesWork: MonitorWork[] = [];
+  const eventLogWork: MonitorWork[] = [];
   const lossSamples: MonitorWork[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
@@ -11893,11 +12412,12 @@ export async function computeDueWork(
     // switches only — APs are enqueued and dispatched.
     // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
     // it delivers telemetry via the per-integration warm cache.
+    // ssh / winrm used to be excluded here because no collector existed for
+    // them; agentlessHostService supplies one now, so they enqueue like any
+    // other transport. icmp still carries no payload.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&
-      eff.cpuMemoryPolling !== "winrm" &&
-      eff.cpuMemoryPolling !== "ssh"   &&
       !(eff.cpuMemoryPolling === "rest_api" && a.assetType === "switch");
     // systemInfo is supported for winrm/ssh paths; only exclude the REST API
     // + managed-switch/AP combination that has no direct endpoint. Treat the
@@ -11947,7 +12467,11 @@ export async function computeDueWork(
     // KEEP IN LOCKSTEP with the pg-boss publisher in jobs/monitorAssets.ts —
     // both call the shared predicate for exactly that reason.
     const isUp = runsHeavyCadences(a);
-    if (probe      && enabled.has("probe"))                                      probes.push({ id: a.id, kind: "probe" });
+    // The probe gates on its resolved method the same way lldp / storage /
+    // processes below already do — "disabled" means don't poll, and queueing it
+    // anyway is what let an off-switch read as an outage.
+    const probeMethodOk = responseTimeProbeShouldQueue(eff.responseTimePolling);
+    if (probe      && enabled.has("probe") && probeMethodOk)                     probes.push({ id: a.id, kind: "probe" });
     if (telemetry  && canTelemetry  && enabled.has("telemetry")  && isUp)        telemetries.push({ id: a.id, kind: "telemetry" });
     if (systemInfo && canSystemInfo && enabled.has("systemInfo") && isUp)        systemInfos.push({ id: a.id, kind: "systemInfo" });
     // Fast-cadence pinned scrape rides the response-time cadence (default 60s).
@@ -11978,6 +12502,13 @@ export async function computeDueWork(
         (procPins && isDue(a.lastProcessPinsAt, PROCESS_PINS_INTERVAL_SEC));
       if (processesDue) processesWork.push({ id: a.id, kind: "processes" });
     }
+    // Agentless event-log cadence — same shape and the same isUp gate. Keep in
+    // sync with publishDueWork in monitorAssets.ts.
+    if (enabled.has("eventLog") && isUp &&
+        (eff.eventLogPolling === "ssh" || eff.eventLogPolling === "winrm") &&
+        isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
+      eventLogWork.push({ id: a.id, kind: "eventLog" });
+    }
     // ICMP packet-loss sampler: 10s side-probe while the state machine is
     // mid-run (warning / recovering only — see utils/lossSampler.ts for why
     // `down` is excluded). Independent of `probe` above: it has its own anchor
@@ -12005,7 +12536,7 @@ export async function computeDueWork(
     );
     lossSamples.length = LOSS_SAMPLES_MAX_PER_PASS;
   }
-  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples };
+  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples };
 }
 
 export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
@@ -12070,6 +12601,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
       lldp:         a.lldpPolling    || ifT,
       storage:      a.storagePolling || ifT,
       processes:    a.processesPolling || "not_delivered",
+      eventLog:     a.eventLogPolling  || "not_delivered",
       // The loss sampler is ICMP by definition, whatever the response-time
       // stream uses — that IS the finding the label should carry.
       lossSample:   "icmp",
@@ -12077,7 +12609,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }
 
-  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, lossSamples } =
+  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples } =
     await computeDueWork(candidates, enabled, now);
 
   // Order matters: probes first so a saturated worker pool drains the cheap
@@ -12091,7 +12623,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // one is already due), so queueing them behind the heavy walks would mean
   // collecting nothing during exactly the incident they exist to measure.
   // They still yield to probes, which decide whether the asset is down at all.
-  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork];
+  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork, ...eventLogWork];
 
   setQueueDepth({
     probe: probes.length,
@@ -12099,6 +12631,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     telemetry: telemetries.length,
     systemInfo: systemInfos.length,
     processes: processesWork.length,
+    eventLog: eventLogWork.length,
     lossSample: lossSamples.length,
   });
 
@@ -12108,6 +12641,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     systemInfo: { collected: 0, failed: 0 },
     fastFiltered: { collected: 0, failed: 0 },
     processes:  { collected: 0, failed: 0 },
+    eventLog:   { collected: 0, failed: 0 },
     lossSample: { collected: 0, failed: 0 },
   };
   if (work.length === 0) {
@@ -12156,6 +12690,12 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
             const outcome = await runProcessesFor(w.id, labelFor("processes"));
             if (outcome === "success") stats.processes.collected++;
             else stats.processes.failed++;
+            break;
+          }
+          case "eventLog": {
+            const outcome = await runEventLogFor(w.id, labelFor("eventLog"));
+            if (outcome === "success") stats.eventLog.collected++;
+            else stats.eventLog.failed++;
             break;
           }
           case "lossSample": {

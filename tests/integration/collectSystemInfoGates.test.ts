@@ -105,12 +105,19 @@ d("collectSystemInfo — dispatch gates", () => {
     expect(await collectSystemInfo(assetId)).toEqual({ supported: false });
   });
 
-  it("winrm / ssh interfaces → unsupported (no system-info collectors yet)", async () => {
-    await seedAsset({ interfacesPolling: "winrm" });
-    expect(await collectSystemInfo(assetId)).toEqual({ supported: false });
-
-    await seedAsset({ interfacesPolling: "ssh" });
-    expect(await collectSystemInfo(assetId)).toEqual({ supported: false });
+  // These used to return {supported:false} — a silent no-op that
+  // runTelemetryFor's sibling records as a healthy tick. agentlessHostService
+  // supplies the collectors now, so the stream is SUPPORTED and reports a real
+  // outcome instead. With no credential resolvable on a bare seeded asset that
+  // outcome is an error naming the missing credential, which is the point: the
+  // operator finds out, rather than watching an empty chart forever.
+  it("winrm / ssh interfaces → supported, and say what is missing", async () => {
+    for (const method of ["winrm", "ssh"] as const) {
+      await seedAsset({ interfacesPolling: method });
+      const res = await collectSystemInfo(assetId);
+      expect(res.supported, method).toBe(true);
+      expect(res.error, method).toMatch(/credential/i);
+    }
   });
 
   it("vcenter interfaces dispatch BEFORE the IP guard, and want a vCenter source", async () => {

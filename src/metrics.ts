@@ -351,7 +351,7 @@ const processCrashTotal = new Counter({
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "lossSample";
+export type Cadence = "probe" | "telemetry" | "systemInfo" | "fastFiltered" | "lldp" | "storage" | "processes" | "eventLog" | "lossSample";
 export type WorkOutcome = "success" | "failure" | "crash";
 export type ProbeOutcome = "success" | "failure";
 

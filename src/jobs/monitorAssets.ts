@@ -46,6 +46,7 @@ import {
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
 import { lossSamplerAppliesTo, lossSampleIsDue } from "../utils/lossSampler.js";
+import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
 import { runInstrumentedJob } from "./_metrics.js";
@@ -140,6 +141,8 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       lastProcessesAt: true, lastProcessPinsAt: true, processesIntervalSec: true,
       processesPolling: true,
       monitoredProcesses: true, mappedProcesses: true,
+      // Agentless event-log cadence due-calc inputs.
+      lastEventLogAt: true, eventLogPolling: true,
       probeTimeoutMs: true,
       responseTimePolling: true,
       cpuMemoryPolling:    true,
@@ -203,11 +206,12 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const isManagedSwitchOrAp = a.assetType === "switch" || a.assetType === "access_point";
     // "vcenter" (hypervisor-view quickStats) deliberately passes this gate —
     // it delivers telemetry via the per-integration warm cache.
+    // ssh / winrm used to be excluded here because no collector existed;
+    // agentlessHostService supplies one now. Keep in lockstep with
+    // monitoringService.computeDueWork.
     const canTelemetry =
       eff.cpuMemoryPolling !== null &&
       eff.cpuMemoryPolling !== "icmp"  &&
-      eff.cpuMemoryPolling !== "winrm" &&
-      eff.cpuMemoryPolling !== "ssh"   &&
       !(eff.cpuMemoryPolling === "rest_api" && isManagedSwitchOrAp);
     // systemInfo carries three streams (interfaces / lldp / storage). Treat
     // the cadence as runnable when ANY is enabled — collectSystemInfo gates
@@ -252,7 +256,10 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const telLabels = { transport: telTransport, assetType, verboseDebug };
     const ifLabels  = { transport: ifTransport,  assetType, verboseDebug };
 
-    if (probe && enabled.has("probe")) {
+    // Gates on the resolved method like every other stream below. Keep in
+    // lockstep with the matching push in monitoringService.computeDueWork —
+    // both call the shared predicate for exactly that reason.
+    if (probe && enabled.has("probe") && responseTimeProbeShouldQueue(eff.responseTimePolling)) {
       await publishMonitorJob("probe", a.id, labels);
     }
     if (telemetry && canTelemetry && isUp && enabled.has("telemetry")) {
@@ -271,7 +278,12 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       const lldpTransport = eff.lldpPolling || "unknown";
       await publishMonitorJob("lldp", a.id, { transport: lldpTransport, assetType, verboseDebug });
     }
-    if (storage && isUp && enabled.has("storage") && eff.storagePolling === "snmp") {
+    // The dedicated storage cadence covers SNMP (hrStorageTable) and the
+    // agentless transports (df / Get-Volume). Agent hosts push on their own
+    // schedule and vCenter storage rides the system-info pass, so neither
+    // belongs on this queue. Keep in lockstep with computeDueWork.
+    if (storage && isUp && enabled.has("storage") &&
+        (eff.storagePolling === "snmp" || eff.storagePolling === "ssh" || eff.storagePolling === "winrm")) {
       const storageTransport = eff.storagePolling || "unknown";
       await publishMonitorJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
     }
@@ -292,6 +304,16 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       if (processesDue) {
         await publishMonitorJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
       }
+    }
+    // Agentless event-log cadence (ssh/winrm), same shape and the same isUp
+    // gate as processes above. runEventLogFor re-checks the global
+    // agentEventLog master switch and stamps its anchor even on failure, so a
+    // bad credential can't re-queue every tick. Keep in sync with
+    // computeDueWork.
+    if (isUp && enabled.has("eventLog") &&
+        (eff.eventLogPolling === "ssh" || eff.eventLogPolling === "winrm") &&
+        isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
+      await publishMonitorJob("eventLog", a.id, { transport: eff.eventLogPolling, assetType, verboseDebug });
     }
     // ICMP packet-loss sampler: 10s side-probe while the state machine is
     // mid-run (warning / recovering only — utils/lossSampler.ts explains why
@@ -351,12 +373,13 @@ async function heavyTick(): Promise<void> {
         // ["telemetry", "systemInfo"] set for those two — the cursor pass
         // doesn't drive the LLDP/Storage queues (pg-boss-only); the existing
         // systemInfo walk picks up LLDP + Storage as session-coalesced side
-        // effects on cursor installs. The agentless "processes" cadence has NO
-        // side effect to ride, so it dispatches explicitly in BOTH modes.
-        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage", "processes"]);
+        // effects on cursor installs. The agentless "processes" and "eventLog"
+        // cadences have NO side effect to ride, so they dispatch explicitly in
+        // BOTH modes.
+        await publishDueWork(["telemetry", "systemInfo", "lldp", "storage", "processes", "eventLog"]);
       } else {
         const stats = await runMonitorPass({
-          cadences: ["telemetry", "systemInfo", "processes"],
+          cadences: ["telemetry", "systemInfo", "processes", "eventLog"],
           concurrency: HEAVY_CONCURRENCY,
         });
         if (stats.telemetry.collected > 0 || stats.systemInfo.collected > 0 || stats.processes.collected > 0) {

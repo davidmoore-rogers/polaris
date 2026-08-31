@@ -50,6 +50,7 @@ import {
   runLldpFor,
   runStorageFor,
   runProcessesFor,
+  runEventLogFor,
   runLossSampleFor,
   type MonitorCadence,
 } from "./monitoringService.js";
@@ -162,6 +163,12 @@ export const QUEUE_NAMES: Record<MonitorCadence, string> = {
   // Agentless (ssh/winrm) processes cadence: inventory + the 60s pinned/mapped
   // sub-pass (cpu/mem telemetry + Application Map connections).
   processes:    "polaris-monitor-processes",
+  // Agentless (ssh/winrm) OS event-log cadence. Its own queue rather than a
+  // rider on `processes` because the two carry independent intervals, and
+  // because this one writes into the audit Event table — a stream whose volume
+  // ships off-host through the syslog / SFTP archivers deserves a pool that can
+  // be sized (and starved) on its own.
+  eventLog:     "polaris-monitor-eventlog",
   // ICMP packet-loss sampler: a 10s side-probe for assets in warning /
   // recovering, feeding probeLossPct resolution only. Its own queue + pool so a
   // site-wide outage (hundreds of assets entering warning at once) drains
@@ -259,6 +266,7 @@ let slotPools: {
   lldp:         WorkerSlotPool;
   storage:      WorkerSlotPool;
   processes:    WorkerSlotPool;
+  eventLog:     WorkerSlotPool;
   lossSample:   WorkerSlotPool;
   floating:     WorkerSlotPool;
 } | null = null;
@@ -330,7 +338,7 @@ let floatingLoopRunning = false;
 // generally cheaper than the per-vendor disk scalar pair; storage outranks
 // telemetry because storage feeds capacity alerts directly. Both still sit
 // below probe/fastFiltered so probes (the cheapest cadence) never starve.
-const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "processes", "telemetry", "systemInfo"];
+const FLOAT_PRIORITY: MonitorCadence[] = ["probe", "fastFiltered", "lldp", "storage", "processes", "eventLog", "telemetry", "systemInfo"];
 
 
 // ─── Stalled-worker watchdog ─────────────────────────────────────────────────
@@ -613,6 +621,9 @@ async function ensureQueues(boss: PgBossType): Promise<void> {
     storage:      600,
     // SSH/WinRM sessions with generous per-command timeouts + two sub-passes.
     processes:    600,
+    // One SSH/WinRM session reading a bounded window of the OS log, then an
+    // ingest that the sink rate-caps. Shorter than processes: no sub-passes.
+    eventLog:     300,
     // One ping with a 5s timeout. Deliberately the tightest cap of any queue:
     // a sample that has not landed within 15s is worthless (the next one is
     // already due at 10s), so failing fast is better than holding a slot.
@@ -761,6 +772,7 @@ export async function startPgbossWorkers(): Promise<void> {
   // Agentless processes cadence (ssh/winrm). Sized like lldp/storage — only
   // ssh/winrm-polled assets with pins/mapped names produce work.
   const processesWorkers = resolveEnvInt("POLARIS_MONITOR_PROCESSES_WORKERS", 12);
+  const eventLogWorkers  = resolveEnvInt("POLARIS_MONITOR_EVENTLOG_WORKERS", 8);
   // The loss sampler is one ping per asset per 10s — cheap individually, but
   // fleet-wide during a site outage. A generous default is safe (a ping holds
   // its slot for ≤5s) and the cap is what stops it competing with real probes.
@@ -774,12 +786,13 @@ export async function startPgbossWorkers(): Promise<void> {
     lldp:         lldpWorkers,
     storage:      storageWorkers,
     processes:    processesWorkers,
+    eventLog:     eventLogWorkers,
     lossSample:   lossSampleWorkers,
     floating:     floatingWorkers,
   });
   logger.info(
     {
-      probeWorkers, fastWorkers, heavyWorkers, lldpWorkers, storageWorkers, processesWorkers, lossSampleWorkers, floatingWorkers, cores: cpus().length,
+      probeWorkers, fastWorkers, heavyWorkers, lldpWorkers, storageWorkers, processesWorkers, eventLogWorkers, lossSampleWorkers, floatingWorkers, cores: cpus().length,
     },
     "pg-boss workers configured",
   );
@@ -796,6 +809,7 @@ export async function startPgbossWorkers(): Promise<void> {
     lldp:         createWorkerSlotPool("lldp",      lldpWorkers),
     storage:      createWorkerSlotPool("storage",   storageWorkers),
     processes:    createWorkerSlotPool("processes", processesWorkers),
+    eventLog:     createWorkerSlotPool("eventlog",  eventLogWorkers),
     lossSample:   createWorkerSlotPool("losssample", lossSampleWorkers),
     floating:     createWorkerSlotPool("floating",  floatingWorkers),
   };
@@ -853,6 +867,14 @@ export async function startPgbossWorkers(): Promise<void> {
   }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
     await runDedicatedWorker("processes", jobs[0], (assetId, labels) =>
       runProcessesFor(assetId, labels),
+    );
+  });
+
+  await boss.work<MonitorJobPayload>(QUEUE_NAMES.eventLog, {
+    localConcurrency: eventLogWorkers, batchSize: 1, pollingIntervalSeconds: 5,
+  }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
+    await runDedicatedWorker("eventLog", jobs[0], (assetId, labels) =>
+      runEventLogFor(assetId, labels),
     );
   });
 
@@ -968,6 +990,7 @@ async function dispatchFloatingJob(
       case "lldp":         await runLldpFor(assetId, labels);         break;
       case "storage":      await runStorageFor(assetId, labels);      break;
       case "processes":    await runProcessesFor(assetId, labels);    break;
+      case "eventLog":     await runEventLogFor(assetId, labels);     break;
       case "lossSample":   await runLossSampleFor(assetId, labels);   break;
     }
     await boss.complete(queueName, job.id);

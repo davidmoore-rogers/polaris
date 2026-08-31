@@ -1388,6 +1388,105 @@ export function extractRosterIdentities(devicesRaw: any[]): { names: string[]; s
   return { names, serials };
 }
 
+/** One chassis's reachability as FortiManager currently understands it. */
+export interface RosterDeviceStatus {
+  /** FMG device name (top level), or the `ha_slave[]` member name. */
+  name: string;
+  /** Serial, upper-cased — the join key. */
+  serial: string;
+  connected: boolean;
+  /** Raw signal, surfaced verbatim in probe errors so an operator can see what FMG said. */
+  raw: string;
+  /** True when the row came from `ha_slave[]` rather than the top level. */
+  haMember: boolean;
+}
+
+/**
+ * Reachability for every chassis in the RAW `/dvmdb/adom/<adom>/device` payload
+ * — the status sibling of `extractRosterIdentities`, walking the same rows and
+ * the same `ha_slave[]` members so the two cannot disagree about which serials
+ * exist.
+ *
+ * This is FortiManager's OWN view, refreshed on FMG's check-in cadence rather
+ * than by Polaris touching the device. It is therefore lagged, and it is
+ * second-hand — but it is free (a native `/dvmdb` read, outside the
+ * `/sys/proxy/json` concurrency-1 lane) and it covers the whole fleet in one
+ * call, which is exactly what the `fortimanager` polling method trades for.
+ *
+ * Two encodings, both matching how discovery already reads them:
+ *  - top level `conn_status`: 1 = connected. **Absent counts as connected**,
+ *    the same "unknown is not down" reading `processDevice` uses to decide
+ *    whether a gate is offline — an FMG that stopped reporting the field must
+ *    not mass-down a fleet.
+ *  - `ha_slave[].status`: 1 = member up, 0 = down. Flagged
+ *    verify-on-real-FMG where it is first read (`parseHaCluster`); the same
+ *    caveat applies here.
+ *
+ * Serials are upper-cased because every Fortinet serial join in this codebase
+ * folds case on both sides.
+ */
+export function extractRosterConnectivity(devicesRaw: any[]): RosterDeviceStatus[] {
+  const out: RosterDeviceStatus[] = [];
+  for (const d of Array.isArray(devicesRaw) ? devicesRaw : []) {
+    const sn = typeof d?.sn === "string" ? d.sn.trim() : "";
+    if (sn) {
+      const cs = d?.conn_status;
+      out.push({
+        name: String(d?.name || d?.hostname || ""),
+        serial: sn.toUpperCase(),
+        connected: cs === undefined || cs === null || cs === 1,
+        raw: cs === undefined || cs === null ? "unreported" : `conn_status=${String(cs)}`,
+        haMember: false,
+      });
+    }
+    for (const m of Array.isArray(d?.ha_slave) ? d.ha_slave : []) {
+      const msn = typeof m?.sn === "string" ? m.sn.trim() : "";
+      if (!msn) continue;
+      const st = m?.status;
+      out.push({
+        name: String(m?.name || ""),
+        serial: msn.toUpperCase(),
+        connected: st === undefined || st === null || st === 1,
+        raw: st === undefined || st === null ? "unreported" : `ha_slave.status=${String(st)}`,
+        haMember: true,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch the ADOM device roster and project it to per-serial reachability.
+ *
+ * Native `/dvmdb` read: NOT subject to FMG's `/sys/proxy/json` concurrency-1
+ * throttle, and one call covers every managed gate — which is what lets the
+ * monitor role poll a whole fleet's up/down for the price of a single request.
+ * The monitor process cannot reuse discovery's copy of this payload (separate
+ * process in the split-role layout), so it issues its own.
+ */
+export async function fetchRosterConnectivity(
+  config: FortiManagerConfig,
+  signal?: AbortSignal,
+  integrationId?: string,
+): Promise<RosterDeviceStatus[]> {
+  const baseUrl = `https://${config.host}:${config.port || 443}/jsonrpc`;
+  const adom = config.adom || "root";
+  const { apiUser, apiToken, verifySsl } = config;
+  // No `fields` list, deliberately: naming fields makes FMG authorize each one
+  // individually and fail the whole query with -11 when the API user's profile
+  // doesn't grant one of them. See the roster fetch in discoverDhcpSubnets.
+  const res = await rpc(
+    baseUrl,
+    { id: 1, method: "get", params: [{ url: `/dvmdb/adom/${adom}/device` }] },
+    apiUser,
+    apiToken,
+    verifySsl,
+    signal,
+    integrationId,
+  );
+  return extractRosterConnectivity(res.result?.[0]?.data as any[]);
+}
+
 /**
  * Extract HA cluster info from a raw FMG `/dvmdb/adom/<adom>/device` record.
  * FMG exposes `ha_mode` + `ha_slave[]` directly on the device record — no

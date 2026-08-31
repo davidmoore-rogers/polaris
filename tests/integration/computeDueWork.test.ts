@@ -119,8 +119,15 @@ dbDescribe("computeDueWork", () => {
     );
     expect(warning.telemetries).toEqual([]);
 
+    // ssh / winrm used to be excluded here because no collector existed;
+    // agentlessHostService supplies one, so they enqueue like any other
+    // transport now. icmp still carries no payload and stays out.
     const ssh = await computeDueWork([cand({ cpuMemoryPolling: "ssh" })], ALL, now);
-    expect(ssh.telemetries).toEqual([]);
+    expect(ssh.telemetries).toHaveLength(1);
+    const winrm = await computeDueWork([cand({ cpuMemoryPolling: "winrm" })], ALL, now);
+    expect(winrm.telemetries).toHaveLength(1);
+    const icmp = await computeDueWork([cand({ cpuMemoryPolling: "icmp" })], ALL, now);
+    expect(icmp.telemetries).toEqual([]);
 
     // Managed FortiSwitch on REST has no direct telemetry endpoint…
     const restSwitch = await computeDueWork(

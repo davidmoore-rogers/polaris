@@ -30,6 +30,8 @@ import {
   isMethodValidForStream,
   pollingMethodLabel,
 } from "../utils/pollingCompatibility.js";
+import { collectorCapability } from "../utils/pollingCapability.js";
+import { logger } from "../utils/logger.js";
 
 // Polling-method compatibility check shared by integration-tier and
 // class-override writes. A tier whose source is fixed (any single integration
@@ -88,6 +90,18 @@ function assertPollingCompatible(
       throw new AppError(
         400,
         `ICMP polling is only valid for the response-time stream (field: ${field})`,
+      );
+    }
+    // Does a collector actually exist? WARN rather than throw: a hard refusal
+    // would 400 an operator who merely re-saves an integration that already
+    // holds one of these values, punishing them for a gap they didn't create.
+    // The UI stops offering them and a startup audit names the stored ones; the
+    // log line is the third net, for an API caller that sees neither.
+    const cap = collectorCapability(source, stream, v);
+    if (!cap.implemented) {
+      logger.warn(
+        { source, stream, method: v, field, reason: cap.reason },
+        `Monitor settings accepted a polling method with no collector — this stream will silently collect nothing: ${cap.reason}`,
       );
     }
   }

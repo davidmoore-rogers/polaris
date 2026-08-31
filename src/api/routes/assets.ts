@@ -105,6 +105,8 @@ import {
   isPollingMethodCompatible,
   pollingMethodLabel,
 } from "../../utils/pollingCompatibility.js";
+import { collectorCapability } from "../../utils/pollingCapability.js";
+import { logger } from "../../utils/logger.js";
 import {
   buildInferredNeighborsForAsset,
   dedupeInferredNeighbors,
@@ -229,7 +231,7 @@ const CreateAssetSchema = z.object({
 // apply to the asset's source. Includes "disabled" (universally allowed
 // opt-out) and "agent" (Polaris Agent; allowed on AD/Entra/WinServer/Manual
 // sources, ignored on fortimanager/fortigate).
-const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter"]);
+const PollingMethodEnum = z.enum(["rest_api", "snmp", "winrm", "ssh", "icmp", "disabled", "agent", "vcenter", "fortimanager"]);
 
 const UpdateAssetSchema = CreateAssetSchema.partial().extend({
   // Unlike create (min(1)), update accepts "" — blanking the IP Address field
@@ -1656,12 +1658,24 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
     });
     const label = asset?.hostname || asset?.ipAddress || id;
     const ok = probe.success;
+    // A SKIPPED probe is not a failed one — nothing was measured. Two sources:
+    // the response-time stream is set to Disabled (the operator's own choice),
+    // and vCenter itself being unreachable. Rendering either as
+    // "failed: unknown" and stamping a warning Event told the operator their
+    // device was broken when Polaris had simply not asked.
+    const probeSkipped = probe.skipped === true;
     const streamSummary: string[] = [];
-    streamSummary.push(`probe ${ok ? probe.responseTimeMs + " ms" : "failed: " + (probe.error || "unknown")}`);
+    streamSummary.push(
+      `probe ${ok
+        ? probe.responseTimeMs + " ms"
+        : probeSkipped
+          ? "n/a" + (probe.error ? ` (${probe.error})` : " (not polled)")
+          : "failed: " + (probe.error || "unknown")}`,
+    );
     streamSummary.push(`telemetry ${telemetry.collected ? "ok" : (telemetry.supported ? "failed: " + (telemetry.error || "no data") : "n/a")}`);
     streamSummary.push(`hardware ${hardware.collected ? "ok" : (hwNoData ? "n/a (no sensors)" : (hardware.supported ? "failed: " + (hardware.error || "no data") : "n/a"))}`);
     streamSummary.push(`interfaces ${systemInfo.collected ? "ok" : (systemInfo.supported ? "failed: " + (systemInfo.error || "no data") : "n/a")}`);
-    const anyFail = !ok ||
+    const anyFail = (!ok && !probeSkipped) ||
       (telemetry.supported && !telemetry.collected) ||
       (hardware.supported  && !hardware.collected && !hwNoData) ||
       (systemInfo.supported && !systemInfo.collected);
@@ -3352,6 +3366,42 @@ async function validateAssetUpdate(id: string, existing: ExistingAssetForUpdate,
         if (!vcSource) {
           throw new AppError(400, "vCenter polling requires this asset to be a vCenter-discovered VM or ESXi host (no vCenter source on file)");
         }
+      }
+      // "fortimanager" reads FMG's own device roster — reachability and nothing
+      // else — so it covers response time only, and needs an actual
+      // FortiManager to ask. The source-kind check above already rejects it on
+      // a standalone FortiGate; this catches the stream half, plus the asset
+      // having a serial to join the roster on (the probe identifies a chassis
+      // by serial, never by name).
+      if (value === "fortimanager") {
+        const stream = name.replace(/Polling$/, "") as Stream;
+        if (!isMethodValidForStream(stream, "fortimanager")) {
+          throw new AppError(
+            400,
+            `FortiManager polling only applies to the response-time stream — FortiManager's database carries reachability, not metrics (field: ${name})`,
+          );
+        }
+        if (!existing.serialNumber) {
+          throw new AppError(400, "FortiManager polling identifies the device by serial number, and this asset has none recorded");
+        }
+      }
+      const stream = name.replace(/Polling$/, "") as Stream;
+      // ICMP carries no payload, so it can only answer a response-time probe.
+      // The integration-tier and class-override validators have always refused
+      // this; the per-asset path never did, so `PUT /assets/:id` accepted it,
+      // the resolver adopted it, and the stream then fell into its
+      // `{supported:false}` branch forever.
+      if (value === "icmp" && stream !== "responseTime") {
+        throw new AppError(400, `ICMP polling is only valid for the response-time stream (field: ${name})`);
+      }
+      // Warn — don't refuse — when no collector exists. Refusing would break an
+      // operator merely re-saving an asset that already holds the value.
+      const cap = collectorCapability(sourceKind, stream, value, { assetType: existing.assetType });
+      if (!cap.implemented) {
+        logger.warn(
+          { assetId: id, sourceKind, stream, method: value, reason: cap.reason },
+          `Asset update accepted a polling method with no collector — this stream will silently collect nothing: ${cap.reason}`,
+        );
       }
     }
   }

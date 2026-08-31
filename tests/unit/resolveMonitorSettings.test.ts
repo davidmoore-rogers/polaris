@@ -352,8 +352,13 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
     expect(out.intervalSeconds).toBe(30);
     expect(out.probeTimeoutMs).toBe(8000);
     expect(out.storagePolling).toBe("snmp");
-    // cpuMemory unchanged → FortiManager source default of rest_api.
-    expect(out.cpuMemoryPolling).toBe("rest_api");
+    // cpuMemory unchanged, and this fixture is an FMG with no useProxy flag
+    // (= proxy, the default) and no fortigateApiToken — so no FortiOS REST call
+    // can be assembled and the source default is "disabled" rather than
+    // rest_api. It was rest_api, which 409'd on every tick; for a managed
+    // switch it was doubly dead, since REST telemetry is hard-guarded off for
+    // that class anyway.
+    expect(out.cpuMemoryPolling).toBe("disabled");
   });
 
   it("firewall vs switch read from different per-class streams blocks on the same integration", async () => {
@@ -378,10 +383,62 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
       assetType: "switch", discoveredByIntegrationId: "fmg-1", discoveredByIntegrationType: "fortimanager",
       monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
     });
-    expect(firewallOut.responseTimePolling).toBe("rest_api");
+    // The firewall's class block asks for rest_api, but this fixture is an FMG
+    // with no useProxy flag (= proxy) and no fortigateApiToken, so a FortiOS
+    // call cannot be assembled and rest_api is skipped like any other method
+    // the source can't use — the layer below stays, which is icmp. This is the
+    // "locked to inherited" behaviour: the stored choice is untouched and
+    // returns the moment a token is supplied (see the next test).
+    expect(firewallOut.responseTimePolling).toBe("icmp");
+    // The cadence from the same class block is unaffected — only the METHOD is
+    // gated. Getting this wrong would silently reset every operator's interval.
     expect(firewallOut.intervalSeconds).toBe(60);
     expect(switchOut.responseTimePolling).toBe("snmp");
     expect(switchOut.intervalSeconds).toBe(120);
+  });
+
+  it("a FortiGate API token makes rest_api reachable again under proxy mode", async () => {
+    // Same shape as above plus the direct token. Proxy transport with a token
+    // is a legitimate configuration — discovery and writes ride FMG, monitoring
+    // dials the gates directly — so nothing should be gated.
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: {
+        monitorSettings: TUNED_TIER,
+        fortigateApiToken: "a-real-token",
+        fortigateMonitor: { streams: { responseTime: { polling: "rest_api", intervalSeconds: 60 } } },
+      },
+      type: "fortimanager",
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const out = await resolveMonitorSettings({
+      assetType: "firewall", discoveredByIntegrationId: "fmg-tok", discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
+    });
+    expect(out.responseTimePolling).toBe("rest_api");
+    // …and the REST source defaults come back with it.
+    expect(out.cpuMemoryPolling).toBe("rest_api");
+  });
+
+  it("a managed switch keeps its controller-table probe with no token", async () => {
+    // The one FortiOS read the proxy serves on FMG's own credential: a managed
+    // switch/AP's up/down comes off the PARENT gate's controller table via
+    // fetchViaFortinetTransport, which honours useProxy. Downgrading it to icmp
+    // would be a real regression — many FortiLink devices are not pingable.
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: {
+        monitorSettings: TUNED_TIER,
+        fortiswitchMonitor: { enabled: true, streams: { responseTime: { polling: "rest_api" } } },
+      },
+      type: "fortimanager",
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const out = await resolveMonitorSettings({
+      assetType: "switch", discoveredByIntegrationId: "fmg-sw", discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
+    });
+    expect(out.responseTimePolling).toBe("rest_api");
   });
 });
 

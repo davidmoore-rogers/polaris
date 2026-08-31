@@ -1,0 +1,12 @@
+-- Cadence anchor for the agentless (ssh/winrm) event-log stream.
+--
+-- The eventLog stream had settings at every tier (eventLogPolling,
+-- eventLogIntervalSeconds, eventLogTimeoutMs, eventLogCredentialId) and a
+-- working sink (ingestOsEventLog → the audit Event table, with level filtering,
+-- dedupe and per-asset rate caps) but no server-side collector and no cadence,
+-- so only the Polaris Agent ever delivered it. This is the anchor the new
+-- cadence needs; it mirrors lastProcessesAt exactly.
+--
+-- Nullable with no default: NULL means "never collected", which is precisely
+-- what isDue() should read as immediately-due on the first tick.
+ALTER TABLE "assets" ADD COLUMN "lastEventLogAt" TIMESTAMP(3);

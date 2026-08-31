@@ -546,6 +546,7 @@ function renderNav() {
     <div style="margin-top:auto">
       <div id="role-review-status" class="query-status role-review-status" style="display:none"></div>
       <div id="integration-failed-status" class="query-status integration-failed-status" style="display:none"></div>
+      <div id="fmg-proxy-advice" class="query-status fmg-proxy-advice" style="display:none"></div>
       <div id="signing-failure-alert" class="query-status signing-failure-alert" style="display:none"></div>
       <div id="update-status" class="query-status update-status" style="display:none"></div>
       <div id="query-status" class="query-status" style="display:none"></div>
@@ -634,19 +635,27 @@ function renderNav() {
   // Silently degrades on permission denial (the route requires
   // integrations=read; users without it just see nothing).
   var _failedIntegrations = [];
+  // FortiManager integrations still on the proxy transport with more gates than
+  // the server's throughput threshold. Rides the same payload deliberately —
+  // see the route comment; a slow-moving advisory does not deserve its own poll.
+  var _fmgProxyAdvice = [];
   async function pollFailedIntegrations() {
     try {
       var result = await api.integrations.healthSummary();
       _failedIntegrations = (result && result.failed) || [];
+      _fmgProxyAdvice = (result && result.proxyAdvice) || [];
     } catch (_) {
       _failedIntegrations = [];
+      _fmgProxyAdvice = [];
     }
     renderIntegrationFailedStatus();
+    renderFmgProxyAdvice();
   }
   pollFailedIntegrations();
   setInterval(pollFailedIntegrations, 30000);
   window._pollFailedIntegrations = pollFailedIntegrations;
   window._getFailedIntegrations = function () { return _failedIntegrations; };
+  window._getFmgProxyAdvice = function () { return _fmgProxyAdvice; };
 
   // ─── Agent code-signing failure alert ─────────────────────────────────
   // Dismissable sidebar alert: the last agent build shipped UNSIGNED
@@ -1788,6 +1797,76 @@ function renderIntegrationFailedStatus() {
   // Whole panel clicks through to the integrations page. Skip clicks that
   // originated on a button (defensive — there are none today, but parity with
   // the role-review panel pattern).
+  container.style.cursor = "pointer";
+  container.onclick = function (e) {
+    if (e.target && e.target.tagName === "BUTTON") return;
+    window.location.href = "/integrations.html";
+  };
+}
+
+// ─── FortiManager proxy-transport advisory ──────────────────────────────────
+// A FortiManager integration on the proxy transport funnels every per-device
+// live query through /sys/proxy/json, which FMG serializes at concurrency 1 —
+// so poll time grows linearly with the managed-gate count. Past the server's
+// threshold that is the wrong transport, and the operator should know without
+// having to open the integration modal to read the hint inside it.
+//
+// Deliberately about THROUGHPUT, not capability. Proxy mode's inability to
+// collect a FortiGate's REST streams is a separate (and fixable) matter; if
+// this copy claimed "proxy can't monitor", it would read as wrong the moment
+// that lands.
+//
+// Dismissible, unlike the capacity banner: this is advice, and an operator who
+// has consciously chosen proxy mode should be able to silence it. Dismissal is
+// per-user and keyed on the integration id + gate count, so adding gates to an
+// already-dismissed integration re-raises it.
+function _fmgProxyAdviceDismissKey() {
+  return "polaris.fmg-proxy-advice.dismissed." + (currentUsername || "anon");
+}
+
+function renderFmgProxyAdvice() {
+  var container = document.getElementById("fmg-proxy-advice");
+  if (!container) return;
+  var advice = (window._getFmgProxyAdvice && window._getFmgProxyAdvice()) || [];
+
+  // Signature changes when a gate is added/removed, so the advisory returns
+  // after the fleet grows rather than staying silenced forever.
+  var signature = advice.map(function (a) { return a.id + ":" + a.managedFortigates; }).join(",");
+  var dismissed = null;
+  try { dismissed = localStorage.getItem(_fmgProxyAdviceDismissKey()); } catch (_) {}
+
+  if (!advice.length || dismissed === signature) {
+    container.style.display = "none";
+    container.innerHTML = "";
+    container.onclick = null;
+    return;
+  }
+
+  container.style.display = "block";
+  container.innerHTML =
+    '<div class="query-status-header fmg-proxy-advice-header">' +
+      '<span class="fmg-proxy-advice-icon" aria-hidden="true">&#9888;</span>' +
+      '<span class="query-status-label">Consider bypassing the FortiManager proxy</span>' +
+      '<button class="query-abort-btn fmg-proxy-advice-dismiss" title="Dismiss (re-appears as the fleet grows)">&#x2715;</button>' +
+    '</div>' +
+    '<ul class="query-status-list">' +
+      advice.map(function (a) {
+        return '<li><div style="min-width:0;flex:1">' +
+          '<span class="query-status-name" title="' + escapeHtml(a.name) + '">' + escapeHtml(a.name) + '</span>' +
+          '<span class="query-status-progress">' + a.managedFortigates + ' FortiGates · proxy polls them one at a time</span>' +
+          '</div></li>';
+      }).join("") +
+    '</ul>';
+
+  var dismissBtn = container.querySelector(".fmg-proxy-advice-dismiss");
+  if (dismissBtn) {
+    dismissBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      try { localStorage.setItem(_fmgProxyAdviceDismissKey(), signature); } catch (_) {}
+      renderFmgProxyAdvice();
+    });
+  }
+
   container.style.cursor = "pointer";
   container.onclick = function (e) {
     if (e.target && e.target.tagName === "BUTTON") return;

@@ -3307,6 +3307,7 @@ var _MONITORED_VIA_LABELS = {
   rest_api: "REST API",
   icmp:     "ICMP",
   vcenter:  "vCenter",
+  fortimanager: "FortiManager",
 };
 
 // "Monitored Via" cell — renders how the asset is actually monitored from the
@@ -5898,7 +5899,12 @@ function _wireAssetMonitorActions(a) {
           //     systemInfo: {…} }
           var parts = [];
           var failures = [];
+          // `skipped` means nothing was measured — the response-time stream is
+          // set to Disabled, or vCenter (which answers FOR the asset) was
+          // unreachable. Neither is a device failure, so it reports like the
+          // other streams' "n/a" rather than turning the toast red.
           if (r.success) parts.push("probe " + r.responseTimeMs + " ms");
+          else if (r.skipped) parts.push("probe n/a" + (r.error ? " (" + r.error + ")" : " (not polled)"));
           else failures.push("probe: " + (r.error || "unknown"));
 
           var tel = r.telemetry || {};
@@ -10729,17 +10735,21 @@ function _renderSessionsChart(container, data, asset) {
 // caption.
 function _probeMethodLabel(a) {
   if (!a) return "—";
-  var integ = a.discoveredByIntegration;
-  var sourceKind = (integ && integ.type) || "manual";
-  var polling = a.responseTimePolling
-    || (sourceKind === "fortimanager" || sourceKind === "fortigate" ? "rest_api" : "icmp");
+  // Source default for response time is ICMP on EVERY source kind, Fortinet
+  // included (defaultPollingForSource) — this used to claim rest_api for the
+  // two Fortinet sources and so mislabelled every gate that had no explicit
+  // per-asset override, which is most of them.
+  var polling = a.responseTimePolling || "icmp";
   switch (polling) {
-    case "rest_api": return "REST API";
-    case "snmp":     return "SNMP GET";
-    case "winrm":    return "WinRM";
-    case "ssh":      return "SSH";
-    case "icmp":     return "ICMP ping";
-    default:         return polling;
+    case "rest_api":     return "REST API";
+    case "snmp":         return "SNMP GET";
+    case "winrm":        return "WinRM";
+    case "ssh":          return "SSH";
+    case "icmp":         return "ICMP ping";
+    case "fortimanager": return "FortiManager roster";
+    case "vcenter":      return "vCenter";
+    case "agent":        return "Polaris Agent";
+    default:             return polling;
   }
 }
 

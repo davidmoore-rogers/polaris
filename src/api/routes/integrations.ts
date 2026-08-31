@@ -11,6 +11,7 @@ import { bumpDirectoryCache } from "../../services/directorySearchService.js";
 import { requirePermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgActivityForIntegration } from "../../services/fmgActivityService.js";
+import { getIntegrationHealthSummary } from "../../services/integrationHealthService.js";
 import * as fortigate from "../../services/fortigateService.js";
 import * as windowsServer from "../../services/windowsServerService.js";
 import * as entraId from "../../services/entraIdService.js";
@@ -157,18 +158,14 @@ function validateAutoMonitorPatterns(cfg: any): void {
 }
 
 // GET /api/v1/integrations/health-summary — sidebar polling target. Returns
-// the small subset of enabled integrations whose most recent connection test
-// failed, so the sidebar can surface a notice prompting an operator to look.
+// the enabled integrations whose most recent connection test failed, so the
+// sidebar can surface a notice prompting an operator to look, PLUS the
+// FortiManager integrations whose fleet has outgrown the proxy transport.
 // Lives in the read-gated section so any user who can see the integrations
-// list also sees the failure indicator.
+// list also sees both indicators. Logic lives in integrationHealthService.
 router.get("/health-summary", async (_req, res, next) => {
   try {
-    const failed = await prisma.integration.findMany({
-      where: { enabled: true, lastTestOk: false },
-      select: { id: true, name: true, type: true, lastTestAt: true },
-      orderBy: { name: "asc" },
-    });
-    res.json({ failed });
+    res.json(await getIntegrationHealthSummary());
   } catch (err) {
     next(err);
   }
