@@ -220,7 +220,7 @@ FMG Integration Discovery
 │   asset.quarantine action
 │   AND pushQuarantine === true on integration
 │   AND a sighting exists for this asset on a FortiGate this integration owns
-│     → push MAC to user.quarantine.targets/<name>/macs on each FortiGate
+│     → PUT user.quarantine with the MAC in a targets[] entry (drop=enable)
 │        record per-target status in Asset.quarantineTargets
 │
 ├─ Description sync (writeback — syncDescriptions toggle; POLARIS IS PRIMARY)

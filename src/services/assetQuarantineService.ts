@@ -7,21 +7,37 @@
  * persistent FortiOS user.quarantine.targets CMDB tree. Each Polaris-
  * managed quarantine becomes a single target named `polaris-<short-id>`
  * on the FortiGate, with one MAC entry per associated MAC. Release
- * deletes the target wholesale.
+ * removes that entry from the table.
  *
- * ── FortiOS endpoint assumption ─────────────────────────────────────────
- * The CMDB tree this service writes to is:
+ * ── FortiOS endpoint, as the device describes it ────────────────────────
+ * Every read and write goes through ONE resource:
  *
- *     /api/v2/cmdb/user/quarantine/targets
- *     /api/v2/cmdb/user/quarantine/targets/<name>
- *     /api/v2/cmdb/user/quarantine/targets/<name>/macs
- *     /api/v2/cmdb/user/quarantine/targets/<name>/macs/<mac>
+ *     GET /api/v2/cmdb/user/quarantine          → the whole object
+ *     PUT /api/v2/cmdb/user/quarantine          → { targets: [ … ] }
  *
- * This matches FortiOS 7.0+ persistent NAC quarantine. Earlier majors
- * (6.4 and below) and some branch-class images may surface the table at
- * a slightly different path or omit it entirely. Operators should verify
- * with a dry "Test Quarantine Permission" call (a no-op GET against
- * `/cmdb/user/quarantine/targets`) before enabling push on an integration.
+ * `user.quarantine` is a COMPLEX (single) object whose `targets` child table
+ * holds one entry per quarantined device, keyed on `entry`, each carrying a
+ * `macs` child table keyed on `mac`. Ask any gate and it will say so:
+ *
+ *     GET /api/v2/cmdb/user/quarantine?action=schema
+ *
+ * which is the authority for a given build — not this comment. It also
+ * publishes `access_group: "wifi"`, i.e. the REST API admin needs WiFi &
+ * Switch Controller write, and the field sizes (both descriptions: 63).
+ *
+ * The child table has NO collection resource. This service previously
+ * assumed one and it does not exist:
+ *
+ *     POST   /api/v2/cmdb/user/quarantine/targets          → 405
+ *     DELETE /api/v2/cmdb/user/quarantine/targets/<entry>   → likewise unreal
+ *
+ * FortiOS exposes POST/DELETE on a child table only where the parent is
+ * itself a table and the URL carries the parent's mkey (the
+ * `/firewall/policy/1/srcaddr` shape); this parent has no mkey. Create,
+ * release and rollback were therefore all broken by one fact, which is why
+ * they now share a single mechanism. See "The write mechanism" below for the
+ * read-modify-write hazard that follows from PUTting a shared table, and
+ * `tests/unit/quarantineRequestShape.test.ts` for the guards.
  *
  * ── Transport ───────────────────────────────────────────────────────────
  * Identical to reservationPushService:
@@ -52,15 +68,51 @@ import { expandMacRange } from "../utils/macAddresses.js";
 
 // ─── FortiOS user.quarantine shapes (subset) ────────────────────────────
 
+/**
+ * `user.quarantine.targets`, as the device's own schema describes it
+ * (`GET /api/v2/cmdb/user/quarantine/targets?action=schema` on FortiOS 7.x):
+ *
+ *   mkey: "entry"  (string, required, size 63)
+ *   description    (string, size 63)
+ *   macs[]         child table, mkey "mac" (mac-address)
+ *     description  (string, size 63)
+ *     drop         option, DEFAULT "disable" = "Sends quarantined device
+ *                  traffic to FortiGate" — i.e. does NOT block it
+ *     parent       readonly, set by the device
+ *
+ * The mkey is `entry`, NOT `name`. This interface modelled both from the start
+ * and every writer used `name`, so every create POST was a body with no mkey
+ * in it and FortiOS answered 500 — on both transports, on every install, since
+ * the service shipped. `name` is gone rather than kept optional: leaving it
+ * would let a future writer pick the one that silently fails.
+ */
 interface FortiOsQuarantineTarget {
-  name?: string;
-  description?: string;
   entry?: string;
+  description?: string;
   macs?: Array<{
     mac?: string;
     description?: string;
+    drop?: "enable" | "disable";
+    parent?: string;
   }>;
 }
+
+/**
+ * FortiOS caps both `description` fields at 63 characters. The cap here was 64
+ * — one over, so a long hostname made the difference between a quarantine that
+ * applied and one that was refused.
+ */
+const FORTIOS_DESCRIPTION_MAX = 63;
+
+/**
+ * Quarantine only means something with `drop` ENABLED. The device default is
+ * `disable`, which the schema glosses as "Sends quarantined device traffic to
+ * FortiGate" — the MAC is listed, the traffic flows. Polaris quarantine is a
+ * containment action, so every MAC it writes carries drop=enable explicitly;
+ * relying on a device default for the half that does the blocking is how a
+ * security action becomes a no-op that reads as success.
+ */
+const QUARANTINE_DROP = "enable" as const;
 
 // ─── Transport ──────────────────────────────────────────────────────────
 // Shared with every other FortiOS write pathway: buildTransportForIntegration
@@ -81,6 +133,29 @@ export function quarantineTargetName(assetId: string): string {
   return `polaris-q-${compact.slice(0, 12)}`;
 }
 
+/**
+ * Printable-ASCII only, for a string being written into FortiOS CMDB config.
+ *
+ * The target description was built with an em dash (U+2014) from the day this
+ * service shipped, and a hostname reaches the per-MAC description as typed —
+ * so a quarantine push could put non-ASCII bytes into a device config field.
+ * FortiOS is inconsistent about accepting them (they also come back mangled in
+ * the CLI and in FortiManager's copy of the config), and a rejected write here
+ * costs an operator a security action: `pushQuarantineToFortigate` rolls the
+ * target back and the asset never flips to `quarantined`. Descriptions are
+ * ours to phrase, so nothing is lost by keeping them ASCII.
+ *
+ * Non-printable and non-ASCII runs collapse to a single space rather than
+ * vanishing, so a name made entirely of them can't silently become "".
+ */
+export function asciiForDevice(value: string): string {
+  return value
+    .replace(/—|–/g, "-")   // em / en dash — the ones we author ourselves
+    .replace(/[^ -~]+/g, " ")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
 function buildMacDescription(
   hostname: string | null | undefined,
   actor: string,
@@ -90,48 +165,179 @@ function buildMacDescription(
   // admin scanning the quarantine list immediately sees Polaris owns this
   // entry and which user/token initiated it.
   const name = (hostname && hostname.trim()) || fallback || "(unnamed)";
-  const candidate = `Polaris/${actor}: ${name}`;
-  return candidate.length > 64 ? candidate.slice(0, 64) : candidate;
+  // Sanitized BEFORE the length cap, so the cap counts the characters that will
+  // actually be sent rather than bytes a replacement may shorten.
+  const candidate = asciiForDevice(`Polaris/${actor}: ${name}`) || "Polaris";
+  return candidate.length > FORTIOS_DESCRIPTION_MAX
+    ? candidate.slice(0, FORTIOS_DESCRIPTION_MAX)
+    : candidate;
 }
 
-async function getTarget(
+/** The target's own description, ASCII and inside FortiOS's 63-char field. */
+function buildTargetDescription(actor: string): string {
+  const candidate = asciiForDevice(`Polaris asset quarantine - ${actor}`);
+  return candidate.length > FORTIOS_DESCRIPTION_MAX
+    ? candidate.slice(0, FORTIOS_DESCRIPTION_MAX)
+    : candidate;
+}
+
+/**
+ * ── The write mechanism ─────────────────────────────────────────────────────
+ *
+ * `user.quarantine` is a COMPLEX (single) object and `targets` is a child table
+ * inside it, which FortiOS states in its own schema
+ * (`GET /api/v2/cmdb/user/quarantine?action=schema` → `"category": "complex"`).
+ * A child table of a single object has no addressable collection resource: a
+ * `POST /api/v2/cmdb/user/quarantine/targets` answers **405 Method Not
+ * Allowed**, whatever the body. FortiOS exposes POST/DELETE on a child table
+ * only when the parent is itself a table and the URL carries the parent's mkey
+ * (`/firewall/policy/1/srcaddr`); this parent has no mkey.
+ *
+ * So every write goes through ONE mechanism — `PUT /api/v2/cmdb/user/quarantine`
+ * carrying the whole `targets` array — used by create, reconcile, rollback AND
+ * release alike. That is deliberate: the previous design used POST to create and
+ * DELETE on the child path to release and to roll back, so release was broken in
+ * exactly the same way as create and neither could be fixed alone. A partial PUT
+ * naming only `targets` leaves the object's other attributes (`quarantine`,
+ * `traffic-policy`, `firewall-groups`) untouched, so the blast radius is the
+ * targets table itself.
+ *
+ * Which raises the hazard that shapes everything below: **that table is not
+ * ours.** The gate's own Quarantine Host action, NAC policies and automation
+ * stitches write entries there too, and a full-array PUT deletes whatever it
+ * omits. Hence read-modify-write with three guards:
+ *
+ *   - foreign entries are carried through VERBATIM apart from device-owned
+ *     readonly fields, which FortiOS refuses on write (`parent`, and the
+ *     `q_origin_key` some builds decorate reads with);
+ *   - the read-back verifies not just that OUR entry landed but that every
+ *     foreign entry survived, and restores the snapshot if one did not;
+ *   - the rollback restores the exact array that was read, rather than deleting
+ *     our entry, so a failure cannot leave the table shorter than it started.
+ *
+ * KNOWN LIMITATION: read-modify-write over a shared table has a lost-update
+ * window, and FortiOS CMDB offers no ETag or compare-and-set to close it. Two
+ * pushes to the same gate are serialized within a process
+ * (`withQuarantineLane`), but Polaris runs split-role, so an operator-initiated
+ * push from the web role and an auto-quarantine from the discovery role can
+ * still interleave. The foreign-entry check turns the bad outcome from silent
+ * entry loss into a failed push with the table restored. Quarantine is a rare,
+ * operator-paced action, so that trade is deliberate rather than merely
+ * tolerated.
+ */
+
+/** Fields FortiOS owns and refuses on write. */
+const DEVICE_OWNED_TARGET_FIELDS = ["q_origin_key"];
+const DEVICE_OWNED_MAC_FIELDS = ["parent", "q_origin_key"];
+
+function stripKeys(row: unknown, keys: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(row as Record<string, unknown>) };
+  for (const k of keys) delete out[k];
+  return out;
+}
+
+/**
+ * A target as it must be sent back: readonly fields dropped from the target and
+ * from every MAC row. Everything else passes through untouched — a foreign
+ * entry's description, its MAC set, and any attribute a newer FortiOS added that
+ * this code has never heard of.
+ */
+function sanitizeTargetForWrite(target: FortiOsQuarantineTarget): FortiOsQuarantineTarget {
+  const clean = stripKeys(target, DEVICE_OWNED_TARGET_FIELDS);
+  const macs = (target.macs ?? []).map(
+    (m) => stripKeys(m, DEVICE_OWNED_MAC_FIELDS) as NonNullable<FortiOsQuarantineTarget["macs"]>[number],
+  );
+  if (target.macs !== undefined) clean.macs = macs;
+  return clean as FortiOsQuarantineTarget;
+}
+
+interface QuarantineObject {
+  /** The feature's own master switch. The schema default is "enable". */
+  enabled: boolean;
+  targets: FortiOsQuarantineTarget[];
+}
+
+/** Read the whole quarantine object: the master switch plus every target. */
+async function readQuarantineObject(t: Transport): Promise<QuarantineObject> {
+  const data = await callFortiOs<any>(t, "GET", "/api/v2/cmdb/user/quarantine");
+  // FortiOS wraps a complex object's results in a single-element array on some
+  // builds and returns it bare on others.
+  const obj = Array.isArray(data) ? data[0] ?? {} : data ?? {};
+  const targets: FortiOsQuarantineTarget[] = Array.isArray(obj.targets) ? obj.targets : [];
+  // Absent reads as enabled, matching the schema default: refusing to quarantine
+  // because an older build does not publish the field would be the wrong way to
+  // be careful.
+  return { enabled: obj.quarantine !== "disable", targets };
+}
+
+/** Replace the targets table. No other attribute of the object is named. */
+async function writeQuarantineTargets(
   t: Transport,
-  name: string,
+  targets: FortiOsQuarantineTarget[],
+): Promise<void> {
+  await callFortiOs<unknown>(t, "PUT", "/api/v2/cmdb/user/quarantine", {
+    targets: targets.map(sanitizeTargetForWrite),
+  });
+}
+
+/**
+ * One target by mkey. There is no per-entry GET worth using here: the object
+ * read is a single round trip that answers for the whole table, and it is the
+ * same read every write path needs, so this shares it rather than adding a
+ * second endpoint whose 404 semantics would have to be handled separately.
+ */
+async function readOneTarget(
+  t: Transport,
+  entryName: string,
 ): Promise<FortiOsQuarantineTarget | null> {
+  const obj = await readQuarantineObject(t);
+  return obj.targets.find((x) => entryNameOf(x) === entryName) ?? null;
+}
+
+function entryNameOf(target: FortiOsQuarantineTarget): string {
+  return String(target.entry ?? "");
+}
+
+function macSetOf(target: FortiOsQuarantineTarget | undefined): Set<string> {
+  return new Set((target?.macs ?? []).map((m) => normalizeMac(m.mac || "")).filter(Boolean));
+}
+
+/**
+ * Serialize read-modify-write per gate WITHIN this process. Keyed on the
+ * transport's device identity, not on the asset: the contention is over the one
+ * shared targets table, so two different assets pushing to the same gate is
+ * exactly the case that needs ordering.
+ */
+const quarantineLanes = new Map<string, Promise<unknown>>();
+
+function quarantineLaneKey(t: Transport): string {
+  const anyT = t as unknown as Record<string, any>;
+  return t.kind === "direct-fortigate"
+    ? "fg:" + String(anyT.fgConfig?.host ?? "?") + ":" + String(anyT.vdom ?? "root")
+    : "fmg:" + String(anyT.integrationId ?? "?") + ":" + String(anyT.deviceName ?? "?");
+}
+
+async function withQuarantineLane<T>(t: Transport, fn: () => Promise<T>): Promise<T> {
+  const key = quarantineLaneKey(t);
+  const prior = quarantineLanes.get(key) ?? Promise.resolve();
+  // Runs after the prior holder settles either way — a failed push must not
+  // wedge the lane for every later one.
+  const run = prior.then(fn, fn);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  quarantineLanes.set(key, settled);
   try {
-    const data = await callFortiOs<FortiOsQuarantineTarget | FortiOsQuarantineTarget[]>(
-      t,
-      "GET",
-      `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(name)}`,
-    );
-    if (Array.isArray(data)) return data[0] ?? null;
-    return data ?? null;
-  } catch (err: any) {
-    // 404 is expected when the target doesn't exist yet.
-    if (err?.status === 404 || /not found|does not exist|404/i.test(String(err?.message || ""))) {
-      return null;
-    }
-    throw err;
+    return await run;
+  } finally {
+    // Only the last waiter clears the lane, so an in-flight successor is never
+    // orphaned out of the map.
+    if (quarantineLanes.get(key) === settled) quarantineLanes.delete(key);
   }
 }
 
-async function deleteTarget(t: Transport, name: string): Promise<{ removed: boolean; alreadyAbsent: boolean }> {
-  try {
-    await callFortiOs<unknown>(
-      t,
-      "DELETE",
-      `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(name)}`,
-    );
-    return { removed: true, alreadyAbsent: false };
-  } catch (err: any) {
-    if (err?.status === 404 || /not found|does not exist|404/i.test(String(err?.message || ""))) {
-      return { removed: false, alreadyAbsent: true };
-    }
-    throw err;
-  }
-}
-
-// ─── Public API ─────────────────────────────────────────────────────────
+// ─── Public API ─────────────────────────────────────
 
 export interface PushQuarantineParams {
   assetId: string;
@@ -153,11 +359,10 @@ export interface PushQuarantineResult {
 }
 
 /**
- * Push a per-asset quarantine target to one FortiGate. Idempotent: if the
- * target already exists, its MAC list is reconciled to match `macs` (adds
- * missing entries, removes stale ones). On any verify failure the target
- * is rolled back (deleted) before throwing so a partial write doesn't
- * leave the device in an inconsistent state.
+ * Push a per-asset quarantine target to one FortiGate. Idempotent: an existing
+ * target has its MAC list reconciled to match `macs`, and a target that already
+ * matches costs no write at all. On any failure the targets table is restored to
+ * exactly what was read before the attempt.
  */
 export async function pushQuarantineToFortigate(
   params: PushQuarantineParams,
@@ -177,80 +382,99 @@ export async function pushQuarantineToFortigate(
   }
 
   const t = params.transport;
-  const existing = await getTarget(t, targetName);
-  const existingMacs = new Set(
-    (existing?.macs ?? []).map((m) => normalizeMac(m.mac || "")).filter(Boolean),
-  );
 
-  const targetWasNew = !existing;
+  return withQuarantineLane(t, async () => {
+    const before = await readQuarantineObject(t);
 
-  try {
-    if (!existing) {
-      // Create a fresh target with all desired MACs in one shot.
-      await callFortiOs<unknown>(t, "POST", `/api/v2/cmdb/user/quarantine/targets`, {
-        name: targetName,
-        description: `Polaris asset quarantine — ${params.actor}`,
-        macs: desiredMacs.map((mac) => ({
-          mac,
-          description: buildMacDescription(params.hostname, params.actor, mac),
-        })),
-      });
-    } else {
-      // Reconcile in ONE call: PUT the full desired MAC set on the parent
-      // target. FortiOS CMDB PUT replaces the object's `macs` child table with
-      // the provided list, so this adds missing entries and removes stale ones
-      // atomically — instead of one POST/DELETE round-trip per MAC (FortiManager
-      // API Best Practices Guide: multiplex multiple objects into one request).
-      // The create path above already multiplexes the same `macs` array shape,
-      // and `callFortiOs` PUT carries the body on both transports (FMG proxy +
-      // direct FortiGate), so this keeps FMG↔FortiGate parity.
-      const desiredSet = new Set(desiredMacs);
-      const needsReconcile =
-        desiredMacs.some((m) => !existingMacs.has(m)) ||
-        Array.from(existingMacs).some((m) => !desiredSet.has(m));
-      if (needsReconcile) {
-        await callFortiOs<unknown>(
-          t,
-          "PUT",
-          `/api/v2/cmdb/user/quarantine/targets/${encodeURIComponent(targetName)}`,
-          {
-            macs: desiredMacs.map((mac) => ({
-              mac,
-              description: buildMacDescription(params.hostname, params.actor, mac),
-            })),
-          },
+    // A target written into a disabled feature is not containment. The asset
+    // would flip to `quarantined` while the device kept forwarding its traffic,
+    // which is worse than a push that fails and says why.
+    if (!before.enabled) {
+      throw new AppError(
+        409,
+        `FortiGate "${params.deviceName}" has quarantine disabled (user.quarantine: disable) — enable it on ` +
+          `the device before pushing, or the entry would be written and never applied`,
+      );
+    }
+
+    const ourTarget: FortiOsQuarantineTarget = {
+      entry: targetName,
+      description: buildTargetDescription(params.actor),
+      macs: desiredMacs.map((mac) => ({
+        mac,
+        description: buildMacDescription(params.hostname, params.actor, mac),
+        drop: QUARANTINE_DROP,
+      })),
+    };
+
+    const existingIdx = before.targets.findIndex((x) => entryNameOf(x) === targetName);
+    const existing = existingIdx >= 0 ? before.targets[existingIdx] : undefined;
+
+    // Nothing to do when the device already says what we would say. Compared on
+    // the MAC set and on `drop`, never on the descriptions — re-pushing every
+    // cycle because an operator retitled something would be churn.
+    const existingMacSet = macSetOf(existing);
+    const macsMatch =
+      existingMacSet.size === desiredMacs.length && desiredMacs.every((m) => existingMacSet.has(m));
+    const allDropping = (existing?.macs ?? []).every((m) => m.drop === QUARANTINE_DROP);
+    if (existing && macsMatch && allDropping) {
+      return { fortigateDevice: params.deviceName, targetName, pushedMacs: desiredMacs };
+    }
+
+    // Ours replaces in place when present, so the table keeps its order.
+    const next = [...before.targets];
+    if (existingIdx >= 0) next[existingIdx] = ourTarget;
+    else next.push(ourTarget);
+
+    const foreignNames = before.targets.map(entryNameOf).filter((n) => n && n !== targetName);
+
+    try {
+      await writeQuarantineTargets(t, next);
+
+      const after = await readQuarantineObject(t);
+      const afterByName = new Map(after.targets.map((x) => [entryNameOf(x), x]));
+
+      const landed = afterByName.get(targetName);
+      if (!landed) {
+        throw new AppError(
+          502,
+          `FortiGate accepted the write but the quarantine target ${targetName} was not visible on read-back`,
         );
       }
-    }
-
-    // Verify by reading the target back.
-    const after = await getTarget(t, targetName);
-    if (!after) {
-      throw new AppError(502, `FortiGate accepted the write but the quarantine target ${targetName} was not visible on read-back`);
-    }
-    const verifiedMacs = new Set(
-      (after.macs ?? []).map((m) => normalizeMac(m.mac || "")).filter(Boolean),
-    );
-    const missing = desiredMacs.filter((m) => !verifiedMacs.has(m));
-    if (missing.length > 0) {
-      throw new AppError(502, `FortiGate verify mismatch — target ${targetName} is missing MACs: ${missing.join(", ")}`);
-    }
-
-    return { fortigateDevice: params.deviceName, targetName, pushedMacs: desiredMacs };
-  } catch (err) {
-    // Roll back partial writes so we never leave the device in a half-
-    // configured state. Only roll back the target itself if we just
-    // created it; if it already existed, leave it alone (the operator's
-    // prior state may have included entries we shouldn't blow away).
-    if (targetWasNew) {
-      try {
-        await deleteTarget(t, targetName);
-      } catch {
-        /* swallow rollback failure — caller still surfaces the original error */
+      const verifiedMacs = macSetOf(landed);
+      const missing = desiredMacs.filter((m) => !verifiedMacs.has(m));
+      if (missing.length > 0) {
+        throw new AppError(
+          502,
+          `FortiGate verify mismatch — target ${targetName} is missing MACs: ${missing.join(", ")}`,
+        );
       }
+
+      // The guard that matters: a full-array PUT can delete entries Polaris does
+      // not own, so prove none went missing before reporting success.
+      const lostForeign = foreignNames.filter((n) => !afterByName.has(n));
+      if (lostForeign.length > 0) {
+        throw new AppError(
+          502,
+          `Quarantine write removed ${lostForeign.length} quarantine entry/entries Polaris does not own ` +
+            `(${lostForeign.join(", ")}) — the table has been restored. Retry; if it repeats, another writer ` +
+            `is changing user.quarantine concurrently`,
+        );
+      }
+
+      return { fortigateDevice: params.deviceName, targetName, pushedMacs: desiredMacs };
+    } catch (err) {
+      // Restore the exact array that was read. This replaces the old
+      // delete-our-target rollback, which could only ever shorten the table and
+      // did nothing at all when the failure was a lost foreign entry.
+      try {
+        await writeQuarantineTargets(t, before.targets);
+      } catch {
+        /* swallow — the caller still surfaces the original error */
+      }
+      throw err;
     }
-    throw err;
-  }
+  });
 }
 
 export interface UnpushQuarantineParams {
@@ -263,11 +487,60 @@ export interface UnpushQuarantineResult {
   alreadyAbsent: boolean;
 }
 
+/**
+ * Release: the same parent-object PUT, with our entry filtered out. It cannot be
+ * a `DELETE /targets/<entry>` — the child table of a complex object exposes no
+ * such resource (see "The write mechanism" above), which is why release used to
+ * fail for exactly the reason create did.
+ *
+ * Absence is success, not an error: an entry already gone (released by hand on
+ * the device, or a quarantine that never landed) reports `alreadyAbsent` and
+ * costs no write.
+ */
 export async function unpushQuarantineFromFortigate(
   params: UnpushQuarantineParams,
 ): Promise<UnpushQuarantineResult> {
   const targetName = quarantineTargetName(params.assetId);
-  return deleteTarget(params.transport, targetName);
+  const t = params.transport;
+
+  return withQuarantineLane(t, async () => {
+    const before = await readQuarantineObject(t);
+    const present = before.targets.some((x) => entryNameOf(x) === targetName);
+    if (!present) return { removed: false, alreadyAbsent: true };
+
+    const next = before.targets.filter((x) => entryNameOf(x) !== targetName);
+    const foreignNames = next.map(entryNameOf).filter(Boolean);
+
+    try {
+      await writeQuarantineTargets(t, next);
+
+      const after = await readQuarantineObject(t);
+      const afterNames = new Set(after.targets.map(entryNameOf));
+      if (afterNames.has(targetName)) {
+        throw new AppError(
+          502,
+          `FortiGate accepted the write but quarantine target ${targetName} is still present on read-back`,
+        );
+      }
+      // Releasing one asset must not take anyone else's entry with it.
+      const lostForeign = foreignNames.filter((n) => !afterNames.has(n));
+      if (lostForeign.length > 0) {
+        throw new AppError(
+          502,
+          `Quarantine release removed ${lostForeign.length} entry/entries Polaris does not own ` +
+            `(${lostForeign.join(", ")}) — the table has been restored`,
+        );
+      }
+      return { removed: true, alreadyAbsent: false };
+    } catch (err) {
+      try {
+        await writeQuarantineTargets(t, before.targets);
+      } catch {
+        /* swallow — the caller still surfaces the original error */
+      }
+      throw err;
+    }
+  });
 }
 
 /**
@@ -282,7 +555,7 @@ export async function verifyQuarantineOnFortigate(params: {
 }): Promise<{ present: boolean; missingMacs: string[] }> {
   const targetName = quarantineTargetName(params.assetId);
   const desired = Array.from(new Set(params.desiredMacs.map(normalizeMac)));
-  const target = await getTarget(params.transport, targetName);
+  const target = await readOneTarget(params.transport, targetName);
   if (!target) return { present: false, missingMacs: desired };
   const verifiedMacs = new Set(
     (target.macs ?? []).map((m) => normalizeMac(m.mac || "")).filter(Boolean),

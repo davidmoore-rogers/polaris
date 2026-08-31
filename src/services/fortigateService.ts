@@ -114,6 +114,43 @@ export async function testConnection(config: FortiGateConfig): Promise<{
  * DELETE ignore the body field. Used by reservation push to write
  * /api/v2/cmdb/system.dhcp/server/<id>/reserved-address.
  */
+/**
+ * Best-effort detail from a failed FortiOS response body, formatted as a
+ * trailing ` — …` fragment (empty string when there is nothing to add).
+ *
+ * FortiOS shapes seen in the wild on a CMDB refusal:
+ *   { "http_status": 500, "status": "error", "error": -651, "cli_error": "..." }
+ * `error` is the CLI return code and `cli_error` the message the CLI printed;
+ * either alone is far more actionable than the HTTP status. Never throws — a
+ * diagnostic must not replace the error it is describing.
+ */
+async function fgErrorDetail(res: Response): Promise<string> {
+  try {
+    const text = await res.text();
+    if (!text) return "";
+    let body: any;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // Not JSON (an HTML error page from a proxy, say). One trimmed line is
+      // enough to recognize it; the whole page is not.
+      const line = text.replace(/\s+/g, " ").trim();
+      return line ? ` — ${line.slice(0, 200)}` : "";
+    }
+    const parts: string[] = [];
+    const cliError = body?.cli_error ?? body?.cli_errors;
+    if (typeof cliError === "string" && cliError.trim()) parts.push(cliError.replace(/\s+/g, " ").trim());
+    if (typeof body?.message === "string" && body.message.trim()) parts.push(body.message.trim());
+    // The numeric CLI code is the part Fortinet documentation is indexed by, so
+    // it goes last but is never dropped.
+    if (body?.error !== undefined && body?.error !== null) parts.push(`FortiOS error ${body.error}`);
+    if (parts.length === 0) return "";
+    return ` — ${parts.join("; ").slice(0, 300)}`;
+  } catch {
+    return "";
+  }
+}
+
 export async function fgRequest<T>(
   config: FortiGateConfig,
   method: "GET" | "POST" | "PUT" | "DELETE",
@@ -191,7 +228,23 @@ export async function fgRequest<T>(
       throw new AppError(404, `Endpoint not found: ${path}`);
     }
     if (!res.ok) {
-      throw new AppError(502, `FortiGate returned HTTP ${res.status}`);
+      // Surface FortiOS's OWN complaint. A failing CMDB write answers with a
+      // body — `error` (the negative CLI code) and often `cli_error` (the exact
+      // text the CLI printed) — and this branch used to discard it, so every
+      // refusal an operator hit read "FortiGate returned HTTP 500" with no way
+      // to tell a rejected field from an unsupported table from a dependency
+      // failure. The FMG-proxy path has always relayed the device's message
+      // (`fortimanagerService`'s rpcInner), so the direct transport was the
+      // blind one: a quarantine push that 500'd was undiagnosable from the UI,
+      // the Event details and the log alike. The body is read as TEXT and
+      // parsed defensively — an HTML error page from something in front of the
+      // gate must not turn a device error into a parse error — and the prefix
+      // is unchanged because classifyPushError and the 502 fragment list read
+      // these messages.
+      throw new AppError(
+        502,
+        `FortiGate returned HTTP ${res.status} for ${path}${await fgErrorDetail(res)}`,
+      );
     }
 
     const body = (await res.json()) as any;
