@@ -6761,18 +6761,17 @@ function assetSystemViewHTML(a) {
     '</div>';
   }
   // Heavy-cadence streams (telemetry / interfaces / storage) are only
-  // delivered when the resolved interfacesPolling is REST API, SNMP, or
-  // Polaris Agent. ICMP / SSH / WinRM don't carry the data shapes yet.
-  var ifPolling = a.interfacesPolling;
-  if (!ifPolling) {
-    var integ = a.discoveredByIntegration;
-    var sk = (integ && integ.type) || "manual";
-    if (sk !== "fortimanager" && sk !== "fortigate") ifPolling = null;
-    else ifPolling = "rest_api";
-  }
-  if (ifPolling !== "rest_api" && ifPolling !== "snmp" && ifPolling !== "agent") {
+  // delivered when the resolved interfacesPolling is one of
+  // _SYSTEM_TAB_IFACE_METHODS. ICMP / SSH / WinRM don't carry the data shapes
+  // this tab renders yet.
+  // Resolved, not guessed: the per-asset column is null on almost every asset,
+  // and hand-rolling the source default here meant an integration- or
+  // class-tier method never reached this gate. Same value the section badges
+  // and stale banners resolve.
+  var ifPolling = _resolvedStreamPolling(a, "interfaces");
+  if (_SYSTEM_TAB_IFACE_METHODS.indexOf(ifPolling) === -1) {
     return '<div style="padding:1rem 0;color:var(--color-text-secondary)">' +
-      "System metrics (CPU / memory / interfaces / storage) require REST API, SNMP, or Polaris Agent on the Interfaces stream. Install the Polaris Agent (Edit → Monitoring) or switch the polling method to enable." +
+      "System metrics (CPU / memory / interfaces / storage) require REST API, SNMP, vCenter, or Polaris Agent on the Interfaces stream. Install the Polaris Agent (Edit → Monitoring) or switch the polling method to enable." +
     '</div>';
   }
   var rangeBtns =
@@ -6813,16 +6812,6 @@ function assetSystemViewHTML(a) {
   // so the placeholder isn't blank during the first paint.
   var temperatureBadgeFull = temperatureBadge + (temperatureBadge ? " " : "") +
     '<span id="asset-system-temps-updated">' + telUpdatedAt + '</span>';
-  // FortiOS REST API never exposes storage — hide Storage for any asset on the
-  // REST API interfaces stream (firewalls as well as managed switches/APs).
-  var isRestApiInterfaces = (function () {
-    var p = a.interfacesPolling;
-    if (!p) {
-      var sk = (a.discoveredByIntegration && a.discoveredByIntegration.type) || "manual";
-      return sk === "fortimanager" || sk === "fortigate";
-    }
-    return p === "rest_api";
-  }());
   function sectionHeader(title, badgeHTML, rangeBtnsHTML) {
     return '<div style="display:flex;align-items:center;justify-content:space-between;margin:1.25rem 0 0.5rem">' +
       '<div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">' +
@@ -6885,10 +6874,22 @@ function assetSystemViewHTML(a) {
     sectionHeader("Interfaces", interfacesBadgeFull, false) +
     '<div id="asset-system-interfaces"><span class="empty-state">Loading…</span></div>' +
     '</div>' +
-    (isRestApiInterfaces ? '' : '<div data-shot-section="storage" data-shot-label="Storage">' +
+    // Storage is always EMITTED; whether it can carry data is decided by
+    // _renderStorageTable from the RESOLVED polling methods
+    // (_storageStreamDelivers), and re-decided by
+    // _updateStaleBannersFromEffective once the effective-settings walk lands.
+    // This section used to be dropped from the DOM whenever the interfaces
+    // stream looked like REST API, judged from the per-asset interfacesPolling
+    // column alone — null on almost every asset, in which case it GUESSED
+    // rest_api for anything an FMG or FortiGate discovered. That was wrong on a
+    // FortiSwitch two ways: an integration- or class-tier SNMP override (the
+    // documented way to enable direct switch polling) still read as REST and
+    // hid the section, and switching the Storage stream itself to SNMP
+    // collected samples into a table with nowhere to render.
+    '<div data-shot-section="storage" data-shot-label="Storage">' +
     sectionHeader("Storage", interfacesBadgeFull, false) +
     '<div id="asset-system-storage"><span class="empty-state">Loading…</span></div>' +
-    '</div>') +
+    '</div>' +
     '<div data-shot-section="lldp" data-shot-label="LLDP Neighbors">' +
     sectionHeader("LLDP Neighbors", lldpBadgeFull, false) +
     '<div id="asset-system-lldp"><span class="empty-state">Loading…</span></div>' +
@@ -7148,6 +7149,36 @@ function _resolvedStreamPolling(asset, stream) {
   return _polarisSourceDefaultPolling(sk, stream || "interfaces");
 }
 
+// Methods that actually put storage rows on an asset.
+//
+// `storagePolling` is the SOLE authority server-side, and deliberately so: the
+// interfaces walk produces storage rows as a side effect, and every path drops
+// them unless the storage stream itself asked for that transport
+// (`data.storage = []` in the SNMP and vCenter system-info branches,
+// `wantStorage` on the ssh/winrm branch, the method check at the top of
+// runStorageFor). So enabling SNMP on the Interfaces stream alone collects
+// nothing — a real trap, since it is the setting that reveals every OTHER
+// section of this tab. Two transports reach the rows once storage does ask:
+// the dedicated storage cadence (runStorageFor — SNMP walks hrStorageTable with
+// the vendor disk-scalar pair as fallback, ssh reads `df`, winrm reads
+// Get-Volume) and the heavy system-info pass (the same SNMP walk, the agent's
+// own push, or the vCenter warm cache's guest filesystems / host datastores).
+var _STORAGE_DELIVERING_METHODS = ["snmp", "ssh", "winrm", "agent", "vcenter"];
+
+// Interfaces-stream methods that deliver ANY heavy-cadence system data, and so
+// gate the System tab as a whole. `vcenter` belongs here since the 2026-08
+// four-stream cutover — a VM's vNICs and an ESXi host's pNICs / VMkernel ports
+// / vSwitches come out of the warm vCenter cache and render in the interface
+// table like any other inventory (see the Virtualization section's own note).
+// It was missing, so a vCenter-monitored asset was told to switch to a
+// transport it doesn't use in order to see data it was already collecting.
+var _SYSTEM_TAB_IFACE_METHODS = ["rest_api", "snmp", "agent", "vcenter"];
+
+function _storageStreamDelivers(asset) {
+  if (!asset) return false;
+  return _STORAGE_DELIVERING_METHODS.indexOf(_resolvedStreamPolling(asset, "storage")) !== -1;
+}
+
 function _isRestApiManagedNetworkDevice(asset, stream) {
   if (!asset) return false;
   var t = asset.assetType;
@@ -7255,6 +7286,14 @@ function _updateStaleBannersFromEffective(assetId, asset) {
   var tempsEl = document.getElementById("asset-system-temps");
   if (tempsEl && asset && asset.id === assetId && _assetSystemSiCache) {
     _renderTemperatures(tempsEl, _assetSystemSiCache, asset);
+  }
+  // Storage for the same reason: its empty state names the resolved method and
+  // says which stream to change, and the sync render can only see the per-asset
+  // column. A switch whose Storage or Interfaces stream is SNMP at the
+  // integration tier drops the "not available" state here.
+  var storageEl = document.getElementById("asset-system-storage");
+  if (storageEl && asset && asset.id === assetId && _assetSystemSiCache) {
+    _renderStorageTable(storageEl, _assetSystemSiCache, asset);
   }
 }
 
@@ -8236,7 +8275,27 @@ function _renderStorageTable(container, si, asset) {
   if (!container) return;
   var rows = (si && si.storage) || [];
   if (rows.length === 0) {
-    container.innerHTML = '<p class="empty-state">No storage data yet — only available for SNMP-monitored assets exposing HOST-RESOURCES-MIB.</p>';
+    // Distinguish "nothing collected this yet" from "nothing ever will".
+    // The second case used to render as the first — or, before 2026-08, as no
+    // Storage section at all — which read as a device with no disks rather
+    // than as a stream that is switched off.
+    if (!_storageStreamDelivers(asset)) {
+      var storageMethod = _resolvedStreamPolling(asset, "storage");
+      var storageOff = !storageMethod || storageMethod === "disabled";
+      // "not available via Disabled" isn't a sentence; when the stream is
+      // simply off, the description carries the specifics instead.
+      var methodLabel = storageOff
+        ? "the current polling method"
+        : (_POLLING_LABELS[storageMethod] || storageMethod);
+      var storageDesc =
+        (storageOff ? "The <strong>Storage</strong> stream is switched off for this device. " : "") +
+        "Set it to <strong>SNMP</strong> on this asset's Monitoring tab, or on the integration's Monitoring tab to cover the whole class. " +
+        "It has to be the <strong>Storage</strong> stream specifically — the Interfaces stream's SNMP walk collects the same rows but they are dropped unless Storage asked for them. " +
+        "FortiOS REST API publishes no mountable storage, so a Fortinet device reports its system flash over SNMP only.";
+      container.innerHTML = _notAvailableViaPollingHTML("Storage", methodLabel, storageDesc);
+      return;
+    }
+    container.innerHTML = '<p class="empty-state">No storage data yet — the first scrape lands within one storage polling interval.</p>';
     return;
   }
   var monitored = new Set(((si && si.monitoredStorage) || (asset && asset.monitoredStorage) || []));
