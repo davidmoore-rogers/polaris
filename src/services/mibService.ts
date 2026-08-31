@@ -690,6 +690,7 @@ export interface ProfileSymbolStatus {
     | "memory.pct"
     | "disk.used"
     | "disk.total"
+    | "disk.free"
     | "temperature";
   symbol: string;
   resolved: boolean;
@@ -781,6 +782,10 @@ export async function getProfileStatus(): Promise<ProfileStatus[]> {
     if (profile.disk?.totalBytesSymbol) {
       const r = await resolveSymbolAtVendorScope(example, profile.disk.totalBytesSymbol);
       symbols.push({ metric: "disk.total", symbol: profile.disk.totalBytesSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
+    }
+    if (profile.disk?.freeBytesSymbol) {
+      const r = await resolveSymbolAtVendorScope(example, profile.disk.freeBytesSymbol);
+      symbols.push({ metric: "disk.free", symbol: profile.disk.freeBytesSymbol, resolved: r.resolved, fromModuleName: r.fromModuleName, fromScope: r.fromScope });
     }
     if (profile.temperature?.symbol) {
       const r = await resolveSymbolAtVendorScope(example, profile.temperature.symbol);

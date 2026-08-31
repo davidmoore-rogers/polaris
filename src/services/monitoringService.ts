@@ -123,6 +123,8 @@ import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
 import {
   pickVendorProfile,
   fortinetClassHint,
+  diskQueryFromMetricPick,
+  deriveDiskBytes,
   type VendorTelemetryProfile,
 } from "./vendorTelemetryProfiles.js";
 import {
@@ -6938,6 +6940,12 @@ function resolveDbMetric(metric: MetricRow | undefined, model: string | null | u
 // matching what the hardcoded FortiSwitch baseline already does. Scalar
 // memory rows fall back to the single-symbol pctSymbol shape.
 //
+// Storage reads the same way through `diskQueryFromMetricPick`, with one
+// difference: the collector emits a StorageSample carrying BYTES and every
+// reader derives its own percent, so the combiner is read as a statement of
+// which two of used/total/free the row's symbols are rather than as
+// arithmetic to perform.
+//
 // Returns the hardcoded profile unchanged when the DB cache hasn't loaded yet
 // OR no matching DB profile exists.
 function pickVendorProfileMerged(
@@ -6950,10 +6958,13 @@ function pickVendorProfileMerged(
   const dbProfile = getDbManufacturerProfile(manufacturer);
   if (!dbProfile) return base;
 
-  // Pluck the three metric rows we currently consult during telemetry probes.
+  // Pluck the metric rows the SNMP collectors consult. `interfaces` / `lldp` /
+  // `wirelessStations` are deliberately absent: those are table walks with no
+  // symbol to swap, so their rows on the profile page stay descriptive.
   const cpuRow         = dbProfile.metrics.find((m) => m.metricKey === ("cpu" as MetricKey));
   const memoryRow      = dbProfile.metrics.find((m) => m.metricKey === ("memory" as MetricKey));
   const temperatureRow = dbProfile.metrics.find((m) => m.metricKey === ("temperature" as MetricKey));
+  const storageRow     = dbProfile.metrics.find((m) => m.metricKey === ("storage" as MetricKey));
 
   // The DB row's `modelPattern` is matched against the MODEL ALONE, while the
   // hardcoded pick above matches a haystack that also carries `os` and the
@@ -6967,15 +6978,16 @@ function pickVendorProfileMerged(
   const cpuPick  = resolveDbMetric(cpuRow,         matchModel);
   const memPick  = resolveDbMetric(memoryRow,      matchModel);
   const tempPick = resolveDbMetric(temperatureRow, matchModel);
+  const diskPick = resolveDbMetric(storageRow,     matchModel);
 
   // Nothing operator-overridden? Skip the clone allocation entirely.
-  if (!cpuPick && !memPick && !tempPick) return base;
+  if (!cpuPick && !memPick && !tempPick && !diskPick) return base;
 
   // Clone shallowly so we can swap fields without mutating the shared
   // VENDOR_TELEMETRY_PROFILES array entry.
   const merged: VendorTelemetryProfile = base
-    ? { ...base, cpu: base.cpu && { ...base.cpu }, memory: base.memory && { ...base.memory }, temperature: base.temperature && { ...base.temperature } }
-    : { vendor: dbProfile.manufacturer, match: /__db_profile__/, cpu: undefined, memory: undefined, temperature: undefined };
+    ? { ...base, cpu: base.cpu && { ...base.cpu }, memory: base.memory && { ...base.memory }, temperature: base.temperature && { ...base.temperature }, disk: base.disk && { ...base.disk } }
+    : { vendor: dbProfile.manufacturer, match: /__db_profile__/, cpu: undefined, memory: undefined, temperature: undefined, disk: undefined };
 
   if (cpuPick && cpuPick.symbol) {
     merged.cpu = { symbol: cpuPick.symbol, mode: cpuPick.type === "table" ? "walk-avg" : "scalar" };
@@ -7014,6 +7026,20 @@ function pickVendorProfileMerged(
     // operator-facing "Hardware Sensors" metric. `scalar` keeps the
     // single-reading path (FortiAP fapTemperature).
     merged.temperature = { symbol: tempPick.symbol, mode: tempPick.type === "table" ? "table" : "scalar" };
+  }
+  if (diskPick) {
+    // The operator-facing "Storage" metric. It feeds the vendor disk fallback
+    // that runs when HOST-RESOURCES-MIB's hrStorageTable came back with no
+    // disk rows — which on a FortiSwitch is every pass, since the FortiSwitch
+    // agent doesn't implement HRM's storage view at all. `mountPath` is not a
+    // profile field, so the base profile's label is carried over (a
+    // FortiSwitch keeps "flash") and only the OIDs come from the DB.
+    //
+    // A row that can't produce a used/total byte pair resolves to null and
+    // leaves `merged.disk` at the hardcoded baseline rather than clearing it:
+    // a half-finished edit must not cost an install its storage collection.
+    const disk = diskQueryFromMetricPick(diskPick, base?.disk?.mountPath);
+    if (disk) merged.disk = disk;
   }
   return merged;
 }
@@ -8020,6 +8046,61 @@ async function persistMacTable(assetId: string, rows: FdbEntry[]): Promise<void>
   ]);
 }
 
+/**
+ * Vendor disk fallback — the storage half of a vendor telemetry profile.
+ *
+ * Runs when HOST-RESOURCES-MIB's hrStorageTable produced no disk rows, which
+ * is every pass on a device whose agent doesn't implement HRM's storage view
+ * (FortiSwitches, some access points). Reads whichever two of the used /
+ * total / free scalars the profile names — the pair comes from the editable
+ * Manufacturer Profile's Storage row when an operator set one, else from the
+ * hardcoded profile — and completes the used/total pair via `deriveDiskBytes`.
+ *
+ * Returns null when the profile has no disk block, when neither OID resolves
+ * (the MIB isn't uploaded), or when both readings came back empty. Both
+ * callers treat null as "leave storage as it was", which is the same outcome
+ * an HRM-empty device had before this path existed. Shared by
+ * `collectSystemInfoSnmp` (the full heavy pass) and `collectStorageOnlySnmp`
+ * (the dedicated storage cadence) so the two can't drift — they carried
+ * byte-identical copies of this until 2026-08.
+ */
+async function collectVendorDiskFallback(
+  session: any,
+  vendorProfile: VendorTelemetryProfile | null,
+  vendorScope: { manufacturer: string | null | undefined; model: string | null | undefined },
+): Promise<StorageSample | null> {
+  const disk = vendorProfile?.disk;
+  if (!disk) return null;
+  try {
+    await ensureRegistryLoaded();
+    // Only the symbols this profile actually names are dialed — a used+free
+    // profile must not GET a total OID it never declared.
+    const oids = {
+      used:  disk.usedBytesSymbol  ? resolveOidSync(disk.usedBytesSymbol,  vendorScope) : null,
+      total: disk.totalBytesSymbol ? resolveOidSync(disk.totalBytesSymbol, vendorScope) : null,
+      free:  disk.freeBytesSymbol  ? resolveOidSync(disk.freeBytesSymbol,  vendorScope) : null,
+    };
+    // Two resolved OIDs are the floor: one reading alone can't fill a
+    // used/total pair, and the Storage table's whole point is the ratio.
+    const resolvedCount = [oids.used, oids.total, oids.free].filter(Boolean).length;
+    if (resolvedCount < 2) return null;
+    const [usedVb, totVb, freeVb] = await Promise.all([
+      oids.used  ? snmpGetScalar(session, oids.used).catch(()  => null) : Promise.resolve(null),
+      oids.total ? snmpGetScalar(session, oids.total).catch(() => null) : Promise.resolve(null),
+      oids.free  ? snmpGetScalar(session, oids.free).catch(()  => null) : Promise.resolve(null),
+    ]);
+    const { usedBytes, totalBytes } = deriveDiskBytes({
+      used:  snmpVbToNumber(usedVb),
+      total: snmpVbToNumber(totVb),
+      free:  snmpVbToNumber(freeVb),
+    });
+    if (usedBytes == null && totalBytes == null) return null;
+    return { mountPath: disk.mountPath || "system", usedBytes, totalBytes };
+  } catch {
+    return null;
+  }
+}
+
 async function collectSystemInfoSnmp(
   host: string,
   config: Record<string, unknown>,
@@ -8077,28 +8158,9 @@ async function collectSystemInfoSnmp(
     // devices whose SNMP agents don't implement hrStorageTable — FortiSwitches,
     // some access points, etc.), consult the matched vendor profile for
     // proprietary used/total byte scalars and synthesize one StorageSample.
-    if (storage.length === 0 && vendorProfile?.disk) {
-      try {
-        await ensureRegistryLoaded();
-        const disk    = vendorProfile.disk;
-        const usedOid = resolveOidSync(disk.usedBytesSymbol,  vendorScope);
-        const totOid  = resolveOidSync(disk.totalBytesSymbol, vendorScope);
-        if (usedOid && totOid) {
-          const [usedVb, totVb] = await Promise.all([
-            snmpGetScalar(session, usedOid).catch(() => null),
-            snmpGetScalar(session, totOid).catch(() => null),
-          ]);
-          const usedBytes  = snmpVbToNumber(usedVb);
-          const totalBytes = snmpVbToNumber(totVb);
-          if (usedBytes != null || totalBytes != null) {
-            storage.push({
-              mountPath:  disk.mountPath || "system",
-              usedBytes:  usedBytes  ?? null,
-              totalBytes: totalBytes ?? null,
-            });
-          }
-        }
-      } catch { /* leave storage empty; HRM-empty is the same outcome as before */ }
+    if (storage.length === 0) {
+      const vendorRow = await collectVendorDiskFallback(session, vendorProfile, vendorScope);
+      if (vendorRow) storage.push(vendorRow);
     }
 
     // Vendor model identity: one scalar GET when the matched profile knows
@@ -12197,28 +12259,9 @@ export async function collectStorageOnlySnmp(
         }
       }
     } catch { /* fall through to vendor fallback */ }
-    if (storage.length === 0 && vendorProfile?.disk) {
-      try {
-        await ensureRegistryLoaded();
-        const disk    = vendorProfile.disk;
-        const usedOid = resolveOidSync(disk.usedBytesSymbol,  vendorScope);
-        const totOid  = resolveOidSync(disk.totalBytesSymbol, vendorScope);
-        if (usedOid && totOid) {
-          const [usedVb, totVb] = await Promise.all([
-            snmpGetScalar(session, usedOid).catch(() => null),
-            snmpGetScalar(session, totOid).catch(() => null),
-          ]);
-          const usedBytes  = snmpVbToNumber(usedVb);
-          const totalBytes = snmpVbToNumber(totVb);
-          if (usedBytes != null || totalBytes != null) {
-            storage.push({
-              mountPath:  disk.mountPath || "system",
-              usedBytes:  usedBytes  ?? null,
-              totalBytes: totalBytes ?? null,
-            });
-          }
-        }
-      } catch { /* leave storage empty */ }
+    if (storage.length === 0) {
+      const vendorRow = await collectVendorDiskFallback(session, vendorProfile, vendorScope);
+      if (vendorRow) storage.push(vendorRow);
     }
     return storage;
   }, timeoutMs);

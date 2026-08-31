@@ -18,7 +18,7 @@ import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { runInstrumentedJob } from "./_metrics.js";
 import { hasRunMarker, stampRunMarker } from "./_runOnce.js";
-import { VENDOR_TELEMETRY_PROFILES, type VendorTelemetryProfile, memoryQueryToDoubleScalar } from "../services/vendorTelemetryProfiles.js";
+import { VENDOR_TELEMETRY_PROFILES, type VendorTelemetryProfile, memoryQueryToDoubleScalar, diskQueryToDoubleScalar } from "../services/vendorTelemetryProfiles.js";
 import { refreshProfileCache } from "../services/manufacturerProfileService.js";
 import { normalizeManufacturer } from "../utils/manufacturerNormalize.js";
 
@@ -88,18 +88,21 @@ function profileToMetricSeeds(p: VendorTelemetryProfile): MetricSeed[] {
     }
   }
   if (p.disk) {
-    // Disk in the hardcoded profile is always bytes-form (used + total).
-    // Stamp it as double_scalar so the editable surface matches what the
-    // resolver does at probe time when the collector swap lands. The
-    // current runtime monitor still consults the hardcoded constant
-    // directly for the disk-fallback path — see collectSystemInfoSnmp.
-    out.push({
-      metricKey: "storage",
-      symbol:    p.disk.usedBytesSymbol,
-      symbolB:   p.disk.totalBytesSymbol,
-      type:      "double_scalar",
-      transform: "a_over_b_as_percent",
-    });
+    // Disk is bytes-form (a pair drawn from used / total / free), so it seeds
+    // as double_scalar with the combiner naming which pair it is. The runtime
+    // reads this row back through `diskQueryFromMetricPick` in
+    // pickVendorProfileMerged, so what is stamped here IS what the
+    // disk-fallback collects — an operator edit to the row takes effect.
+    const ds = diskQueryToDoubleScalar(p.disk);
+    if (ds) {
+      out.push({
+        metricKey: "storage",
+        symbol:    ds.symbol,
+        symbolB:   ds.symbolB,
+        type:      ds.type,
+        transform: ds.transform,
+      });
+    }
   }
   if (p.temperature) {
     out.push({

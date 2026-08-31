@@ -47,8 +47,15 @@ export interface MemoryQuery {
  * need a different shape and aren't covered here yet.
  */
 export interface DiskQuery {
-  usedBytesSymbol:  string;
-  totalBytesSymbol: string;
+  // Any TWO of the three complete the third. used+total is what every
+  // hardcoded profile below states; the other two pairs exist because the
+  // editable Manufacturer Profile's storage row may name a FREE-bytes OID
+  // instead (see diskQueryFromMetricPick). `deriveDiskBytes` does that
+  // arithmetic — a StorageSample carries BYTES, so the pair is COMPLETED
+  // rather than reduced to the percent the profile row's combiner describes.
+  usedBytesSymbol?:  string;
+  totalBytesSymbol?: string;
+  freeBytesSymbol?:  string;
   /** Display label for the synthesized StorageSample row. Defaults to "system" when omitted. */
   mountPath?: string;
 }
@@ -353,6 +360,106 @@ export function memoryQueryToDoubleScalar(mem: MemoryQuery | undefined): {
   }
   if (mem.pctSymbol) {
     return { type: "scalar", symbol: mem.pctSymbol, symbolB: null, transform: null };
+  }
+  return null;
+}
+
+/**
+ * Translate an editable Manufacturer Profile **storage** row into a
+ * `DiskQuery`. The runtime counterpart of `memoryQueryToDoubleScalar`, which
+ * goes the other way for the seed job.
+ *
+ * The row's combiner is NOT arithmetic here. A `StorageSample` carries the
+ * used/total byte pair and every reader derives its own percent, so the
+ * combiner is read as a statement of WHAT THE TWO SYMBOLS MEAN:
+ *
+ *   a_over_b_as_percent / a_over_b_ratio  → A = used,  B = total
+ *   a_over_a_plus_b_as_percent / a_plus_b → A = used,  B = free
+ *   b_minus_a_over_b_as_percent           → A = free,  B = total
+ *   a_minus_b                             → A = total, B = free
+ *
+ * Returns null — leaving the hardcoded profile in place — for a row that
+ * cannot produce a byte pair: a `scalar` row (a lone percentage is not a
+ * StorageSample; there is no total to render or to alert a threshold
+ * against), a `table` row (HOST-RESOURCES-MIB is already the table path and
+ * runs first), a row missing either symbol, or a combiner with no role
+ * mapping. Null is the honest answer in each case, and it is why an operator
+ * who half-fills the row keeps the behavior they had rather than losing
+ * storage collection to a partial edit.
+ */
+export function diskQueryFromMetricPick(pick: {
+  type:      "scalar" | "double_scalar" | "table";
+  symbol:    string | null;
+  symbolB:   string | null;
+  transform: string | null;
+}, mountPath?: string): DiskQuery | null {
+  if (pick.type !== "double_scalar") return null;
+  const a = pick.symbol;
+  const b = pick.symbolB;
+  if (!a || !b) return null;
+  const base = mountPath ? { mountPath } : {};
+  switch (pick.transform) {
+    case "a_over_b_as_percent":
+    case "a_over_b_ratio":
+      return { ...base, usedBytesSymbol: a, totalBytesSymbol: b };
+    case "a_over_a_plus_b_as_percent":
+    case "a_plus_b":
+      return { ...base, usedBytesSymbol: a, freeBytesSymbol: b };
+    case "b_minus_a_over_b_as_percent":
+      return { ...base, freeBytesSymbol: a, totalBytesSymbol: b };
+    case "a_minus_b":
+      return { ...base, totalBytesSymbol: a, freeBytesSymbol: b };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Complete the used/total byte pair from whichever two of the three readings
+ * a `DiskQuery` collected. Both outputs are derived from the RAW inputs — never
+ * from each other — so a null in one place can't propagate into a fabricated
+ * value in the other. A negative used (free reported larger than total, which
+ * some agents do transiently across a resize) clamps to null rather than
+ * charting a below-zero bar.
+ */
+export function deriveDiskBytes(readings: {
+  used?:  number | null;
+  total?: number | null;
+  free?:  number | null;
+}): { usedBytes: number | null; totalBytes: number | null } {
+  const used  = readings.used  ?? null;
+  const total = readings.total ?? null;
+  const free  = readings.free  ?? null;
+  let usedBytes  = used;
+  let totalBytes = total;
+  if (usedBytes  == null && total != null && free != null) usedBytes  = total - free;
+  if (totalBytes == null && used  != null && free != null) totalBytes = used  + free;
+  if (usedBytes  != null && (!Number.isFinite(usedBytes)  || usedBytes  < 0)) usedBytes  = null;
+  if (totalBytes != null && (!Number.isFinite(totalBytes) || totalBytes < 0)) totalBytes = null;
+  return { usedBytes, totalBytes };
+}
+
+/**
+ * The inverse of `diskQueryFromMetricPick`: express a hardcoded `DiskQuery` in
+ * the editable profile's row shape so the seed job can stamp it. Mirrors
+ * `memoryQueryToDoubleScalar`. Returns null when the block names fewer than
+ * two symbols (nothing to seed).
+ */
+export function diskQueryToDoubleScalar(disk: DiskQuery | undefined): {
+  type:      "double_scalar";
+  symbol:    string;
+  symbolB:   string;
+  transform: string;
+} | null {
+  if (!disk) return null;
+  if (disk.usedBytesSymbol && disk.totalBytesSymbol) {
+    return { type: "double_scalar", symbol: disk.usedBytesSymbol, symbolB: disk.totalBytesSymbol, transform: "a_over_b_as_percent" };
+  }
+  if (disk.usedBytesSymbol && disk.freeBytesSymbol) {
+    return { type: "double_scalar", symbol: disk.usedBytesSymbol, symbolB: disk.freeBytesSymbol, transform: "a_over_a_plus_b_as_percent" };
+  }
+  if (disk.totalBytesSymbol && disk.freeBytesSymbol) {
+    return { type: "double_scalar", symbol: disk.totalBytesSymbol, symbolB: disk.freeBytesSymbol, transform: "a_minus_b" };
   }
   return null;
 }
