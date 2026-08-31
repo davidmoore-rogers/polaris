@@ -388,7 +388,7 @@ describe("recovering spans", () => {
     const svg = sparklineSvg(answered, {
       label: "Response time", color: "#2e7d32", failSpans: outage, recoverSpans: climb, ...window,
     });
-    expect(svg).toContain('stroke="#ab47bc"');
+    expect(svg).toContain('stroke="#0288d1"');
   });
 
   it("returns to the series colour once the bucket is empty", () => {
@@ -401,7 +401,7 @@ describe("recovering spans", () => {
     // Red dive, purple climb, green tail — three strokes, and a fade at each
     // colour change rather than a jump.
     expect((svg.match(/<polyline/g) ?? []).length).toBe(3);
-    expect(svg).toContain('stop-color="#ab47bc"');
+    expect(svg).toContain('stop-color="#0288d1"');
   });
 
   it("fills the area under a recovering run in its own colour", () => {
@@ -410,14 +410,14 @@ describe("recovering spans", () => {
     const svg = sparklineSvg(answered, {
       label: "Response time", color: "#2e7d32", failSpans: outage, recoverSpans: climb, ...window,
     });
-    expect(svg).toContain('<polygon fill="#ab47bc"');
+    expect(svg).toContain('<polygon fill="#0288d1"');
   });
 
   it("is inert when no recovery spans are passed", () => {
     // Every other chart is about a reading, not a verdict — purple must not
     // leak into CPU or memory.
     const svg = sparklineSvg(answered, { label: "CPU", color: "#2563eb", failSpans: outage, ...window });
-    expect(svg).not.toContain("#ab47bc");
+    expect(svg).not.toContain("#0288d1");
   });
 });
 

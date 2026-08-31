@@ -2279,6 +2279,12 @@ th.cb-col, td.cb-col { padding: 0 !important; text-align: center; }
    measured off td padding, so the half-padding rule below must not touch th. */
 thead th.cb-col { vertical-align: top; padding: 0.65rem 0 0 0 !important; }
 td.cb-col + td { padding-left: 0.5rem; }
+/* A plain (non-TableSF) table has no <col> width track, so the zero-padding
+   cell above collapses to the box itself and the checkbox ends up flush
+   against the table border rather than centred in a column (asset details
+   -> Alerts tab). Seed the same 34px track FIXED_COL_W gives the sortable
+   tables; the <col> still wins wherever table-sf.js is driving. */
+table:not([data-sf-table-id]) th.cb-col { width: 34px; }
 /* Zero the UA margin and stay INLINE: as a block in the tall, middle-aligned
    header cell the input centred vertically and read as an extra empty header
    row. text-align:center on the cell does the horizontal centering. */
@@ -3055,8 +3061,19 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 .badge-monitor-warning  { background: rgba(255,193,7,0.16);  color: #ffd54f;                 border: 1px solid rgba(255,193,7,0.30); }
 /* Blue "in flux" treatment used for both monitorStatus="recovering" (was
  * down, now succeeding; below the recovery threshold) and the never-probed
- * unknown / null state (rendered as "Pending" in the pill, same color). */
-.badge-monitor-recovering { background: rgba(79,195,247,0.12); color: var(--color-accent);     border: 1px solid rgba(79,195,247,0.25); }
+ * unknown / null state (rendered as "Pending" in the pill, same color).
+ *
+ * Anchored on rgba(2,136,209,.) = #0288d1, the SAME blue the Last-30-min strip
+ * and the response-time chart paint a recovering probe (and the same value
+ * POLARIS_HEALTH_COLORS.recovering already used for map nodes). The text is a
+ * per-theme member of that family exactly as its down/warning siblings do it —
+ * light on dark, dark on light.
+ *
+ * It was `var(--color-accent)`, the only monitor badge keyed to a theme token
+ * rather than to its own colour family, which is why the morning theme rendered
+ * "Recovering" in that theme's GOLD accent — the same family as the amber
+ * "Missed" pill sitting beside it. */
+.badge-monitor-recovering { background: rgba(2,136,209,0.16); color: #81d4fa;                  border: 1px solid rgba(2,136,209,0.30); }
 /* Slate-blue "Dep. Down" treatment — distinct from the bright red of a true
  * confirmed-down probe and the amber Warning of in-flux state. Used when an
  * upstream parent (FortiGate / chained switch) is confirmed-down and this
@@ -3087,7 +3104,7 @@ select option { background: var(--color-bg-secondary); color: var(--color-text-p
 :is([data-theme="morning"],[data-theme="noon"]) .badge-unmonitored      { background: rgba(117,117,117,0.10); border-color: rgba(117,117,117,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-down     { background: rgba(211,47,47,0.10); color: #c62828; border-color: rgba(211,47,47,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-warning  { background: rgba(245,127,23,0.10); color: #f57f17; border-color: rgba(245,127,23,0.30); }
-:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-recovering { background: rgba(79,195,247,0.10); border-color: rgba(79,195,247,0.30); }
+:is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-recovering { background: rgba(2,136,209,0.10); color: #0277bd; border-color: rgba(2,136,209,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-dep-down   { background: rgba(96,125,139,0.10); color: #455a64; border-color: rgba(96,125,139,0.30); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-monitor-dep-test   { background: rgba(123,31,162,0.10); color: #7b1fa2; border-color: rgba(123,31,162,0.45); }
 :is([data-theme="morning"],[data-theme="noon"]) .badge-maintenance        { background: rgba(103,58,183,0.10); color: #5e35b1; border-color: rgba(103,58,183,0.35); }

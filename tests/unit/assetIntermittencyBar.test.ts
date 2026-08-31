@@ -211,10 +211,14 @@ describe("_intermittencyStates", () => {
     for (const state of ["up", "recovering", "warning", "down"]) {
       expect(map).toContain(`${state}:`);
     }
-    // Recovering is PURPLE on this strip — "answered, misses still outstanding".
-    // Pinned as the magenta-leaning purple 400 and NOT the muted lavender
-    // #9575cd (149,117,205) that means maintenance elsewhere in the product.
-    expect(map).toMatch(/recovering:\s*"rgba\(171,71,188,/);
+    // Recovering is BLUE on this strip — "answered, misses still outstanding" —
+    // and must be the SAME value the response-time chart directly below it uses
+    // for the same state, which is the entire reason the two are stacked.
+    expect(map).toMatch(/recovering:\s*"rgba\(2,136,209,/);
+    const chartBlue = /var _CHART_RECOVER_COLOR = "(#[0-9a-f]{6})";/.exec(src)![1];
+    expect(chartBlue).toBe("#0288d1");
+    // Never the muted lavender #9575cd (149,117,205), which means MAINTENANCE
+    // elsewhere in the product — the trap the old purple sat one shade from.
     expect(map).not.toContain("149,117,205");
   });
 });

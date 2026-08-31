@@ -1191,7 +1191,7 @@ sample by sample:
 | green (`--color-success`) | answered, nothing outstanding |
 | amber `#ffc107` | a miss, but the count has not reached the threshold that declares Down |
 | red `#d32f2f` | the miss that IS the verdict, and every one after it |
-| purple `#ab47bc` | answered, but the misses are not paid off yet |
+| blue `#0288d1` | answered, but the misses are not paid off yet |
 | grey `#9aa0a6` | a miss the upstream explains — overrides amber and red both |
 
 Amber earns its place by what red claims. Red asserts "this device is down", so
@@ -1207,7 +1207,7 @@ exact confusion this vocabulary exists to prevent. Give the amber the strip's
 own value, not a deeper one chosen for contrast: two yellows a shade apart read
 as two meanings. That replay is also
 what puts the recovery rule in the picture: when the config says "down after 3
-missed, up after 5 received", the climb stays purple for all five answers, not
+missed, up after 5 received", the climb stays blue for all five answers, not
 just the three it takes to drain the counter.
 
 The counts ride the history payload alongside the samples. A chart that fetches
@@ -1215,7 +1215,7 @@ them separately paints an outage and then repaints it a moment later, in front
 of the operator.
 
 Every OTHER chart keeps its own series colour and its two states. Recolouring
-them would make green and purple mean two different things apiece.
+them would make green and blue mean two different things apiece.
 
 ### Bands are maintenance, not failure
 
@@ -1248,7 +1248,7 @@ balloon the PNG — the phone port collapses them for the same reason).
 May not: the shape of an outage, **or which colour any part of it is**. Same
 baseline dive, same fade at each transition, same rule about what counts as a
 missed poll — and the same five-colour verdict palette on the reachability
-chart, including the amber that says a miss is not yet a verdict and the purple
+chart, including the amber that says a miss is not yet a verdict and the blue
 that says a device is answering but not yet trusted. An operator who learns to
 read a recovery on the device page must not have to learn it again from the
 email about the same outage.

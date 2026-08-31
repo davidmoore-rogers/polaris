@@ -252,10 +252,26 @@ var _CHART_UP_COLOR = "var(--color-success)";
 var _CHART_MISS_COLOR = "#ffc107";
 
 // A poll that ANSWERED while missed polls are still outstanding. Same meaning
-// and same hue as the purple cell on the Last-30-min strip: the device is
+// and same hue as the blue cell on the Last-30-min strip: the device is
 // answering, it just has not paid the debt off yet. Kept a flat hex for the
-// same reason the fail/dep colors are — it must read on all three themes.
-var _CHART_RECOVER_COLOR = "#ab47bc";
+// same reason the fail/dep colors are — it must read on all three themes AND on
+// the alert email's white card, which is why it is the deeper light-blue 700
+// rather than the pale #4fc3f7 the Recovering PILL tints itself with.
+//
+// It was PURPLE until 2026-08-29, chosen when this chart's series was still the
+// theme accent and blue would have collided with it. The series is the Up green
+// now, so blue is free — and it is the better answer twice over: it agrees with
+// the Recovering pill (which was repointed at this exact value in the same
+// change, having been keyed to var(--color-accent) and therefore rendering GOLD
+// on the morning theme) instead of contradicting it, and it puts real distance
+// between this and the lavender #9575cd that means MAINTENANCE on the same
+// chart, which the magenta-leaning purple only ever held by a shade.
+//
+// #0288d1 is also POLARIS_HEALTH_COLORS.recovering, which the Device Map has
+// used for the same state all along. Convergent, NOT shared: that map is
+// deliberately its own palette (see the comment on it in api.js) — do not make
+// either one read the other.
+var _CHART_RECOVER_COLOR = "#0288d1";
 
 // The stroke/dot color for one plot point. `ok:false` points carry `dep:true`
 // when the miss was explained; `ok:true` points carry `rec:true` when misses
@@ -11360,15 +11376,20 @@ async function _renderIntermittencyBar(assetId, effP) {
   // up / recovering / warning / down per sample; unknown remains the
   // fallback color.
   //
-  // `recovering` is PURPLE here, not the pill's blue: on this strip it means
-  // "this probe answered while misses are still outstanding", and the operator
-  // reads the bar as a running tally — amber climbing, purple paying it back.
-  // Deliberately the magenta-leaning purple 400 rather than the muted lavender
-  // #9575cd that means MAINTENANCE elsewhere in the product; the strip never
-  // renders a maintenance cell, but the two must not be confusable at a glance.
+  // `recovering` is BLUE, agreeing with the pill above rather than contradicting
+  // it: on this strip it means "this probe answered while misses are still
+  // outstanding", and the operator reads the bar as a running tally — amber
+  // climbing, blue paying it back. Same value as _CHART_RECOVER_COLOR on the
+  // response-time chart immediately below, which is the whole point.
+  //
+  // It was the magenta-leaning purple 400 until 2026-08-29, picked when the
+  // chart's series was still the theme accent and blue would have collided with
+  // it. The series is the Up green now, so the blue is free — and it never sat
+  // comfortably one shade from the muted lavender #9575cd that means
+  // MAINTENANCE elsewhere in the product.
   var colors = {
     up:         "rgba(0,200,83,0.65)",
-    recovering: "rgba(171,71,188,0.80)",
+    recovering: "rgba(2,136,209,0.80)",
     warning:    "rgba(255,193,7,0.75)",
     down:       "rgba(211,47,47,0.75)",
     unknown:    "rgba(117,117,117,0.45)",

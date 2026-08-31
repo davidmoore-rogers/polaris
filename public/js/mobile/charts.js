@@ -77,7 +77,7 @@
   // MISS_COLOR / RECOVER_COLOR in utils/sparklineSvg.ts — one outage and one
   // recovery look the same on all three surfaces; change one, change all.
   var MISS_COLOR = "#ffc107";
-  var RECOVER_COLOR = "#ab47bc";
+  var RECOVER_COLOR = "#0288d1";
 
   // The stroke/dot colour for one plot point. Port of `_chartPointColor` in
   // public/js/assets.js — keep the two in step. Grey outranks the amber/red

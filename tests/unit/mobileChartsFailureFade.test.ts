@@ -37,7 +37,7 @@ function outage(fromMs: number, toMs: number): Outage {
 
 const FAIL = "#d32f2f";
 const MISS = "#ffc107";
-const RECOVER = "#ab47bc";
+const RECOVER = "#0288d1";
 const DEP = "#9aa0a6";
 let charts: Charts;
 

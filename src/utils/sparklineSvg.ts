@@ -138,12 +138,14 @@ const FAIL_COLOR = "#d32f2f";
  *  the 2px stroke and the 3px dot carry it. */
 const MISS_COLOR = "#ffc107";
 
-/** The recovering purple — a poll that ANSWERED while missed polls were still
- *  outstanding. Same meaning and same hue as the purple cell on the Last-30-min
+/** The recovering blue — a poll that ANSWERED while missed polls were still
+ *  outstanding. Same meaning and same value as the blue cell on the Last-30-min
  *  strip and the in-app charts' _CHART_RECOVER_COLOR: the device is answering,
- *  it just has not paid the debt off yet. Deliberately the magenta-leaning 400,
- *  not the muted lavender that means maintenance elsewhere. */
-const RECOVER_COLOR = "#ab47bc";
+ *  it just has not paid the debt off yet. The deeper light-blue 700 rather than
+ *  the pale tint the Recovering pill uses, because this has to hold up as a 2px
+ *  line on a WHITE card. Purple until 2026-08-29 — see _CHART_RECOVER_COLOR in
+ *  public/js/assets.js for why the series going green freed the blue. */
+const RECOVER_COLOR = "#0288d1";
 
 /** The dependency-down grey. Same dive, drained of alarm: the upstream is what
  *  broke, and this device is only reporting that it sits behind it. Shared with
