@@ -50,8 +50,15 @@ export interface SeverityTier {
   severity: Severity;
   /** Per-tier comparison operator (falls back to the base trigger's). */
   operator?: Comparator;
-  /** Per-tier sustained duration (falls back to the base trigger's
-   *  forDurationSec). See resolveTierLadder / sustainedSeverity. */
+  /**
+   * Per-tier sustained duration (falls back to the base trigger's
+   * forDurationSec). See resolveTierLadder / sustainedSeverity. The BUILDER no
+   * longer writes one — every tier shares the trigger's hold (business rule 19)
+   * — but an API-authored band may still carry it, and a band that does keeps
+   * the wall-clock path even when the trigger counts readings: a per-tier count
+   * would need a per-tier run map on the state row for a shape the wizard
+   * cannot produce.
+   */
   forDurationSec?: number;
 }
 
@@ -118,6 +125,10 @@ export interface ResolvedTier {
   severity: Severity;
   operator: Comparator;
   forDurationSec: number;
+  /** The hold as READINGS, inherited from the trigger. When set it is the
+   *  authority and `forDurationSec` is only its mirror (see FOR_POLLS_NOTE);
+   *  absent on a tier carrying its own wall-clock duration. */
+  forPolls?: number;
 }
 
 /**
@@ -132,13 +143,18 @@ export function resolveTierLadder(
   baseSeverity: Severity,
   baseForDurationSec: number,
   bands: SeverityTier[] | null | undefined,
+  baseForPolls?: number | null,
 ): ResolvedTier[] {
-  const base: ResolvedTier = { threshold: baseThreshold, severity: baseSeverity, operator, forDurationSec: Math.max(0, baseForDurationSec || 0) };
+  const polls = typeof baseForPolls === "number" && baseForPolls > 0 ? Math.round(baseForPolls) : undefined;
+  const base: ResolvedTier = { threshold: baseThreshold, severity: baseSeverity, operator, forDurationSec: Math.max(0, baseForDurationSec || 0), forPolls: polls };
   const rest = (bands ?? []).map((b) => ({
     threshold: b.threshold,
     severity: b.severity,
     operator: b.operator ?? operator,
     forDurationSec: Math.max(0, b.forDurationSec ?? baseForDurationSec ?? 0),
+    // A band with a hold of its OWN is a wall-clock band: it stated seconds, so
+    // it is measured in seconds. One that inherits inherits both spellings.
+    forPolls: b.forDurationSec == null ? polls : undefined,
   }));
   return [base, ...rest];
 }
@@ -191,6 +207,105 @@ export function sustainedSeverity(
     }
   }
   return best;
+}
+
+// ─── Poll-counted holds ─────────────────────────────────────────────────────
+// The reading-counting counterpart of the met-since machinery above. A hold
+// written as `forPolls` is satisfied by N consecutive qualifying READINGS, not
+// by N × cadence seconds of engine ticks — see FOR_POLLS_NOTE for why that
+// distinction is the whole point.
+//
+// Two shapes reach the engine, because two shapes of source exist:
+//  - a SERIES source (every sample table, and the Polaris host's own metrics)
+//    hands over its recent readings newest-first, and the run is computed from
+//    them here — stateless, so it is exact whatever the engine's tick spacing
+//    is, and a device that stopped reporting simply has no readings to count.
+//  - a CURRENT-STATE source (the Asset columns, the SD-WAN rule table, and the
+//    windowed-ratio metrics that are recomputed per tick) has no series at all,
+//    so the engine counts observations on the state row instead, advancing only
+//    when that stream's own poll anchor moved. `advanceRun` is that rule.
+
+/**
+ * How many of the leading (newest-first) readings satisfy `meets`. Stops at the
+ * first one that doesn't — a run is CONSECUTIVE by definition, so one reading
+ * back under the line resets it to zero however long the run before it was.
+ */
+export function leadingRun<T>(readings: readonly T[], meets: (v: T) => boolean): number {
+  let n = 0;
+  for (const r of readings) {
+    if (!meets(r)) break;
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * One step of a current-state source's run counter. `readingAt` is the poll
+ * anchor for this reading; `lastAt` is the anchor that last advanced it.
+ *
+ * Three properties, all load-bearing:
+ *  - **A repeat is not a reading.** An anchor that hasn't moved means the
+ *    engine is looking at the same poll again (its 60s tick against a 5-minute
+ *    cadence), so the run is returned unchanged and the caller writes nothing.
+ *  - **An unknown anchor counts once.** A source with no anchor at all (null)
+ *    still has to make progress, or its hold could never be satisfied.
+ *  - **A qualifying reading extends, a non-qualifying one zeroes.** There is no
+ *    decay: this is a consecutive run, not the leaky bucket the probe loop
+ *    keeps for down detection (business rule 30), which is counting something
+ *    else — misses outstanding, not a condition holding.
+ */
+export function advanceRun(
+  run: number,
+  meets: boolean,
+  readingAt: Date | null | undefined,
+  lastAt: Date | null | undefined,
+): { run: number; advanced: boolean } {
+  const cur = Number.isFinite(run) && run > 0 ? Math.round(run) : 0;
+  if (readingAt && lastAt && readingAt.getTime() <= lastAt.getTime()) return { run: cur, advanced: false };
+  return { run: meets ? cur + 1 : 0, advanced: true };
+}
+
+/**
+ * The severity the alert should be at when the ladder counts READINGS: the
+ * most-severe tier whose OWN run has reached its OWN `forPolls`. `runs` is per
+ * severity, computed by the caller from the series (each tier tests its own
+ * threshold, so a value climbing into critical starts critical's run at 1 while
+ * warning's keeps climbing).
+ *
+ * A tier carrying no `forPolls` is skipped — it is a wall-clock tier and
+ * `sustainedSeverity` owns it. A tier whose count is 0 fires on its first
+ * qualifying reading, matching a 0-second hold.
+ */
+export function sustainedSeverityByRun(
+  runs: Record<string, number> | null | undefined,
+  tiers: ResolvedTier[],
+): Severity | null {
+  let best: Severity | null = null;
+  let bestRank = -1;
+  for (const tier of tiers) {
+    if (tier.forPolls == null) continue;
+    const run = runs?.[tier.severity] ?? 0;
+    if (run < Math.max(1, tier.forPolls)) continue;
+    const rank = severityRank(tier.severity);
+    if (rank > bestRank) {
+      best = tier.severity;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+/** The hold this trigger states as a COUNT, or 0 when it states one in seconds
+ *  (or none at all). The one place the "count wins where present" rule lives. */
+export function triggerHoldPolls(trigger: { forPolls?: number | null } | null | undefined): number {
+  const n = trigger?.forPolls;
+  return typeof n === "number" && n > 0 ? Math.round(n) : 0;
+}
+
+/** The reset's clear-sustain as a COUNT, same contract. */
+export function resetSustainPolls(reset: { sustainPolls?: number | null } | null | undefined): number {
+  const n = reset?.sustainPolls;
+  return typeof n === "number" && n > 0 ? Math.round(n) : 0;
 }
 
 /** Whether two met-since maps differ — the engine only writes the state row
@@ -351,6 +466,30 @@ const dimensionFilterSchema = z
   .strict()
   .optional();
 
+/**
+ * THE HOLD IS A COUNT OF READINGS, and `forDurationSec` is its mirror.
+ *
+ * A threshold can only be tested when a reading arrives, so "sustained for 3"
+ * has always meant three readings — and expressing it in seconds made it a
+ * different number of readings on a device polled every 5 minutes than on one
+ * polled every 30 seconds. Worse, the engine measured those seconds on ITS OWN
+ * 60-second tick against the newest sample, so a device that stopped reporting
+ * mid-spike had its last over-threshold sample re-presented every tick and the
+ * hold "elapsed" on ONE reading.
+ *
+ * `forPolls` is therefore the authority wherever it is set: the engine counts
+ * consecutive qualifying READINGS and fires on the Nth. `forDurationSec` stays
+ * written as the lossless wall-clock mirror (polls × the scope's cadence at
+ * authoring time) — it is what the sentences, the alert email and every
+ * pre-cutover rule read, and it is what sizes the sample window the engine has
+ * to fetch to see N readings. A rule carrying only seconds keeps the old
+ * time-based behaviour exactly; nothing is migrated.
+ *
+ * Capped at 100 like `missedPolls` (business rule 36), the other count that IS
+ * the definition of a condition rather than a filter on one.
+ */
+const FOR_POLLS_FIELD = z.number().int().min(0).max(100).optional();
+
 const assetMetricTrigger = z.object({
   type: z.literal("asset_metric"),
   metric: z.enum(ASSET_METRICS),
@@ -359,6 +498,8 @@ const assetMetricTrigger = z.object({
   operator: z.enum(COMPARATORS),
   threshold: z.number(),
   forDurationSec: z.number().int().min(0).max(86400).default(0),
+  /** The hold as a COUNT OF READINGS — see FOR_POLLS_NOTE. */
+  forPolls: FOR_POLLS_FIELD,
   dimensionFilter: dimensionFilterSchema,
 });
 
@@ -369,6 +510,8 @@ const assetStateTrigger = z.object({
   // string for enum-like fields (monitorStatus), number for counters, bool for flags
   value: z.union([z.string().max(200), z.number(), z.boolean()]),
   forDurationSec: z.number().int().min(0).max(86400).default(0),
+  /** The hold as a COUNT OF READINGS — see FOR_POLLS_NOTE. */
+  forPolls: FOR_POLLS_FIELD,
   dimensionFilter: dimensionFilterSchema,
   /**
    * DOWN-DETECTION AUTHORITY — valid only on `monitorStatus == down`, where it
@@ -393,6 +536,9 @@ const hostMetricTrigger = z.object({
   operator: z.enum(COMPARATORS),
   threshold: z.number(),
   forDurationSec: z.number().int().min(0).max(86400).default(0),
+  /** The hold as a COUNT OF READINGS — see FOR_POLLS_NOTE. The Polaris host
+   *  samples itself every 30s (hostMetricsCollector), so a poll here is 30s. */
+  forPolls: FOR_POLLS_FIELD,
 });
 
 const eventTrigger = z.object({
@@ -427,11 +573,12 @@ const changeTrigger = z.object({
 export const TRIGGER_GROUP_OPS = ["and", "or"] as const;
 export type TriggerGroupOp = (typeof TRIGGER_GROUP_OPS)[number];
 
-// Leaves are the existing threshold conditions minus forDurationSec (the
-// sustain applies to the whole composite, not per leaf).
-const compositeAssetMetricLeaf = assetMetricTrigger.omit({ forDurationSec: true });
-const compositeAssetStateLeaf = assetStateTrigger.omit({ forDurationSec: true });
-const compositeHostMetricLeaf = hostMetricTrigger.omit({ forDurationSec: true });
+// Leaves are the existing threshold conditions minus the hold in BOTH its
+// spellings (the sustain applies to the whole composite, not per leaf) — a leaf
+// that kept `forPolls` would be a second hold the tree's own count already owns.
+const compositeAssetMetricLeaf = assetMetricTrigger.omit({ forDurationSec: true, forPolls: true });
+const compositeAssetStateLeaf = assetStateTrigger.omit({ forDurationSec: true, forPolls: true });
+const compositeHostMetricLeaf = hostMetricTrigger.omit({ forDurationSec: true, forPolls: true });
 export const compositeLeafSchema = z.discriminatedUnion("type", [
   compositeAssetMetricLeaf,
   compositeAssetStateLeaf,
@@ -470,6 +617,9 @@ const compositeTrigger = z.object({
   op: z.enum(TRIGGER_GROUP_OPS),
   children: z.array(z.union([compositeLeafSchema, triggerConditionGroupSchema])).min(1).max(10),
   forDurationSec: z.number().int().min(0).max(86400).default(0),
+  /** The hold as a COUNT OF READINGS — see FOR_POLLS_NOTE. One hold over the
+   *  whole tree, counted on the leaves' own readings. */
+  forPolls: FOR_POLLS_FIELD,
 });
 
 export const triggerSchema = z.discriminatedUnion("type", [
@@ -514,7 +664,9 @@ export function collapseCompositeTrigger(trigger: Trigger): Trigger {
     children = g.children;
   }
   if (children.length === 1 && isTriggerLeaf(children[0])) {
-    return { ...(children[0] as CompositeLeaf), forDurationSec: trigger.forDurationSec } as Trigger;
+    // The count rides down with its mirror — a collapsed single-leaf trigger
+    // that kept only the seconds would silently fall back to the time path.
+    return { ...(children[0] as CompositeLeaf), forDurationSec: trigger.forDurationSec, forPolls: trigger.forPolls } as Trigger;
   }
   return { ...trigger, op, children };
 }
@@ -1365,6 +1517,12 @@ export const resetSchema = z
     // auto + condition — clear-sustain: the recovery must hold this long
     // before the alert auto-clears. 0/omit = clear on first recovered tick.
     sustainSec: z.number().int().min(0).max(86400).optional().nullable(),
+    // The same clear-sustain as a COUNT OF READINGS, and the authority when
+    // set (`sustainSec` is its wall-clock mirror — see FOR_POLLS_NOTE): the
+    // recovery must hold across this many consecutive readings. "Down after 3
+    // missed, reset after 5 received" already meant readings on the down path
+    // (business rule 36); this is the same sentence for every other condition.
+    sustainPolls: z.number().int().min(0).max(100).optional().nullable(),
     // timed only (the old clearAfterSec).
     afterSec: z.number().int().min(1).max(2592000).optional().nullable(),
     // condition only — a custom AND/OR reset tree (same leaf vocabulary as the
@@ -1929,6 +2087,20 @@ export function downRecoverySustainSec(reset: unknown): number | null {
 }
 
 /**
+ * The same recovery hold as the COUNT the operator actually stated
+ * (`reset.sustainPolls`), which is what `recoveryPollsFor` should use when it
+ * has one: dividing the seconds mirror by the asset's cadence returns their
+ * number only when the cadence hasn't changed since they typed it, and rounds
+ * to something else when it has. Null when the reset states only seconds — the
+ * pre-count shape, and the one the division exists for.
+ */
+export function downRecoveryPolls(reset: unknown): number | null {
+  const r = reset as { mode?: unknown; sustainPolls?: unknown } | null | undefined;
+  if (!r || typeof r !== "object" || r.mode !== "auto") return null;
+  return typeof r.sustainPolls === "number" && r.sustainPolls > 0 ? Math.round(r.sustainPolls) : null;
+}
+
+/**
  * Has this rule's reset sustain been CONSUMED by the monitor state machine?
  *
  * True exactly when a down-detection trigger carries an auto reset with a hold:
@@ -1939,7 +2111,10 @@ export function downRecoverySustainSec(reset: unknown): number | null {
  * `notificationEngine.recoveredMeets` is the single reader.
  */
 export function downRecoveryConsumesSustain(trigger: Trigger, reset: ResetConfig): boolean {
-  return isDownDetectionTrigger(trigger) && downRecoverySustainSec(reset) !== null;
+  // Either spelling counts: a reset that states only a COUNT is still a hold
+  // the monitor state machine is serving, and missing that would let the engine
+  // charge the wait a second time.
+  return isDownDetectionTrigger(trigger) && (downRecoverySustainSec(reset) !== null || downRecoveryPolls(reset) !== null);
 }
 
 /**
@@ -2046,10 +2221,10 @@ export function normalizeReset(
 ): ResetConfig {
   if (reset) {
     if (reset.mode === "auto") {
-      return { mode: "auto", clearThreshold: reset.clearThreshold ?? null, sustainSec: reset.sustainSec ?? null };
+      return { mode: "auto", clearThreshold: reset.clearThreshold ?? null, sustainSec: reset.sustainSec ?? null, sustainPolls: reset.sustainPolls ?? null };
     }
     if (reset.mode === "condition") {
-      return { mode: "condition", condition: reset.condition ?? null, sustainSec: reset.sustainSec ?? null };
+      return { mode: "condition", condition: reset.condition ?? null, sustainSec: reset.sustainSec ?? null, sustainPolls: reset.sustainPolls ?? null };
     }
     if (reset.mode === "timed") return { mode: "timed", afterSec: reset.afterSec ?? null };
     if (reset.mode === "event") {

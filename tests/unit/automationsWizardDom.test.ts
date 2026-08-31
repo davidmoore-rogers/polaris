@@ -853,7 +853,9 @@ describe("automation wizard DOM render", () => {
     // cannot carry one of its own either — `critical` arrived with 60s and the
     // step-3 round trip drops it, which is exactly why step 5 has to agree.
     // What matters for this test is that both steps say the SAME three things.
-    expect(trigBase).toBe("is at or above 70 for 5 min");
+    // "5 minutes", not "5 min": both steps read the hold through the shared
+    // holdPhrase/humanDuration pair now, which is what keeps them identical.
+    expect(trigBase).toBe("is at or above 70 for 5 minutes");
     expect(trigTiers).toEqual(["is at or above 85", "is at or above 95"]);
 
     // Step 5: the same phrases, from the draft rather than the DOM controls, and
@@ -1531,8 +1533,46 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
     const saved = savedPayloads[0]! as Record<string, any>;
+    // BOTH spellings: the count is what the engine counts, the seconds are its
+    // wall-clock mirror (3 × the stubbed 120s cadence) and what sizes the
+    // sample window the engine fetches to see three readings.
+    expect(saved.trigger.forPolls).toBe(3);
     expect(saved.trigger.forDurationSec).toBe(360);
     expect(() => ruleInputSchema.parse(saved)).not.toThrow();
+  });
+
+  it("shows a STORED count verbatim, whatever the fleet's cadence has since become", async () => {
+    // The count is what the rule states, so a rule authored at a 60s cadence
+    // still reads "3 polls" on a fleet now polling every 120s — re-dividing its
+    // seconds would show 2 and quietly halve the hold on the next save.
+    doc.body.innerHTML = "";
+    savedPayloads.length = 0;
+    toastErrors.length = 0;
+    await (g.openAutomationWizard as (r: unknown) => Promise<void>)({
+      id: "r-stored-polls",
+      name: "High memory",
+      description: null,
+      enabled: true,
+      severity: "warning",
+      trigger: { type: "asset_metric", metric: "memPct", aggregation: "latest", windowSec: 0, operator: ">=", threshold: 88, forDurationSec: 180, forPolls: 3 },
+      scope: { allAssets: true },
+      reset: { mode: "auto", sustainSec: 120, sustainPolls: 2 },
+      cooldownSec: null,
+      messageTemplate: null,
+      actions: [{ type: "notify", channelId: "c1", recipientDeviceRegion: true }],
+      escalation: null,
+      severityBands: null,
+      bandNotify: null,
+    });
+    for (let i = 0; i < 2; i++) {
+      (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // 180s ÷ the stubbed 120s cadence would round to 2; the stored count says 3.
+    expect((doc.querySelector("#tf-duration-min") as unknown as { value: string }).value).toBe("3");
+    (doc.querySelector("#aw-next") as unknown as { click: () => void }).click();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((doc.querySelector("#aw-sustain-min") as unknown as { value: string }).value).toBe("2");
   });
 
   it("counts the auto-reset hold in polls too — recovery is judged on readings as well", async () => {
@@ -1571,6 +1611,7 @@ describe("automation wizard DOM render", () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(toastErrors).toEqual([]);
     const saved = savedPayloads[0]! as Record<string, any>;
+    expect(saved.reset.sustainPolls).toBe(6);
     expect(saved.reset.sustainSec).toBe(720);
     expect(() => ruleInputSchema.parse(saved)).not.toThrow();
   });
@@ -1639,11 +1680,14 @@ describe("automation wizard DOM render", () => {
       await new Promise((r) => setTimeout(r, 20));
     }
     const box = doc.querySelector("#aw-trigger-formula") as unknown as { style: { display: string }; textContent: string };
-    // `latest`: the minutes are the hold, outside the term, and there's no window
-    // argument at all — nothing for the sampling floor to qualify.
+    // `latest`: the period is the hold, outside the term, and there's no window
+    // argument at all — nothing for the sampling floor to qualify. It prints as
+    // "5p" rather than "10m" because the wizard counts holds in READINGS: the
+    // stored 600s reads as 5 polls at the stubbed 120s cadence, and saving from
+    // here stores that count (which is what the engine then counts).
     expect(box.style.display).not.toBe("none");
     expect(box.textContent).toContain("latest(");
-    expect(box.textContent).toContain("held 10m");
+    expect(box.textContent).toContain("held 5p");
     expect(box.textContent).not.toContain("floor");
     // The formula and the sentence are twins of one draft, so they must name the
     // same severity — asserted against each other rather than against a literal.

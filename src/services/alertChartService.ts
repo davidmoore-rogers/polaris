@@ -407,9 +407,14 @@ async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<F
  */
 async function resolveRecoveryPolls(
   assetId: string,
-  winner: { threshold: number; recoverySustainSec: number | null } | null,
+  winner: { threshold: number; recoverySustainSec: number | null; recoverySustainPolls?: number | null } | null,
 ): Promise<number> {
   if (!winner) return 0;
+  // A reset that states its hold as a COUNT needs no cadence at all — and no
+  // asset read to find one.
+  if (winner.recoverySustainPolls && winner.recoverySustainPolls > 0) {
+    return Math.min(100, Math.max(winner.threshold, Math.round(winner.recoverySustainPolls)));
+  }
   if (!winner.recoverySustainSec) return winner.threshold;
   try {
     const ctx = await prisma.asset.findUnique({
@@ -426,7 +431,7 @@ async function resolveRecoveryPolls(
       ...ctx,
       discoveredByIntegrationType: ctx.discoveredByIntegration?.type ?? null,
     });
-    return recoveryPollsFor(winner, resolved.intervalSeconds);
+    return recoveryPollsFor({ ...winner, recoverySustainPolls: winner.recoverySustainPolls ?? null }, resolved.intervalSeconds);
   } catch {
     return winner.threshold;
   }

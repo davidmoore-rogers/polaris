@@ -4422,6 +4422,18 @@ model NotificationRuleState {
   // hot path still writes on transitions, not per tick. NULL for non-banded
   // rules, which keep using conditionMetSince unchanged.
   bandMetSince      Json?
+  // Poll-counted holds (forPolls / reset.sustainPolls) for the sources that
+  // have NO sample series to count — the Asset columns, the SD-WAN rule table,
+  // and the windowed-ratio metrics that are recomputed per tick. `metRun` is
+  // the consecutive qualifying readings behind a pending/firing row, `clearRun`
+  // the consecutive recovered ones behind an auto-reset, and `lastReadingAt` is
+  // the poll anchor that last advanced either — without it the engine's 60s
+  // tick would count five "polls" against a device polled every five minutes.
+  // Series-backed triggers ignore all three: their run is computed from the
+  // samples themselves, statelessly (see leadingRun / advanceRun).
+  metRun            Int       @default(0)
+  clearRun          Int       @default(0)
+  lastReadingAt     DateTime?
   updatedAt         DateTime  @updatedAt
 
   @@unique([ruleId, assetId, dimensionKey])

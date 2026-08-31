@@ -47,6 +47,7 @@ import { logEvent } from "./eventLogService.js";
 import {
   DEFAULT_MISSED_POLLS,
   downRecoverySustainSec,
+  downRecoveryPolls,
   isDownDetectionTrigger,
   scopeRank,
   deviceFilterMatch,
@@ -90,6 +91,10 @@ export interface DownWinner {
    * is what keeps the count honest after someone changes the interval.
    */
   recoverySustainSec: number | null;
+  /** The same hold as the operator's own COUNT, when the reset states one —
+   *  preferred over the seconds, which only round back to it while the cadence
+   *  is the one they authored against. */
+  recoverySustainPolls: number | null;
   ruleId: string;
   ruleName: string;
   rank: number;
@@ -113,6 +118,7 @@ export interface DownRule {
   rank: number;
   threshold: number;
   recoverySustainSec: number | null;
+  recoverySustainPolls: number | null;
   dimensionFilter: Parameters<typeof deviceFilterMatch>[0];
 }
 
@@ -262,6 +268,7 @@ export function pickDownWinner(rules: DownRule[], asset: ScopeAsset, sink?: Down
   return {
     threshold: winner.threshold,
     recoverySustainSec: winner.recoverySustainSec,
+    recoverySustainPolls: winner.recoverySustainPolls,
     ruleId: winner.id,
     ruleName: winner.name,
     rank: winner.rank,
@@ -291,6 +298,9 @@ function toDownRule(row: {
     // the number that was in force when it was written.
     threshold: typeof missed === "number" && missed > 0 ? missed : DEFAULT_MISSED_POLLS,
     recoverySustainSec: downRecoverySustainSec(row.reset),
+    // The count as STATED, when the reset states one — recoveryPollsFor prefers
+    // it over dividing the seconds mirror by a cadence that may have moved.
+    recoverySustainPolls: downRecoveryPolls(row.reset),
     dimensionFilter: (trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] }).dimensionFilter,
   };
 }
@@ -435,6 +445,8 @@ export interface DownDetectionVerdict {
   threshold: number;
   /** The reset sustain in seconds, or null — see DownWinner. */
   recoverySustainSec: number | null;
+  /** The same hold as the operator's own COUNT, when the reset states one. */
+  recoverySustainPolls: number | null;
 }
 
 /**
@@ -450,7 +462,7 @@ export async function resolveDownDetection(assetId: string): Promise<DownDetecti
   // narrower rule could only raise the specificity, and it converges within one
   // TTL.
   if (!hit) return null;
-  return { threshold: hit.threshold, recoverySustainSec: hit.recoverySustainSec };
+  return { threshold: hit.threshold, recoverySustainSec: hit.recoverySustainSec, recoverySustainPolls: hit.recoverySustainPolls };
 }
 
 /**
@@ -476,7 +488,10 @@ export async function resolveDownThreshold(assetId: string): Promise<number | nu
  * probe path already has in hand.
  */
 export function recoveryPollsFor(verdict: DownDetectionVerdict, intervalSec: number): number {
-  const { threshold, recoverySustainSec } = verdict;
+  const { threshold, recoverySustainSec, recoverySustainPolls } = verdict;
+  // A stated COUNT needs no conversion at all — it is already the answer, and
+  // it survives a cadence change that the division below would silently absorb.
+  if (recoverySustainPolls && recoverySustainPolls > 0) return Math.min(100, Math.max(threshold, Math.round(recoverySustainPolls)));
   if (!recoverySustainSec || !Number.isFinite(intervalSec) || intervalSec <= 0) return threshold;
   // Round rather than ceil: the wizard produced these seconds by MULTIPLYING a
   // whole number of polls by the same cadence, so rounding returns the operator

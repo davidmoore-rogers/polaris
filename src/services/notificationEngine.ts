@@ -75,6 +75,11 @@ import {
   type DeviceFilterAsset,
   downRecoveryConsumesSustain,
   DOWN_ALERT_HOLDING_STATES,
+  triggerHoldPolls,
+  resetSustainPolls,
+  leadingRun,
+  advanceRun,
+  sustainedSeverityByRun,
 } from "./notificationTypes.js";
 import { scopeMatchesAsset, type ScopeAsset } from "./notificationRuleService.js";
 import { decorateRelationLeafHits } from "./scopeRelationIndex.js";
@@ -97,6 +102,25 @@ import {
 
 const LAST_EVENT_SETTING_KEY = "notificationEngine.lastEventCursor";
 const DEFAULT_LOOKBACK_MS = 15 * 60 * 1000; // window to find the "latest" sample
+/** Most recent readings kept per (asset, dimension) for run counting. A hold is
+ *  capped at 100 polls, so this covers the longest one with room to spare while
+ *  bounding what a chatty dimension costs in memory on a 2000-asset tick. */
+const SERIES_CAP = 200;
+/**
+ * How far back a trigger's samples must be fetched. Normally the 15-minute
+ * "find the latest sample" window (or the aggregation's own window), but a
+ * poll-counted hold has to SEE its N readings: `forDurationSec` is the
+ * wall-clock mirror of that count (polls × the scope's cadence at authoring
+ * time), so twice it covers N readings with room for jitter and a missed poll.
+ * Capped at 6 hours — past that this stops being an interactive query, and a
+ * hold that long is a wall-clock question anyway.
+ */
+const HOLD_LOOKBACK_CAP_MS = 6 * 60 * 60 * 1000;
+function lookbackMsFor(trigger: { windowSec?: number; forDurationSec?: number; forPolls?: number | null }): number {
+  const base = Math.max((trigger.windowSec ?? 0) * 1000, DEFAULT_LOOKBACK_MS);
+  if (!triggerHoldPolls(trigger)) return base;
+  return Math.max(base, Math.min((trigger.forDurationSec ?? 0) * 2000, HOLD_LOOKBACK_CAP_MS));
+}
 
 // probeLossPct is a windowed RATIO, so its window is the measurement rather than
 // a lookback (business rule 29). The resolution (configured window floored at 5
@@ -172,6 +196,9 @@ interface ScopeAssetRow extends ScopeAsset {
   // Read by both IPsec resolvers (ipsecStatus / ipsecThroughputBps) for the
   // pinned-tunnel gate (tunnelIsPinned).
   monitoredIpsecTunnels?: string[];
+  // Poll anchors for the current-state readings (see SCOPE_SELECT).
+  lastMonitorAt?: Date | null;
+  lastSystemInfoAt?: Date | null;
   // Read ONLY by the builder's device-list preview (optional so the pseudo-host
   // row can omit it). The engine never filters on it — see SCOPE_SELECT.
   monitored?: boolean;
@@ -185,6 +212,23 @@ interface Reading {
   dimKey: string;
   dimLabel: string;
   value: number | string | boolean | null;
+  /**
+   * The recent readings behind `value`, NEWEST FIRST — present only for a
+   * SERIES source (every sample table, plus the Polaris host's own metrics).
+   * A poll-counted hold is resolved from this statelessly (leadingRun), which
+   * is what makes "3 polls" mean three readings whatever the engine's tick
+   * spacing is, and what stops a device that has stopped reporting from
+   * satisfying a hold with one stale sample re-read at every tick.
+   */
+  series?: (number | string | boolean | null)[];
+  /**
+   * When this reading was taken: the newest sample's timestamp for a series
+   * source, that stream's poll anchor on the Asset for a current-state one
+   * (`lastMonitorAt` for the probe-backed fields, `lastSystemInfoAt` for the
+   * SD-WAN ones). The current-state path counts observations on the state row
+   * and uses this to tell a NEW poll from the same one seen again.
+   */
+  readingAt?: Date | null;
 }
 
 // ─── Comparators ────────────────────────────────────────────────────────────
@@ -223,6 +267,12 @@ const SCOPE_SELECT = {
   monitoredInterfaces: true,
   // Every IPsec tunnel reading is restricted to PINNED tunnels (tunnelIsPinned).
   monitoredIpsecTunnels: true,
+  // The poll anchors a CURRENT-STATE reading counts on: these fields have no
+  // sample series, so "3 polls" can only mean three observations in which the
+  // stream that produces them actually ran. lastMonitorAt is the probe (every
+  // Asset-column field, plus the windowed-ratio metrics), lastSystemInfoAt the
+  // scrape that rewrites the SD-WAN rule table.
+  lastMonitorAt: true, lastSystemInfoAt: true,
   // The gate every trigger path applies (assetCanTrigger): an automation only
   // ever fires about a device Polaris is actually polling. Kept in the select
   // as well as the WHERE because the event tail and the builder's device
@@ -507,7 +557,7 @@ function reduceReadings(
   aggregation: string,
 ): Reading[] {
   // group by assetId|dimKey
-  const groups = new Map<string, { asset: ScopeAssetRow; dimKey: string; dimLabel: string; values: number[]; latest: { ts: number; v: number | null } }>();
+  const groups = new Map<string, { asset: ScopeAssetRow; dimKey: string; dimLabel: string; values: number[]; series: Array<{ ts: number; v: number | null }>; latest: { ts: number; v: number | null } }>();
   for (const row of rows) {
     const asset = assetIndex.get(row.assetId);
     if (!asset) continue;
@@ -516,11 +566,16 @@ function reduceReadings(
     const v = valueFn(row);
     let g = groups.get(key);
     if (!g) {
-      g = { asset, dimKey, dimLabel: dimLabelFn(row), values: [], latest: { ts: -1, v: null } };
+      g = { asset, dimKey, dimLabel: dimLabelFn(row), values: [], series: [], latest: { ts: -1, v: null } };
       groups.set(key, g);
     }
     if (v !== null) g.values.push(v);
     const ts = row.timestamp.getTime();
+    // Every sample, not just the newest: a poll-counted hold is the leading run
+    // of qualifying readings, so their ORDER is the reading and a reduced value
+    // cannot answer it. Sorted on the way out — rows arrive in whatever order
+    // the query returned them.
+    g.series.push({ ts, v });
     if (ts > g.latest.ts) g.latest = { ts, v };
   }
   const out: Reading[] = [];
@@ -531,7 +586,15 @@ function reduceReadings(
     else if (aggregation === "min") value = g.values.length ? Math.min(...g.values) : null;
     else if (aggregation === "max") value = g.values.length ? Math.max(...g.values) : null;
     else value = g.latest.v; // latest
-    out.push({ assetId: g.asset.id, hostname: g.asset.hostname, tags: g.asset.tags, dimKey: g.dimKey, dimLabel: g.dimLabel, value });
+    g.series.sort((a, b) => b.ts - a.ts);
+    out.push({
+      assetId: g.asset.id, hostname: g.asset.hostname, tags: g.asset.tags, dimKey: g.dimKey, dimLabel: g.dimLabel, value,
+      // RAW readings, never the aggregate: an aggregated trigger has no hold to
+      // count (its window IS the period), and a `latest` one needs exactly
+      // these values in exactly this order.
+      series: g.series.slice(0, SERIES_CAP).map((x) => x.v),
+      readingAt: g.latest.ts >= 0 ? new Date(g.latest.ts) : null,
+    });
   }
   return out;
 }
@@ -545,7 +608,8 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
   const ids = assets.map((a) => a.id);
   if (ids.length === 0) return [];
   const index = new Map(assets.map((a) => [a.id, a]));
-  const since = new Date(Date.now() - Math.max(trigger.windowSec * 1000, DEFAULT_LOOKBACK_MS));
+  // Wide enough to SEE a poll-counted hold's N readings (lookbackMsFor).
+  const since = new Date(Date.now() - lookbackMsFor(trigger));
   const agg = trigger.aggregation;
   const num = (b: bigint | null | undefined): number | null => (b === null || b === undefined ? null : Number(b));
 
@@ -606,7 +670,10 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
         if (!a) return null;
         const total = Number(r.total); const failed = Number(r.failed);
         const value = total > 0 ? Math.round((failed / total) * 1000) / 10 : null;
-        return { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value };
+        // A windowed RATIO is recomputed from scratch every tick — there is no
+        // series of ratios to count, so a poll-counted hold on one counts
+        // observations against the probe's own anchor instead.
+        return { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value, readingAt: a.lastMonitorAt ?? null };
       }).filter((r): r is Reading => r !== null);
     }
     case "hwSensorValue": {
@@ -768,6 +835,23 @@ function rateReadings(
   return out;
 }
 
+/**
+ * Group timestamp-ordered rows (newest first WITHIN the query's order) into one
+ * array per key, preserving that order — the run of readings a poll-counted
+ * hold counts. Replaces the `distinct` the state resolvers used when the newest
+ * row was the only one they needed.
+ */
+function groupSeries<T>(rows: T[], keyOf: (r: T) => string): T[][] {
+  const byKey = new Map<string, T[]>();
+  for (const r of rows) {
+    const k = keyOf(r);
+    const g = byKey.get(k);
+    if (g) g.push(r);
+    else byKey.set(k, [r]);
+  }
+  return [...byKey.values()];
+}
+
 async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asset_state" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
   const df = trigger.dimensionFilter ?? {};
   assets = applyDeviceFilters(assets, df); // same asset-set narrowing as the metric resolver
@@ -775,18 +859,24 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
   const ids = assets.map((a) => a.id);
   const mk = (a: ScopeAssetRow, dimKey: string, dimLabel: string, value: any): Reading => ({ assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey, dimLabel, value });
 
+  // These five are Asset COLUMNS: current state, no series to count, so a
+  // poll-counted hold counts observations gated on the probe's own anchor.
+  const probeAt = (a: ScopeAssetRow): Date | null => a.lastMonitorAt ?? null;
   switch (trigger.field) {
-    case "monitorStatus": return assets.map((a) => mk(a, "", "", a.monitorStatus));
-    case "status": return assets.map((a) => mk(a, "", "", a.status));
-    case "consecutiveFailures": return assets.map((a) => mk(a, "", "", a.consecutiveFailures));
-    case "dependencySuppressed": return assets.map((a) => mk(a, "", "", a.dependencySuppressed));
-    case "quarantined": return assets.map((a) => mk(a, "", "", a.quarantinedAt !== null || a.status === "quarantined"));
+    case "monitorStatus": return assets.map((a) => ({ ...mk(a, "", "", a.monitorStatus), readingAt: probeAt(a) }));
+    case "status": return assets.map((a) => ({ ...mk(a, "", "", a.status), readingAt: probeAt(a) }));
+    case "consecutiveFailures": return assets.map((a) => ({ ...mk(a, "", "", a.consecutiveFailures), readingAt: probeAt(a) }));
+    case "dependencySuppressed": return assets.map((a) => ({ ...mk(a, "", "", a.dependencySuppressed), readingAt: probeAt(a) }));
+    case "quarantined": return assets.map((a) => ({ ...mk(a, "", "", a.quarantinedAt !== null || a.status === "quarantined"), readingAt: probeAt(a) }));
     case "ifOperStatus": case "ifAdminStatus": case "poeStatus": {
       const col = trigger.field === "ifOperStatus" ? "operStatus"
         : trigger.field === "ifAdminStatus" ? "adminStatus"
         : "poeStatus";
-      const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
-      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "ifName"], select: { assetId: true, ifName: true, operStatus: true, adminStatus: true, poeStatus: true } });
+      const since = new Date(Date.now() - lookbackMsFor(trigger));
+      // No `distinct` any more: a poll-counted hold needs the RUN of readings
+      // per port, so the rows are grouped here (newest first) and the newest of
+      // each group is the current value the un-counted paths always used.
+      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], select: { assetId: true, ifName: true, timestamp: true, operStatus: true, adminStatus: true, poeStatus: true } });
       // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
       // the same join the Down Interfaces widget uses): the interfaces stream
       // samples every port a device reports, and an unpinned port is usually
@@ -795,7 +885,8 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // port is deliberately down, not an outage — the widget's adminStatus
       // gate). An interface that leaves the pin set (or gets admin-downed)
       // stops producing readings; the vanished-state sweep clears its alert.
-      return rows.filter((r) => {
+      const byPort = groupSeries(rows, (r) => `${r.assetId}|${r.ifName}`);
+      return byPort.map((g) => g[0]!).filter((r) => {
         const a = index.get(r.assetId);
         if (!interfaceIsPinned(a, r.ifName)) return false;
         if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
@@ -809,30 +900,45 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
         // is unaffected: a disabled port reports "disabled", never "fault".
         if (trigger.field === "poeStatus" && r.poeStatus === "disabled") return false;
         return substringMatch(r.ifName, df.ifNamePattern);
-      }).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.ifName, r.ifName, (r as any)[col]); });
+      }).map((r) => {
+        const a = index.get(r.assetId)!;
+        const g = byPort.find((x) => x[0]!.assetId === r.assetId && x[0]!.ifName === r.ifName)!;
+        return { ...mk(a, r.ifName, r.ifName, (r as any)[col]), series: g.slice(0, SERIES_CAP).map((x) => (x as any)[col] ?? null), readingAt: r.timestamp };
+      });
     }
     case "ipsecStatus": {
-      const since = new Date(Date.now() - DEFAULT_LOOKBACK_MS);
-      const rows = await prisma.assetIpsecTunnelSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { tunnelName: "asc" }, { timestamp: "desc" }], distinct: ["assetId", "tunnelName"], select: { assetId: true, tunnelName: true, status: true } });
+      const since = new Date(Date.now() - lookbackMsFor(trigger));
+      const rows = await prisma.assetIpsecTunnelSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { tunnelName: "asc" }, { timestamp: "desc" }], select: { assetId: true, tunnelName: true, timestamp: true, status: true } });
+      const byTunnel = groupSeries(rows, (r) => `${r.assetId}|${r.tunnelName}`);
       // Only PINNED tunnels produce readings (Asset.monitoredIpsecTunnels) —
       // the full system-info scrape samples every tunnel the gate reports, and
       // an unpinned tunnel is one nobody selected for monitoring, so a "tunnel
       // down" rule must not alert on it. See tunnelIsPinned.
-      return rows.filter((r) => tunnelIsPinned(index.get(r.assetId), r.tunnelName) && substringMatch(r.tunnelName, df.tunnelName)).map((r) => { const a = index.get(r.assetId)!; return mk(a, r.tunnelName, r.tunnelName, r.status); });
+      return byTunnel.map((g) => g[0]!).filter((r) => tunnelIsPinned(index.get(r.assetId), r.tunnelName) && substringMatch(r.tunnelName, df.tunnelName)).map((r) => {
+        const a = index.get(r.assetId)!;
+        const g = byTunnel.find((x) => x[0]!.assetId === r.assetId && x[0]!.tunnelName === r.tunnelName)!;
+        return { ...mk(a, r.tunnelName, r.tunnelName, r.status), series: g.slice(0, SERIES_CAP).map((x) => x.status ?? null), readingAt: r.timestamp };
+      });
     }
     case "sdwanRuleStatus": case "sdwanSelectedMember": {
       const rows = await prisma.assetSdwanRule.findMany({ where: { assetId: { in: ids } }, select: { assetId: true, ruleName: true, status: true, selectedMember: true } });
       const col = trigger.field === "sdwanRuleStatus" ? "status" : "selectedMember";
       // sdwanRulePattern narrows to the named rule(s) — without it every rule
       // on the gate is its own alerting dimension, which is the default.
-      return rows.filter((r) => substringMatch(r.ruleName, df.sdwanRulePattern)).map((r) => { const a = index.get(r.assetId); if (!a) return null; return mk(a, r.ruleName, r.ruleName, (r as any)[col]); }).filter(Boolean) as Reading[];
+      return rows.filter((r) => substringMatch(r.ruleName, df.sdwanRulePattern)).map((r) => {
+        const a = index.get(r.assetId);
+        if (!a) return null;
+        // Delete-replaced per scrape, so there is no history to count: the
+        // system-info anchor is what says a NEW reading happened.
+        return { ...mk(a, r.ruleName, r.ruleName, (r as any)[col]), readingAt: a.lastSystemInfoAt ?? null };
+      }).filter(Boolean) as Reading[];
     }
     default: return [];
   }
 }
 
 async function resolveHostMetricReading(trigger: Extract<Trigger, { type: "host_metric" }>): Promise<Reading | null> {
-  const since = new Date(Date.now() - Math.max(trigger.windowSec * 1000, DEFAULT_LOOKBACK_MS));
+  const since = new Date(Date.now() - lookbackMsFor(trigger));
   const rows = await prisma.hostMetricsSample.findMany({ where: { timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, take: 2000 });
   if (rows.length === 0) return null;
   const num = (b: bigint) => Number(b);
@@ -854,7 +960,13 @@ async function resolveHostMetricReading(trigger: Extract<Trigger, { type: "host_
   else if (trigger.aggregation === "min") value = Math.min(...rows.map(valueOf));
   else if (trigger.aggregation === "max") value = Math.max(...rows.map(valueOf));
   else value = valueOf(rows[0]); // latest
-  return { assetId: "", hostname: "Polaris host", tags: [], dimKey: "", dimLabel: "", value };
+  // The host samples itself every 30s, so its readings ARE a series and a
+  // poll-counted hold counts them the same way a device metric's is counted.
+  return {
+    assetId: "", hostname: "Polaris host", tags: [], dimKey: "", dimLabel: "", value,
+    series: rows.slice(0, SERIES_CAP).map(valueOf),
+    readingAt: rows[0]?.timestamp ?? null,
+  };
 }
 
 export function readingMeets(trigger: Trigger, value: number | string | boolean | null): boolean {
@@ -1301,8 +1413,31 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     // hold the firing alert's current severity).
     const prevMetSince = tiers ? metSinceOf(st) : null;
     const metSince = tiers ? updateTierMetSince(prevMetSince, tiers, meets ? lastValue : null, now.getTime()) : null;
-    const sustainedSev = tiers ? sustainedSeverity(metSince, tiers, now.getTime()) : null;
     const metSinceChanged = !!tiers && tierMetSinceChanged(prevMetSince, metSince);
+    // POLL-COUNTED HOLDS (FOR_POLLS_NOTE). A rule that states its hold or its
+    // clear-sustain as a count of readings is decided by counting readings; one
+    // that states seconds keeps the wall-clock path below, untouched. Both runs
+    // are resolved once per reading and reused by the fire and the clear side.
+    const holdPolls = triggerHoldPolls(trigger);
+    const sustainPolls = engineSustainPolls(rule);
+    const tierPolls = tiers ? tierRuns(reading, tiers) : null;
+    const recoveredNow = recoveredMeets(trigger, rule.reset, reading.value);
+    const runs = holdPolls > 0 || sustainPolls > 0 || (tiers && tierPolls)
+      ? readingRuns(reading, st ?? undefined, trigger, rule.reset, meets, recoveredNow)
+      : null;
+    // A banded ladder counts readings only when its tiers carry counts AND the
+    // source has a series to count (tierRuns is null for a windowed ratio).
+    const sustainedSev = tiers
+      ? (tierPolls && tiers.some((t) => t.forPolls != null)
+        ? sustainedSeverityByRun(tierPolls, tiers)
+        : sustainedSeverity(metSince, tiers, now.getTime()))
+      : null;
+    /** Persist the current-state counters, but only when this reading moved
+     *  them — a series-backed rule stores nothing, having nothing to remember. */
+    const runPatch = (): Prisma.NotificationRuleStateUpdateInput =>
+      runs && runs.stateful && runs.advanced
+        ? { metRun: runs.metRun, clearRun: runs.clearRun, lastReadingAt: reading.readingAt ?? now }
+        : {};
     const fireOpts = sustainedSev ? { severity: sustainedSev, actions: tierForSeverity(rule, sustainedSev).actions } : undefined;
 
     if (meets) {
@@ -1312,6 +1447,15 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // per-tier timer starts here and the row sits pending.
           if (sustainedSev) await fire(rule, reading, lastValue, now, undefined, fireOpts, metSince);
           else await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue, bandMetSince: metSince });
+        } else if (holdPolls > 0) {
+          // Counted in READINGS: this one is the first of the run, so it fires
+          // only when the hold is a single poll. The run itself is stored only
+          // for a current-state source; a series-backed one recomputes it.
+          if (runs && runs.metRun >= holdPolls) await fire(rule, reading, lastValue, now, undefined, fireOpts);
+          else await upsertState(rule.id, reading, "pending", {
+            conditionMetSince: now, lastValue,
+            ...(runs?.stateful ? { metRun: runs.metRun, clearRun: runs.clearRun, lastReadingAt: reading.readingAt ?? now } : {}),
+          });
         } else if ((trigger as any).forDurationSec > 0) {
           // start the sustained-duration timer
           await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue });
@@ -1324,6 +1468,12 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           else if (metSinceChanged) {
             // A tier entered or dropped out while pending — persist the runs.
             await prisma.notificationRuleState.update({ where: { id: st.id }, data: { bandMetSince: metSinceJson(metSince), lastValue } });
+          }
+        } else if (holdPolls > 0) {
+          if (runs && runs.metRun >= holdPolls) await fire(rule, reading, lastValue, now, undefined, fireOpts);
+          else {
+            const patch = runPatch();
+            if (Object.keys(patch).length) await prisma.notificationRuleState.update({ where: { id: st.id }, data: { ...patch, lastValue } });
           }
         } else {
           const since = st.conditionMetSince ?? now;
@@ -1346,13 +1496,16 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // not cancel it (parity with the composite path's same contract).
           const data: Prisma.NotificationRuleStateUpdateInput = resetTree ? {} : { recoveredSince: null };
           if (hasBands) data.bandMetSince = metSinceJson(metSince);
+          Object.assign(data, runPatch()); // the recovery run just broke
           if (Object.keys(data).length) await prisma.notificationRuleState.update({ where: { id: st.id }, data });
         } // same band / firing without a pending recovery → already active; suppress
       }
     } else {
       // condition not met for this reading
       if (st && st.state === "pending") {
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, bandMetSince: Prisma.DbNull } });
+        // Zeroed with the timer: a run is CONSECUTIVE, so a reading under the
+        // line ends it however long it was.
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, bandMetSince: Prisma.DbNull, metRun: 0, clearRun: 0, lastReadingAt: reading.readingAt ?? now } });
       } else if (st && st.state === "firing") {
         if (resetTree) {
           // The reset tree owns recovery — the trigger falling away is not
@@ -1369,11 +1522,23 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
           // old band it would read critical indefinitely.
           if (hasBands && (st.firingSeverity ?? rule.severity) !== rule.severity) {
             await applyBandTransition(rule, reading, st, rule.severity, now, metSince);
-          } else if (st.recoveredSince || metSinceChanged) {
+          } else if (st.recoveredSince || metSinceChanged || Object.keys(runPatch()).length) {
             await prisma.notificationRuleState.update({
               where: { id: st.id },
-              data: { recoveredSince: null, ...(hasBands ? { bandMetSince: metSinceJson(metSince) } : {}) },
+              // A dead-band reading is neither met nor recovered, so it ends the
+              // recovery run (advanceRun zeroes it) without starting a new one.
+              data: { recoveredSince: null, ...(hasBands ? { bandMetSince: metSinceJson(metSince) } : {}), ...runPatch() },
             });
+          }
+        } else if (sustainPolls > 0) {
+          // "Must stay cleared for N polls": N consecutive RECOVERED readings,
+          // counted the same way the fire side counts qualifying ones.
+          if (runs && runs.clearRun >= sustainPolls) {
+            if (hasBands) await fireResolved(rule, reading, st, now);
+            await recover(rule, st, reading, now);
+          } else {
+            const patch = runPatch();
+            if (Object.keys(patch).length) await prisma.notificationRuleState.update({ where: { id: st.id }, data: patch });
           }
         } else {
           const sustainSec = engineSustainSec(rule);
@@ -1454,7 +1619,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
       await clearActiveNotification(st, "system:device-down");
       await prisma.notificationRuleState.update({
         where: { id: st.id },
-        data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull },
+        data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS },
       });
       await logEvent({
         action: "notification.superseded",
@@ -1534,7 +1699,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
         // reporting), so the reset context is built from the state row.
         await fireReset(rule, readingFromState(st), st, "alert timed out", now);
         await clearActiveNotification(st, "system:timed");
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS } });
       }
     }
   }
@@ -1569,6 +1734,10 @@ function collectLeafRefs(node: { children: (TriggerConditionGroup | CompositeLea
 
 interface LeafTruth {
   met: boolean;
+  /** Newest reading time across this leaf's dimensions — the composite's own
+   *  poll anchor (a tree has no series of its own to count, so its hold counts
+   *  observations and this is what says a NEW one happened). */
+  readingAt?: Date | null;
   /** The first meeting dimension — names the sensor/mount/interface in the alert. */
   witness: { dimLabel: string; value: number | string | boolean | null } | null;
   /** A representative reading regardless of met (preview shows current values). */
@@ -1612,6 +1781,7 @@ function leafTruthByAsset(leaf: CompositeLeaf, readings: Reading[]): Map<string,
       out.set(id, t);
     }
     if (!t.sample) t.sample = { dimLabel: r.dimLabel, value: r.value };
+    if (r.readingAt && (!t.readingAt || r.readingAt.getTime() > t.readingAt.getTime())) t.readingAt = r.readingAt;
     if (!t.met && readingMeets(leafTrigger, r.value)) {
       t.met = true;
       t.witness = { dimLabel: r.dimLabel, value: r.value };
@@ -1708,6 +1878,8 @@ function evalTriggerTreeForAsset(
 
 interface CompositeOutcome {
   meets: boolean;
+  /** Newest reading time across every leaf — see LeafTruth.readingAt. */
+  readingAt?: Date | null;
   /** False when NO leaf produced a reading for this asset — the asset is
    *  skipped entirely (state frozen), matching the per-reading path's
    *  no-reading behavior. */
@@ -1724,12 +1896,17 @@ function compositeOutcomeForAsset(
 ): CompositeOutcome {
   const metLeaves: CompositeOutcome["metLeaves"] = [];
   let hasAnyReading = false;
+  let readingAt: Date | null = null;
   for (const { leafId, leaf } of leaves) {
     const t = truths.get(leafId)?.get(assetId);
     if (t?.hasReading) hasAnyReading = true;
+    // The NEWEST leaf reading is the tree's own: a poll on any leaf is a new
+    // observation of the tree, and the alternative (the oldest) would stall the
+    // count on the slowest-cadence leaf.
+    if (t?.readingAt && (!readingAt || t.readingAt.getTime() > readingAt.getTime())) readingAt = t.readingAt;
     if (t?.met) metLeaves.push({ leafId, leaf, witness: t.witness });
   }
-  return { meets: evalTriggerTreeForAsset(tree, assetId, truths), hasAnyReading, metLeaves, totalLeaves: leaves.length };
+  return { meets: evalTriggerTreeForAsset(tree, assetId, truths), hasAnyReading, readingAt, metLeaves, totalLeaves: leaves.length };
 }
 
 /** Human label for a leaf condition ("CPU utilization >= 90"). */
@@ -1764,7 +1941,7 @@ const HOST_PSEUDO_ASSET: ScopeAssetRow = {
  *  per-reading sustain block exactly. */
 async function applySustainedRecovery(
   rule: DbRule,
-  st: { id: string; notificationId: string | null; recoveredSince: Date | null; firingSeverity?: string | null },
+  st: { id: string; notificationId: string | null; recoveredSince: Date | null; firingSeverity?: string | null; clearRun?: number; metRun?: number; lastReadingAt?: Date | null },
   recovered: boolean,
   now: Date,
   /** Carried purely so the reset actions have a device to talk about. */
@@ -1774,7 +1951,7 @@ async function applySustainedRecovery(
    *  (bands need a numeric single trigger, so composites never set it). */
   opts?: { fireResolvedFirst?: boolean },
 ): Promise<void> {
-  if (!recovered) {
+  if (!recovered && engineSustainPolls(rule) <= 0) {
     if (st.recoveredSince) {
       await prisma.notificationRuleState.update({ where: { id: st.id }, data: { recoveredSince: null } });
     }
@@ -1786,6 +1963,25 @@ async function applySustainedRecovery(
     }
     await recover(rule, st, reading, now);
   };
+  // Counted in READINGS when the reset states a count: the recovery has to hold
+  // across N consecutive observations, and an observation is one in which the
+  // source actually produced a new reading (advanceRun). A non-recovered
+  // reading lands here too — it is what ENDS the run.
+  const sustainPolls = engineSustainPolls(rule);
+  if (sustainPolls > 0) {
+    const stepped = advanceRun(st.clearRun ?? 0, recovered, reading?.readingAt ?? null, st.lastReadingAt ?? null);
+    if (recovered && stepped.run >= sustainPolls) {
+      await clear();
+      return;
+    }
+    if (stepped.advanced || st.recoveredSince) {
+      await prisma.notificationRuleState.update({
+        where: { id: st.id },
+        data: { recoveredSince: null, clearRun: stepped.run, lastReadingAt: reading?.readingAt ?? now },
+      });
+    }
+    return;
+  }
   const sustainSec = engineSustainSec(rule);
   if (sustainSec <= 0) {
     await clear();
@@ -1853,7 +2049,15 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
     if (!outcome.hasAnyReading) continue; // no evidence either way — state frozen (parity with the per-reading path)
     evaluatedIds.add(a.id);
     const st = stateMap.get(a.id);
-    const reading: Reading = { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value: null };
+    // `readingAt` is the tree's own poll anchor (the newest leaf reading), which
+    // is what a poll-counted hold or clear-sustain counts observations against.
+    const reading: Reading = { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value: null, readingAt: outcome.readingAt ?? null };
+    const holdPolls = triggerHoldPolls(trigger);
+    // A tree has no series of its own — its leaves' readings are of different
+    // things — so the run lives on the state row.
+    const stepped = holdPolls > 0
+      ? advanceRun(st?.metRun ?? 0, outcome.meets, outcome.readingAt ?? null, st?.lastReadingAt ?? null)
+      : null;
 
     if (st?.state === "firing") {
       if (rule.reset.mode === "condition") {
@@ -1879,22 +2083,39 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
 
     if (outcome.meets) {
       if (!st || st.state === "clear") {
-        if (trigger.forDurationSec > 0) {
+        if (holdPolls > 0) {
+          if (stepped && stepped.run >= holdPolls) await fire(rule, reading, null, now, compositeFireInfo(outcome));
+          else await upsertState(rule.id, reading, "pending", {
+            conditionMetSince: now, lastValue: null,
+            metRun: stepped?.run ?? 1, clearRun: 0, lastReadingAt: outcome.readingAt ?? now,
+          });
+        } else if (trigger.forDurationSec > 0) {
           await upsertState(rule.id, reading, "pending", { conditionMetSince: now, lastValue: null });
         } else {
           await fire(rule, reading, null, now, compositeFireInfo(outcome));
         }
       } else if (st.state === "pending") {
-        const since = st.conditionMetSince ?? now;
-        if (now.getTime() - since.getTime() >= trigger.forDurationSec * 1000) {
-          await fire(rule, reading, null, now, compositeFireInfo(outcome));
+        if (holdPolls > 0) {
+          if (stepped && stepped.run >= holdPolls) await fire(rule, reading, null, now, compositeFireInfo(outcome));
+          else if (stepped?.advanced) {
+            await prisma.notificationRuleState.update({
+              where: { id: st.id },
+              data: { metRun: stepped.run, clearRun: 0, lastReadingAt: outcome.readingAt ?? now },
+            });
+          }
+        } else {
+          const since = st.conditionMetSince ?? now;
+          if (now.getTime() - since.getTime() >= trigger.forDurationSec * 1000) {
+            await fire(rule, reading, null, now, compositeFireInfo(outcome));
+          }
+          // else keep pending
         }
-        // else keep pending
       }
     } else if (st?.state === "pending") {
       // Partial-missing under AND lands here too (missing leaf ⇒ false) — the
       // debounce restarts; accepted semantics (readings smooth over 15 min).
-      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null } });
+      // The counted run ends with it, for the same reason.
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, ...CLEARED_RUNS } });
     }
   }
 
@@ -1934,7 +2155,7 @@ async function evaluateCompositeRule(rule: DbRule): Promise<void> {
         // reporting), so the reset context is built from the state row.
         await fireReset(rule, readingFromState(st), st, "alert timed out", now);
         await clearActiveNotification(st, "system:timed");
-        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
+        await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS } });
       }
     }
   }
@@ -1951,6 +2172,11 @@ async function upsertState(
     notificationId?: string | null;
     /** Per-tier met-since runs (banded rules only); undefined leaves it alone. */
     bandMetSince?: Record<string, number> | null;
+    /** Poll-counted run state — current-state sources only (a series-backed
+     *  trigger recomputes its runs and stores none). */
+    metRun?: number;
+    clearRun?: number;
+    lastReadingAt?: Date | null;
   },
 ) {
   const { bandMetSince, ...rest } = extra;
@@ -2001,7 +2227,102 @@ function tierLadderFor(rule: DbRule): ResolvedTier[] | null {
     rule.severity as Severity,
     t.forDurationSec ?? 0,
     rule.severityBands as SeverityBand[] | null,
+    (t as { forPolls?: number }).forPolls ?? null,
   );
+}
+
+/**
+ * How many consecutive READINGS, ending with this one, satisfied `meets` —
+ * `null` when the source carries no series and the caller must count
+ * observations on the state row instead (advanceRun).
+ *
+ * The predicate is applied to the raw readings in `series`, so it answers the
+ * question the operator asked ("three polls over 90") rather than the question
+ * wall-clock answered ("the newest sample has read over 90 at every tick for
+ * three cadences, whether or not any new sample arrived").
+ */
+function seriesRun(reading: Reading, meets: (v: number | string | boolean | null) => boolean): number | null {
+  if (!reading.series) return null;
+  return leadingRun(reading.series, meets);
+}
+
+/**
+ * The run behind a reading for one side of the decision (met, or recovered),
+ * resolving the series and current-state families into one answer.
+ *
+ * `stateRun` / `lastAt` are the state row's counters, read only when there is
+ * no series. `advanced` says whether the current-state counter moved, i.e.
+ * whether the caller has anything to persist — a repeat of the same poll writes
+ * nothing, which is what keeps the hot path transition-write-only.
+ */
+function runFor(
+  reading: Reading,
+  meets: boolean,
+  predicate: (v: number | string | boolean | null) => boolean,
+  stateRun: number,
+  lastAt: Date | null | undefined,
+): { run: number; advanced: boolean; stateful: boolean } {
+  const s = seriesRun(reading, predicate);
+  if (s !== null) return { run: s, advanced: false, stateful: false };
+  const stepped = advanceRun(stateRun, meets, reading.readingAt, lastAt);
+  return { run: stepped.run, advanced: stepped.advanced, stateful: true };
+}
+
+/**
+ * Both runs behind one reading — how many consecutive readings have MET the
+ * trigger, and how many have RECOVERED from it — resolved for either family of
+ * source. `stateful` says the numbers came from the state row rather than from
+ * a series, and `advanced` whether this reading moved them (a repeat of the
+ * same poll does not, which is what keeps the hot path transition-write-only).
+ */
+interface ReadingRuns { metRun: number; clearRun: number; stateful: boolean; advanced: boolean }
+function readingRuns(
+  reading: Reading,
+  st: { metRun?: number; clearRun?: number; lastReadingAt?: Date | null } | undefined,
+  trigger: Trigger,
+  reset: ResetConfig,
+  meets: boolean,
+  recovered: boolean,
+): ReadingRuns {
+  const met = seriesRun(reading, (v) => readingMeets(trigger, v));
+  if (met !== null) {
+    const clear = seriesRun(reading, (v) => recoveredMeets(trigger, reset, v)) ?? 0;
+    return { metRun: met, clearRun: clear, stateful: false, advanced: false };
+  }
+  const m = advanceRun(st?.metRun ?? 0, meets, reading.readingAt, st?.lastReadingAt);
+  const c = advanceRun(st?.clearRun ?? 0, recovered, reading.readingAt, st?.lastReadingAt);
+  return { metRun: m.run, clearRun: c.run, stateful: true, advanced: m.advanced };
+}
+
+/**
+ * Per-tier runs for a banded rule: each tier tests its OWN threshold against
+ * the same series, so a value climbing into critical starts critical's run at 1
+ * while warning's keeps counting. Null when the source has no series — the
+ * windowed-ratio metrics are the only banded triggers that can hit that, and
+ * they keep the wall-clock ladder (there is no series of ratios to count).
+ */
+function tierRuns(reading: Reading, tiers: ResolvedTier[]): Record<string, number> | null {
+  if (!reading.series) return null;
+  const out: Record<string, number> = {};
+  for (const tier of tiers) {
+    out[tier.severity] = leadingRun(reading.series, (v) => typeof v === "number" && numMeets(v, tier.operator, tier.threshold));
+  }
+  return out;
+}
+
+/**
+ * What a row returning to `clear` stores for its poll-counted runs. Zeroed
+ * TOGETHER with the timers, and not optional: a stale `metRun` left behind by a
+ * cleared alert would let the very next qualifying reading fire immediately,
+ * skipping the hold entirely (advanceRun counts up from whatever it finds).
+ */
+const CLEARED_RUNS = { metRun: 0, clearRun: 0, lastReadingAt: null } as const;
+
+/** The clear-sustain as a COUNT, with the same down-detection carve-out
+ *  `engineSustainSec` applies to its wall-clock twin (business rule 36). */
+function engineSustainPolls(rule: { trigger: Trigger; reset: ResetConfig }): number {
+  if (downRecoveryConsumesSustain(rule.trigger, rule.reset)) return 0;
+  return resetSustainPolls(rule.reset);
 }
 
 /** Per-tier met-since map → the Json column value (empty map stores as SQL
@@ -2331,7 +2652,7 @@ async function recover(
     // timed fires its own reset from the sweep that actually clears it.
     if (reading && now) await fireReset(rule, reading, st, "recovered", now);
     await clearActiveNotification(st, "system:auto-resolve");
-    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
+    await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS } });
     await logEvent({
       action: "notification.auto_cleared",
       resourceType: "notification",
@@ -2345,7 +2666,7 @@ async function recover(
     // manual / timed: re-arm the state but leave the notification for a human
     // (timed is swept by the timer pass; manual stays until cleared).
     if (rule.reset.mode === "manual") {
-      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull } });
+      await prisma.notificationRuleState.update({ where: { id: st.id }, data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS } });
     }
   }
 }

@@ -44,7 +44,9 @@ describe("normalizeReset", () => {
     expect(normalizeReset({ mode: "manual", afterSec: 60, clearThreshold: 5 } as any)).toEqual({ mode: "manual" });
     expect(normalizeReset({ mode: "timed", afterSec: 120, clearThreshold: 5 } as any)).toEqual({ mode: "timed", afterSec: 120 });
     expect(normalizeReset({ mode: "auto", clearThreshold: 80, sustainSec: 300, afterSec: 99 } as any)).toEqual({
-      mode: "auto", clearThreshold: 80, sustainSec: 300,
+      // `sustainPolls` is the count the engine actually counts; null = this
+      // reset states only its wall-clock mirror.
+      mode: "auto", clearThreshold: 80, sustainSec: 300, sustainPolls: null,
     });
   });
 });
@@ -122,7 +124,7 @@ describe("normalizeRuleToV2 (stored rows)", () => {
       reset: { mode: "auto", clearThreshold: 55, sustainSec: 120 },
       actions: [{ type: "api_call", method: "POST", url: "https://example.com/x", timeoutSec: 15 }],
     });
-    expect(v2.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 120 });
+    expect(v2.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 120, sustainPolls: null });
     expect(v2.actions).toEqual([{ type: "api_call", method: "POST", url: "https://example.com/x", timeoutSec: 15 }]);
   });
 
@@ -224,7 +226,7 @@ describe("ruleInputSchema (v2 input with legacy folding)", () => {
       targets: [{ channelId: "stale" }],
       actions: [],
     });
-    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 80, sustainSec: 60 });
+    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 80, sustainSec: 60, sustainPolls: null });
     expect(parsed.actions).toEqual([]);
   });
 
@@ -278,7 +280,7 @@ describe("ruleInputSchema (v2 input with legacy folding)", () => {
       scope: { allAssets: true },
       reset: { mode: "auto", clearThreshold: 55, sustainSec: 300 },
     });
-    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 300 });
+    expect(parsed.reset).toEqual({ mode: "auto", clearThreshold: 55, sustainSec: 300, sustainPolls: null });
   });
 
   it("accepts api_call actions and rejects non-http(s) URLs", () => {
@@ -611,7 +613,7 @@ describe("condition-mode reset", () => {
 
   it("normalizeReset keeps condition mode (does not fall through to manual)", () => {
     expect(normalizeReset({ mode: "condition", condition: resetTree } as any)).toEqual({
-      mode: "condition", condition: resetTree, sustainSec: null,
+      mode: "condition", condition: resetTree, sustainSec: null, sustainPolls: null,
     });
   });
 

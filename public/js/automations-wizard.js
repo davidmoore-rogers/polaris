@@ -674,18 +674,34 @@ function makeAutomationSentences(s) {
     });
     return " — " + parts.join(", ");
   }
+  /**
+   * How a hold reads in prose: "3 polls" when the rule COUNTS readings (which
+   * is what the engine does with it), the wall-clock mirror otherwise. Every
+   * sentence surface goes through this so the words can't disagree with the
+   * field the operator typed into.
+   */
+  function holdPhrase(tr) {
+    var n = tr && typeof tr.forPolls === "number" && tr.forPolls > 0 ? Math.round(tr.forPolls) : 0;
+    if (n > 0) return n + (n === 1 ? " poll" : " polls");
+    return humanDuration((tr && tr.forDurationSec) || 0);
+  }
+  /** The same, compact, for the formula block ("held 3p" / "held 10m"). */
+  function holdPhraseCompact(tr) {
+    var n = tr && typeof tr.forPolls === "number" && tr.forPolls > 0 ? Math.round(tr.forPolls) : 0;
+    return n > 0 ? n + "p" : compactDuration((tr && tr.forDurationSec) || 0);
+  }
   function triggerSentence(tr, opts) {
     if (!tr || !tr.type) return "…";
     var out;
     var tail = severityLadderPhrase(tr, opts);
     if (tr.type === "composite") {
       out = "When <strong>" + escapeHtml(tgTreePhrase({ op: tr.op, children: tr.children || [] }) || "…") + "</strong>";
-      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
+      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + holdPhrase(tr) + "</strong>";
       return out + tail + ".";
     }
     if (tr.type === "asset_metric" && isBooleanMetric(tr.metric)) {
       out = "When <strong>" + escapeHtml(stateLeafClause(tr)) + "</strong>";
-      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
+      if (tr.forDurationSec > 0) out += ", sustained for <strong>" + holdPhrase(tr) + "</strong>";
       return out + tail + ".";
     }
     if (tr.type === "asset_metric" || tr.type === "host_metric") {
@@ -729,7 +745,7 @@ function makeAutomationSentences(s) {
       out = "…";
     }
     if ((tr.type === "asset_metric" || tr.type === "host_metric" || tr.type === "asset_state") && tr.forDurationSec > 0) {
-      out += ", sustained for <strong>" + humanDuration(tr.forDurationSec) + "</strong>";
+      out += ", sustained for <strong>" + holdPhrase(tr) + "</strong>";
     }
     return out + tail + ".";
   }
@@ -876,7 +892,7 @@ function makeAutomationSentences(s) {
       });
       // The hold applies to the whole tree, so it gets its own line rather than
       // hanging off whichever condition happens to be last.
-      if (hold || sev) out.lines.push(pad + (hold ? "held " + compactDuration(hold) : "") + sevArrow(sev));
+      if (hold || sev) out.lines.push(pad + (hold ? "held " + holdPhraseCompact(tr) : "") + sevArrow(sev));
       out.note = formulaNote(tr);
       return out;
     }
@@ -884,7 +900,7 @@ function makeAutomationSentences(s) {
     if (tr.type !== "asset_metric" && tr.type !== "host_metric" && tr.type !== "asset_state") return out;
 
     var term = formulaTerm(tr);
-    out.lines.push(term + " " + formulaCompare(tr) + holdClause(hold) + sevArrow(sev));
+    out.lines.push(term + " " + formulaCompare(tr) + (hold ? "  held " + holdPhraseCompact(tr) : "") + sevArrow(sev));
 
     // Severity bands: same term, one line per tier, aligned under it. Mirrors
     // severityLadderPhrase's applicability test — bands riding along on a state
@@ -892,9 +908,12 @@ function makeAutomationSentences(s) {
     var banded = (tr.type === "asset_metric" || tr.type === "host_metric") && !isBooleanMetric(tr.metric);
     var bands = (banded && sev && opts.severityBands ? opts.severityBands : []).filter(function (b) { return b && b.severity; });
     bands.forEach(function (b) {
+      // A band with its own seconds is a wall-clock band (resolveTierLadder);
+      // one that inherits inherits the trigger's unit as well as its value.
       var dur = b.forDurationSec == null ? hold : b.forDurationSec;
+      var phrase = b.forDurationSec == null ? holdPhraseCompact(tr) : compactDuration(dur);
       out.lines.push(spaces(term.length) + " " + formulaCompare(tr, b.operator || tr.operator, b.threshold) +
-        holdClause(dur) + sevArrow(b.severity));
+        (dur ? "  held " + phrase : "") + sevArrow(b.severity));
     });
     out.note = formulaNote(tr);
     return out;
@@ -1061,6 +1080,7 @@ function makeAutomationSentences(s) {
     triggerSentence: triggerSentence, severityLadderPhrase: severityLadderPhrase, resetSentence: resetSentence,
     invertedLeaf: invertedLeaf, invertedTree: invertedTree, resetCaveat: resetCaveat,
     triggerFormula: triggerFormula, compactDuration: compactDuration,
+    holdPhrase: holdPhrase, holdPhraseCompact: holdPhraseCompact,
     CMP_PHRASE: CMP_PHRASE, INV_CMP: INV_CMP, AGG_PHRASE: AGG_PHRASE, DIM_PHRASE: DIM_PHRASE,
   };
 }
@@ -1503,6 +1523,8 @@ async function openAutomationWizard(existing, opts) {
       metricLabel = _sent.metricLabel, metricUnit = _sent.metricUnit, leafUnit = _sent.leafUnit,
       fieldLabel = _sent.fieldLabel, changeLabel = _sent.changeLabel,
       humanDuration = _sent.humanDuration, tgTreePhrase = _sent.tgTreePhrase,
+      // The tier summaries state a hold in whichever unit the rule states it.
+      holdPhrase = _sent.holdPhrase,
       // The folded base-severity block summarizes itself with the same leaf
       // phrase the trigger sentence uses.
       tgLeafPhrase = _sent.tgLeafPhrase,
@@ -1821,13 +1843,30 @@ async function openAutomationWizard(existing, opts) {
    * Operator and threshold only; the metric is named once per step and repeating
    * it on every tier row is noise (rule 19: tiers share the trigger's sampling).
    */
-  function tierConditionPhrase(operator, threshold, minutes) {
+  function tierConditionPhrase(operator, threshold, hold) {
     var opText = operator ? ((s.comparatorPhrases || {})[operator] || operator) : "";
     var valText = threshold != null && threshold !== "" ? String(threshold) : "?";
-    var mins = Number(minutes) || 0;
-    return (opText ? opText + " " : "") + valText + (mins > 0 ? " for " + mins + " min" : "");
+    // `hold` is the phrase, not a number: the unit is the rule's own (polls
+    // when it counts readings, wall clock when it states seconds), and one
+    // caller reading a DOM field while the other reads the draft must not be
+    // where that is decided.
+    var h = typeof hold === "number" ? (hold > 0 ? hold + " min" : "") : String(hold || "");
+    return (opText ? opText + " " : "") + valText + (h ? " for " + h : "");
   }
 
+  /** What the BASE severity block says about its period: the measurement window
+   *  on an aggregated trigger (always wall-clock), the hold otherwise — in the
+   *  unit the rule states it in. */
+  function baseHoldPhrase(tr) {
+    if (!tr) return "";
+    return storedHoldPolls(tr) && !tgLeafAggregated(tr) ? holdPhrase(tr) : humanDuration(triggerDurationSec(tr));
+  }
+  /** What one TIER says: the hold it inherits, or the wall-clock one it states
+   *  itself (an API-authored band — resolveTierLadder keeps those in seconds). */
+  function bandHoldPhrase(tr, band) {
+    if (band && band.forDurationSec != null) return humanDuration(band.forDurationSec);
+    return holdPhrase(tr || {});
+  }
   function tierSummaryText(scopeEl) {
     if (!scopeEl) return "";
     var op = scopeEl.querySelector(".tgl-op");
@@ -1841,11 +1880,12 @@ async function openAutomationWizard(existing, opts) {
     // trigger doesn't have.
     var tr = draft.trigger || {};
     var isBand = !!(scopeEl.classList && scopeEl.classList.contains("aw-band"));
-    var mins = isBand
-      ? Math.round((Number(tr.forDurationSec) || 0) / 60)
-      : triggerDurationMinutes(tr);
+    // A tier states only the HOLD (which it inherits); the base block states
+    // whatever its field holds, which on an aggregated trigger is the
+    // measurement window and therefore always wall-clock.
+    var hold = isBand ? holdPhrase(tr) : baseHoldPhrase(tr);
     if (!op && !val) return "";
-    return tierConditionPhrase(op ? op.value : "", val ? val.value : "", mins);
+    return tierConditionPhrase(op ? op.value : "", val ? val.value : "", hold);
   }
 
   function collapseBtnHtml(key) {
@@ -2380,9 +2420,13 @@ async function openAutomationWizard(existing, opts) {
     if (children.length === 1 && children[0] && children[0].type !== undefined) {
       var leaf = JSON.parse(JSON.stringify(children[0]));
       leaf.forDurationSec = tr.forDurationSec || 0;
+      // The COUNT rides down with its mirror (collapseCompositeTrigger does the
+      // same server-side): a collapsed leaf keeping only the seconds would fall
+      // back to the engine's wall-clock path.
+      if (tr.forPolls > 0) leaf.forPolls = tr.forPolls;
       return leaf;
     }
-    return { type: "composite", kind: tr.kind, op: op, children: children, forDurationSec: tr.forDurationSec || 0 };
+    return { type: "composite", kind: tr.kind, op: op, children: children, forDurationSec: tr.forDurationSec || 0, forPolls: tr.forPolls > 0 ? tr.forPolls : undefined };
   }
   function tgLeaves(node) {
     var out = [];
@@ -3068,20 +3112,40 @@ async function openAutomationWizard(existing, opts) {
   function pollFieldHtml(attr, sec, opts) {
     opts = opts || {};
     var iv = awCadence().sec;
+    // A stored COUNT wins over the seconds mirror: `forPolls` is what the rule
+    // actually states (the engine counts readings), so a rule authored at a
+    // 60s cadence still reads "3 polls" on a fleet that now polls every 5
+    // minutes, instead of being re-divided into 1. Only a rule that predates
+    // the count falls back to dividing its seconds.
+    var shown = opts.polls != null ? Math.max(0, Math.round(opts.polls)) : pollsFromSec(sec, iv);
+    // WHICH HALF IS THE TRUTH. For a hold the COUNT is (the engine counts
+    // readings — `forPolls`), so a cadence arriving later leaves the count
+    // alone and re-derives the seconds mirror. For a windowed ratio's History
+    // the SECONDS are (`windowSec` is the measurement — business rule 29c), so
+    // the cadence repaints the count instead. Getting this backwards is how an
+    // async cadence answer silently halved a stored hold.
+    // A ratio's History is LOCKED to seconds; every other field starts
+    // seconds-authoritative only while its count is a derivation (a legacy rule
+    // being read at whatever cadence was known when it rendered) and becomes
+    // count-authoritative the moment the rule states a count or the operator
+    // types one.
+    var lock = opts.authority === "sec" ? "sec" : "";
+    var authority = lock || (opts.polls != null ? "polls" : "sec");
     return '<div class="form-group ' + (opts.wrapClass || "aw-dur") + '"' +
         (opts.hidden ? ' style="margin:0.5rem 0 0;display:none"' : ' style="margin:0.5rem 0 0"') + '>' +
       '<label style="font-size:0.8rem">' + escapeHtml(opts.label || "Sustained for (polls)") +
         '<span class="aw-dur-req" style="display:none;color:var(--color-danger);font-weight:700;margin-left:2px">*</span></label>' +
-      '<input type="number" ' + attr + ' class="aw-poll-input" data-sec="' + (Number(sec) || 0) + '" min="0" ' +
-        'value="' + pollsFromSec(sec, iv) + '" placeholder="' + escapeHtml(opts.placeholder || DUR_PLACEHOLDER_OPTIONAL) + '">' +
+      '<input type="number" ' + attr + ' class="aw-poll-input" data-authority="' + authority + '"' +
+        (lock ? ' data-authority-lock="sec"' : "") + ' data-sec="' + (Number(sec) || 0) + '" min="0" ' +
+        'value="' + shown + '" placeholder="' + escapeHtml(opts.placeholder || DUR_PLACEHOLDER_OPTIONAL) + '">' +
       '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p>' +
       '<p class="aw-dur-note" style="display:none;margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>';
   }
-  function durationFieldHtml(attr, sec) {
+  function durationFieldHtml(attr, sec, polls, authority) {
     // The asterisk is hidden until an aggregated condition makes the field
     // mandatory (syncDurationRequirement) — avg / median / min / max have no
     // period to measure over without it.
-    return pollFieldHtml(attr, sec, { label: "Sustained for (polls)" });
+    return pollFieldHtml(attr, sec, { label: "Sustained for (polls)", polls: polls, authority: authority });
   }
   /**
    * The SECOND time field a windowed-ratio trigger gets (2026-08-20): the base
@@ -3096,6 +3160,7 @@ async function openAutomationWizard(existing, opts) {
       wrapClass: "aw-ratio-sustain",
       hidden: !triggerIsWindowedRatio(tr),
       label: "Sustained for (polls)",
+      polls: triggerIsWindowedRatio(tr) && triggerSustainSec(tr) > 0 ? storedHoldPolls(tr) : null,
     }).replace(
       '<p class="aw-dur-note"',
       '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">Optional — how long the loss must stay over the threshold before the alert fires. Each reading still measures over the History window above.</p><p class="aw-dur-note"',
@@ -3189,7 +3254,12 @@ async function openAutomationWizard(existing, opts) {
     var iv = awCadence().sec;
     Array.prototype.forEach.call(panel.querySelectorAll(".aw-poll-input"), function (input) {
       if (cadenceChanged && input !== document.activeElement) {
-        input.value = pollsFromSec(input.getAttribute("data-sec"), iv);
+        if (input.getAttribute("data-authority") === "sec") {
+          input.value = pollsFromSec(input.getAttribute("data-sec"), iv);
+        } else {
+          // The count stands; its wall-clock mirror follows the new cadence.
+          input.setAttribute("data-sec", String(secFromPolls(input.value, iv)));
+        }
       }
       var note = input.parentNode && input.parentNode.querySelector(".aw-poll-note");
       if (note) {
@@ -3199,8 +3269,15 @@ async function openAutomationWizard(existing, opts) {
       }
     });
   }
+  /** The COUNT a poll field states — what the engine counts, and what
+   *  collection stores as `forPolls` / `sustainPolls`. */
+  function pollFieldCount(input) {
+    if (!input || input.value === "") return 0;
+    var n = Math.round(Number(input.value) || 0);
+    return n > 0 ? n : 0;
+  }
   /**
-   * Seconds a poll field stands for — what collection stores. The stored value
+   * Seconds a poll field stands for — the count's wall-clock MIRROR. The stored value
    * wins while the count on screen still represents it (so loading 300s at a
    * 45s cadence and saving without touching the field can't drift it to 315),
    * and the COUNT wins the moment the two disagree — which is what makes a
@@ -3229,6 +3306,10 @@ async function openAutomationWizard(existing, opts) {
       var t = e.target;
       if (!t || !t.classList || !t.classList.contains("aw-poll-input")) return;
       t.setAttribute("data-sec", String(secFromPolls(t.value, awCadence().sec)));
+      // A typed count is a STATED count: from here the number stands and the
+      // seconds follow it (unless this field is locked to seconds — a ratio's
+      // History window is a measurement, not a count).
+      if (t.getAttribute("data-authority-lock") !== "sec") t.setAttribute("data-authority", "polls");
       syncPollFields(panel, false);
     });
   }
@@ -3256,6 +3337,12 @@ async function openAutomationWizard(existing, opts) {
     syncPollFields(panel, true);
     if (live && live !== panel) syncPollFields(live, true);
     syncDownDetection(live || panel);
+    // A repaint can move what the fields SAY (a legacy rule's seconds convert at
+    // the real cadence rather than the assumed one), and the sentence + formula
+    // are rendered from the collected draft — so re-collect, or the prose would
+    // keep describing the count the fallback cadence produced.
+    if (live) refreshTriggerSentence();
+    if (document.getElementById("aw-step-4")) refreshResetSentence();
   }
   /**
    * Show/hide the duration field's red asterisk + note for the BASE tree: with
@@ -3433,7 +3520,16 @@ async function openAutomationWizard(existing, opts) {
       var tree = triggerToTree(tr, kind);
       html += '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0 0 0.5rem">Add conditions and combine them with AND/OR groups — drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to move them. ' + escapeHtml(tgMeta.anyDimensionNote || "") + '</p>' +
         '<div id="aw-trig-root">' + tgGroupHtml(tree, 0, kind) + '</div>' +
-        durationFieldHtml('id="tf-duration-min"', triggerDurationSec(tr)) +
+        // A windowed ratio's field is its History (a measurement WINDOW, which
+        // is genuinely seconds — business rule 29c), so only a non-ratio hold
+        // seeds from the stored count.
+        durationFieldHtml(
+          'id="tf-duration-min"', triggerDurationSec(tr),
+          triggerIsWindowedRatio(tr) ? null : storedHoldPolls(tr),
+          // A ratio's History is a measurement window in seconds; every other
+          // use of this field is a hold, and a hold is a count.
+          triggerIsWindowedRatio(tr) ? "sec" : "polls",
+        ) +
         ratioSustainFieldHtml(tr);
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
@@ -3526,9 +3622,15 @@ async function openAutomationWizard(existing, opts) {
         var ratio = !!root.querySelector('.scr-row[data-ratio="1"]');
         var sEl = panel.querySelector("#tf-sustain-min");
         var sustainSec = ratio ? Math.min(pollFieldSec(sEl), RATIO_WINDOW_MAX_SEC) : 0;
+        // The hold is stored BOTH ways: `forPolls` is what the engine counts,
+        // `forDurationSec` its wall-clock mirror (which also sizes the sample
+        // window the engine fetches to see that many readings). An aggregated
+        // trigger has no hold at all — its period is the measurement window.
+        var holdPolls = aggregated ? (ratio ? pollFieldCount(sEl) : 0) : pollFieldCount(dEl);
         draft.trigger = tgCollapse({
           type: "composite", kind: kind, op: tree.op, children: tree.children,
           forDurationSec: aggregated ? (ratio ? sustainSec : 0) : holdSec,
+          forPolls: holdPolls,
         });
         // A count only means something on a BARE trigger; the server rejects
         // one inside a multi-condition trigger. tgCollapse has already folded a
@@ -3607,6 +3709,21 @@ async function openAutomationWizard(existing, opts) {
     var win = 0;
     leaves.forEach(function (l) { if (tgLeafAggregated(l)) win = Math.max(win, Number(l.windowSec) || 0); });
     return win;
+  }
+  /**
+   * The hold a stored trigger states as a COUNT OF READINGS, or null when it
+   * states only seconds (every rule authored before the count existed). This is
+   * what the engine actually counts — `forDurationSec` is its wall-clock mirror
+   * — so it is also what the field shows, unconverted.
+   */
+  function storedHoldPolls(tr) {
+    var n = tr && tr.forPolls;
+    return typeof n === "number" && n > 0 ? Math.round(n) : null;
+  }
+  /** The same for a reset's clear-sustain. */
+  function storedResetPolls(reset) {
+    var n = reset && reset.sustainPolls;
+    return typeof n === "number" && n > 0 ? Math.round(n) : null;
   }
   /** SECONDS the duration field stands for on a stored trigger: an aggregated
    *  leaf's window, else the sustain (which is what `latest` triggers carry).
@@ -3952,7 +4069,7 @@ async function openAutomationWizard(existing, opts) {
       var downReset = isDownDetectionTrigger(tr);
       var sustainHtml = '<div style="margin:6px 0 0;font-size:0.85rem">Must stay cleared for ' +
         '<input type="number" id="aw-sustain-min" class="aw-poll-input" data-sec="' + (reset.sustainSec || 0) + '" min="0" value="' +
-        pollsFromSec(reset.sustainSec || 0, awCadence().sec) + '" style="width:80px"> polls (0 = reset immediately)' +
+        (storedResetPolls(reset) != null ? storedResetPolls(reset) : pollsFromSec(reset.sustainSec || 0, awCadence().sec)) + '" style="width:80px"> polls (0 = reset immediately)' +
         (downReset
           ? '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">' +
             'On a down automation this is the way back for the device itself: it reads <strong>Recovering</strong> ' +
@@ -3987,7 +4104,9 @@ async function openAutomationWizard(existing, opts) {
             '<div id="aw-reset-root">' + tgGroupHtml(condTree, 0, kind) + '</div>' +
             '<div style="font-size:0.85rem;margin-top:4px">Must stay true for ' +
               '<input type="number" id="aw-crs-sustain-min" class="aw-poll-input" data-sec="' + (reset.mode === "condition" ? (reset.sustainSec || 0) : 0) + '" min="0" value="' +
-              pollsFromSec(reset.mode === "condition" ? (reset.sustainSec || 0) : 0, awCadence().sec) + '" style="width:80px"> polls (0 = reset immediately)' +
+              (reset.mode === "condition" && storedResetPolls(reset) != null
+                ? storedResetPolls(reset)
+                : pollsFromSec(reset.mode === "condition" ? (reset.sustainSec || 0) : 0, awCadence().sec)) + '" style="width:80px"> polls (0 = reset immediately)' +
               '<p class="aw-poll-note" style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)"></p></div>' +
             (isTriggerPerDimension(tr)
               ? '<p style="font-size:0.78rem;color:var(--color-text-tertiary);margin:6px 0 0">This automation alerts per ' + escapeHtml(perDimensionNoun(tr)) + '. A reset condition on the same ' + escapeHtml(perDimensionNoun(tr)) + ' clears each alert on its own; one on anything else (CPU, memory, device status) is read for the whole device, so it clears all of them together.</p>'
@@ -4067,8 +4186,12 @@ async function openAutomationWizard(existing, opts) {
       var hyst = panel.querySelector("#aw-hyst-enable");
       var ct = panel.querySelector("#aw-clear-threshold");
       if (hyst && hyst.checked && ct && ct.value !== "" && !isNaN(Number(ct.value))) reset.clearThreshold = Number(ct.value);
-      var sus = pollFieldSec(panel.querySelector("#aw-sustain-min"));
+      var smEl = panel.querySelector("#aw-sustain-min");
+      var sus = pollFieldSec(smEl);
       if (sus > 0) reset.sustainSec = sus;
+      // The COUNT is the authority (the engine counts recovered readings); the
+      // seconds ride along as its mirror, exactly as the trigger's hold does.
+      if (pollFieldCount(smEl) > 0) reset.sustainPolls = pollFieldCount(smEl);
     } else {
       var sel = panel.querySelector('input[name="aw-reset-mode"]:checked');
       if (!sel) return;
@@ -4106,8 +4229,10 @@ async function openAutomationWizard(existing, opts) {
           // trigger's own aggregation.
           tgStampWindows(reset.condition, triggerWindowSec(tr));
         }
-        var csus = pollFieldSec(panel.querySelector("#aw-crs-sustain-min"));
+        var csEl = panel.querySelector("#aw-crs-sustain-min");
+        var csus = pollFieldSec(csEl);
         if (csus > 0) reset.sustainSec = csus;
+        if (pollFieldCount(csEl) > 0) reset.sustainPolls = pollFieldCount(csEl);
       }
     }
     draft.reset = reset;
@@ -4377,7 +4502,7 @@ async function openAutomationWizard(existing, opts) {
     var basePhrase = tierConditionPhrase(
       draft.trigger && draft.trigger.operator,
       draft.trigger && draft.trigger.threshold,
-      triggerDurationMinutes(draft.trigger),
+      baseHoldPhrase(draft.trigger),
     );
     var baseLabel = perSev
       ? 'Actions at <span style="color:' + sevColor(draft.severity) + '">' + escapeHtml(draft.severity) + '</span> <span class="aw-tier-qual">(base severity)</span>'
@@ -4412,15 +4537,11 @@ async function openAutomationWizard(existing, opts) {
       var bandPhrase = tierConditionPhrase(
         b.operator || (draft.trigger && draft.trigger.operator),
         b.threshold,
-        // EXACTLY addBandRow's `bandDurMin`: a tier with no hold of its own
-        // inherits the trigger's `forDurationSec`, which an AGGREGATED trigger
-        // does not have (its minutes are the measurement window and live in
-        // `windowSec` — rule 19 has tiers share the sampling). Using
-        // `triggerDurationMinutes` here would print "for 5 min" on this step
-        // where the trigger step correctly prints no hold at all.
-        b.forDurationSec != null
-          ? Math.round(b.forDurationSec / 60)
-          : Math.round((((draft.trigger || {}).forDurationSec) || 0) / 60),
+        // The same phrase the trigger step's folded tier shows, from the same
+        // helper: a tier inherits the trigger's hold (rule 19), which an
+        // AGGREGATED trigger doesn't have at all — its period is the
+        // measurement window and lives in `windowSec`.
+        bandHoldPhrase(draft.trigger, b),
       );
       var bandCount = ((b.actions || []).length);
       html += '<div class="form-group aw-band-actions" data-band-idx="' + i + '" data-collapse-key="t5:' + escapeHtml(b.severity) + '" data-collapse-default="closed" style="border-left:3px solid ' + sevColor(b.severity) + ';padding-left:0.6rem' + (perSev ? "" : ";display:none") + '">' +
