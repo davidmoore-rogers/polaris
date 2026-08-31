@@ -193,11 +193,13 @@ under the same names.
 - **Both buttons disable and relabel while in flight** (`Testing…`, `Creating…`) — these calls reach a remote system and can take seconds. The shell owns that, plus the try/catch that turns a throw into a toast, so `onTest` / `onSave` are plain async functions.
 - **The tab list is built ONCE per type**, by `_integrationTabs(ctx)`, and both flows walk it. Create is just Edit with an empty stored `config`, so every tab reads out of `config` and degrades to its off/default state. Two hand-maintained arrays is how a tab added to one flow silently missed the other.
 - **The shell does NOT scrape the form.** Unlike the UI kit's version, `onTest` / `onSave` read it themselves through `_formConfigForType` and the per-class block readers, which handle nested blocks, arrays and keep-current secrets.
+- **A tab shared by two types states what is true of the type in front of the operator.** The DHCP Push / Quarantine Push / Description Sync bodies are shared by FortiManager and standalone FortiGate, and each one names the transport the write takes and the device whose permissions authorize it. They took only `useProxy` — two states for three transports — and the tab set passed `true` for a standalone FortiGate, so an install with no FortiManager read that its quarantine entries went "through FortiManager's /sys/proxy/json" and that it needed Device Manager Read-Write on the FortiManager admin profile. Wrong guidance is worse than none: it sends the operator to configure a device the install does not have while the FortiOS access profile that actually grants the write goes unmentioned. Shared bodies therefore take `type`, and the direct-to-gate half is one shared builder (`_fortigateAccessProfileHTML`), which also names the CMDB tree the feature writes so the grant is checkable from the Query API tab. Render every shared body in every mode before shipping it — `tests/unit/fortigatePushTabCopy.test.ts` does.
 
 **When adding a tab or a type:**
 - Add the tab to `_integrationTabs` — once. Both flows pick it up.
 - Add the type to `_INTEGRATION_PRODUCTS`, to `_INTEGRATION_REQUIRED_FIELDS` (marking secret fields with a third `true`), and to `_NON_FORTINET_TABBED` if it carries a Monitoring tab.
 - Add its per-type wiring to `_wireIntegrationModal`, not to the flows.
+- Anything the tab COLLECTS must exist in that type's create schema in `src/api/routes/integrations.ts` — `z.object` strips unknown keys, so a field the modal offers and the schema omits is dropped in silence on Add and the tab reopens showing the default. See TOUCHES.md → cross-cutting/fmg-fortigate-parity-surfaces.
 
 ---
 

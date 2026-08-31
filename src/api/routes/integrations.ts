@@ -567,6 +567,24 @@ const FortiGateConfigSchema = z.object({
   fortigateMonitor:   FortiGateClassMonitorSchema,
   fortiswitchMonitor: FortinetClassMonitorSchema,
   fortiapMonitor:     FortinetClassMonitorSchema,
+  // Push manual reservations to the gate at create time — see
+  // FortiManagerConfigSchema.pushReservations for shape + semantics. Transport
+  // is always direct REST here (there is no FMG proxy to choose). Default off.
+  //
+  // These two were absent until 2026-08-31 while the shared Add/Edit modal
+  // rendered the DHCP Push and Quarantine Push tabs for this type all along
+  // (`_integrationTabs` gates them on `isFmg || isFgt`). z.object STRIPS
+  // unknown keys, so ticking either box in the ADD flow silently dropped it:
+  // the integration saved clean, the tab came back unticked, and
+  // `quarantineAsset` skipped every sighting from it — surfacing as
+  // "0/N FortiGate(s) accepted the push" rather than as a missing setting.
+  // Only the Edit flow persisted them, and only by accident: the PUT validates
+  // config as z.record(z.unknown()) and merges. Anything the UI offers on a
+  // type has to exist in that type's create schema.
+  pushReservations: z.boolean().optional().default(false),
+  // Push asset quarantine entries to the gate — see
+  // FortiManagerConfigSchema.pushQuarantine for shape + semantics. Default off.
+  pushQuarantine: z.boolean().optional().default(false),
   // Pull SD-WAN Performance SLA health-check metrics + service-rule member
   // selection on each system-info pass. See FortiManagerConfigSchema.pullSdwan
   // for shape + semantics. FortiOS-only; default off.

@@ -935,7 +935,7 @@ setInterval(function () {
 // its own Stale Detection section at the bottom of the tab (stored in
 // integration.config.arpPresenceSweep, read on save by
 // _readArpPresenceSweepToggle()).
-function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, autoReserveFortinetInfra, adoptDiscoveredMac) {
+function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, autoReserveFortinetInfra, adoptDiscoveredMac, type) {
   var checked = pushReservations === true ? "checked" : "";
   var arpChecked = arpPresenceSweep === true ? "checked" : "";
   // Meaningless without the transport gate above it, so they render nested and
@@ -944,12 +944,34 @@ function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, a
   var autoChecked = autoReserveFortinetInfra === true ? "checked" : "";
   var autoDisabled = pushReservations === true ? "" : " disabled";
   var adoptChecked = adoptDiscoveredMac === true ? "checked" : "";
-  var modeLabel = (useProxy === false)
-    ? "Direct to each FortiGate"
-    : "Proxy through FortiManager to each FortiGate";
-  var modeBody = (useProxy === false)
-    ? "DHCP writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely. Each call lands on the running config in real time."
-    : "DHCP writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials. Each call lands on the running config in real time; FortiManager will see the change on its next config sync.";
+  var isStandalone = type === "fortigate";
+  var modeLabel = isStandalone
+    ? "Direct to the FortiGate"
+    : (useProxy === false)
+      ? "Direct to each FortiGate"
+      : "Proxy through FortiManager to each FortiGate";
+  var modeBody = isStandalone
+    ? "DHCP writes go straight to this FortiGate's REST API using the API token on the General tab. Each call lands on the running config in real time."
+    : (useProxy === false)
+      ? "DHCP writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely. Each call lands on the running config in real time."
+      : "DHCP writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials. Each call lands on the running config in real time; FortiManager will see the change on its next config sync.";
+  var permsHtml = isStandalone
+    ? _fortigateAccessProfileHTML(
+        "DHCP reservations",
+        ['<strong>Network</strong> &rarr; Custom &rarr; <strong>Configuration</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; the group the <code>system.dhcp.server</code> configuration tree belongs to</span>'],
+        "/api/v2/cmdb/system/dhcp/server",
+      )
+    : ('<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; the actual gate</span></li>' +
+        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+        '<li><strong>Policy &amp; Objects</strong> &mdash; leave at Read-Only or None</li>' +
+        '<li style="margin-left:1.2rem"><strong>Install Policy Package or Device Configuration</strong> &rarr; None &nbsp;<span style="color:var(--color-text-tertiary)">&larr; Polaris never triggers installs</span></li>' +
+      '</ul>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
+      calloutHTML("tip", "Tighter scope alternative", "For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate's network-configuration bucket instead of every CMDB tree on every device in the ADOM."));
   return '<section style="margin-bottom:1.5rem">' +
       '<h4 style="margin:0 0 0.25rem 0">DHCP Push</h4>' +
       '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, two DHCP writes flow from Polaris back to the originating FortiGate on subnets discovered by this integration.</p>' +
@@ -994,17 +1016,7 @@ function reservationPushFormHTML(pushReservations, useProxy, arpPresenceSweep, a
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section>' +
-      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
-      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
-        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
-        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; the actual gate</span></li>' +
-        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
-        '<li><strong>Policy &amp; Objects</strong> &mdash; leave at Read-Only or None</li>' +
-        '<li style="margin-left:1.2rem"><strong>Install Policy Package or Device Configuration</strong> &rarr; None &nbsp;<span style="color:var(--color-text-tertiary)">&larr; Polaris never triggers installs</span></li>' +
-      '</ul>' +
-      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for DHCP reservations. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. A compromised Polaris API token could in principle modify other device-level config &mdash; interfaces, routing, other DHCP scopes &mdash; not just the reservations Polaris pushes. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
-      calloutHTML("tip", "Tighter scope alternative", "For tighter scope, switch to direct mode (uncheck <em>Query each FortiGate directly (bypass FortiManager proxy)</em> on the Settings tab) and configure a per-FortiGate REST API admin with <strong>Network &rarr; Custom &rarr; Configuration</strong> set to Read/Write. This scopes write access to one FortiGate's network-configuration bucket instead of every CMDB tree on every device in the ADOM.") +
+      permsHtml +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section>' +
@@ -1401,22 +1413,76 @@ function _readDirectorySyncConfig() {
   };
 }
 
+// Required-permission copy for a write that goes DIRECT to a FortiGate's REST
+// API. A standalone FortiGate integration has no other transport — there is no
+// FortiManager in front of it, so `buildTransportForIntegration` always hands
+// back a direct-fortigate transport — and the FMG copy the three push tabs
+// otherwise render names FortiManager's admin profile, which on an install with
+// no FortiManager points the operator at a device that isn't there. What
+// actually authorizes the write is the FortiOS REST-API admin's access profile
+// on the gate itself.
+//
+// `verifyPath` is the CMDB tree the feature writes, so the grant is provable
+// with one read from the integration's Query API tab instead of being
+// discovered as a failed push. Shared by all three tabs so a fourth caller
+// can't reintroduce a two-transport assumption.
+function _fortigateAccessProfileHTML(noun, grants, verifyPath) {
+  var rows = "";
+  for (var i = 0; i < grants.length; i++) rows += '<li>' + grants[i] + '</li>';
+  return '<h4 style="margin:0 0 0.25rem 0">Required FortiGate Access Profile</h4>' +
+    '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">Polaris writes ' + noun +
+      ' straight to this FortiGate\'s REST API using the API token on the General tab. That token\'s REST API admin needs an access profile granting:</p>' +
+    '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' + rows + '</ul>' +
+    calloutHTML("tip", "Verify the grant before you need it",
+      'Send <code>GET ' + escapeHtml(verifyPath) + '</code> from this integration\'s Query API tab. ' +
+      '<strong>200</strong> means the profile and the vdom are both right; <strong>403</strong> means the profile ' +
+      'does not cover this tree, or the Polaris host sits outside the admin\'s <em>trusthost</em>; ' +
+      '<strong>404</strong> means this FortiOS build does not expose it. Add <code>action=schema</code> as a ' +
+      'query parameter and the gate returns the table\'s own definition &mdash; every field with its ' +
+      'size, plus the <code>access_group</code> naming the profile group above. That is the authority for this ' +
+      'build, not this page.') +
+    calloutHTML("warning", "Scope the token",
+      "Grant only the groups above and set the REST API admin's <strong>trusthost</strong> to the Polaris host's " +
+      "address. A FortiOS access profile is per-group, not per-object, so Read-Write on a group covers every " +
+      "configuration tree inside it. Treat the token as a privileged credential and rotate it on the same " +
+      "cadence as your other admin secrets.");
+}
+
 // Quarantine Push tab body. Renders the master toggle plus transport-mode
 // guidance. When enabled, quarantining an asset pushes MAC-based
 // address-group entries to every FortiGate sighted by this integration.
 // `pushQuarantine` is the current toggle value; `useProxy` drives the
 // transport mode label.
-function quarantinePushFormHTML(pushQuarantine, useProxy) {
+function quarantinePushFormHTML(pushQuarantine, useProxy, type) {
   var checked = pushQuarantine === true ? "checked" : "";
-  var modeLabel = (useProxy === false)
-    ? "Direct to each FortiGate"
-    : "Proxy through FortiManager to each FortiGate";
-  var modeBody = (useProxy === false)
-    ? "Quarantine entries are written to each FortiGate's REST API using the per-device API token configured on the Settings tab."
-    : "Quarantine entries are written through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  var isStandalone = type === "fortigate";
+  var modeLabel = isStandalone
+    ? "Direct to the FortiGate"
+    : (useProxy === false)
+      ? "Direct to each FortiGate"
+      : "Proxy through FortiManager to each FortiGate";
+  var modeBody = isStandalone
+    ? "Quarantine entries are written straight to this FortiGate's REST API using the API token on the General tab."
+    : (useProxy === false)
+      ? "Quarantine entries are written to each FortiGate's REST API using the per-device API token configured on the Settings tab."
+      : "Quarantine entries are written through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  var permsHtml = isStandalone
+    ? _fortigateAccessProfileHTML(
+        "quarantine entries",
+        ['<strong>WiFi &amp; Switch Controller</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; <code>user.quarantine</code> reports <code>access_group: wifi</code>, which is this group &mdash; not User &amp; Device, where the tree\'s name suggests it would live</span>'],
+        "/api/v2/cmdb/user/quarantine/targets",
+      )
+    : ('<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
+        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+      '</ul>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets."));
   return '<section style="margin-bottom:1.5rem">' +
       '<h4 style="margin:0 0 0.25rem 0">Quarantine Push</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, quarantining an asset adds its MAC addresses to the FortiGate quarantine address-group on every device that has recently sighted the asset. Releasing quarantine removes the entries from the device.</p>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">When enabled, quarantining an asset writes its MAC addresses into the FortiGate&rsquo;s quarantine table (<code>user.quarantine</code>) on every device that has recently sighted it, with traffic dropping enabled &mdash; which is the part that actually blocks the device. Releasing quarantine removes the entry again. The gate&rsquo;s own quarantine entries are left untouched.</p>' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px">' +
         '<input type="checkbox" id="f-pushQuarantine" ' + checked + ' style="width:auto">' +
         '<label for="f-pushQuarantine" style="margin:0">Push asset quarantine entries from Polaris back to FortiGate</label>' +
@@ -1430,14 +1496,7 @@ function quarantinePushFormHTML(pushQuarantine, useProxy) {
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section>' +
-      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
-      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
-        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
-        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
-        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
-      '</ul>' +
-      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for quarantine. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
+      permsHtml +
     '</section>';
 }
 
@@ -1464,14 +1523,50 @@ function _centralMgmtLabel(cm, key, countKey, noun) {
 // Newest-wins three-way merge: the side edited since the last sync wins; both
 // edited → conflict (neither overwritten). `syncDescriptions` is the current
 // toggle value; `useProxy` drives the transport-mode label.
-function descriptionSyncFormHTML(syncDescriptions, useProxy) {
+function descriptionSyncFormHTML(syncDescriptions, useProxy, type) {
   var checked = syncDescriptions === true ? "checked" : "";
-  var modeLabel = (useProxy === false)
-    ? "Direct to each FortiGate"
-    : "Proxy through FortiManager to each FortiGate";
-  var modeBody = (useProxy === false)
-    ? "Description writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely."
-    : "Description writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  // Three transports, not two. FMG proxy and FMG "bypass the proxy" direct mode
+  // both sit behind a FortiManager; a standalone FortiGate has none at all
+  // (buildTransportForIntegration always returns a direct-fortigate transport
+  // for the type), so naming one anywhere on this tab points the operator at a
+  // device the install does not have.
+  var isStandalone = type === "fortigate";
+  var modeLabel = isStandalone
+    ? "Direct to the FortiGate"
+    : (useProxy === false)
+      ? "Direct to each FortiGate"
+      : "Proxy through FortiManager to each FortiGate";
+  var modeBody = isStandalone
+    ? "Description writes go straight to this FortiGate's REST API using the API token on the General tab."
+    : (useProxy === false)
+      ? "Description writes go to each FortiGate's REST API using the per-device API token configured on the Settings tab. FortiManager is bypassed entirely."
+      : "Description writes go through FortiManager's <code>/sys/proxy/json</code> endpoint, which forwards the call to the target FortiGate using FortiManager's stored device credentials.";
+  // Not FMG copy — Polaris-is-primary holds on every transport — so this rides
+  // both branches, naming only the devices this integration writes to.
+  var overwriteCallout = calloutHTML("warning", "Polaris overwrites device-side edits", "A description set in Polaris is authoritative: it is pushed on save and re-pushed whenever the device drifts, so a description edited directly on " + (isStandalone ? "the FortiGate" : "a FortiGate / in FortiManager") + " will be overwritten on the next cycle (audited). To take a device-side value into Polaris instead, clear the Polaris description — the next discovery adopts it.");
+  // Describes a mirror into FortiManager's own AP / FortiSwitch database. There
+  // is no such database without a FortiManager.
+  var fmgMirrorBullet = isStandalone ? "" :
+        '<li><strong>FMG central management.</strong> When this ADOM centrally manages FortiAPs or FortiSwitches (detected at each discovery; shown on the integration card), pushes for that class are also mirrored into FortiManager\'s AP Manager / FortiSwitch Manager database so a later install doesn\'t revert them. Polaris never triggers an install.</li>';
+  var permsHtml = isStandalone
+    ? _fortigateAccessProfileHTML(
+        "descriptions",
+        [
+          '<strong>Network</strong> &rarr; Custom &rarr; <strong>Configuration</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; interface descriptions and the FortiGate alias</span>',
+          '<strong>WiFi &amp; Switch Controller</strong> &rarr; Read-Write &nbsp;<span style="color:var(--color-text-tertiary)">&larr; only if this gate manages FortiSwitches / FortiAPs</span>',
+        ],
+        "/api/v2/cmdb/system/interface",
+      ) + overwriteCallout
+    : ('<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
+      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
+      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
+      '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
+      '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
+      '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
+      '</ul>' +
+      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for descriptions. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
+      
+      overwriteCallout);
   return '<section style="margin-bottom:1.5rem">' +
       '<h4 style="margin:0 0 0.25rem 0">Description Sync</h4>' +
       '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)"><strong style="color:var(--color-text-primary)">Polaris is primary.</strong> A value in Polaris always wins: it pushes to the device on save and re-asserts on every discovery cycle — device-side edits are overwritten (every change is audited). An empty Polaris field adopts the device\'s value instead.</p>' +
@@ -1481,9 +1576,9 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
       '</div>' +
       '<ul class="hint" style="margin:0.25rem 0 0 1.2rem;padding:0">' +
         '<li><strong>Interface comments.</strong> The Interface Comments box on an asset\'s interface panel writes to the FortiGate\'s <code>system/interface</code> description (or the FortiSwitch port description via the parent controller). Clearing a comment in Polaris leaves the device value in place.</li>' +
-        '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP location (the field FortiManager\'s AP Manager shows). An empty Polaris Description is seeded from the device on the next discovery.</li>' +
+        '<li><strong>Device descriptions.</strong> An asset\'s Description field writes to the FortiGate alias, FortiSwitch description, or FortiAP location' + (isStandalone ? "" : " (the field FortiManager's AP Manager shows)") + '. An empty Polaris Description is seeded from the device on the next discovery.</li>' +
         '<li><strong>When it runs.</strong> Immediately on save, plus a reconcile on every discovery cycle that re-pushes after transient failures, re-asserts Polaris values over device-side edits, and seeds empty Polaris fields from the device.</li>' +
-        '<li><strong>FMG central management.</strong> When this ADOM centrally manages FortiAPs or FortiSwitches (detected at each discovery; shown on the integration card), pushes for that class are also mirrored into FortiManager\'s AP Manager / FortiSwitch Manager database so a later install doesn\'t revert them. Polaris never triggers an install.</li>' +
+        fmgMirrorBullet +
       '</ul>' +
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
@@ -1494,15 +1589,7 @@ function descriptionSyncFormHTML(syncDescriptions, useProxy) {
     '</section>' +
     '<hr style="margin:1.5rem 0;border:none;border-top:1px solid var(--color-border)">' +
     '<section>' +
-      '<h4 style="margin:0 0 0.25rem 0">Required FortiManager Admin Profile</h4>' +
-      '<p class="hint" style="margin:0 0 0.75rem 0;color:var(--color-text-tertiary)">The following permission changes are needed on the FortiManager admin profile Polaris uses:</p>' +
-      '<ul style="margin:0 0 0.75rem 1.2rem;padding:0;font-size:0.85rem">' +
-        '<li><strong>Device Manager</strong> &rarr; Read-Write</li>' +
-        '<li style="margin-left:1.2rem"><strong>Manage Device Configurations</strong> &rarr; Read-Write</li>' +
-        '<li>All other Device Manager sub-items &mdash; leave at Read-Only or None</li>' +
-      '</ul>' +
-      calloutHTML("warning", "Blast radius", "FortiManager admin profiles do not have a per-object permission for descriptions. <strong>Manage Device Configurations</strong> grants write access to every CMDB tree on every FortiGate in this ADOM. Treat the API token as a privileged credential and rotate on the same cadence as your other admin secrets.") +
-      calloutHTML("warning", "Polaris overwrites device-side edits", "A description set in Polaris is authoritative: it is pushed on save and re-pushed whenever the device drifts, so a description edited directly on a FortiGate / in FortiManager will be overwritten on the next cycle (audited). To take a device-side value into Polaris instead, clear the Polaris description — the next discovery adopts it.") +
+      permsHtml +
     '</section>';
 }
 
@@ -5369,10 +5456,15 @@ function _integrationTabs(ctx) {
   var isArc = type === "azurearc";
 
   if (isFmg || isFgt) {
-    // `useProxy` is meaningful only for FMG; standalone FortiGate always goes
-    // direct REST, so pass true there to keep the FMG copy's "direct" warning
-    // from rendering somewhere it doesn't apply.
-    var pushUseProxy = isFmg ? (config.useProxy !== false) : true;
+    // `useProxy` is meaningful only for FMG. A standalone FortiGate is neither
+    // proxy nor FMG's "bypass the proxy" direct mode — it has no FortiManager in
+    // front of it at all — so the three push tabs take `type` as well and render
+    // a FortiManager-free third copy for it. Passing `true` here rendered the
+    // PROXY text plus a "Required FortiManager Admin Profile" section on an
+    // install with no FortiManager, sending operators to grant Device Manager
+    // Read-Write on a device that isn't there while the FortiOS access profile
+    // that actually authorizes the write went unmentioned.
+    var pushUseProxy = isFmg ? (config.useProxy !== false) : false;
     var fgCfg = config.fortigateMonitor || {};
     var tabs = [
       {
@@ -5409,16 +5501,16 @@ function _integrationTabs(ctx) {
         html: reservationPushFormHTML(
           config.pushReservations === true, pushUseProxy,
           config.arpPresenceSweep === true, config.autoReserveFortinetInfra === true,
-          config.adoptDiscoveredMac === true,
+          config.adoptDiscoveredMac === true, type,
         ),
       },
       {
         key: "quarantine-push", label: "Quarantine Push",
-        html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy),
+        html: quarantinePushFormHTML(config.pushQuarantine === true, pushUseProxy, type),
       },
       {
         key: "description-sync", label: "Description Sync",
-        html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy),
+        html: descriptionSyncFormHTML(config.syncDescriptions === true, pushUseProxy, type),
       },
       { key: "sdwan", label: "SD‑WAN", html: sdwanFormHTML(config.pullSdwan === true) },
       {
