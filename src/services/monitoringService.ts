@@ -122,6 +122,7 @@ import { deriveRadioBand } from "../utils/fortiapRadioBand.js";
 import { resolveOidSync, ensureRegistryLoaded } from "./oidRegistry.js";
 import {
   pickVendorProfile,
+  fortinetClassHint,
   type VendorTelemetryProfile,
 } from "./vendorTelemetryProfiles.js";
 import {
@@ -4548,6 +4549,7 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
         asset.os,
         telemetryTimeout,
         effective.cpuMemoryMibId,
+        asset.assetType,
       );
       return { supported: true, data };
     }
@@ -4651,6 +4653,7 @@ export async function collectHardwareSensors(assetId: string): Promise<Collectio
         asset.os,
         timeoutMs,
         effective.temperatureMibId,
+        asset.assetType,
       );
       return { supported: true, data };
     }
@@ -4675,6 +4678,7 @@ async function collectHardwareSensorsViaSnmpSession(
   os?: string | null,
   timeoutMs?: number,
   temperatureMibId?: string | null,
+  assetType?: string | null,
 ): Promise<HardwareSensorSample[]> {
   await ensureRegistryLoaded();
   let profileManufacturer = manufacturer;
@@ -4691,7 +4695,7 @@ async function collectHardwareSensorsViaSnmpSession(
       profileOs           = mib.moduleName;
     }
   }
-  const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel);
+  const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel, assetType);
   const scope   = { manufacturer, model };
   return await withSnmpSession(host, config, async (session) => {
     return await collectHardwareSensorsSnmp(session, manufacturer, profile, scope);
@@ -6706,14 +6710,41 @@ function snmpVbToString(v: unknown): string {
   return String(v);
 }
 
-function snmpVbToNumber(v: unknown): number | null {
+/**
+ * Decode a varbind value to a number, or null when the device said nothing.
+ *
+ * **An unanswered OID is null, never 0.** `snmpGetScalar` resolves `null` for
+ * an error varbind (noSuchObject / noSuchInstance / endOfMibView), and the
+ * `Number(v)` tail below reads `Number(null)` as a perfectly finite 0 — so a
+ * scalar the device does not publish decoded as a confident zero. That cost a
+ * FortiSwitch model whose fsSysCpuUsage / fsSysMemUsage do not sit at
+ * ...12356.106.4.1.{2,3}.0 its entire CPU & Memory graph: both series read a
+ * flat 0.0% forever, and because 0 is not null the HOST-RESOURCES-MIB fallback
+ * in `collectTelemetrySnmp` never ran either, so nothing ever corrected it
+ * (prod 2026-08-31, FortiSwitchRugged-112D-POE). Same invariant as business
+ * rule 24's alarm bit: a source that publishes no value must never have its
+ * absence mapped to 0.
+ *
+ * An EMPTY value gets the same answer for the same reason — an empty OCTET
+ * STRING arrives as a zero-length Buffer, and `Number("")` is also 0.
+ *
+ * A Buffer longer than 8 bytes still falls through to the string coercion,
+ * which is how an agent that publishes a wide counter as a decimal OCTET
+ * STRING decodes.
+ */
+export function snmpVbToNumber(v: unknown): number | null {
+  if (v == null) return null;
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "bigint") return Number(v);
-  if (Buffer.isBuffer(v) && v.length <= 8) {
-    let n = 0n;
-    for (const b of v) n = (n << 8n) | BigInt(b);
-    return Number(n);
+  if (Buffer.isBuffer(v)) {
+    if (v.length === 0) return null;
+    if (v.length <= 8) {
+      let n = 0n;
+      for (const b of v) n = (n << 8n) | BigInt(b);
+      return Number(n);
+    }
   }
+  if (typeof v === "string" && v.trim() === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
@@ -6913,8 +6944,9 @@ function pickVendorProfileMerged(
   manufacturer: string | null | undefined,
   os: string | null | undefined,
   model: string | null | undefined,
+  assetType?: string | null | undefined,
 ): VendorTelemetryProfile | null {
-  const base = pickVendorProfile(manufacturer, os, model);
+  const base = pickVendorProfile(manufacturer, os, model, assetType);
   const dbProfile = getDbManufacturerProfile(manufacturer);
   if (!dbProfile) return base;
 
@@ -6923,9 +6955,18 @@ function pickVendorProfileMerged(
   const memoryRow      = dbProfile.metrics.find((m) => m.metricKey === ("memory" as MetricKey));
   const temperatureRow = dbProfile.metrics.find((m) => m.metricKey === ("temperature" as MetricKey));
 
-  const cpuPick  = resolveDbMetric(cpuRow,         model);
-  const memPick  = resolveDbMetric(memoryRow,      model);
-  const tempPick = resolveDbMetric(temperatureRow, model);
+  // The DB row's `modelPattern` is matched against the MODEL ALONE, while the
+  // hardcoded pick above matches a haystack that also carries `os` and the
+  // class hint. Without the hint here the two layers disagree on the same
+  // asset: `pickVendorProfile` correctly picks FortiSwitch, then the Fortinet
+  // profile's model-pattern overrides ("FortiSwitch" / "FortiAP") miss an empty
+  // model, `resolveDbMetric` falls back to that profile's manufacturer-wide
+  // DEFAULT (`fgSysCpuUsage`), and the merge below overwrites the correct symbol
+  // with it — a vendor-wide default silently outranking a more specific match.
+  const matchModel = [model, fortinetClassHint(manufacturer, model, assetType)].filter(Boolean).join(" ");
+  const cpuPick  = resolveDbMetric(cpuRow,         matchModel);
+  const memPick  = resolveDbMetric(memoryRow,      matchModel);
+  const tempPick = resolveDbMetric(temperatureRow, matchModel);
 
   // Nothing operator-overridden? Skip the clone allocation entirely.
   if (!cpuPick && !memPick && !tempPick) return base;
@@ -6985,6 +7026,7 @@ async function collectTelemetrySnmp(
   os?: string | null,
   timeoutMs?: number,
   telemetryMibId?: string | null,
+  assetType?: string | null,
 ): Promise<TelemetrySample> {
   // Make sure the symbol table is populated before we try to resolve any
   // vendor symbols. ensureRegistryLoaded short-circuits after the first call.
@@ -7014,7 +7056,7 @@ async function collectTelemetrySnmp(
       profileOs           = mib.moduleName;
     }
   }
-  const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel);
+  const profile = pickVendorProfileMerged(profileManufacturer, profileOs, profileModel, assetType);
   // Scope still uses the *asset's* manufacturer/model so symbol resolution
   // through oidRegistry continues to pick up device-specific MIB overrides
   // for the actual asset, not the MIB pointed at by telemetryMibId.
@@ -7997,7 +8039,7 @@ async function collectSystemInfoSnmp(
   // Vendor profile is read once up-front so the disk fallback (below) can
   // consult it without re-deriving. Cheap — VENDOR_TELEMETRY_PROFILES is in
   // memory; ensureRegistryLoaded is called by the disk fallback when it runs.
-  const vendorProfile = pickVendorProfileMerged(opts.manufacturer, opts.os, opts.model);
+  const vendorProfile = pickVendorProfileMerged(opts.manufacturer, opts.os, opts.model, opts.assetType);
   const vendorScope   = { manufacturer: opts.manufacturer, model: opts.model };
 
   return await withSnmpSession(host, config, async (session) => {
@@ -11755,7 +11797,7 @@ export async function runStorageFor(assetId: string, labels: WorkItemLabels): Pr
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
     }
-    const storage = await collectStorageOnlySnmp(targetIp, snmpCfg, asset.manufacturer, asset.model, effective.storageTimeoutMs).catch(() => undefined);
+    const storage = await collectStorageOnlySnmp(targetIp, snmpCfg, asset.manufacturer, asset.model, effective.storageTimeoutMs, asset.assetType).catch(() => undefined);
     if (storage === undefined) {
       recordWorkOutcome("storage", "failure", labels);
       return "failure";
@@ -12124,8 +12166,9 @@ export async function collectStorageOnlySnmp(
   manufacturer: string | null | undefined,
   model: string | null | undefined,
   timeoutMs?: number,
+  assetType?: string | null,
 ): Promise<StorageSample[]> {
-  const vendorProfile = pickVendorProfileMerged(manufacturer ?? null, null, model ?? null);
+  const vendorProfile = pickVendorProfileMerged(manufacturer ?? null, null, model ?? null, assetType);
   const vendorScope   = { manufacturer: manufacturer ?? null, model: model ?? null };
   return await withSnmpSession(host, config, async (session) => {
     const storage: StorageSample[] = [];

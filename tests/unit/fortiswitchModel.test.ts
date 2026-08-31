@@ -19,6 +19,31 @@ describe("fortiswitchModelFromFsSysVersion", () => {
     expect(model).toMatch(/fortiswitch/i);
   });
 
+  it("splits on a SPACE separator, not just \"-v\" (FortiSwitch Rugged)", () => {
+    // The FSR family publishes the firmware after a space instead of "-v".
+    // Requiring "-v" parsed this to null, which left Asset.model empty — and an
+    // empty model deadlocked the asset out of the FortiSwitch profile entirely,
+    // so CPU/memory were read from the FortiGate root and charted a flat 0%
+    // (prod 2026-08-31). Verbatim value off the affected switch.
+    expect(fortiswitchModelFromFsSysVersion("FortiSwitchRugged-112D-POE v7.4.8,build0929,250909 (GA)"))
+      .toBe("FortiSwitchRugged-112D-POE");
+  });
+
+  it("stops at the firmware marker, not at a hyphen inside the model token", () => {
+    // "112D-POE" carries its own hyphen; a greedy or hyphen-only split would
+    // truncate the model to "FortiSwitchRugged" or "…112D".
+    expect(fortiswitchModelFromFsSysVersion("FSR-124F-POE v7.6.0,build1234,260101 (GA)"))
+      .toBe("FortiSwitch FSR-124F-POE");
+  });
+
+  it("does not double-prefix a token that already names itself", () => {
+    // Storing "FortiSwitch FortiSwitchRugged-112D-POE" would be the model an
+    // operator sees in the list and filters on.
+    const model = fortiswitchModelFromFsSysVersion("FortiSwitchRugged-112D-POE v7.4.8,build0929");
+    expect(model).toBe("FortiSwitchRugged-112D-POE");
+    expect(model).toMatch(/fortiswitch/i); // still satisfies profile matching
+  });
+
   it("trims surrounding whitespace", () => {
     expect(fortiswitchModelFromFsSysVersion("  S548DF-v7.2.5-build0453  "))
       .toBe("FortiSwitch S548DF");

@@ -259,12 +259,55 @@ export const VENDOR_TELEMETRY_PROFILES: VendorTelemetryProfile[] = [
  * Returns null when no profile matches — caller falls through to
  * HOST-RESOURCES-MIB.
  */
+/**
+ * The Fortinet device CLASS, derived from what the asset actually is rather
+ * than from what its model string happens to say.
+ *
+ * Profile matching is a regex over `manufacturer + os + model`, so a
+ * FortiSwitch is recognized only when the word survives in one of those. A
+ * managed switch has no `os`, and `MODEL_RULES` in utils/assetProjection.ts
+ * deliberately skips the fortiswitch source's model (the observed blob says
+ * the useless literal "FortiSwitch") on the assumption that the asset row
+ * already carries that literal from the legacy create path. An asset where it
+ * doesn't — `Asset.model` empty, manufacturer "Fortinet" — matches nothing but
+ * the generic FortiOS entry and gets pointed at `fgSysCpuUsage` /
+ * `fgSysMemUsage` under the FortiGate root 12356.101, which a FortiSwitch does
+ * not publish. That was a DEADLOCK, not just a miss: the FortiOS profile
+ * carries no `model` query, so `fsSysVersion` is never read, so
+ * `adoptDetectedModel` never gets a value, so the model stays empty forever —
+ * and every reading charted a confident 0% (prod 2026-08-31, FSR-112D-POE;
+ * the flat zero came from `snmpVbToNumber`, see its note).
+ *
+ * `assetType` is the signal that was reliable the whole time: Fortinet makes no
+ * switch that isn't a FortiSwitch and no AP that isn't a FortiAP. Deliberately
+ * yields nothing when the model ALREADY names a class — a model is operator- or
+ * device-stated and outranks an inference from a type that may be misclassified,
+ * and blindly appending would let a "FortiAP-231F" typed on a switch-typed row
+ * match the FortiSwitch profile first (it is ordered ahead).
+ *
+ * `firewall` needs no hint — a FortiGate matches the FortiOS entry on the
+ * manufacturer alone, which is exactly the fallback that swallowed the others.
+ */
+export function fortinetClassHint(
+  manufacturer: string | null | undefined,
+  model: string | null | undefined,
+  assetType?: string | null | undefined,
+): string | null {
+  if (!/fortinet|fortigate|fortios/i.test(manufacturer ?? "")) return null;
+  if (/fortiswitch|fortiap/i.test(model ?? "")) return null;
+  if (assetType === "switch")       return "FortiSwitch";
+  if (assetType === "access_point") return "FortiAP";
+  return null;
+}
+
 export function pickVendorProfile(
   manufacturer: string | null | undefined,
   os: string | null | undefined,
   model?: string | null | undefined,
+  assetType?: string | null | undefined,
 ): VendorTelemetryProfile | null {
-  const haystack = `${manufacturer ?? ""} ${os ?? ""} ${model ?? ""}`.trim();
+  const hint = fortinetClassHint(manufacturer, model, assetType);
+  const haystack = `${manufacturer ?? ""} ${os ?? ""} ${model ?? ""} ${hint ?? ""}`.trim();
   if (!haystack) return null;
   for (const p of VENDOR_TELEMETRY_PROFILES) {
     if (p.match.test(haystack)) return p;
