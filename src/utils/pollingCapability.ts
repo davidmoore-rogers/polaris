@@ -157,9 +157,13 @@ export function collectorCapability(
       case "cpuMemory":
       case "interfaces":
       case "storage":
-      // journalctl / Get-WinEvent, feeding the same ingestOsEventLog sink the
-      // agent's stream uses. Gated by the global agentEventLog master switch.
       case "eventLog":
+        // eventLog is journalctl / Get-WinEvent, feeding the same
+        // ingestOsEventLog sink the agent's stream uses. Gated by the global
+        // agentEventLog master switch. The comment lives here rather than above
+        // the label because `no-fallthrough` reads a comment BETWEEN two case
+        // labels as the first case's body, and then the whole empty-case group
+        // is an error — which is what turned CI red on 2026-08-31.
         return OK;
       case "temperature":
         // Linux hwmon is readable, but there is no dependable Windows
