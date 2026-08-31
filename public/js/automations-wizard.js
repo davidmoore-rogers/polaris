@@ -3268,6 +3268,7 @@ async function openAutomationWizard(existing, opts) {
         note.textContent = cadenceNoteFor(input.value);
       }
     });
+    syncBandDurationMirrors(panel);
   }
   /** The COUNT a poll field states — what the engine counts, and what
    *  collection stores as `forPolls` / `sustainPolls`. */
@@ -3411,10 +3412,42 @@ async function openAutomationWizard(existing, opts) {
       }
     });
   }
+  /**
+   * Every severity tier waits out the ONE hold on the trigger (rule 19), so each
+   * tier renders it read-only rather than leaving the operator to infer that the
+   * number above the first tier governs all of them. Mirrors the trigger field's
+   * LABEL too — a ratio's "History (polls)" and an aggregate's "Measured over
+   * (polls)" are the same shared field wearing a different name — and hides
+   * itself whenever the trigger states no hold or has no hold field at all
+   * (an all-down-detection tree), where an empty box in every tier would read as
+   * a field each tier was meant to fill in.
+   */
+  function syncBandDurationMirrors(panel) {
+    if (!panel) return;
+    var host = panel.querySelector("#aw-bands");
+    if (!host) return;
+    var rows = host.querySelectorAll(".aw-band-dur");
+    if (!rows.length) return;
+    var wrap = panel.querySelector("#tf-duration-min");
+    wrap = wrap && wrap.closest(".aw-dur");
+    var input = wrap && wrap.querySelector("#tf-duration-min");
+    var labelEl = wrap && wrap.querySelector("label");
+    var hidden = !wrap || (wrap.style && wrap.style.display === "none");
+    var label = labelEl ? (labelEl.textContent || "").replace(/\*+\s*$/, "").trim() : "";
+    var show = !hidden && !!input && pollFieldCount(input) > 0;
+    Array.prototype.forEach.call(rows, function (mirror) {
+      mirror.style.display = show ? "" : "none";
+      if (!show) return;
+      var lab = mirror.querySelector(".aw-band-dur-label");
+      if (lab && label) lab.textContent = label;
+      var box = mirror.querySelector(".aw-band-dur-input");
+      if (box) box.value = input.value;
+    });
+  }
   function syncDurationRequirement(panel) {
     var wrap = panel.querySelector("#tf-duration-min");
     wrap = wrap && wrap.closest(".aw-dur");
-    if (!wrap) return;
+    if (!wrap) { syncBandDurationMirrors(panel); return; }
     var root = panel.querySelector("#aw-trig-root");
     var aggs = root ? root.querySelectorAll(".scr-row .tgl-agg") : [];
     var aggregated = false;
@@ -3428,6 +3461,7 @@ async function openAutomationWizard(existing, opts) {
     var allRows = root ? root.querySelectorAll(".scr-row") : [];
     if (allRows.length && ddRows.length === allRows.length) {
       wrap.style.display = "none";
+      syncBandDurationMirrors(panel);
       return;
     }
     wrap.style.display = "";
@@ -5243,11 +5277,21 @@ async function openAutomationWizard(existing, opts) {
       '<div class="band-cond scg-children"></div>' +
       // Severity tiers share the trigger's sampling AND its hold (rule 19) —
       // for a windowed ratio that means the History window. The hold lives once,
-      // on the trigger, so there is no per-tier duration field here.
+      // on the trigger, so there is no per-tier duration field here — but it is
+      // MIRRORED read-only into every tier (syncBandDurationMirrors), because a
+      // number stated once above three tiers reads as belonging to the first one.
+      '<div class="form-group aw-band-dur" style="margin:0.5rem 0 0;display:none">' +
+        '<label class="aw-band-dur-label" style="font-size:0.8rem;color:var(--color-text-tertiary)">Sustained for (polls)</label>' +
+        '<input type="number" class="aw-band-dur-input" disabled tabindex="-1" value="" ' +
+          'title="Set once on the trigger above — every severity level waits it out." ' +
+          'style="opacity:0.6;cursor:not-allowed">' +
+        '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">Set once above — every severity level waits it out.</p>' +
+      '</div>' +
       '<div style="margin-top:4px"><button type="button" class="btn btn-sm btn-secondary band-add-sev">+ Severity</button></div>' +
       '</div>';
     host.appendChild(row);
     renderBandCond(row, panel, tierLeaf, kind);
+    syncBandDurationMirrors(panel);
     // What a folded tier says about itself, read from its own controls so it
     // can't drift from what will be saved.
     var syncBandSummary = function () {
