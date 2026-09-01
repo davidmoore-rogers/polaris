@@ -52,7 +52,7 @@ import {
   normalizeSerialKey,
 } from "../utils/fortinetParentKey.js";
 import { inferInterfaceTopology } from "./interfaceTopologyService.js";
-import { logEvent } from "./eventLogService.js";
+import { logEventsBatch } from "./eventLogService.js";
 import { logger } from "../utils/logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -1240,17 +1240,15 @@ export async function reconcileDependencySuppression(): Promise<{
       where: { id: { in: expired.map(e => e.id) } },
       data:  { dependencyTestUntil: null, dependencyTestStartedBy: null },
     });
-    for (const e of expired) {
-      await logEvent({
-        action:       "asset.dependency_test.expired",
-        resourceType: "asset",
-        resourceId:   e.id,
-        resourceName: e.hostname ?? undefined,
-        level:        "info",
-        message:      `Dependency Test expired on ${e.hostname ?? e.id} (started by ${e.dependencyTestStartedBy ?? "unknown"})`,
-        details:      { dependencyTestUntil: e.dependencyTestUntil, startedBy: e.dependencyTestStartedBy },
-      });
-    }
+    await logEventsBatch(expired.map((e) => ({
+      action:       "asset.dependency_test.expired",
+      resourceType: "asset",
+      resourceId:   e.id,
+      resourceName: e.hostname ?? undefined,
+      level:        "info" as const,
+      message:      `Dependency Test expired on ${e.hostname ?? e.id} (started by ${e.dependencyTestStartedBy ?? "unknown"})`,
+      details:      { dependencyTestUntil: e.dependencyTestUntil, startedBy: e.dependencyTestStartedBy },
+    })));
   }
 
   const assets = await prisma.asset.findMany({
@@ -1360,46 +1358,44 @@ export async function reconcileDependencySuppression(): Promise<{
   ]);
 
   // Events fire AFTER the DB write so anyone reading on the back of the
-  // event sees the new state. Only emit for monitored assets. We `await`
-  // each call (vs. the fire-and-forget pattern used elsewhere) so that
-  // when the reconciler returns its caller can rely on the audit row
-  // being durable — the 60s tick cadence makes the per-event latency
-  // negligible, and tests reading the Event table immediately after
-  // would otherwise race with in-flight writes.
-  for (const t of transitions) {
-    const asset = assets.find(a => a.id === t.id);
-    if (!asset || !asset.monitored) continue;
+  // event sees the new state. Only emit for monitored assets. One awaited
+  // batch (vs. the fire-and-forget pattern used elsewhere) so that when the
+  // reconciler returns its caller can rely on the audit rows being durable —
+  // a core switch going dark flips its whole subtree in one pass, and the
+  // per-transition awaited create this replaces serialized hundreds of
+  // inserts inside the 60s tick.
+  const monitoredIds = new Set<string>();
+  for (const a of assets) if (a.monitored) monitoredIds.add(a.id);
+  await logEventsBatch(transitions.filter((t) => monitoredIds.has(t.id)).map((t) => {
     const parentHostnames = t.parentIds.map(id => hostnameById.get(id) ?? id);
-    if (t.to) {
-      await logEvent({
-        action:       "monitor.dependency_suppressed",
-        resourceType: "asset",
-        resourceId:   t.id,
-        resourceName: t.hostname ?? undefined,
-        level:        "info",
-        message:      `Monitor: ${t.hostname ?? t.id} suppressed (parent ${parentHostnames.join(", ") || "—"} down)`,
-        details: {
-          layer:           t.layer,
-          parentAssetIds:  t.parentIds,
-          parentHostnames,
-        },
-      });
-    } else {
-      await logEvent({
-        action:       "monitor.dependency_resumed",
-        resourceType: "asset",
-        resourceId:   t.id,
-        resourceName: t.hostname ?? undefined,
-        level:        "info",
-        message:      `Monitor: ${t.hostname ?? t.id} resumed (dependency cleared)`,
-        details: {
-          layer:           t.layer,
-          parentAssetIds:  t.parentIds,
-          parentHostnames,
-        },
-      });
-    }
-  }
+    return t.to
+      ? {
+          action:       "monitor.dependency_suppressed",
+          resourceType: "asset",
+          resourceId:   t.id,
+          resourceName: t.hostname ?? undefined,
+          level:        "info" as const,
+          message:      `Monitor: ${t.hostname ?? t.id} suppressed (parent ${parentHostnames.join(", ") || "—"} down)`,
+          details: {
+            layer:           t.layer,
+            parentAssetIds:  t.parentIds,
+            parentHostnames,
+          },
+        }
+      : {
+          action:       "monitor.dependency_resumed",
+          resourceType: "asset",
+          resourceId:   t.id,
+          resourceName: t.hostname ?? undefined,
+          level:        "info" as const,
+          message:      `Monitor: ${t.hostname ?? t.id} resumed (dependency cleared)`,
+          details: {
+            layer:           t.layer,
+            parentAssetIds:  t.parentIds,
+            parentHostnames,
+          },
+        };
+  }));
 
   return { evaluated: assets.length, changed };
 }
