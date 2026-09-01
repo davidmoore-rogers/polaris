@@ -217,41 +217,65 @@ function sqlProcessDaily(): string {
   `;
 }
 
+/**
+ * The response-time poll's own rows: NULL predates probeKind and means the
+ * same thing as the literal. A compile-time literal, interpolated into the
+ * SQL below — never near user data.
+ */
+const PRIMARY = `("probeKind" IS NULL OR "probeKind" = 'primary')`;
+
 // ─── Monitor (gauge — response time) ─────────────────────────────────────────
 
 function sqlMonitorHourly(): string {
+  // PRIMARY-ONLY COLUMNS, ALL-KINDS SCAN. Every count and every response-time
+  // aggregate below is FILTERed to the response-time poll, exactly as it was
+  // when the WHERE clause did that filtering — those columns describe the
+  // operator's configured transport, and `probeOutageService` reads
+  // failureCount / dependencyFailureCount to decide what an outage looked like.
+  // Mixing a second transport into them would change what a chart's red band
+  // means.
+  //
+  // The WHERE no longer excludes probeKind='icmp', though, because the packet
+  // columns need those rows. The old exclusion was written for the per-asset
+  // loss SAMPLER, which ran ONLY during warning/recovering windows: folding it
+  // into 400-day aggregates would have counted a quiet month and an
+  // incident-heavy month at different sampling rates, making historical loss
+  // non-comparable across time. That reasoning died with the sampler. The sweep
+  // that replaced it is UNIFORM — every eligible asset, every cycle, whatever
+  // state it is in (business rule 29) — which is precisely what makes it
+  // comparable across time, and what makes rolling it up worth doing at all.
   return `
     INSERT INTO "asset_monitor_samples_hourly" (
       "id", "assetId", "bucketStart",
       "sampleCount", "successCount", "failureCount", "dependencyFailureCount",
-      "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs"
+      "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs",
+      "packetsSent", "packetsReceived"
     )
     SELECT
       gen_random_uuid()::text,
       "assetId",
       date_trunc('hour', "timestamp") AS bucket_start,
-      COUNT(*)::int,
-      COUNT(*) FILTER (WHERE success)::int,
-      COUNT(*) FILTER (WHERE NOT success)::int,
+      COUNT(*) FILTER (WHERE ${PRIMARY})::int,
+      COUNT(*) FILTER (WHERE ${PRIMARY} AND success)::int,
+      COUNT(*) FILTER (WHERE ${PRIMARY} AND NOT success)::int,
       -- Explained misses (parent dark at probe time). Carried through the
       -- rollups so a multi-day dependency outage still reads grey once the
       -- detail rows have aged out; a bucket only counts as a dependency outage
       -- when EVERY failure in it was one.
-      COUNT(*) FILTER (WHERE NOT success AND "dependencyDown")::int,
-      AVG("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL),
-      MIN("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL),
-      MAX("responseTimeMs") FILTER (WHERE success AND "responseTimeMs" IS NOT NULL)
+      COUNT(*) FILTER (WHERE ${PRIMARY} AND NOT success AND "dependencyDown")::int,
+      AVG("responseTimeMs") FILTER (WHERE ${PRIMARY} AND success AND "responseTimeMs" IS NOT NULL),
+      MIN("responseTimeMs") FILTER (WHERE ${PRIMARY} AND success AND "responseTimeMs" IS NOT NULL),
+      MAX("responseTimeMs") FILTER (WHERE ${PRIMARY} AND success AND "responseTimeMs" IS NOT NULL),
+      -- Packet totals from the ICMP burst sweep, SUMMED rather than averaged so
+      -- a long range stays a true packets-lost/packets-sent ratio instead of a
+      -- mean of per-bucket percentages (which would weight a bucket holding one
+      -- sweep the same as one holding sixty). NULL when the bucket held no
+      -- sweep rows at all, which is what tells a reader to fall back to the
+      -- row-count ratio — exactly the fallback probeLossQuery makes.
+      SUM("packetsSent") FILTER (WHERE "packetsSent" IS NOT NULL)::int,
+      SUM("packetsReceived") FILTER (WHERE "packetsSent" IS NOT NULL)::int
     FROM "asset_monitor_samples"
-    -- Response-time poll ONLY. The ICMP loss sampler's rows (probeKind='icmp')
-    -- are deliberately excluded from every rollup: they appear only during
-    -- warning/recovering windows, so folding them into 400-day aggregates would
-    -- make historical loss non-comparable across time (a quiet month and an
-    -- incident-heavy month would be counted at different sampling rates), and
-    -- their NULL responseTimeMs contributes nothing to the avg/min/max anyway.
-    -- The sampler's resolution serves the detail-tier loss metric and ages out
-    -- with the detail retention window.
     WHERE "timestamp" >= $1
-      AND ("probeKind" IS NULL OR "probeKind" = 'primary')
     GROUP BY "assetId", bucket_start
     ON CONFLICT ("bucketStart", "assetId") DO UPDATE SET
       "sampleCount"       = EXCLUDED."sampleCount",
@@ -260,7 +284,9 @@ function sqlMonitorHourly(): string {
       "dependencyFailureCount" = EXCLUDED."dependencyFailureCount",
       "avgResponseTimeMs" = EXCLUDED."avgResponseTimeMs",
       "minResponseTimeMs" = EXCLUDED."minResponseTimeMs",
-      "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs"
+      "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs",
+      "packetsSent"       = EXCLUDED."packetsSent",
+      "packetsReceived"   = EXCLUDED."packetsReceived"
   `;
 }
 
@@ -272,7 +298,8 @@ function sqlMonitorDaily(): string {
     INSERT INTO "asset_monitor_samples_daily" (
       "id", "assetId", "bucketStart",
       "sampleCount", "successCount", "failureCount", "dependencyFailureCount",
-      "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs"
+      "avgResponseTimeMs", "minResponseTimeMs", "maxResponseTimeMs",
+      "packetsSent", "packetsReceived"
     )
     SELECT
       gen_random_uuid()::text,
@@ -286,7 +313,15 @@ function sqlMonitorDaily(): string {
       SUM(COALESCE("dependencyFailureCount", 0))::int,
       SUM("avgResponseTimeMs" * "successCount") / NULLIF(SUM("successCount"), 0),
       MIN("minResponseTimeMs"),
-      MAX("maxResponseTimeMs")
+      MAX("maxResponseTimeMs"),
+      -- Deliberately NOT coalesced to 0 like dependencyFailureCount above: for
+      -- that column 0 is the truthful reading of "no dependency failures", but
+      -- here a day whose hourly buckets all predate the sweep must stay NULL,
+      -- because 0 packets sent would read as a 0% loss day rather than as a day
+      -- with no packet data. SUM ignores NULLs and returns NULL only when every
+      -- input is NULL, which is exactly the distinction wanted.
+      SUM("packetsSent")::int,
+      SUM("packetsReceived")::int
     FROM "asset_monitor_samples_hourly"
     WHERE "bucketStart" >= $1
     GROUP BY "assetId", bucket_start
@@ -297,7 +332,9 @@ function sqlMonitorDaily(): string {
       "dependencyFailureCount" = EXCLUDED."dependencyFailureCount",
       "avgResponseTimeMs" = EXCLUDED."avgResponseTimeMs",
       "minResponseTimeMs" = EXCLUDED."minResponseTimeMs",
-      "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs"
+      "maxResponseTimeMs" = EXCLUDED."maxResponseTimeMs",
+      "packetsSent"       = EXCLUDED."packetsSent",
+      "packetsReceived"   = EXCLUDED."packetsReceived"
   `;
 }
 

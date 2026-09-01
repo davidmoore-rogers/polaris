@@ -65,6 +65,108 @@ beforeEach(async () => {
 
 // ─── GAUGE: asset_monitor_samples → hourly ─────────────────────────────────────
 
+d("rollup — ICMP burst packet totals", () => {
+  it("sums packets from sweep rows, and leaves the row counts primary-only", async () => {
+    // The two column families describe different transports and must not bleed
+    // into each other. sampleCount / successCount / failureCount are about the
+    // operator's configured status poll (probeOutageService reads them to decide
+    // what an outage looked like); packetsSent / packetsReceived are about the
+    // ICMP sweep. Before this, the rollup excluded probeKind='icmp' from the
+    // scan entirely, so the packet columns had nothing to sum.
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        // Status poll: 2 samples, 1 failed.
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: true,  responseTimeMs: 12 },
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 2 * 60_000), success: false, responseTimeMs: null },
+        // Sweep: three bursts, 15 sent / 9 received.
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 3 * 60_000), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 5 },
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 4 * 60_000), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 3 },
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 5 * 60_000), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 1 },
+      ],
+    });
+
+    await rollupHourly();
+
+    const row = (await prisma.assetMonitorSampleHourly.findMany({ where: { assetId: ASSET } }))[0]!;
+    // Row counts see ONLY the status poll — three sweep rows did not inflate them.
+    expect(row.sampleCount).toBe(2);
+    expect(row.successCount).toBe(1);
+    expect(row.failureCount).toBe(1);
+    // ...and the sweep's NULL response times did not touch the RTT aggregates.
+    expect(row.avgResponseTimeMs).toBeCloseTo(12, 6);
+    // Packets see ONLY the sweep: 40% loss, which no row-count ratio here shows.
+    expect(row.packetsSent).toBe(15);
+    expect(row.packetsReceived).toBe(9);
+  });
+
+  it("leaves packet columns NULL when the bucket held no sweep rows", async () => {
+    // NULL rather than 0 is load-bearing: 0 sent would read as a 0%-loss bucket
+    // instead of a bucket with no packet data, and a reader has to be able to
+    // fall back to the row ratio.
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: true, responseTimeMs: 10 },
+      ],
+    });
+
+    await rollupHourly();
+
+    const row = (await prisma.assetMonitorSampleHourly.findMany({ where: { assetId: ASSET } }))[0]!;
+    expect(row.packetsSent).toBeNull();
+    expect(row.packetsReceived).toBeNull();
+  });
+
+  it("reads a fully-dark sweep as every packet lost, not as no data", async () => {
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: false, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 0 },
+      ],
+    });
+
+    await rollupHourly();
+
+    const row = (await prisma.assetMonitorSampleHourly.findMany({ where: { assetId: ASSET } }))[0]!;
+    expect(row.packetsSent).toBe(5);
+    expect(row.packetsReceived).toBe(0);
+  });
+
+  it("daily SUMs the packet totals across hourly buckets", async () => {
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 10, packetsReceived: 7 },
+      ],
+    });
+    await rollupHourly();
+    await rollupDaily();
+
+    const day = (await prisma.assetMonitorSampleDaily.findMany({ where: { assetId: ASSET } }))[0]!;
+    expect(day.packetsSent).toBe(10);
+    expect(day.packetsReceived).toBe(7);
+  });
+
+  it("keeps a day NULL when every hourly bucket predates the sweep", async () => {
+    // Deliberately NOT coalesced to 0 the way dependencyFailureCount is: there
+    // 0 is a truthful "no dependency failures", here it would claim a 0%-loss
+    // day for a day nobody measured.
+    const bucket = recentHourBucket();
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: ASSET, timestamp: new Date(bucket.getTime() + 1 * 60_000), success: true, responseTimeMs: 10 },
+      ],
+    });
+    await rollupHourly();
+    await rollupDaily();
+
+    const day = (await prisma.assetMonitorSampleDaily.findMany({ where: { assetId: ASSET } }))[0]!;
+    expect(day.packetsSent).toBeNull();
+    expect(day.packetsReceived).toBeNull();
+  });
+});
+
 d("rollupHourly — gauge table (asset_monitor_samples)", () => {
   it("aggregates sampleCount + success/failure + avg/min/max over successes", async () => {
     const bucket = recentHourBucket();
