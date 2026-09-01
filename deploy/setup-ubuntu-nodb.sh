@@ -120,12 +120,14 @@ else
   fi
 fi
 
-# ─── 1c. Install fping (OPTIONAL — ICMP packet-loss sweep) ──────────────────
-# Polaris measures packet loss with a burst of ICMP echoes at every monitored
-# asset each cycle. fping sends that burst to up to 500 hosts from ONE process;
-# without it Polaris falls back to one `ping` process per host, which is
-# CORRECT but forks per host and cannot hold a 60s cadence on a large fleet
-# (the sweep interval is floored automatically to whatever the host can finish).
+# ─── 1c. Install fping (OPTIONAL — ICMP batching) ──────────────────
+# Polaris batches two ICMP cadences through fping: the packet-loss sweep (a
+# burst of echoes at every monitored asset each cycle) and the ICMP status
+# probe that decides whether a device is down. fping reaches up to 500 hosts
+# from ONE process; without it both fall back to one `ping` per host, which is
+# CORRECT and gives the same verdicts, but forks per host and cannot hold a 60s
+# sweep cadence on a large fleet (the interval is floored automatically to
+# whatever the host can finish).
 #
 # In the standard Debian/Ubuntu archive, so no extra repo is needed — but the
 # install is still best-effort and never fatal, because a missing fping costs

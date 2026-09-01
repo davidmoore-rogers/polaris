@@ -458,20 +458,28 @@ are remote).
 
 ---
 
-## Optional: fping (ICMP packet-loss sweep)
+## Optional: fping (ICMP batching)
 
-Polaris measures packet loss by sending a short burst of ICMP echoes to every
-monitored asset each cycle and counting what comes back. It will do this on any
-install with no configuration. `fping` only changes **how fast** it can.
+Polaris uses `fping` for two things, and does both without it:
+
+1. **The packet-loss sweep** — a short burst of ICMP echoes to every monitored
+   asset each cycle, counting what comes back.
+2. **The ICMP status probe** — the poll that decides whether a device is down,
+   for assets whose Response Time method is ICMP.
+
+Both work on any install with no configuration. `fping` only changes **how**
+they are sent: one process per batch instead of one process per host.
 
 | | With fping | Without it |
 |---|---|---|
-| Processes per sweep | one per 500 targets | one per host |
-| 2000-asset sweep | ~4 spawns | ~2000 spawns |
-| Sustainable cadence | 60s at any fleet size | widens with the fleet |
-| Loss figures | identical | identical |
+| Loss sweep, 2000 assets | ~4 spawns | ~2000 spawns |
+| ICMP status probe, 2000 assets | one per distinct timeout (usually 2-3) | one per host |
+| Sustainable sweep cadence | 60s at any fleet size | widens with the fleet |
+| Loss figures and up/down verdicts | identical | identical |
 
-The fallback is **correct, not degraded** — the numbers are the same. It simply
+The fallback is **correct, not degraded** — the numbers and the verdicts are the
+same, and the status probe still sends exactly one echo per asset per cycle
+either way, so down detection is unaffected. It simply
 forks per host, so on a large fleet Polaris widens the sweep interval to
 whatever the host can actually finish (`resolveSweepIntervalSec`) rather than
 publishing sweeps faster than they drain. You get loss on a 2–3 minute cadence

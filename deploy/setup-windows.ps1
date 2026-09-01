@@ -478,11 +478,12 @@ if (-not $fwRule) {
     Write-Info "Firewall rule for port $Port already exists"
 }
 
-# ─── ICMP packet-loss sweep (informational) ───────────────────────────────────
-# Polaris measures packet loss with a burst of ICMP echoes at every monitored
-# asset each cycle. On Linux it batches those through fping — one process per
-# 500 targets. There is no fping build for Windows Server, so this install uses
-# the per-host fallback: one `ping` process per asset per sweep.
+# ─── ICMP batching (informational) ────────────────────────────────────────────
+# Polaris batches two ICMP cadences through fping on Linux — the packet-loss
+# sweep and the ICMP status probe that decides whether a device is down — at
+# one process per 500 targets. There is no fping build for Windows Server, so
+# this install uses the per-host fallback for both: one `ping` process per
+# asset per cycle.
 #
 # That is CORRECT, not degraded — the loss figures are the same. It is slower,
 # and measurably so: Windows `ping` paces at a fixed ~1s per echo with no
@@ -491,8 +492,8 @@ if (-not $fwRule) {
 # the sweep cadence at whatever this host can actually finish, so a large fleet
 # gets loss on a 2-3 minute cadence instead of 60s. Nothing to configure; this
 # note exists so the cadence is not a surprise.
-Write-Info "Packet-loss sweep: using per-host ping (no fping on Windows)."
-Write-Info "  On a large fleet Polaris will widen the sweep interval to suit."
+Write-Info "ICMP batching: using per-host ping (no fping on Windows)."
+Write-Info "  Verdicts are unaffected; on a large fleet the loss sweep interval widens."
 # ─── Done ─────────────────────────────────────────────────────────────────────
 $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } | Select-Object -First 1).IPAddress
 if (-not $ip) { $ip = "localhost" }
