@@ -3161,15 +3161,16 @@ export async function assetDetail(assetId: string): Promise<AssetDetailRow | nul
 /** Warm the per-tick cache for a known id set in ONE query. A site-wide
  *  outage writes one monitor Event per asset, so the event tail's per-event
  *  assetDetail miss serialized one findUnique per distinct asset — inside the
- *  very tick raising the alerts about that outage. Ids that resolve to no row
- *  cache as null exactly as a single-id miss does (a deleted asset's event
- *  must still fire). */
+ *  very tick raising the alerts about that outage. Only rows actually found
+ *  are cached: an id the findMany didn't return falls through to assetDetail's
+ *  own findUnique, so a genuinely-deleted asset (rare) costs one lookup and
+ *  the null-means-deleted contract stays decided by the same read it always
+ *  was. */
 async function primeAssetDetailCache(assetIds: Iterable<string>): Promise<void> {
   const missing = [...new Set(assetIds)].filter((id) => !_assetDetailCache.has(id));
   if (missing.length === 0) return;
   const rows = await prisma.asset.findMany({ where: { id: { in: missing } }, select: ASSET_DETAIL_SELECT });
   for (const a of rows) _assetDetailCache.set(a.id, { ...a, status: String(a.status) });
-  for (const id of missing) if (!_assetDetailCache.has(id)) _assetDetailCache.set(id, null);
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
