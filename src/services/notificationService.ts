@@ -429,6 +429,55 @@ export async function clearSuppressedAlerts(assetIds?: string[]): Promise<number
   return cleared.length;
 }
 
+/** How long a wizard "Test delivery" alert stays on the board before it
+ *  retires itself. An hour is long enough to open the email, follow its
+ *  Acknowledge link and see the row it points at, and short enough that a
+ *  test is gone by the next time anyone looks at the device. */
+export const TEST_ALERT_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Retire wizard test alerts older than an hour.
+ *
+ * A test fire is a REAL Notification row — that is what makes the delivery
+ * path, the email body and the acknowledge link testable at all — so it lands
+ * on the asset-details Alerts tab, in the View list and in every active-alert
+ * count exactly like a fire that meant something. But nothing can ever clear
+ * it: it carries `ruleId: null` by design (automationTestService, safety
+ * property 1), so it sits outside every recovery path Polaris has — no state
+ * row for the engine to release, no rule for `runEventRuleTimedClear` to
+ * sweep, no condition that could recover. Testing one automation therefore
+ * left a permanent alert on whichever device the wizard happened to pick, and
+ * the only way to remove it was for an operator to recognize it as a test and
+ * clear it by hand.
+ *
+ * So the clear is a TTL rather than a reset: nothing recovered, so no reset
+ * actions run (there is no rule to define any) and no state row is touched (a
+ * test never wrote one). Soft-clear keeps the history and the ack state, so an
+ * acknowledge link in an old test email still resolves — the page just reports
+ * the alert as closed.
+ *
+ * One indexed `updateMany` per tick, independent of fleet size.
+ */
+export async function clearExpiredTestAlerts(now = new Date()): Promise<number> {
+  const cutoff = new Date(now.getTime() - TEST_ALERT_TTL_MS);
+  const res = await prisma.notification.updateMany({
+    where: { testRun: true, cleared: false, triggeredAt: { lte: cutoff } },
+    data: { cleared: true, clearedBy: "system:test-expired", clearedAt: now },
+  });
+  if (res.count > 0) {
+    // One summary line per sweep rather than one per row: the fire itself was
+    // already audited as automation.test_delivery, and this is its bookend.
+    await logEvent({
+      action: "notification.auto_cleared",
+      resourceType: "notification",
+      actor: "system:notification-engine",
+      message: `Cleared ${res.count} expired test alert${res.count === 1 ? "" : "s"}`,
+      details: { count: res.count, reason: "test_expired", ttlMs: TEST_ALERT_TTL_MS },
+    }).catch(() => {});
+  }
+  return res.count;
+}
+
 /**
  * The asset-details Notifications tab bundle: active (non-cleared)
  * notifications for the asset + the enabled rules whose scope matches it.

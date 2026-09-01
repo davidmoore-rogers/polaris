@@ -10,7 +10,7 @@
 
 import { logger } from "../utils/logger.js";
 import { evaluateAllNotificationRules } from "../services/notificationEngine.js";
-import { clearSuppressedAlerts } from "../services/notificationService.js";
+import { clearSuppressedAlerts, clearExpiredTestAlerts } from "../services/notificationService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
 const INTERVAL_MS = 60 * 1000; // 1 minute
@@ -29,6 +29,13 @@ async function runEvaluateNotificationRules(): Promise<void> {
         logger.warn({ err: err?.message }, "clearSuppressedAlerts sweep failed (non-fatal)");
       });
       await evaluateAllNotificationRules();
+      // A wizard test alert has no rule and no state row, so no recovery path
+      // can ever close it — without this it stays on the device's Alerts tab
+      // forever. Sweeps after the rules for the same reason the suppression
+      // sweep runs before them: it can never affect what the engine decides.
+      await clearExpiredTestAlerts().catch((err: any) => {
+        logger.warn({ err: err?.message }, "clearExpiredTestAlerts sweep failed (non-fatal)");
+      });
     });
   } catch (err: any) {
     logger.warn({ err: err?.message }, "evaluateNotificationRules job failed (non-fatal)");
