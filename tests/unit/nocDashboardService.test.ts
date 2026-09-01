@@ -281,11 +281,16 @@ describe("getPacketLoss", () => {
     rawUnsafe.mockResolvedValueOnce([]);
     await noc.getPacketLoss();
     const sql = rawUnsafe.mock.calls[0][0] as string;
-    // At least one failure (HAVING) AND at least one success — the latter now
-    // comes from the first-success anchor, which drops an asset with no
-    // successful probe outright: a window with zero successes is a down node,
-    // not a lossy one.
-    expect(sql).toContain(`count(*) FILTER (WHERE NOT "success") > 0`);
+    // Actual loss (HAVING) AND at least one success — the latter comes from the
+    // first-success anchor, which drops an asset with no successful probe
+    // outright: a window with zero successes is a down node, not a lossy one.
+    //
+    // The loss half is asked of PACKETS now, not of row outcomes. A row-based
+    // `>= 1 failed row` test would filter out a device whose every ICMP burst
+    // dropped packets while still getting something back (so no row is a
+    // failure) — which is precisely the device this widget exists to surface.
+    expect(sql).toContain("HAVING");
+    expect(sql).toContain(`"packetsSent"`);
     expect(sql).toContain(`"firstOk" IS NOT NULL`);
   });
 

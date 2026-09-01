@@ -67,6 +67,30 @@ async function seedProbes(assetId: string, pattern: boolean[], probeKind?: strin
 const F = false, S = true;
 
 /**
+ * Seed ICMP BURST rows: one row per entry carrying packetsSent/packetsReceived,
+ * oldest first at minute granularity. `success` is derived the way the sweep
+ * derives it (received > 0), because the query has to keep agreeing with that
+ * invariant — a burst that got one reply back is a "successful" row and an
+ * 80%-lossy reading, and conflating the two is the bug these tests exist for.
+ */
+async function seedBursts(
+  assetId: string,
+  bursts: Array<[sent: number, received: number]>,
+): Promise<void> {
+  await prisma.assetMonitorSample.createMany({
+    data: bursts.map(([sent, received], i) => ({
+      assetId,
+      timestamp: ago(bursts.length - i),
+      success: received > 0,
+      responseTimeMs: null,
+      probeKind: "icmp",
+      packetsSent: sent,
+      packetsReceived: received,
+    })),
+  });
+}
+
+/**
  * Seed explicit rows at second granularity. The two-transport cases need the
  * ordering to be unambiguous: `seedProbes` above is minute-granular per call, so
  * calling it twice for one asset interleaves rows onto identical timestamps and
@@ -363,3 +387,98 @@ d("queryProbeLossRatios — probeKind", () => {
     expect(Number(rows[0].failed)).toBe(0);
   });
 });
+
+dbDescribe("packet counts (ICMP burst rows)", () => {
+  it("measures PACKETS, not row outcomes", async () => {
+    // Five bursts, each 5 sent / 1 received. Every row is `success: true`
+    // (something came back), so the old row-counting ratio called this a
+    // perfectly clean device. It is 80% lossy.
+    await seedBursts(A, [[5, 1], [5, 1], [5, 1], [5, 1], [5, 1]]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(rows).toHaveLength(1);
+    expect(pct(rows[0]!)).toBeCloseTo(80, 5);
+  });
+
+  it("reads 0% when every echo came back", async () => {
+    await seedBursts(A, [[5, 5], [5, 5], [5, 5]]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(pct(rows[0]!)).toBe(0);
+  });
+
+  it("weights by packets rather than by burst, so a long burst counts more", async () => {
+    // 5/5 then 10/0 is 10 lost of 15 sent = 66.7%, NOT the 50% a mean of
+    // per-burst percentages would give. The clean burst goes FIRST on purpose:
+    // the first-success anchor would otherwise trim a leading all-lost burst
+    // out of the window, and the assertion would be measuring the anchor
+    // rather than the weighting. (That trim is business rule 29b, pinned by
+    // its own tests above.)
+    await seedBursts(A, [[5, 5], [10, 0]]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(pct(rows[0]!)).toBeCloseTo(66.67, 1);
+  });
+
+  it("falls back to the row ratio for an asset with no burst rows", async () => {
+    // The pre-sweep behaviour, still exactly what an asset with no pingable
+    // target or a disabled sweep gets.
+    await seedProbes(A, [S, S, F, F]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(pct(rows[0]!)).toBe(50);
+  });
+
+  it("IGNORES the response-time poll's rows once burst rows exist", async () => {
+    // The poll may be SNMP/SSH/REST/WinRM; folding a lost SNMP response into a
+    // figure labelled "packet loss" would make the number mean something
+    // different per asset depending on how it is monitored. Bursts are clean
+    // here while every poll row failed, and the answer must be 0%.
+    await seedAt(A, [
+      { secondsAgo: 50, success: false },
+      { secondsAgo: 40, success: false },
+      { secondsAgo: 30, success: true },
+    ]);
+    await seedBursts(A, [[5, 5], [5, 5]]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(pct(rows[0]!)).toBe(0);
+  });
+
+  it("surfaces a partially-lossy device in widget mode even though no ROW failed", async () => {
+    // The HAVING has to be asked of packets too: every one of these rows is a
+    // success, so a row-based `≥1 failure` test would filter out exactly the
+    // device the Packet Loss widget exists to show.
+    await seedBursts(A, [[5, 3], [5, 3]]);
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10,
+    });
+    expect(rows).toHaveLength(1);
+    expect(pct(rows[0]!)).toBeCloseTo(40, 5);
+  });
+
+  it("still hides a spotless device in widget mode", async () => {
+    await seedBursts(A, [[5, 5], [5, 5]]);
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10,
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it("orders lossiest-first by the packet ratio", async () => {
+    await seedBursts(A, [[5, 4]]);            // 20%
+    await seedBursts(B, [[5, 1]]);            // 80%
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: ALL, onlyLossy: true, limit: 10,
+    });
+    expect(rows.map((r) => r.assetId)).toEqual([B, A]);
+  });
+
+  it("reads a fully-dark burst run as 100% under includeFullyDown", async () => {
+    await seedBursts(A, [[5, 0], [5, 0]]);
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10, includeFullyDown: true,
+    });
+    expect(pct(rows[0]!)).toBe(100);
+  });
+});
+
+/** Loss percentage from a returned row — the arithmetic every caller does. */
+function pct(r: { total: bigint; failed: bigint }): number {
+  return (Number(r.failed) / Number(r.total)) * 100;
+}

@@ -9,12 +9,28 @@
  *     the window, INCLUDING 0%-loss rows — an auto-clear/hysteresis rule needs
  *     the clean reading to recover. Fully-down assets (0 successes) are
  *     dropped either way — asset-down owns them.
- *   - Widget mode (onlyLossy=true): additionally requires ≥1 FAILURE (a clean
- *     asset isn't "packet loss"), orders lossiest-first, and caps at `limit`
+ *   - Widget mode (onlyLossy=true): additionally requires actual LOSS — asked of
+ *     the effective packet counts, not of row outcomes, so a device whose every
+ *     burst dropped packets while still getting something back is not filtered
+ *     out as spotless — orders lossiest-first, and caps at `limit`
  *     (null = uncapped; Postgres treats LIMIT NULL as ALL). It also passes
  *     `includeFullyDown`, so an asset with no success in the window reads 100%
  *     instead of disappearing — see that option's doc for why the engine must
  *     not.
+ *
+ * IT COUNTS PACKETS, NOT ROWS, WHEREVER IT CAN (2026-09-01). The ICMP loss
+ * sweep writes ONE row per burst carrying `packetsSent` / `packetsReceived`, so
+ * an asset with any burst rows in the window has its ratio computed from those
+ * sums and its response-time poll rows left out. Counting such a row as a
+ * single outcome understated loss badly — a 5-echo burst that got one reply
+ * back is an 80%-lossy reading but a perfectly "successful" row. Poll rows are
+ * excluded rather than blended because that poll may be SNMP, SSH, REST or
+ * WinRM, and folding a lost SNMP response into a figure labelled "packet loss"
+ * would make the number mean something different per asset depending on how it
+ * happens to be monitored. An asset with no burst rows falls back to the row
+ * ratio, which is exactly the pre-sweep behaviour. The returned {total, failed}
+ * shape is unchanged: the UNITS beneath it moved from rows to packets, the
+ * arithmetic every caller does did not.
  *
  * THIS QUERY COUNTS EVERY `probeKind`. It is one of only three readers of
  * asset_monitor_samples that does (with alertChartService's loss chart);
@@ -108,20 +124,34 @@ export async function queryProbeLossRatios(opts: {
     params.push(opts.assetIds);
   }
 
-  // "≥1 success" is enforced by the anchor itself (`"firstOk" IS NOT NULL`
-  // below keeps only assets that HAD one, and the anchor row is a success), so
-  // engine mode needs no HAVING at all. Widget mode still has to hide clean
-  // assets.
-  const having = opts.onlyLossy
-    ? `HAVING count(*) FILTER (WHERE NOT "success") > 0`
-    : "";
+  // EFFECTIVE PACKET COUNTS. A burst row (the ICMP loss sweep) describes N
+  // echoes in one row; a response-time poll row describes one probe and leaves
+  // the columns NULL. Mixing the two by COUNTING ROWS understates loss badly —
+  // a 5-echo burst that got 1 reply back is a 80%-lossy reading but a
+  // perfectly "successful" row — so when an asset has ANY burst rows in the
+  // window its ratio is computed from PACKETS and the poll rows are left out
+  // of it entirely.
+  //
+  // Leaving them out is deliberate rather than lazy: the response-time poll
+  // may be SNMP, SSH, REST or WinRM, and folding a lost SNMP response into a
+  // figure labelled "packet loss" would make the number mean something
+  // different per asset depending on how it happens to be monitored. An asset
+  // with no burst rows (no pingable target, sweep disabled, or the window
+  // predates the sweep) falls back to the row ratio, which is exactly the
+  // pre-sweep behaviour.
+  //
+  // The results keep the {total, failed} shape so every caller is unchanged —
+  // the units under it changed from rows to packets, the arithmetic did not.
+  const hasBursts = `count(*) FILTER (WHERE "packetsSent" IS NOT NULL) > 0`;
+  const effSent = `CASE WHEN ${hasBursts} THEN sum("packetsSent") ELSE count(*) END`;
+  const effRecv = `CASE WHEN ${hasBursts} THEN coalesce(sum("packetsReceived"), 0) ELSE count(*) FILTER (WHERE "success") END`;
 
-  // The anchor trims everything before the LATER of the asset's first
-  // successful probe and the end of its last outage (see the header).
-  // GREATEST ignores NULLs, so an asset that hasn't recovered inside the
-  // window falls back to the first-success anchor alone. An asset with NO
-  // success has no anchor at all: engine mode drops it (asset-down owns a
-  // total outage), display mode keeps every row so the ratio comes out at 100%.
+  // Widget mode still hides clean assets — but "clean" now has to be asked of
+  // the effective counts, or a device whose every burst lost packets while
+  // still getting SOMETHING back (so no row is a failure) would be filtered
+  // out as spotless, which is the exact device the widget exists to surface.
+  const having = opts.onlyLossy ? `HAVING (${effSent}) > (${effRecv})` : "";
+
   const anchor = `GREATEST("firstOk", "recoveredAt")`;
   const anchorClause = opts.includeFullyDown
     ? `(("firstOk" IS NOT NULL AND "timestamp" >= ${anchor}) OR "firstOk" IS NULL)`
@@ -130,25 +160,15 @@ export async function queryProbeLossRatios(opts: {
   let tail = "";
   if (opts.onlyLossy) {
     tail = `
-     ORDER BY (count(*) FILTER (WHERE NOT "success"))::float / count(*) DESC
+     ORDER BY 1 - (${effRecv})::float / NULLIF((${effSent}), 0) DESC
      LIMIT $${++p}`;
     params.push(opts.limit ?? null);
   }
 
-  // One pass: the partitioned min() stamps each asset's first successful probe
-  // onto its own rows, the LEFT JOIN carries its recovery anchor alongside, the
-  // outer WHERE trims everything before the later of the two, and the grouped
-  // aggregate counts what's left. Scale note — this reads the same rows the
-  // plain aggregate did (an hour of 2000 assets' probes is ~240k rows on the
-  // 60s engine tick) but now sorts/hashes them by assetId for the partition; it
-  // stays one query with one scan, never a per-asset lookup. The join is to a
-  // ~2000-row dimension table on its primary key, and it must stay a LEFT JOIN:
-  // the sample tables have no FK to assets (hypertables), so rows whose asset
-  // row is gone — or, in tests, was never created — must still count.
   return prisma.$queryRawUnsafe<ProbeLossRow[]>(
-    `SELECT "assetId", count(*) AS total, count(*) FILTER (WHERE NOT "success") AS failed
+    `SELECT "assetId", (${effSent}) AS total, (${effSent}) - (${effRecv}) AS failed
      FROM (
-       SELECT s."assetId", s."success", s."timestamp",
+       SELECT s."assetId", s."success", s."timestamp", s."packetsSent", s."packetsReceived",
               min(s."timestamp") FILTER (WHERE s."success") OVER (PARTITION BY s."assetId") AS "firstOk",
               a."recoveryStartedAt" AS "recoveredAt"
        FROM "asset_monitor_samples" s
