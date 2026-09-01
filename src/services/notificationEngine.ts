@@ -2937,6 +2937,12 @@ async function runEventTail(rules: DbRule[]): Promise<void> {
   // execute their actions after the batch insert (createMany returns no ids).
   // The fire-time template context rides along — api_call bodies render from it.
   const deliverAfter: { id: string; rule: DbRule; assetId: string | null; ctx: Record<string, string>; assetRegionTags: string[] }[] = [];
+  // Warm the asset-detail cache for the whole batch up front — the loop below
+  // reads it per matched event, and the miss-per-distinct-asset pattern is at
+  // its worst exactly when a broad outage fills the batch with asset events.
+  if (compiled.length > 0) {
+    await primeAssetDetailCache(events.flatMap((ev) => (ev.resourceType === "asset" && ev.resourceId ? [ev.resourceId] : [])));
+  }
   for (const ev of events) {
     // Which rules this same event FIRED — a rule whose trigger and reset globs
     // both match one event (`agent.*` on both sides) would otherwise clear the
@@ -3150,6 +3156,20 @@ export async function assetDetail(assetId: string): Promise<AssetDetailRow | nul
   const row = a ? { ...a, status: String(a.status) } : null;
   _assetDetailCache.set(assetId, row);
   return row;
+}
+
+/** Warm the per-tick cache for a known id set in ONE query. A site-wide
+ *  outage writes one monitor Event per asset, so the event tail's per-event
+ *  assetDetail miss serialized one findUnique per distinct asset — inside the
+ *  very tick raising the alerts about that outage. Ids that resolve to no row
+ *  cache as null exactly as a single-id miss does (a deleted asset's event
+ *  must still fire). */
+async function primeAssetDetailCache(assetIds: Iterable<string>): Promise<void> {
+  const missing = [...new Set(assetIds)].filter((id) => !_assetDetailCache.has(id));
+  if (missing.length === 0) return;
+  const rows = await prisma.asset.findMany({ where: { id: { in: missing } }, select: ASSET_DETAIL_SELECT });
+  for (const a of rows) _assetDetailCache.set(a.id, { ...a, status: String(a.status) });
+  for (const id of missing) if (!_assetDetailCache.has(id)) _assetDetailCache.set(id, null);
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
