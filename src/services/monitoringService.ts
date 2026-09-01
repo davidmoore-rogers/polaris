@@ -8050,7 +8050,7 @@ async function persistTrunkMembers(assetId: string, rows: TrunkPortEntry[]): Pro
 }
 
 async function persistMacTable(assetId: string, rows: FdbEntry[]): Promise<void> {
-  const index = await buildLldpAssetMatchIndex();
+  const index = await getLldpAssetMatchIndex();
   const now = new Date();
   const existing = await prisma.assetMacTableEntry.findMany({
     where: { assetId },
