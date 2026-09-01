@@ -9,14 +9,19 @@
  *
  * The six states:
  *
- *   up          — answering, and it has answered `failureThreshold` times in a row
- *   warning     — answering intermittently: 1..threshold-1 consecutive misses.
+ *   up          — no missed polls outstanding: the bucket has drained to zero
+ *   warning     — a MISSED poll with the bucket still below the threshold.
  *                 Operator-facing label is "Missed" (MONITOR_STATUS_LABELS) —
  *                 "Warning" collided with the alert severity of the same name,
  *                 so a pill reading Warning looked like a fired alert rather
  *                 than a missed poll. The stored value is unchanged.
- *   down        — `missedPolls` consecutive misses, per the covering automation
- *   recovering  — answering again after an outage, not yet back to `up`
+ *   down        — a MISSED poll with the bucket at or above `missedPolls`, per
+ *                 the covering automation. The bucket LOCKS at its cap here, so
+ *                 recovery costs what the operator asked for rather than what
+ *                 the outage's length happened to accrue (`nextFailureBucket`).
+ *   recovering  — an ANSWERED poll with misses still outstanding. Reachable
+ *                 straight out of `down` as well as out of `warning`: it means
+ *                 "climbing back", not "was down".
  *   unknown     — nothing measured yet
  *   passive     — NOT a probe outcome. No down-detection automation covers this
  *                 device, so Polaris renders no verdict about it. It is still
@@ -82,51 +87,134 @@ export function runsHeavyCadences(a: {
 }): boolean {
   if (a.dependencySuppressed) return false;
   if (a.monitorStatus === "up") return true;
-  // A `recovering` asset whose bucket has drained is answering every probe and
-  // is only still amber because its automation asked for more confirmations
-  // (owesRecoveryConfirmation). Stalling telemetry through that hold would let
-  // a reset count silently decide how fresh an asset's charts are, which is not
-  // what it was set to decide. Unreachable before the recovery count existed —
-  // `recovering` implied cf > 0 — so this widens nothing retroactively.
+  // `recovering` always carries cf > 0 now that the automation's reset count is
+  // served by the bucket's own drain rather than by a separate hold at cf 0
+  // (the `owesRecoveryConfirmation` arrow this replaced). The test is kept
+  // rather than collapsed to `false` because it states the actual rule — an
+  // asset with misses outstanding is not somewhere to point a full SNMP walk —
+  // and it stays correct if a later state ever reaches cf 0 while recovering.
   if (a.monitorStatus === "recovering") return (a.consecutiveFailures ?? 0) === 0;
   return a.monitorStatus === "passive" && (a.consecutiveFailures ?? 0) === 0;
 }
 
 /**
- * Is the asset still owing answered polls before it may read `up`?
+ * The ceiling the missed-poll bucket may ever reach.
  *
- * The leaky bucket alone says `up` the moment the debt is paid — `threshold`
- * answers after `threshold` misses. A down automation whose reset asks for MORE
- * than that (business rule 36) holds the asset in `recovering` until its count
- * is served, so the pill and the automation agree about when a device is back.
+ * The bucket was UNBOUNDED until 2026-09-01, and that was the whole of the
+ * recovery bug: a device dark overnight at a 60 s cadence reached cf ≈ 480, and
+ * because a success only ever takes ONE back, it then had to answer 480 probes
+ * — eight hours — before it read `up` again. Its down alert holds through
+ * `down`/`recovering`/`warning` (DOWN_ALERT_HOLDING_STATES), so that alert kept
+ * repeating and escalating for eight hours after the device demonstrably came
+ * back. Recovery cost has to be bounded by what the operator ASKED for, never
+ * by how long the outage happened to run.
  *
- * Three inputs, and each one is load-bearing:
- *
- *   • `awaitingRecoveryConfirm` — the asset has read `down` since it last read
- *     `up`. ONLY such a device owes a run. This is a stored bit rather than
- *     something derived because at cf 0 a success run of N is ambiguous between
- *     a bucket that drained from N and a healthy device that has answered N
- *     times: deriving it painted two amber cells into every ordinary blip.
- *   • `consecutiveFailures` must be 0 — while the bucket still holds debt the
- *     LEVEL owns the verdict, and this arrow must not reach past it.
- *   • `consecutiveSuccesses` is the run so far. It counts the answers that
- *     drained the bucket too: an operator who writes "5 received" means five
- *     probes, not the drain plus five more. A miss anywhere zeroes it, so the
- *     run has to be clean — which is the point of asking for one.
- *
- * `recoveryPolls <= threshold` (no reset sustain, or one no longer than the
- * drain) makes this constantly false — the pre-2026-08-29 behavior, and what
- * every automation that resets immediately still gets.
+ * Covered assets cap at their own automation's number (see `bucketCapFor`);
+ * this constant is the passive ceiling and the absolute ceiling behind it. It
+ * matches the `missedPolls` / recovery-poll maximum in notificationTypes, so no
+ * covered asset can ever be capped by this value rather than by its rule.
  */
-export function owesRecoveryConfirmation(
-  awaitingRecoveryConfirm: boolean,
+export const MAX_MISSED_POLL_BUCKET = 100;
+
+/**
+ * The bucket level an asset sits at once it is DOWN — and therefore how many
+ * answered polls it owes before it reads `up` again.
+ *
+ * `threshold` misses is what DECLARES the outage; `recoveryPolls` is what ENDS
+ * it. Taking the max of the two makes the drain itself serve the operator's
+ * reset count, which is why `owesRecoveryConfirmation` and the
+ * `Asset.awaitingRecoveryConfirm` bit it read are no longer part of the state
+ * machine — the ambiguity that stored bit existed to resolve (at cf 0, a
+ * success run of N could be a drained bucket or a healthy device) cannot arise
+ * when the bucket carries the whole debt.
+ *
+ * `null` threshold is the PASSIVE device: no automation defines down for it, so
+ * there is no rule-supplied number and the ceiling is the constant. The bucket
+ * still moves for a passive asset — it is an automatable `asset_state` field,
+ * it is what lets a surface say "passive and dark" vs "passive and answering",
+ * and keeping it warm means an asset that LATER gains coverage converges on its
+ * next probe instead of restarting from zero.
+ */
+export function bucketCapFor(threshold: number | null, recoveryPolls: number): number {
+  if (threshold === null) return MAX_MISSED_POLL_BUCKET;
+  const rec = Number.isFinite(recoveryPolls) && recoveryPolls > 0 ? Math.floor(recoveryPolls) : 0;
+  return Math.min(MAX_MISSED_POLL_BUCKET, Math.max(threshold, rec));
+}
+
+/**
+ * The next bucket level after one probe.
+ *
+ * A miss adds one; an answer takes one back, floored at 0 — still the leaky
+ * bucket of business rule 30, and still not a run length, because forgetting an
+ * outage on one lucky packet is what let an alternating device never reach a
+ * verdict in either direction.
+ *
+ * What is new is the LOCK. The moment a miss carries the level to the
+ * threshold, the bucket jumps straight to the cap and stays there for every
+ * further miss. Two things fall out of that, both of them the point:
+ *
+ *   • Recovery is bounded and deterministic. A device that has been down for
+ *     four minutes and one that has been down for four days both owe exactly
+ *     `cap` answered polls, which is the number the operator wrote down.
+ *   • The reset count is served by the drain. `cap` is max(threshold,
+ *     recoveryPolls), so "down after 3 missed, up after 5 received" jumps to 5
+ *     on the third miss and drains 5→4→3→2→1→0 across five answers.
+ *
+ * Pure, and mirrored in public/js/monitor-states.js (browser) and
+ * probeOutageService.replayProbeStates (server-side chart replay). Those two
+ * cannot import this — one is a no-build-step browser file, the other is kept
+ * deliberately dependency-free — so a parity test pins them instead.
+ */
+export function nextFailureBucket(
   consecutiveFailures: number,
-  consecutiveSuccesses: number,
+  success: boolean,
+  threshold: number | null,
   recoveryPolls: number,
-): boolean {
-  if (!awaitingRecoveryConfirm) return false;
-  if (consecutiveFailures !== 0) return false;
-  return consecutiveSuccesses < recoveryPolls;
+): number {
+  const cf = Math.max(0, consecutiveFailures || 0);
+  const cap = bucketCapFor(threshold, recoveryPolls);
+  if (success) return Math.max(0, Math.min(cap, cf) - 1);
+  const raised = Math.min(cap, cf + 1);
+  // The verdict miss and every miss after it sit at the cap: once an outage is
+  // declared, further misses tell us nothing new about how long recovery should
+  // take, and letting them accrue is what made an overnight outage unrecoverable.
+  if (threshold !== null && raised >= threshold) return cap;
+  return raised;
+}
+
+/**
+ * The state one probe leaves the asset in, given the bucket level AFTER that
+ * probe.
+ *
+ * THE LEVEL DECIDES WHAT A MISS MEANS; THE OUTCOME DECIDES EVERYTHING ELSE:
+ *
+ *   passive (no threshold)         → passive
+ *   cf === 0                       → up
+ *   this probe ANSWERED            → recovering
+ *   this probe missed, cf >= thr   → down
+ *   this probe missed, cf <  thr   → warning  (operator-facing "Missed")
+ *
+ * The answered branch is unconditional as of 2026-09-01. It used to sit BELOW
+ * the threshold test, so an answered probe taken while the bucket was still at
+ * or above the threshold read `down` — correct for a verdict, but it meant the
+ * response-time chart drew those probes in the plain series green (its point
+ * colouring has no way to paint an `ok` point red), so an outage read
+ * red → green → blue → green and looked like the device had recovered twice.
+ * With the bucket locked, every answered probe during an outage is genuinely
+ * the device climbing back, and `recovering` is the word for that. It does not
+ * clear the alert early: DOWN_ALERT_HOLDING_STATES holds a down alert through
+ * `recovering` and `warning`, so the alert still ends only at `up`.
+ */
+export function monitorStatusFor(
+  consecutiveFailures: number,
+  success: boolean,
+  threshold: number | null,
+): MonitorStatus {
+  if (threshold === null) return "passive";
+  const cf = Math.max(0, consecutiveFailures || 0);
+  if (cf === 0) return "up";
+  if (success) return "recovering";
+  return cf >= threshold ? "down" : "warning";
 }
 
 /**

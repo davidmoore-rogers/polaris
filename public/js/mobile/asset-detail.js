@@ -710,6 +710,13 @@
       // later. Its ABSENCE is the unknown case: keep every miss red rather than
       // invent a threshold to be amber about.
       var dd = PolarisMonitorStates.fromPayload(resp.downDetection);
+      // The colour a `down` probe is drawn in: the covering automation's own
+      // severity (business rule 36), resolved through the same table the
+      // desktop chart and the alert email read. Null severity — passive, or an
+      // unresolved automation — keeps the red Down has always been.
+      var downColor = (window.PolarisChartSeverity && dd.severity)
+        ? window.PolarisChartSeverity.downColorOf(dd.severity)
+        : null;
       var states = PolarisMonitorStates.replay(
         (resp.samples || []).map(function (s) { return { timestamp: s.timestamp, success: !isFailure(s) }; }),
         dd.threshold, dd.recoveryPolls,
@@ -722,6 +729,7 @@
           samples.push({
             ts: s.timestamp, v: null, ok: false, dep: isDependency(s),
             down: !dd.known || status === "down",
+            downColor: downColor,
           });
         }
       });

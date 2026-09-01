@@ -1382,6 +1382,12 @@ router.get("/:id/effective-monitor-settings", requirePermission("assets", "read"
             : null,
           automationId: downCoverage.winner?.ruleId ?? null,
           automationName: downCoverage.winner?.ruleName ?? null,
+          // The colour every surface paints `down` in (business rule 36). Down
+          // is not inherently red — red is what `critical` looks like, and it
+          // is merely the default severity of a seeded down automation. Sent as
+          // the severity NAME, not a colour: the palette belongs to the client
+          // that is drawing (browser tokens vs the email's flat hex).
+          severity: downCoverage.winner?.severity ?? null,
           // A tie is two equally-specific automations asking for different
           // counts on this device — surfaced so the modal can say which one
           // won rather than leaving the operator to guess.
@@ -1530,7 +1536,14 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
       bucketSeconds: pick.bucketSeconds,
       lastSuccessAt,
       downDetection: downCoverage
-        ? { passive: downCoverage.passive, missedPolls: downWinner?.threshold ?? null, recoveryPolls }
+        ? {
+            passive: downCoverage.passive,
+            missedPolls: downWinner?.threshold ?? null,
+            recoveryPolls,
+            // What the covering automation rated this outage — the colour the
+            // response-time chart draws a `down` probe in. See business rule 36.
+            severity: downWinner?.severity ?? null,
+          }
         : null,
       samples: result.samples,
       stats: result.stats,

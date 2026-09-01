@@ -84,10 +84,14 @@
   // split (a miss the upstream explains is not counted against this device at
   // all), and a point with no `down` flag stays red, which is every chart that
   // never resolved a threshold.
+  // `p.downColor` is the covering automation's SEVERITY colour for a `down`
+  // probe (business rule 36) — Down is not inherently red, red is what
+  // `critical` looks like. Absent ⇒ FAIL_COLOR, which is both the critical
+  // colour and the right answer for a miss no automation was resolved for.
   function pointColorFor(p, seriesColor) {
     if (p && p.ok) return p.rec ? RECOVER_COLOR : seriesColor;
     if (p && p.dep) return DEP_COLOR;
-    return p && p.down === false ? MISS_COLOR : FAIL_COLOR;
+    return p && p.down === false ? MISS_COLOR : ((p && p.downColor) || FAIL_COLOR);
   }
   function failColorFor(p) { return pointColorFor(p, null); }
 
@@ -160,7 +164,7 @@
         // (PolarisMonitorStates). `down === false` is the deliberate amber; both
         // are undefined on every series that never resolved a threshold, which
         // leaves those charts exactly as they were.
-        rec: p.rec === true, down: p.down,
+        rec: p.rec === true, down: p.down, downColor: p.downColor,
       });
     });
     pts.sort(function (a, b) { return a.ts - b.ts; });
@@ -320,7 +324,7 @@
     prepared.forEach(function (e, si) {
       var color = e.s.color || "var(--md-primary)";
       var plot = e.pts.map(function (p) {
-        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok, dep: p.dep, rec: p.rec, down: p.down };
+        return { x: x(p.ts), y: p.ok ? y(p.v) : baselineY, ok: p.ok, dep: p.dep, rec: p.rec, down: p.down, downColor: p.downColor };
       });
       if (!plot.length) return;
 

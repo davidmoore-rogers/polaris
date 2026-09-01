@@ -91,15 +91,20 @@ describe("_intermittencyStates", () => {
     expect(counts("xxx.x..", 3)).toEqual([1, 2, 3, 2, 3, 2, 1]);
   });
 
-  it("does not let one answered packet repaint a deep outage", () => {
-    // Five misses is a debt of 5. One answer takes it to 4 — still at or over
-    // the threshold, so the cell stays RED. This is the whole reason the level
-    // decides rather than the last outcome: at threshold 3 a device dark for an
-    // hour would otherwise read "recovering" on a single lucky poll.
-    expect(run("xxxxx.", 3)).toBe("yyrrrr");
-    expect(counts("xxxxx.", 3)).toEqual([1, 2, 3, 4, 5, 4]);
-    // It takes two more answers to drop under the threshold, then two to clear.
-    expect(run("xxxxx.....", 3)).toBe("yyrrrrrppg");
+  it("LOCKS the bucket at the cap, so the debt does not track the outage's length", () => {
+    // Five misses against a threshold of 3 is a debt of 3, not 5: the third
+    // miss declares the outage and every miss after it holds at the cap. That
+    // is what bounds recovery by the operator's number instead of by how long
+    // the device happened to be dark — unbounded, an overnight outage owed one
+    // answered poll per minute it had been down.
+    expect(counts("xxxxx.", 3)).toEqual([1, 2, 3, 3, 3, 2]);
+    // And the first ANSWER is blue, not red: the level still decides what a
+    // MISS means, but a probe that answered is the device climbing back. It
+    // used to read `down` here, which the chart had no colour for on an `ok`
+    // point and drew in the plain series GREEN — the red→green→blue→green
+    // artefact this pair of changes closed.
+    expect(run("xxxxx.", 3)).toBe("yyrrrp");
+    expect(run("xxxxx.....", 3)).toBe("yyrrrppggg");
   });
 
   it("goes straight to green at threshold 1 (no recovery window to show)", () => {
@@ -125,6 +130,8 @@ describe("_intermittencyStates", () => {
     // threshold null = no down-detection automation covers the device, so no
     // verdict may be rendered — but the count is still the tooltip's subject.
     expect(run("xxxxx.", null as unknown as number)).toBe("yyyyyp");
+    // No threshold means no lock either — a passive device's bucket climbs
+    // freely (bounded only by MAX_BUCKET) because there is no outage to declare.
     expect(counts("xxxxx.", null as unknown as number)).toEqual([1, 2, 3, 4, 5, 4]);
   });
 
@@ -164,12 +171,16 @@ describe("_intermittencyStates", () => {
     expect(s.filter((c) => c.success).findIndex((c) => c.status === "up")).toBe(4);
   });
 
-  it("reports the confirmation run in the tooltip's subject", () => {
+  it("reports the climb's progress in the tooltip's subject", () => {
+    // The cap IS the run now, so every recovering cell can state how far
+    // through it is — `cap - cf` served of `cap`. There is no longer a separate
+    // confirmation phase at cf 0 to distinguish from the drain.
     const s = states("xxx.....", 3, 5);
-    expect(s[5].confirming).toEqual({ done: 3, need: 5 });
+    expect(s[3].confirming).toEqual({ done: 1, need: 5 });
+    expect(s[4].confirming).toEqual({ done: 2, need: 5 });
     expect(s[6].confirming).toEqual({ done: 4, need: 5 });
-    // While the bucket still has debt the cell is about the debt, not the run.
-    expect(s[4].confirming).toBeNull();
+    // A missed probe is about the debt, not the climb.
+    expect(s[2].confirming).toBeNull();
     // And once the run is served it is an ordinary green.
     expect(s[7].confirming).toBeNull();
   });
@@ -186,22 +197,24 @@ describe("_intermittencyStates", () => {
     expect(run("xxx.....", 3, 2)).toBe(run("xxx.....", 3));
   });
 
-  it("does not extend a deep outage that already out-drained the count", () => {
-    // 7 misses cost 7 answers to drain — the asset is still DOWN for the first
-    // four of them (the bucket has to fall under 3) — and a 5-poll reset adds
-    // nothing on top, because the drain already exceeded it.
-    expect(run("xxxxxxx........", 3, 5)).toBe("yyrrrrrrrrrppgg");
-    expect(run("xxxxxxx........", 3, 5)).toBe(run("xxxxxxx........", 3));
+  it("costs the same climb however long the outage ran", () => {
+    // 7 misses used to cost 7 answers; the cap makes it 5, which is what the
+    // operator asked for. Compare with the same outage under no reset hold,
+    // where the cap is the threshold and the climb is 3 — the two now DIFFER,
+    // where before the drain swamped the reset on any outage past 5 misses.
+    expect(run("xxxxxxx........", 3, 5)).toBe("yyrrrrrppppgggg");
+    expect(run("xxxxxxx........", 3)).toBe("yyrrrrrppgggggg");
   });
 
   it("re-arms after a fresh outage, not once per window", () => {
     expect(run("xxx.....xxx.....", 3, 5)).toBe("yyrppppgyyrppppg");
   });
 
-  it("never paints a healthy window purple on its third cell", () => {
-    // The server infers "was down" from the counters; the replay cannot, so it
-    // tracks the observation. Without that, a bar opening on a device that has
-    // been up for hours reads cs >= threshold at cf 0 and goes amber.
+  it("never paints a healthy window blue", () => {
+    // At cf 0 there is nothing to climb out of, so a device that has been up
+    // for hours stays green however long its success run. The old machine
+    // needed a stored "was down" bit to tell that apart from a drained bucket;
+    // the cap removes the ambiguity, because the debt itself carries it.
     expect(run("..........", 3, 5)).toBe("gggggggggg");
   });
 
@@ -245,6 +258,8 @@ describe("the strip, the response-time chart and the alert email replay ONE mach
     [".x.",         3, 0],   // a single miss never smears
     ["xxx.x..",     3, 0],   // a blip on the climb re-fills the bucket
     ["..xxx......", 3, 5],   // the reset asks for more answers than the drain
+    ["xxxxxxxxxx.......", 3, 5],  // a deep outage still costs only the cap
+    ["xxxxxxxxxx.......", 3, 0],  // and only the threshold with no reset hold
     ["..xx....",    3, 5],   // a blip that never went down earns no hold
     ["xxxxxxx",     3, 0],   // still down at the right edge
     ["..xxxx...",   1, 0],   // down on the first miss

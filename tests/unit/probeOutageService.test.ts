@@ -208,11 +208,20 @@ describe("replayProbeStates", () => {
     ]);
   });
 
-  it("holds down while the level is high, whatever a single lucky packet says", () => {
-    // The LEVEL decides. One answer in the middle of a deep outage takes the
-    // bucket from 4 to 3, which is still at the threshold.
+  it("locks the bucket at the cap, so a long outage costs no more than a short one", () => {
+    // The fourth miss adds nothing: the third already declared the outage and
+    // the level holds at the cap. Unbounded, this is where a device dark
+    // overnight accrued the hundreds of answered polls it then had to serve.
+    // The answer at the end is `recovering` — the LEVEL still decides what a
+    // MISS means, but a probe that answered is the device climbing back, and
+    // painting it `down` is what left the chart no colour to draw it in.
     expect(replayProbeStates([v(0, true), v(1, true), v(2, true), v(3, true), v(4, false)], 3, 0))
-      .toEqual(["warning", "warning", "down", "down", "down"]);
+      .toEqual(["warning", "warning", "down", "down", "recovering"]);
+    // Four answers would have been owed before the cap; the threshold's three
+    // are now, however many misses ran past it.
+    expect(replayProbeStates(
+      [v(0, true), v(1, true), v(2, true), v(3, true), v(4, false), v(5, false), v(6, false)], 3, 0,
+    )).toEqual(["warning", "warning", "down", "down", "recovering", "recovering", "up"]);
   });
 
   it("never reaches down for a passive device", () => {

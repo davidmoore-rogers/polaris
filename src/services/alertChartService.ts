@@ -24,6 +24,7 @@
 import { prisma } from "../db.js";
 import { foldProbeOutages, foldProbeRecoveries, replayProbeStates, type OutageKind } from "./probeOutageService.js";
 import { describeDownDetectionFor, recoveryPollsFor } from "./downDetectionService.js";
+import { downSeverityCss } from "../utils/severityStyle.js";
 import { resolveMonitorSettings } from "./monitoringService.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
@@ -312,6 +313,15 @@ export interface FailSpanSeries {
   recoverySpans: Array<{ from: number; to: number }>;
   /** How many polls failed in the window — the text fallback's number. */
   failedCount: number;
+  /**
+   * The colour an "outage" span is drawn in: the covering down automation's own
+   * SEVERITY (business rule 36), already resolved to a hex by
+   * `downSeverityCss`. Down is not inherently red — red is what `critical`
+   * looks like — and the email must not override an operator's rating when the
+   * device page honours it. Undefined for a passive or unresolved device, which
+   * keeps the red the dive has always had.
+   */
+  downColor?: string;
 }
 
 /**
@@ -393,7 +403,16 @@ async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<F
   // for the device, so its misses stay amber and never go red — the same rule
   // the Last-30-min strip replays. A null result is the unknown case.
   const downThreshold = down ? (down.passive ? null : down.winner?.threshold ?? null) : undefined;
-  return failSpansFrom(rows, now.getTime(), downThreshold, await resolveRecoveryPolls(assetId, down?.winner ?? null));
+  const series = failSpansFrom(
+    rows,
+    now.getTime(),
+    downThreshold,
+    await resolveRecoveryPolls(assetId, down?.winner ?? null),
+  );
+  // A passive device never reaches `down`, so there is nothing to colour; an
+  // unresolved one keeps the red. Only a real winner supplies a severity.
+  const severity = down && !down.passive ? down.winner?.severity ?? null : null;
+  return severity ? { ...series, downColor: downSeverityCss(severity) } : series;
 }
 
 /**
@@ -407,7 +426,12 @@ async function loadFailSpans(assetId: string, since: Date, now: Date): Promise<F
  */
 async function resolveRecoveryPolls(
   assetId: string,
-  winner: { threshold: number; recoverySustainSec: number | null; recoverySustainPolls?: number | null } | null,
+  winner: {
+    threshold: number;
+    recoverySustainSec: number | null;
+    recoverySustainPolls?: number | null;
+    severity?: string;
+  } | null,
 ): Promise<number> {
   if (!winner) return 0;
   // A reset that states its hold as a COUNT needs no cadence at all — and no
@@ -431,7 +455,17 @@ async function resolveRecoveryPolls(
       ...ctx,
       discoveredByIntegrationType: ctx.discoveredByIntegration?.type ?? null,
     });
-    return recoveryPollsFor({ ...winner, recoverySustainPolls: winner.recoverySustainPolls ?? null }, resolved.intervalSeconds);
+    return recoveryPollsFor(
+      {
+        ...winner,
+        recoverySustainPolls: winner.recoverySustainPolls ?? null,
+        // Not read by recoveryPollsFor — only the poll arithmetic is — but the
+        // verdict type carries it, and inventing a value here would be a second
+        // place that decides what colour Down is drawn in.
+        severity: winner.severity ?? "critical",
+      },
+      resolved.intervalSeconds,
+    );
   } catch {
     return winner.threshold;
   }
@@ -740,6 +774,10 @@ export async function buildAlertCharts(
       threshold: opts?.thresholds?.[token] ?? null,
       ...(isSensor && sensor.alarmSpans.length ? { alarmSpans: sensor.alarmSpans } : {}),
       ...(withFailSpans ? { failSpans: fail.spans } : {}),
+      // The severity colour for the "outage" kind only — "missed" stays amber
+      // (not a verdict yet) and "dependency" stays grey (not this device's
+      // fault). Absent ⇒ the red sparklineSvg has always used.
+      ...(withFailSpans && fail.downColor ? { downColor: fail.downColor } : {}),
       ...(withRecoverSpans ? { recoverSpans: fail.recoverySpans } : {}),
       // Only the loss chart sets this — where its caption's ratio starts, when
       // the anchor left part of the plotted window outside the measurement.

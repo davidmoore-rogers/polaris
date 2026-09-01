@@ -831,6 +831,11 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       // "an unmonitorable status cannot be monitored" true across upgrades
       // and raw-SQL writers. See its header.
       "./jobs/clampMonitoredForStatus.js",
+      // Same posture: brings pre-ceiling missed-poll buckets inside
+      // MAX_MISSED_POLL_BUCKET so an outage's length can no longer decide how
+      // long recovery takes, and retires the dormant awaitingRecoveryConfirm
+      // bit. See its header.
+      "./jobs/clampFailureBucket.js",
       "./jobs/bootstrapProxyConfig.js",
       "./jobs/migrateAutomationRuleShape.js",
       "./jobs/migrateContactFilterShape.js",

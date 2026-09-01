@@ -111,6 +111,11 @@
 <script src="/js/brand-logo.js"></script>
 <script src="/js/mobile/auth.js"></script>
 <script src="/js/monitor-states.js"></script>
+<!-- The severity palette the response-time chart paints a `down` probe with
+     (business rule 36). Pure, DOM-free and dependency-free; loaded here rather
+     than mirrored into mobile/charts.js so the phone, the desktop chart and the
+     alert email cannot draw one outage three different colours. -->
+<script src="/js/chart-severity.js"></script>
 <script src="/js/mobile/charts.js"></script>
 <script src="/js/mobile/map-tab.js"></script>
 <script src="/js/mobile/assets-tab.js"></script>

@@ -41,6 +41,7 @@
 
 import { prisma } from "../db.js";
 import { pickSampleTierForAsset, type SampleTier } from "./sampleQueryRouter.js";
+import { MAX_MISSED_POLL_BUCKET } from "../utils/monitorStatus.js";
 
 /**
  * Why the probes in a window failed.
@@ -179,23 +180,31 @@ export type ProbeDisplayState = "up" | "warning" | "down" | "recovering";
  *
  * The rules, in the order they decide:
  *
- *   cf >= threshold                    down        (the verdict)
- *   cf > 0, this probe missed          warning     (a miss, not yet a verdict)
- *   cf > 0, this probe answered        recovering  (paying the debt off)
- *   cf == 0, but the confirmation run
- *   since the outage is still short    recovering  (rule 36's way back up)
- *   otherwise                          up
+ *   cf = 0                             up
+ *   this probe ANSWERED                recovering  (climbing back, misses left)
+ *   missed, cf >= threshold            down        (the verdict)
+ *   missed, cf <  threshold            warning     (a miss, not yet a verdict)
  *
- * THE LEVEL DECIDES; this probe's own outcome only breaks the tie below the
- * threshold. `threshold === null` is the PASSIVE device — no automation defines
- * down for it, so nothing may ever read `down` — spelled `Infinity` rather than
- * a second loop. `recoveryPolls` is the covering automation's reset already
- * converted to a poll count; below the missed-poll count it changes nothing,
- * because the bucket's drain is the floor.
+ * THE LEVEL DECIDES WHAT A MISS MEANS; the outcome decides everything else.
+ * `threshold === null` is the PASSIVE device — no automation defines down for
+ * it, so nothing may ever read `down` — spelled `Infinity` rather than a second
+ * loop.
  *
- * The bucket starts at zero and `sawDown` starts false: a window that opens
- * mid-outage counts only the misses it can actually see rather than inventing a
- * debt it has no samples for. Same assumption as the browser copy.
+ * The bucket LOCKS at max(threshold, recoveryPolls) once the outage is
+ * declared, which is what makes an answered probe during an outage unambiguously
+ * `recovering` rather than a still-`down` reading the charts had no colour for.
+ * Unbounded, an overnight outage left the bucket hundreds deep and the climb out
+ * spent its first hundreds of answered probes still reading `down`.
+ *
+ * The bucket starts at zero: a window that opens mid-outage counts only the
+ * misses it can actually see rather than inventing a debt it has no samples for.
+ * Same assumption as the browser copy.
+ *
+ * MIRROR of `nextFailureBucket` + `monitorStatusFor` in utils/monitorStatus.ts
+ * (the probe path) and of `replay` in public/js/monitor-states.js (the browser
+ * charts). Nothing crosses those boundaries — this file is kept deliberately
+ * dependency-free and that one is a no-build-step browser file — so a parity
+ * test pins the three instead.
  */
 export function replayProbeStates(
   verdicts: ProbeVerdict[],
@@ -206,17 +215,18 @@ export function replayProbeStates(
     ? Infinity
     : Number.isFinite(threshold) && threshold >= 1 ? Math.floor(threshold) : 3;
   const rec = Number.isFinite(recoveryPolls) && recoveryPolls > 0 ? Math.floor(recoveryPolls) : 0;
+  const cap = thr === Infinity ? MAX_MISSED_POLL_BUCKET : Math.min(MAX_MISSED_POLL_BUCKET, Math.max(thr, rec));
   let cf = 0;
-  let cs = 0;
-  let sawDown = false;
   return verdicts.map((v) => {
-    cf = v.failed ? cf + 1 : Math.max(0, cf - 1);
-    cs = v.failed ? 0 : cs + 1;
-    if (cf >= thr) { sawDown = true; return "down"; }
-    if (cf > 0) return v.failed ? "warning" : "recovering";
-    if (sawDown && cs < rec) return "recovering";
-    sawDown = false;
-    return "up";
+    if (v.failed) {
+      const raised = Math.min(cap, cf + 1);
+      cf = thr !== Infinity && raised >= thr ? cap : raised;
+    } else {
+      cf = Math.max(0, Math.min(cap, cf) - 1);
+    }
+    if (cf === 0) return "up";
+    if (!v.failed) return "recovering";
+    return cf >= thr ? "down" : "warning";
   });
 }
 

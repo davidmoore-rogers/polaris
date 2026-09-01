@@ -273,21 +273,48 @@ var _CHART_MISS_COLOR = "#ffc107";
 // either one read the other.
 var _CHART_RECOVER_COLOR = "#0288d1";
 
+/**
+ * "#rrggbb" + alpha → "rgba(r,g,b,a)". Exists because the Last-30-min strip
+ * paints its cells at a fixed translucency while the colour ITSELF is now a
+ * variable — the Down cell takes the covering automation's severity colour,
+ * which arrives as a flat hex from PolarisChartSeverity.downColorOf. A
+ * malformed input returns the string untouched, so a bad value shows up as a
+ * missing cell rather than a silently wrong hue.
+ */
+function _hexWithAlpha(hex, alpha) {
+  var m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ""));
+  if (!m) return hex;
+  var n = parseInt(m[1], 16);
+  return "rgba(" + ((n >> 16) & 255) + "," + ((n >> 8) & 255) + "," + (n & 255) + "," + alpha + ")";
+}
+
 // The stroke/dot color for one plot point. `ok:false` points carry `dep:true`
-// when the miss was explained; `ok:true` points carry `rec:true` when misses
-// were still outstanding at that probe. Single decider so a dive can never
-// come out half grey and half red, and so the climb back out cannot come out
-// half green and half purple.
+// when the miss was explained and `downColor` when the covering automation's
+// severity is known; `ok:true` points carry `rec:true` when misses were still
+// outstanding at that probe. Single decider so a dive can never come out half
+// grey and half red, and so the climb back out cannot come out half green and
+// half blue.
+//
+// Note an `ok` point can no longer be `down`: since 2026-09-01 an answered
+// probe is `recovering` whatever the bucket level (business rule 30), which is
+// what closed the red → GREEN → blue → green artefact — an answered probe taken
+// while the bucket was still above the threshold read `down`, and with no way to
+// paint an `ok` point in the down colour it fell through to the series green.
 function _chartPointColor(p, seriesColor) {
   if (p.ok) return p.rec ? _CHART_RECOVER_COLOR : seriesColor;
-  // Grey outranks the amber/red split: a miss the upstream explains is not
+  // Grey outranks the amber/down split: a miss the upstream explains is not
   // being counted against this device at all, so how close it sits to the
   // threshold says nothing worth colouring.
   if (p.dep) return _CHART_DEP_COLOR;
   // `down` is set only by the charts that resolved the covering automation's
   // count (today: response time). Everywhere else it is undefined and the miss
   // stays red, which is what every other chart has always drawn.
-  return p.down === false ? _CHART_MISS_COLOR : _CHART_FAIL_COLOR;
+  //
+  // `downColor` is that automation's SEVERITY colour: Down is not inherently
+  // red, red is what `critical` looks like. Absent ⇒ the red, which is both the
+  // critical colour and the right answer for a miss no automation was resolved
+  // for (see PolarisChartSeverity.downColorOf).
+  return p.down === false ? _CHART_MISS_COLOR : (p.downColor || _CHART_FAIL_COLOR);
 }
 
 // Failure-aware line rendering. `pts` is a time-ordered list of
@@ -11396,6 +11423,9 @@ async function _renderIntermittencyBar(assetId, effP) {
   var threshold = 3;
   var recoveryPolls = 0;
   var downAutomation = null;
+  // The covering automation's severity — the colour a Down cell takes. Null
+  // until resolved, and null on a passive device, which never reaches Down.
+  var downSeverity = null;
   try {
     var results = await Promise.all([
       api.assets.monitorHistory(assetId, "1h").catch(function () { return null; }),
@@ -11413,6 +11443,7 @@ async function _renderIntermittencyBar(assetId, effP) {
     if (ddInfo && !ddInfo.passive) {
       if (Number.isFinite(ddInfo.recoveryPolls)) recoveryPolls = ddInfo.recoveryPolls;
       downAutomation = ddInfo.automationName || null;
+      downSeverity = ddInfo.severity || null;
     }
     if (results[1] && results[1].resolved) {
       // Populate the shared cache so stale-banner slots see the resolved
@@ -11446,11 +11477,21 @@ async function _renderIntermittencyBar(assetId, effP) {
   // it. The series is the Up green now, so the blue is free — and it never sat
   // comfortably one shade from the muted lavender #9575cd that means
   // MAINTENANCE elsewhere in the product.
+  // `down` is the ONE cell whose hue is not fixed: it is the covering
+  // automation's severity (business rule 36), so an outage an operator rated
+  // `warning` reads amber-yellow here and in the chart below rather than in a
+  // red they never asked for. Resolved through the same
+  // PolarisChartSeverity.downColorOf the chart uses, then given the strip's own
+  // alpha so it sits in the same visual weight as its neighbours. Unresolved
+  // severity falls back to the red Down has always been.
+  var downHex = (window.PolarisChartSeverity && downSeverity)
+    ? window.PolarisChartSeverity.downColorOf(downSeverity)
+    : "#d32f2f";
   var colors = {
     up:         "rgba(0,200,83,0.65)",
     recovering: "rgba(2,136,209,0.80)",
     warning:    "rgba(255,193,7,0.75)",
-    down:       "rgba(211,47,47,0.75)",
+    down:       _hexWithAlpha(downHex, 0.75),
     unknown:    "rgba(117,117,117,0.45)",
   };
   // Each cell flexes to 1fr so the bar always fills the column regardless
@@ -11467,16 +11508,21 @@ async function _renderIntermittencyBar(assetId, effP) {
     var n = st.missed || 0;
     var what;
     if (!st.success)        what = "Missed " + n + " (+1)";
-    else if (n > 0)         what = "Received — " + n + " missed outstanding (−1)";
-    else if (st.confirming) what = "Received — confirming recovery " + st.confirming.done + "/" + st.confirming.need;
+    // A recovering probe reports BOTH halves: how far through the climb it is
+    // (the bucket's cap is what a declared outage owes) and how much debt is
+    // left. One without the other reads as either "why is this still blue" or
+    // "how much longer".
+    else if (st.confirming) what = "Received " + st.confirming.done + "/" + st.confirming.need +
+                                   " — " + n + " missed outstanding (−1)";
     else                    what = "Received — recovered";
     if (st.status === "down") what += " · Down";
     return '<div title="' + escapeHtml(ts + " · " + what) + '" style="flex:1;background:' + color + '"></div>';
   }).join("");
   // Name the automation the bar is drawn from. Both counts are its counts —
-  // the missed-poll threshold that turns a cell red and the confirmation run
-  // that keeps it purple — so an operator reading the strip against their
-  // automation can see the two numbers rather than infer them from the colors.
+  // the missed-poll threshold that turns a cell to the Down colour and the
+  // recovery run that keeps it blue — so an operator reading the strip against
+  // their automation can see the two numbers rather than infer them from the
+  // colors.
   var legend;
   if (threshold === null) {
     legend = 'No down automation covers this device — Polaris renders no verdict';
@@ -11764,6 +11810,12 @@ function _renderMonitorChart(container, data, transitions) {
   // about.
   var dd = (data && data.downDetection) || null;
   var thresholdKnown = !!dd;
+  // The colour a `down` probe is drawn in — the covering automation's own
+  // severity (business rule 36). A passive device never reaches `down`, and an
+  // unresolved one keeps the red it has always had.
+  var downColor = (window.PolarisChartSeverity && dd && !dd.passive)
+    ? window.PolarisChartSeverity.downColorOf(dd.severity)
+    : _CHART_FAIL_COLOR;
   var states = _intermittencyStates(
     // Rollup tiers carry no per-sample `success`, so the bucket reads the same
     // fully-failed-bucket rule the plot does: a bucket with any success in it
@@ -11784,6 +11836,7 @@ function _renderMonitorChart(container, data, transitions) {
         x: xFor(s.timestamp), y: padT + innerH, ok: false,
         dep: ptIsDependency(s),
         down: !thresholdKnown || statusAt(i) === "down",
+        downColor: downColor,
       });
     }
   });

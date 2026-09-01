@@ -31,6 +31,57 @@ export function severityHex(severity: string | null | undefined): string {
   return SEVERITY_HEX[String(severity ?? "")] ?? FALLBACK_HEX;
 }
 
+/**
+ * The colour a `down` monitor state is DRAWN in — one entry per severity,
+ * mirrored by `DOWN_SEV_COLOR` in public/js/chart-severity.js.
+ *
+ * Down is not inherently red. Red is what `critical` looks like, and critical
+ * happens to be the default severity of every down automation Polaris seeds. An
+ * operator who says an outage on this device class is only worth a `warning`
+ * has said something about how it should read, and painting it in the same red
+ * as a critical outage overrides that on every surface at once.
+ *
+ * DELIBERATELY NOT the `SEVERITY_HEX` values above. Those colour a whole alert
+ * — an email's severity bar, a Teams card — where nothing else competes. These
+ * land on the response-time chart and the Last-30-min strip, which already
+ * spend amber on a below-threshold miss (#ffc107), blue on a recovering probe
+ * (#0288d1) and grey on a dependency-explained one (#9aa0a6). Each value here
+ * is pulled deliberately deeper than its neighbour in that vocabulary so the
+ * two stay tellable apart:
+ *
+ *   critical      #d32f2f  the red every surface already used — unchanged, so
+ *                          a default install looks exactly as it did
+ *   serious       #e65100  deep orange, well clear of the miss amber
+ *   warning       #f9a825  the operator's "yellow", a shade under #ffc107
+ *   informational #1565c0  darker than the recovering blue
+ *   notice        #546e7a  darker than the dependency grey
+ *
+ * The warning/amber pair is the closest of the four and it is a real limit
+ * rather than a bug: a warning-severity outage and the misses that built it are
+ * two shades of one yellow. They stay separable by shape and by tooltip — the
+ * misses are the climb, the down is the verdict — and by the pill, which names
+ * the state outright. An unrecognized severity falls back to the red, because
+ * that is what Down has always been.
+ */
+const DOWN_SEVERITY_HEX: Record<string, string> = {
+  notice: "546e7a",
+  informational: "1565c0",
+  warning: "f9a825",
+  serious: "e65100",
+  critical: "d32f2f",
+};
+
+/** Hex WITHOUT a leading "#". */
+export function downSeverityHex(severity: string | null | undefined): string {
+  return DOWN_SEVERITY_HEX[String(severity ?? "")] ?? DOWN_SEVERITY_HEX.critical!;
+}
+
+/** Same colour, CSS-ready — what the alert-email response-time chart strokes a
+ *  down probe with. */
+export function downSeverityCss(severity: string | null | undefined): string {
+  return `#${downSeverityHex(severity)}`;
+}
+
 /** Same colour, CSS-ready. */
 export function severityCss(severity: string | null | undefined): string {
   return `#${severityHex(severity)}`;

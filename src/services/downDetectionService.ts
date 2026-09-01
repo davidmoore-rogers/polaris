@@ -54,6 +54,7 @@ import {
   DEVICE_FILTER_DIMENSIONS,
   scopeMatchesAsset,
   type ScopeAsset,
+  SEVERITIES,
   type Trigger,
   type RuleScope,
 } from "./notificationTypes.js";
@@ -95,6 +96,14 @@ export interface DownWinner {
    *  preferred over the seconds, which only round back to it while the cadence
    *  is the one they authored against. */
   recoverySustainPolls: number | null;
+  /**
+   * The covering automation's own severity — what the operator said this
+   * outage is WORTH. Every surface that paints `down` reads it, so a device
+   * governed by a `warning`-severity automation reads Down in that automation's
+   * amber rather than in a red the operator never asked for. Not a threshold
+   * input: it changes no verdict, only how the verdict is drawn.
+   */
+  severity: string;
   ruleId: string;
   ruleName: string;
   rank: number;
@@ -119,6 +128,7 @@ export interface DownRule {
   threshold: number;
   recoverySustainSec: number | null;
   recoverySustainPolls: number | null;
+  severity: string;
   dimensionFilter: Parameters<typeof deviceFilterMatch>[0];
 }
 
@@ -269,6 +279,7 @@ export function pickDownWinner(rules: DownRule[], asset: ScopeAsset, sink?: Down
     threshold: winner.threshold,
     recoverySustainSec: winner.recoverySustainSec,
     recoverySustainPolls: winner.recoverySustainPolls,
+    severity: winner.severity,
     ruleId: winner.id,
     ruleName: winner.name,
     rank: winner.rank,
@@ -283,6 +294,7 @@ function toDownRule(row: {
   trigger: unknown;
   scope: unknown;
   reset?: unknown;
+  severity?: unknown;
 }): DownRule | null {
   const trigger = row.trigger as unknown as Trigger;
   if (!trigger || !isDownDetectionTrigger(trigger)) return null;
@@ -301,6 +313,12 @@ function toDownRule(row: {
     // The count as STATED, when the reset states one — recoveryPollsFor prefers
     // it over dividing the seconds mirror by a cadence that may have moved.
     recoverySustainPolls: downRecoveryPolls(row.reset),
+    // Unrecognized or absent normalizes to `critical` — the colour Down has
+    // always been drawn in, so an automation predating the severity read, or
+    // one carrying a value this build does not know, changes nothing.
+    severity: typeof row.severity === "string" && SEVERITIES.includes(row.severity as (typeof SEVERITIES)[number])
+      ? row.severity
+      : "critical",
     dimensionFilter: (trigger as { dimensionFilter?: Parameters<typeof deviceFilterMatch>[0] }).dimensionFilter,
   };
 }
@@ -322,7 +340,10 @@ async function buildDownDetectionIndex(): Promise<DownDetectionIndex> {
   // as well as the alert's clock — see DownWinner.recoverySustainSec.
   const rows = await prisma.notificationRule.findMany({
     where: { enabled: true },
-    select: { id: true, name: true, createdAt: true, trigger: true, scope: true, reset: true },
+    // `severity` rides along for the same reason `reset` does: on a down
+    // automation it is not only the alert's severity, it is the colour every
+    // surface paints the resulting `down` state in (business rule 36).
+    select: { id: true, name: true, createdAt: true, trigger: true, scope: true, reset: true, severity: true },
   });
   const rules = rows.map(toDownRule).filter((r): r is DownRule => r !== null);
 
@@ -447,6 +468,8 @@ export interface DownDetectionVerdict {
   recoverySustainSec: number | null;
   /** The same hold as the operator's own COUNT, when the reset states one. */
   recoverySustainPolls: number | null;
+  /** The covering automation's severity — the colour `down` is drawn in. */
+  severity: string;
 }
 
 /**
@@ -462,7 +485,12 @@ export async function resolveDownDetection(assetId: string): Promise<DownDetecti
   // narrower rule could only raise the specificity, and it converges within one
   // TTL.
   if (!hit) return null;
-  return { threshold: hit.threshold, recoverySustainSec: hit.recoverySustainSec, recoverySustainPolls: hit.recoverySustainPolls };
+  return {
+    threshold: hit.threshold,
+    recoverySustainSec: hit.recoverySustainSec,
+    recoverySustainPolls: hit.recoverySustainPolls,
+    severity: hit.severity,
+  };
 }
 
 /**

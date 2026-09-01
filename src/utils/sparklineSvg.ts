@@ -92,8 +92,10 @@ export interface SparklineOptions {
    * A span still open at the last point rides to the right edge, because a
    * device that is down as the email sends is down up to "now".
    *
-   * `kind` picks the colour, not the shape: "outage" dives RED (nobody knows
-   * why the device stopped answering), "dependency" dives GREY (it was
+   * `kind` picks the colour, not the shape: "outage" dives in the covering
+   * automation's severity colour — RED unless `downColor` says otherwise, and
+   * red is simply what `critical` looks like — because nobody knows why the
+   * device stopped answering; "dependency" dives GREY (it was
    * dependency-suppressed — its parent was dark, so the miss is accounted for
    * and the device itself is not being accused of anything), "missed" dives
    * AMBER (the probes failed, but the count has not reached the covering
@@ -121,6 +123,24 @@ export interface SparklineOptions {
    * things — the same reason the in-app charts leave CPU and memory alone.
    */
   recoverSpans?: Array<{ from: number; to: number }>;
+  /**
+   * The colour an "outage" span is drawn in — the covering down automation's
+   * SEVERITY colour (business rule 36), resolved by the caller through
+   * `downSeverityCss` in utils/severityStyle.ts.
+   *
+   * Down is not inherently red: red is what `critical` looks like, and critical
+   * is merely the default severity of a seeded down automation. An operator who
+   * rated an outage on this device class `warning` has said something about how
+   * it should read, and the email must not override that when the device page
+   * honours it.
+   *
+   * Only the "outage" kind moves. "missed" keeps the amber (it is not a verdict
+   * yet, so there is no severity to express) and "dependency" keeps the grey
+   * (that miss is not being counted against this device at all). Omitted ⇒
+   * FAIL_COLOR, which is both the critical colour and the right answer for a
+   * chart drawn without a resolved automation.
+   */
+  downColor?: string;
 }
 
 /** The missed-poll red. Shared with the in-app charts' _CHART_FAIL_COLOR so
@@ -353,12 +373,13 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   // One colour rule for every stroke, fill, dot and gradient stop below, so a
   // dive can never come out half amber and half red, and the climb back out can
   // never come out half purple and half green.
+  const downColor = opts.downColor || FAIL_COLOR;
   const colorOf = (p: PlotPoint): string =>
     p.ok
       ? p.rec ? RECOVER_COLOR : color
       : p.kind === "dependency" ? DEP_COLOR
       : p.kind === "missed" ? MISS_COLOR
-      : FAIL_COLOR;
+      : downColor;
 
   const defs: string[] = [];
   // Gradients are local defs, not external references — resvg resolves them

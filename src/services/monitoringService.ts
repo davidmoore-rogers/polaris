@@ -177,7 +177,8 @@ import { enqueueProbePatch, getPendingProbePatch } from "./probePatchBuffer.js";
 import { recoveryPollsFor, resolveDownDetection } from "./downDetectionService.js";
 import {
   isConfigStatusEdge,
-  owesRecoveryConfirmation,
+  monitorStatusFor,
+  nextFailureBucket,
   runsHeavyCadences,
   type MonitorStatus,
 } from "../utils/monitorStatus.js";
@@ -245,11 +246,6 @@ export interface AssetMonitorSnapshot {
   lastUptimeSec?: number | null;
   consecutiveFailures: number;
   consecutiveSuccesses: number;
-  /** Owes a recovery confirmation run — see Asset.awaitingRecoveryConfirm.
-   *  REQUIRED, not optional: every producer of this snapshot feeds the state
-   *  machine, and a missing bit would silently read as "owes nothing" and let
-   *  a device out of its confirmation run on the drain alone. */
-  awaitingRecoveryConfirm: boolean;
   discoveredByIntegrationId: string | null;
   monitorIntervalSec: number | null;
   cpuMemoryIntervalSec: number | null;
@@ -10814,7 +10810,6 @@ export async function recordProbeResult(
       lastUptimeSec: true,
       consecutiveFailures: true,
       consecutiveSuccesses: true,
-      awaitingRecoveryConfirm: true,
       discoveredByIntegrationId: true,
       monitorIntervalSec: true,
       cpuMemoryIntervalSec: true,
@@ -10841,12 +10836,6 @@ export async function recordProbeResult(
         monitorStatus:        pending.monitorStatus,
         consecutiveFailures:  pending.consecutiveFailures,
         consecutiveSuccesses: pending.consecutiveSuccesses,
-        // The confirmation-run bit belongs to the same machine as the two
-        // counters, so it has to ride the same overlay: two probes inside one
-        // flush window would otherwise both read the pre-outage `false` and the
-        // second would decide a device that just went down owes no run.
-        awaitingRecoveryConfirm:
-          pending.awaitingRecoveryConfirm ?? loaded.awaitingRecoveryConfirm,
       }
     : loaded;
 
@@ -10894,85 +10883,68 @@ export async function recordProbeResult(
 
   const now = new Date();
   const previousStatus = asset.monitorStatus ?? "unknown";
-  // Counter update. `consecutiveFailures` is a LEAKY BUCKET, not a run length:
-  // a miss adds one, a success TAKES ONE BACK (floored at 0). It stopped being
-  // a literal consecutive count in 2026-08 — see business rule 30.
+  // Counter update. `consecutiveFailures` is a LEAKY BUCKET WITH A CEILING, not
+  // a run length and no longer an unbounded debt — see business rule 30 and
+  // `nextFailureBucket`, which owns the whole arithmetic so the probe path, the
+  // browser replay and the email replay cannot drift.
   //
-  // The run-length version forgot an outage the instant one packet answered, so
-  // a device alternating miss/answer/miss/answer sat at cf=1 forever and never
-  // reached ANY verdict, while a device that had already missed threshold-1
-  // times was handed a clean slate by a single lucky poll. The bucket keeps the
-  // debt: three misses then one answer is still two misses outstanding, and the
-  // next miss lands on 3 rather than on 1.
+  // A miss adds one, a success TAKES ONE BACK (floored at 0). The run-length
+  // version forgot an outage the instant one packet answered, so a device
+  // alternating miss/answer/miss/answer sat at cf=1 forever and never reached
+  // ANY verdict, while a device that had already missed threshold-1 times was
+  // handed a clean slate by a single lucky poll. The bucket keeps the debt.
   //
-  // It also makes recovery symmetric for free — walking 3 → 2 → 1 → 0 takes
-  // exactly `threshold` successes, which is the same number of confirmations
-  // the run-length machine spent `consecutiveSuccesses` to count. That is why
-  // the state machine below no longer consults `newCs`.
-  const newCf = result.success
-    ? Math.max(0, (asset.consecutiveFailures ?? 0) - 1)
-    : (asset.consecutiveFailures ?? 0) + 1;
+  // What the bucket does NOT do any more is keep accruing once the outage is
+  // declared. It locks at `bucketCapFor(threshold, recoveryPolls)` — the larger
+  // of the missed-poll count and the automation's reset count — so recovery
+  // costs exactly what the operator wrote down instead of one answered poll per
+  // minute the device happened to be dark. Unbounded, an overnight outage left
+  // cf ≈ 480 and the asset read `down` for the whole of the following morning
+  // while answering every probe, with its alert repeating and escalating
+  // throughout.
+  const newCf = nextFailureBucket(asset.consecutiveFailures ?? 0, result.success, threshold, recoveryPolls);
   // Still maintained and still written: it is a true fact about the device, it
-  // is charted, and the probe-patch overlay carries it. It simply no longer
-  // decides anything.
+  // is charted, and the probe-patch overlay carries it. It decides nothing —
+  // the bucket's own level is now the whole of the recovery arithmetic.
   const newCs = result.success ? (asset.consecutiveSuccesses ?? 0) + 1     : 0;
 
-  // Six-state machine, now a pure function of the leaky bucket above and the
-  // outcome of THIS probe. `previousStatus` no longer participates: the bucket
-  // already carries every bit of history the verdict needs, and reading the
-  // prior state as well was what made the old machine need eight arrows.
+  // Six-state machine — a pure function of the bucket level above and the
+  // outcome of THIS probe (`monitorStatusFor`). `previousStatus` does not
+  // participate: the bucket carries every bit of history the verdict needs.
   //
   //   passive                     — no down-detection automation covers this
   //                                 asset, so Polaris renders NO verdict. Still
   //                                 polled, sampled and charted; the bucket
   //                                 still moves, it is simply never compared.
   //
-  //   cf ≥ threshold              → down        (red)
-  //   cf > 0, this probe missed   → warning     (amber — "Missed N")
-  //   cf > 0, this probe answered → recovering  (answering, misses outstanding)
   //   cf = 0                      → up          (green — the debt is paid off)
+  //   this probe answered         → recovering  (climbing back, misses left)
+  //   missed, cf >= threshold     → down        (the verdict, in the covering
+  //                                 automation's own severity colour)
+  //   missed, cf <  threshold     → warning     (amber — "Missed N")
   //
-  // THE BUCKET LEVEL DECIDES; the outcome of this one probe only breaks the tie
-  // below the threshold. Letting a success win outright would mean a device
-  // dark for an hour (cf=60) reads `recovering` — and clears its down alert,
-  // since the alert tests `monitorStatus == down` — on ONE answered packet out
-  // of sixty. It has to pay the debt back down under the threshold first.
+  // The ANSWERED branch is unconditional as of 2026-09-01. It used to sit below
+  // the threshold test, so a probe that answered while the bucket was still at
+  // or above the threshold read `down` — defensible for a verdict, but the
+  // response-time chart cannot paint an `ok` point red and fell through to the
+  // series green, so a long outage drew red → GREEN → blue → green and looked
+  // like the device recovered twice. With the bucket locked, an answered probe
+  // during an outage is unambiguously the device climbing back.
   //
-  // Two consequences worth stating, because both are deliberate:
+  // It does not clear the alert early. DOWN_ALERT_HOLDING_STATES holds a down
+  // alert through `down`/`recovering`/`warning`, so the alert ends when the
+  // asset reads `up` — which is precisely when the drain has served the
+  // automation's reset count. That is why the separate `owesRecoveryConfirmation`
+  // hold at cf 0, and the `Asset.awaitingRecoveryConfirm` bit it read, are gone:
+  // the cap does that work, and it does it without needing memory.
   //
-  //   • `recovering` no longer means "was down". It means "answering with
-  //     misses still outstanding", which is reachable straight out of warning —
-  //     a device that missed twice and then answered is at cf=1 and is visibly
-  //     climbing back rather than sitting in amber pretending nothing changed.
-  //   • Down is sticky in exactly one direction: it holds until the bucket
-  //     drains below the threshold, which takes as many answers as it took
-  //     misses to get there. That is the same "recover for N polls" shape the
-  //     reset step asks for, falling out of the counter for free.
+  // Down is still sticky in exactly one direction — it holds until the bucket
+  // drains below the threshold — and a miss anywhere in the climb re-locks it
+  // at the cap, so a flapping device cannot walk itself out of an outage.
   //
   // The previous name for `recovering` was "pending"; the
   // migrateMonitorStatusRename startup job bumps any leftover rows.
-  let nextStatus: MonitorStatus;
-  if (threshold === null) {
-    // PASSIVE. Note the bucket still moves above: consecutiveFailures is itself
-    // an automatable asset_state field, it is what lets a surface say "passive
-    // and answering" vs "passive and dark", and keeping it warm means an asset
-    // that LATER gains coverage converges on its very next probe instead of
-    // restarting from zero.
-    nextStatus = "passive";
-  } else if (newCf >= threshold) {
-    nextStatus = "down";
-  } else if (newCf > 0) {
-    nextStatus = result.success ? "recovering" : "warning";
-  } else if (owesRecoveryConfirmation(asset.awaitingRecoveryConfirm, newCf, newCs, recoveryPolls)) {
-    // The debt is paid, but this asset has read `down` since it last read `up`
-    // and the covering automation asked for a longer confirmation run than the
-    // drain provided. Hold amber until the run is served. This is the ONE arrow
-    // that reads `newCs`, and the stored bit is what keeps it off the healthy
-    // devices whose success runs look identical from the counters alone.
-    nextStatus = "recovering";
-  } else {
-    nextStatus = "up";
-  }
+  const nextStatus: MonitorStatus = monitorStatusFor(newCf, result.success, threshold);
 
   // Buffer the sample row — the periodic flush in sampleWriteBuffer will
   // batch this with every other monitor sample seen in the same 2 s
@@ -11024,12 +10996,10 @@ export async function recordProbeResult(
     lastResponseTimeMs: result.success ? result.responseTimeMs : null,
     consecutiveFailures: newCf,
     consecutiveSuccesses: newCs,
-    // Arm on the way down, disarm once the asset is genuinely back. Every other
-    // state leaves it alone (undefined ⇒ the flush's COALESCE keeps it), which
-    // is what carries the memory across a mid-run miss: a device parked in
-    // `warning` halfway through its confirmation run still owes the run.
-    awaitingRecoveryConfirm:
-      nextStatus === "down" ? true : nextStatus === "up" ? false : undefined,
+    // `awaitingRecoveryConfirm` is deliberately NOT written any more. The bucket
+    // cap serves the automation's reset count on its own, so the bit decides
+    // nothing; the column survives dormant (the `cooldownSec` precedent) and is
+    // zeroed fleet-wide once by jobs/clampFailureBucket.
     monitorStatusChangedAt: previousStatus !== nextStatus ? now : undefined,
     // The packet-loss anchor (business rule 29b): the success that ended an
     // outage. "down"/"unknown" are the only states a device leaves on a

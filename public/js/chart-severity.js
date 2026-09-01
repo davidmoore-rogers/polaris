@@ -31,11 +31,44 @@
   };
   /** Color of a reading no tier claims — the charts' normal line color. */
   var BASE_COLOR = "var(--color-accent)";
+
+  /**
+   * The colour a `down` monitor state is DRAWN in, per severity — the browser
+   * mirror of DOWN_SEVERITY_HEX in src/utils/severityStyle.ts, which the alert
+   * email uses. Change one, change both.
+   *
+   * Down is not inherently red: red is what `critical` looks like, and critical
+   * is merely the default severity of a seeded down automation. An operator who
+   * says an outage on this device class is only worth a `warning` has said
+   * something about how it should read.
+   *
+   * Flat hex rather than the theme tokens SEV_COLOR uses, for the same reason
+   * the chart's fail / recovering / dependency colours are: these have to hold
+   * on all three themes AND on the alert email's white card, and the browser and
+   * the email must not draw one outage two different colours. They are pulled
+   * deliberately deeper than the neighbours they sit beside in the chart's
+   * vocabulary — the miss amber #ffc107, the recovering blue #0288d1, the
+   * dependency grey #9aa0a6 — so the pairs stay tellable apart.
+   */
+  var DOWN_SEV_COLOR = {
+    notice: "#546e7a",
+    informational: "#1565c0",
+    warning: "#f9a825",
+    serious: "#e65100",
+    critical: "#d32f2f",
+  };
+  /** What Down has always been drawn in, and the answer for an unknown or
+   *  absent severity — including the case where no automation could be
+   *  resolved at all, where inventing a gentler colour would understate a
+   *  verdict Polaris is still asserting. */
+  var DOWN_DEFAULT_COLOR = DOWN_SEV_COLOR.critical;
   /** Default fade depth at a tier boundary, as a fraction of chart height. */
   var DEFAULT_FADE = 0.05;
 
   function sevRank(s) { return SEV_ORDER.indexOf(s); }
   function colorOf(s) { return SEV_COLOR[s] || BASE_COLOR; }
+  /** The colour a `down` probe/cell takes under an automation of this severity. */
+  function downColorOf(s) { return DOWN_SEV_COLOR[s] || DOWN_DEFAULT_COLOR; }
   function isUp(op) { return op === ">" || op === ">="; }
   function isDown(op) { return op === "<" || op === "<="; }
 
@@ -133,7 +166,9 @@
   window.PolarisChartSeverity = {
     SEV_ORDER: SEV_ORDER,
     BASE_COLOR: BASE_COLOR,
+    DOWN_DEFAULT_COLOR: DOWN_DEFAULT_COLOR,
     colorOf: colorOf,
+    downColorOf: downColorOf,
     severityAt: severityAt,
     gradientStops: gradientStops,
     visibleTiers: visibleTiers,
