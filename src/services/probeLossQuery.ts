@@ -40,47 +40,33 @@
  * of ~15. The sampler's rows carry probeKind='icmp' and a NULL responseTimeMs,
  * so they can only ever affect a ratio, never a timing.
  *
- * THE MEASUREMENT STARTS AT THE FIRST SUCCESSFUL PROBE IN THE WINDOW, not at
- * the window's leading edge (2026-08). Loss is failed/total over the samples
- * from that probe onward; everything before it is discarded. The window is a
- * ratio denominator, and a device that was UNREACHABLE for part of it never
- * had probes that could be "lost" — it was down, which asset-down already owns
- * (the same reasoning that drops 0-success assets entirely, applied to the
- * down PORTION of a window instead of all of it). Without the anchor a device
- * recovering from a 55-minute outage reads ~92% loss the moment it comes back
- * and keeps alerting until the outage slides out of the window — the alert
- * fires *because* the device is healthy again, and a 60-minute window makes it
- * stick around for an hour. With it, the reading is 0% on the first clean
- * probe after recovery, so the rule clears instead.
+ * EVERY MISS IN THE WINDOW COUNTS (2026-09-01). failed/total over the whole
+ * window, no trimming. A probe that did not come back is a lost probe whatever
+ * state the device was in when it was sent, which is what an operator means by
+ * packet loss and what the loss chart has always DRAWN.
  *
- * The cost is that a leading failure run is not counted as loss even when it
- * was a brief blip rather than an outage (a single failure at the window's
- * first sample reads 0%). That is deliberate: the alternative is a threshold
- * separating "blip" from "outage", and the blip re-enters the ratio on the next
- * tick anyway, since the anchor only ever discards samples OLDER than the
- * first success. Flapping is unaffected — an early success anchors near the
- * window edge, so nearly the whole window still counts.
+ * IT USED TO TRIM, and why it stopped is the whole design. Between 2026-08 and
+ * 2026-09-01 the measurement started at GREATEST(first success in window,
+ * Asset.recoveryStartedAt), discarding any outage inside the window. That
+ * existed to stop a device reading ~92% the moment it came back from a
+ * 55-minute outage and alerting for a full window BECAUSE it recovered. But it
+ * also discarded loss nobody wanted discarded: a device flapping hard enough to
+ * reach `down` each cycle re-stamped recoveryStartedAt on every recovery,
+ * collapsing its window to the last few probes and reporting ~0% loss forever.
+ * A badly lossy link that Polaris insisted was clean is the exact failure this
+ * metric exists to catch, so the trim had to go.
  *
- * A SECOND ANCHOR COVERS THE OUTAGE THAT STARTED MID-WINDOW (2026-08). The
- * first-success anchor only helps while the outage is still running at the
- * window's leading edge; once the device has been back long enough for a
- * healthy sample to precede the outage, that first success sits BEFORE it and
- * the anchor goes inert — the whole outage stays in the denominator, so the
- * device reads heavily lossy for a full window *because* it recovered. That is
- * the same false alert the first anchor exists to prevent (and the engine's
- * device-down supersede only covers the outage itself, not the window after
- * it). So the measurement also starts no earlier than `Asset.recoveryStartedAt`
- * — the success that ended the last outage, i.e. the moment monitorStatus left
- * down/unknown for recovering. Effective anchor = GREATEST(first success,
- * recoveryStartedAt); Postgres's GREATEST ignores NULLs, so a device that has
- * not recovered inside the window behaves exactly as before.
+ * THE FALSE ALERT IT PREVENTED IS NOW HANDLED WHERE IT BELONGS — in the engine,
+ * as two gates on whether to ALERT rather than as a fiddle with the arithmetic
+ * (business rule 29). Only a device currently answering produces a reading at
+ * all (assetIsAnsweringProbes), and a reading at or above the automation's own
+ * `ignoreAtOrAbove` ceiling produces none either. Both gates CLEAR a live loss
+ * alert rather than freezing it. Keeping the measurement honest and deciding
+ * separately what deserves an alert is the separation the anchor blurred.
  *
- * Only an outage-ending recovery stamps that column — a warning→up recovery
- * never does. That is what keeps flapping measurable: a lossy device passes
- * through warning constantly, and anchoring on those recoveries would restart
- * the window every few probes and report ~0% forever.
- *
- * The window is anchored to UTC wall-clock (`now() AT TIME ZONE 'UTC'`)
+ * Asset.recoveryStartedAt is still stamped (utils/probeLossAnchor.ts) but is
+ * read by nothing — dormant on the cooldownSec precedent.
+ * * The window is anchored to UTC wall-clock (`now() AT TIME ZONE 'UTC'`)
  * rather than a bound JS Date to avoid tz skew against the hypertable's
  * naive timestamps. All SQL fragments are compile-time literals; user data
  * rides positional parameters only.
@@ -99,28 +85,14 @@ export async function queryProbeLossRatios(opts: {
   assetIds?: string[] | null;
   onlyLossy?: boolean;
   limit?: number | null;
-  /**
-   * DISPLAY ONLY. Report an asset with ZERO successful probes in the window as
-   * 100% loss instead of dropping it. Without this a device that was down for
-   * the whole window vanishes from the Packet Loss widget rather than pegging
-   * at 100%, which reads as "no loss" — the opposite of the truth.
-   *
-   * Deliberately NOT set by the notification engine: `assetIsAnsweringProbes`
-   * already keeps `down` / `recovering` assets out of its id list, and a 100%
-   * reading reaching a probeLossPct automation would fire a second alert about
-   * an outage that asset-down already owns (business rule 29's supersede). If
-   * this is ever passed on the engine path, that dedup is gone.
-   */
-  includeFullyDown?: boolean;
 }): Promise<ProbeLossRow[]> {
   const params: unknown[] = [String(opts.sinceMinutes)];
   let p = 1;
 
   let idClause = "";
   if (opts.assetIds) {
-    // Qualified: the subquery joins assets, and an unqualified column there is
-    // one schema change away from being ambiguous.
-    idClause = ` AND s."assetId" = ANY($${++p}::text[])`;
+
+    idClause = ` AND "assetId" = ANY($${++p}::text[])`;
     params.push(opts.assetIds);
   }
 
@@ -152,10 +124,6 @@ export async function queryProbeLossRatios(opts: {
   // out as spotless, which is the exact device the widget exists to surface.
   const having = opts.onlyLossy ? `HAVING (${effSent}) > (${effRecv})` : "";
 
-  const anchor = `GREATEST("firstOk", "recoveredAt")`;
-  const anchorClause = opts.includeFullyDown
-    ? `(("firstOk" IS NOT NULL AND "timestamp" >= ${anchor}) OR "firstOk" IS NULL)`
-    : `("firstOk" IS NOT NULL AND "timestamp" >= ${anchor})`;
 
   let tail = "";
   if (opts.onlyLossy) {
@@ -166,16 +134,13 @@ export async function queryProbeLossRatios(opts: {
   }
 
   return prisma.$queryRawUnsafe<ProbeLossRow[]>(
+    // One grouped aggregate, one scan. With the anchor gone so are its
+    // partitioned min() and its join to `assets`, so this is a plain hash
+    // aggregate again — strictly cheaper than the trimmed version it replaces,
+    // on the same ~240k rows an hour of 2000 assets produces.
     `SELECT "assetId", (${effSent}) AS total, (${effSent}) - (${effRecv}) AS failed
-     FROM (
-       SELECT s."assetId", s."success", s."timestamp", s."packetsSent", s."packetsReceived",
-              min(s."timestamp") FILTER (WHERE s."success") OVER (PARTITION BY s."assetId") AS "firstOk",
-              a."recoveryStartedAt" AS "recoveredAt"
-       FROM "asset_monitor_samples" s
-       LEFT JOIN "assets" a ON a."id" = s."assetId"
-       WHERE s."timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
-     ) w
-     WHERE ${anchorClause}
+     FROM "asset_monitor_samples"
+     WHERE "timestamp" > (now() AT TIME ZONE 'UTC') - ($1 || ' minutes')::interval${idClause}
      GROUP BY "assetId"
      ${having}${tail}`,
     ...params,

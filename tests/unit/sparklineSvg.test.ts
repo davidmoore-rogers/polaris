@@ -421,31 +421,22 @@ describe("recovering spans", () => {
   });
 });
 
-describe("measuredFrom", () => {
+describe("the retired measuredFrom marker", () => {
   const T0 = Date.parse("2026-08-28T09:00:00Z");
   const hour = 60 * 60_000;
   const points = Array.from({ length: 13 }, (_, i) => ({ t: T0 + i * 5 * 60_000, v: i < 6 ? 100 : 0 }));
 
-  it("rules off where the caption's number starts measuring", () => {
-    // The loss chart plots the whole hour but captions the ANCHORED ratio
-    // (business rule 29b). Without the rule, the outage on the left reads as a
-    // contradiction of the "avg 0 %" on the right.
-    const svg = sparklineSvg(points, { label: "Packet loss", from: T0, to: T0 + hour, measuredFrom: T0 + 30 * 60_000 });
-    expect(svg).toContain('stroke-dasharray="3 3"');
-    expect(svg).toContain("measured");
+  it("draws no measurement rule — caption and line now cover the same window", () => {
+    // The loss chart used to plot the whole window but caption the ANCHORED
+    // ratio, so a dashed rule had to explain why the outage on the left was
+    // outside the "avg 0 %" on the right. The anchor is gone (2026-09-01):
+    // both halves cover the window, and an option that no longer exists must
+    // not leave a stray rule behind if some caller still passes it.
+    const svg = sparklineSvg(points, {
+      label: "Packet loss", from: T0, to: T0 + hour,
+      ...({ measuredFrom: T0 + 30 * 60_000 } as Record<string, unknown>),
+    });
+    expect(svg).not.toContain("measured");
     expect(svg).not.toContain("NaN");
-  });
-
-  it("draws nothing when the whole window is measured — the ordinary chart", () => {
-    for (const measuredFrom of [null, undefined, T0, T0 - hour, T0 + hour]) {
-      const svg = sparklineSvg(points, { label: "Packet loss", from: T0, to: T0 + hour, measuredFrom });
-      expect(svg).not.toContain("measured");
-    }
-  });
-
-  it("flips the label inside the plot when the rule sits near the right edge", () => {
-    const svg = sparklineSvg(points, { label: "Packet loss", from: T0, to: T0 + hour, measuredFrom: T0 + 58 * 60_000 });
-    expect(svg).toContain('text-anchor="end"');
-    expect(svg).toContain("measured");
   });
 });

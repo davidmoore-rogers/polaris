@@ -55,18 +55,6 @@ export interface SparklineOptions {
    */
   avgOverride?: number | null;
   /**
-   * Epoch ms where the caption's number STARTS measuring, when that is later
-   * than the plotted window's start. Drawn as a dashed vertical rule labelled
-   * "measured".
-   *
-   * The packet-loss chart is the one caller: it plots the whole window but
-   * captions the ANCHORED ratio the automation fired on (business rule 29b),
-   * so without this the outage on the left of the picture reads as a
-   * contradiction of the number on the right instead of what it is — the part
-   * deliberately outside the measurement.
-   */
-  measuredFrom?: number | null;
-  /**
    * Spans (epoch ms) to shade red behind the plot — where a hardware sensor's
    * own alarm bit was set. An alarm-triggered alert charts the sensor's VALUE,
    * and this is what ties the two together: it shows whether the device raised
@@ -456,19 +444,6 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
   const area = areaParts.join("");
   const dot = dotParts.join("");
 
-  // The measurement's starting edge, when the caption covers less of the
-  // window than the picture does. Drawn behind the line; the label flips to the
-  // rule's left when the rule sits too close to the right edge to fit beside it.
-  let measuredMark = "";
-  if (opts.measuredFrom != null && opts.measuredFrom > from && opts.measuredFrom < to) {
-    const mx = x(opts.measuredFrom);
-    const nearRight = mx > width - PAD_R - 62;
-    measuredMark =
-      `<line x1="${mx.toFixed(1)}" y1="${PAD_T}" x2="${mx.toFixed(1)}" y2="${(PAD_T + plotH).toFixed(1)}" stroke="#6b7280" stroke-width="1" stroke-dasharray="3 3"/>` +
-      `<text x="${(nearRight ? mx - 3 : mx + 3).toFixed(1)}" y="${PAD_T + 9}"${nearRight ? ' text-anchor="end"' : ""} ` +
-      `font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#6b7280">${nearRight ? "measured &#8594;" : "&#8594; measured"}</text>`;
-  }
-
   const thresholdLine =
     opts.threshold != null && opts.threshold >= yMin && opts.threshold <= yMax
       ? `<line x1="${PAD_L}" y1="${y(opts.threshold).toFixed(1)}" x2="${width - PAD_R}" y2="${y(opts.threshold).toFixed(1)}" stroke="#dc2626" stroke-width="1" stroke-dasharray="4 3"/>`
@@ -484,5 +459,5 @@ export function sparklineSvg(points: SparkPoint[], opts: SparklineOptions): stri
     `<text x="${PAD_L}" y="${height - 5}" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">-${esc(timeAxisLabel(tSpan))}</text>` +
     `<text x="${width - PAD_R}" y="${height - 5}" text-anchor="end" font-family="Helvetica,Arial,sans-serif" font-size="9" fill="#9ca3af">now</text>`;
 
-  return head + defsBlock + alarmBands + grid + measuredMark + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
+  return head + defsBlock + alarmBands + grid + area + line + dot + thresholdLine + axis + xLabels + caption + `</svg>`;
 }

@@ -1,21 +1,24 @@
 /**
  * src/utils/probeLossAnchor.ts
  *
- * The two halves of the packet-loss ratio's RECOVERY anchor (business rule
- * 29b), as pure functions: the WRITER's predicate (does this probe end an
- * outage, i.e. stamp `Asset.recoveryStartedAt`?) and the READER's anchor
- * arithmetic (which sample does the measurement start at?).
+ * The WRITER half of what used to be the packet-loss recovery anchor: does this
+ * probe end an outage, i.e. stamp `Asset.recoveryStartedAt`?
  *
- * They live together because they are one decision seen from two sides, and
- * they are extracted at all because each is a one-liner whose failure mode is
- * silent. Stamp on the wrong transition and a flapping device's window
- * collapses to its last few probes, reporting ~0% loss forever; take the wrong
- * side of the anchor and the alert email's chart contradicts the reading that
- * fired it.
+ * THE READER HALF IS GONE (2026-09-01). Until then the loss ratio started at
+ * GREATEST(first success in window, recoveryStartedAt), discarding any outage
+ * inside the window so a device coming back from one did not read ~92% and
+ * alert because it had recovered. That trim also silenced a device flapping to
+ * `down` every cycle — each recovery re-stamped the column, collapsing the
+ * window to the last few probes and reporting ~0% loss forever — so the
+ * measurement is now plainly failed/total over the whole window, and the false
+ * alert it prevented is handled in the engine instead, by the answering gate
+ * and the `ignoreAtOrAbove` ceiling (business rule 29).
  *
- * The SQL half of the reader lives in `services/probeLossQuery.ts` as
- * `GREATEST("firstOk", "recoveredAt")` — Postgres's GREATEST ignores NULLs,
- * which is exactly what `effectiveLossAnchorMs` reproduces.
+ * `Asset.recoveryStartedAt` is therefore DORMANT: still stamped here, because it
+ * records a genuine fact for one field on a patch the probe path already writes,
+ * and read by nothing. Kept rather than ripped out on the `cooldownSec`
+ * precedent — with the difference that makes keeping it safe: a dormant
+ * timestamp cannot change behaviour, where a dormant cooldown silenced alerts.
  */
 
 /**
@@ -37,23 +40,4 @@ export function stampsRecoveryAnchor(
 ): boolean {
   if (!success) return false;
   return previousStatus === "down" || previousStatus === "unknown" || previousStatus == null;
-}
-
-/**
- * Where the measurement starts, in epoch ms: the LATER of the window's first
- * successful probe and the end of the last outage. Null when nothing answered
- * in the window — the caller decides what that means (the engine drops the
- * asset, display paths keep every row and read 100%).
- *
- * A recovery stamp older than the window is inert (every sample already sits
- * after it), which is what makes this a no-op for a device that has not
- * recovered recently. The `max` also means a stamp that somehow predates the
- * first success can never widen the window backwards.
- */
-export function effectiveLossAnchorMs(
-  firstOkMs: number | null,
-  recoveryMs: number | null,
-): number | null {
-  if (firstOkMs === null) return null;
-  return recoveryMs === null ? firstOkMs : Math.max(firstOkMs, recoveryMs);
 }

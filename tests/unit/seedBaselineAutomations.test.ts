@@ -155,6 +155,7 @@ describe("marker gating (V2 reaches existing installs)", () => {
     settings.set("seedBaselineAutomationsV2SeededAt", { key: "y", value: {} });
     settings.set("seedBaselineAutomationsV3SeededAt", { key: "z", value: {} });
     settings.set("seedBaselineAutomationsV4ResetEventSeededAt", { key: "w", value: {} });
+    settings.set("seedBaselineAutomationsV5LossCeilingSeededAt", { key: "v", value: {} });
     const res = await seedBaselineAutomations();
     expect(res).toEqual({ created: 0, skipped: true });
     expect(createdRules).toEqual([]);
@@ -406,5 +407,91 @@ describe("V3 down-detection seed", () => {
     for (const body of downRules()) {
       expect(() => ruleInputSchema.parse(body), body.name).not.toThrow();
     }
+  });
+});
+
+/**
+ * V5 — the saturation ceiling for installs whose packet-loss rule predates it.
+ *
+ * This one repairs a regression THIS change introduced: removing the loss
+ * anchor (business rule 29) means a device back from a 55-minute outage really
+ * does read ~92% for the rest of a 60-minute window. The baseline loss rule is
+ * scoped to ALL ASSETS, so without a ceiling every outage on every device would
+ * trail a second alert behind it as it ages out of the window.
+ */
+describe("V5 packet-loss saturation ceiling", () => {
+  const seededMarkers = (): void => {
+    settings.set("seedBaselineAutomationsSeededAt", { key: "x", value: {} });
+    settings.set("seedBaselineAutomationsV2SeededAt", { key: "y", value: {} });
+    settings.set("seedBaselineAutomationsV3SeededAt", { key: "z", value: {} });
+    settings.set("seedBaselineAutomationsV4ResetEventSeededAt", { key: "w", value: {} });
+  };
+  const t = new Date("2026-01-01T00:00:00Z");
+  const lossRule = (over: Record<string, unknown> = {}): any => ({
+    id: "L1", name: "High packet loss",
+    trigger: { type: "asset_metric", metric: "probeLossPct", windowSec: 900, operator: ">", threshold: 10 },
+    reset: { mode: "auto" }, clearBehavior: "auto",
+    createdAt: t, updatedAt: t, ...over,
+  });
+
+  it("gives an untouched loss rule the ceiling, preserving the rest of the trigger", async () => {
+    seededMarkers();
+    existingRules = [lossRule()];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toHaveLength(1);
+    expect(ruleUpdates[0].data.trigger).toEqual({
+      type: "asset_metric", metric: "probeLossPct", windowSec: 900,
+      operator: ">", threshold: 10, ignoreAtOrAbove: 90,
+    });
+    expect(loggedEvents.some((e) => e.action === "automation.seed.v5_loss_ceiling")).toBe(true);
+  });
+
+  it("leaves an EDITED rule alone but NAMES it in a warning", async () => {
+    // Silently narrowing a rule someone tuned is worse than leaving it noisy —
+    // but they have to be told it will now alert after outages.
+    seededMarkers();
+    existingRules = [lossRule({ updatedAt: new Date("2026-03-01T00:00:00Z") })];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+    const ev = loggedEvents.find((e) => e.action === "automation.seed.v5_loss_ceiling");
+    expect(ev?.level).toBe("warning");
+    expect(ev?.message).toContain("High packet loss");
+  });
+
+  it("leaves a rule that already states a ceiling alone", async () => {
+    // The operator has already answered this question — including with 100.
+    seededMarkers();
+    existingRules = [
+      lossRule({ id: "a", trigger: { type: "asset_metric", metric: "probeLossPct", threshold: 10, ignoreAtOrAbove: 100 } }),
+      lossRule({ id: "b", trigger: { type: "asset_metric", metric: "probeLossPct", threshold: 10, ignoreAtOrAbove: 50 } }),
+    ];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+  });
+
+  it("touches no other metric", async () => {
+    seededMarkers();
+    existingRules = [
+      lossRule({ id: "cpu", trigger: { type: "asset_metric", metric: "cpuPct", threshold: 90 } }),
+      lossRule({ id: "st", trigger: { type: "asset_state", field: "monitorStatus", value: "down" } }),
+      lossRule({ id: "ev", trigger: { type: "event", actionPattern: "x.y" } }),
+    ];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+  });
+
+  it("is seed-once: a stamped marker skips the pass entirely", async () => {
+    seededMarkers();
+    settings.set("seedBaselineAutomationsV5LossCeilingSeededAt", { key: "v", value: {} });
+    existingRules = [lossRule()];
+    await seedBaselineAutomations();
+    expect(ruleUpdates).toEqual([]);
+  });
+
+  it("logs nothing when there is no loss rule to consider", async () => {
+    seededMarkers();
+    existingRules = [];
+    await seedBaselineAutomations();
+    expect(loggedEvents.some((e) => e.action === "automation.seed.v5_loss_ceiling")).toBe(false);
   });
 });

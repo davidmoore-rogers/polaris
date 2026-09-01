@@ -16,6 +16,8 @@ import {
   probeLossWindowSecFromTrigger,
   PROBE_LOSS_DEFAULT_WINDOW_SEC,
   PROBE_LOSS_MIN_WINDOW_SEC,
+  readingAtOrAboveCeiling,
+  DEFAULT_READING_CEILING_PCT,
 } from "../../src/services/notificationTypes.js";
 import { lossBucketMs, probeLossSeriesFrom } from "../../src/services/alertChartService.js";
 
@@ -115,75 +117,57 @@ describe("probeLossSeriesFrom", () => {
 
   it("is 0 % for a clean window and 100 % when every probe failed", () => {
     expect(probeLossSeriesFrom(probes(30, []), 2 * 60_000).ratioPct).toBe(0);
-    // No success at all: every row is kept (the widget's includeFullyDown
-    // semantics) so an asset-down alert's loss chart reads 100 %, not blank.
+    // No success at all reads 100 %, not blank — an asset-down alert embeds a
+    // loss chart too, and an empty one would say "no loss".
     const allFailed = probeLossSeriesFrom(probes(30, Array.from({ length: 30 }, (_, i) => i)), 2 * 60_000);
     expect(allFailed.ratioPct).toBe(100);
     expect(allFailed.points.length).toBeGreaterThan(0);
   });
 
-  it("anchors at the first successful probe, so a recovered device doesn't read its outage back as loss", () => {
-    // 40 minutes dark, then 20 clean: the engine discards the pre-recovery
-    // samples (business rule 29b), so the RATIO must too or its caption would
-    // say 66.7 % about a device that is now answering every probe.
+  it("counts the outage that preceded recovery — the anchor is gone", () => {
+    // 40 minutes dark, then 20 clean. The first-success anchor made the CAPTION
+    // read 0% over a line that plainly showed an outage; both halves now cover
+    // the same window and agree at 66.7%.
     const rows = probes(60, Array.from({ length: 40 }, (_, i) => i));
     const s = probeLossSeriesFrom(rows, 2 * 60_000);
-    expect(s.ratioPct).toBe(0);
-    // The LINE keeps the outage (2026-08-28): trimming it too sent an email
-    // whose loss chart started when the device came back, so the thing the
-    // operator was paged about was missing from the graph explaining it.
+    expect(s.ratioPct).toBe(66.7);
+    // The line always kept the outage; that has not changed.
     expect(s.points.some((p) => p.t < min(40).getTime() && p.v === 100)).toBe(true);
     expect(s.points[0]!.t).toBe(min(0).getTime());
-    // ...and the caption's narrower span is marked rather than left implicit.
-    expect(s.measuredFromMs).toBe(min(40).getTime());
   });
 
-  it("anchors at the recovery when the outage STARTED mid-window (the first-success anchor's blind spot)", () => {
-    // 10 clean minutes, 30 dark, then 20 clean again. The window's first
-    // success is minute 0 — BEFORE the outage — so the first-success anchor is
-    // inert and the ratio would read 50 % about a device that has been
-    // answering every probe for 20 minutes. `recoveryMs` (Asset.
-    // recoveryStartedAt) is the success that ended the outage, at minute 40.
+  it("counts an outage that started mid-window", () => {
+    // 10 clean, 30 dark, 20 clean. The old recovery anchor read this as 0%
+    // about a device that had lost half its probes in the last hour.
     const rows = probes(60, Array.from({ length: 30 }, (_, i) => 10 + i));
     expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(50);
-    const s = probeLossSeriesFrom(rows, 2 * 60_000, min(40).getTime());
-    expect(s.ratioPct).toBe(0);
-    // The outage is still drawn — between the clean start and the clean tail,
-    // which is exactly the shape the recipient needs to see — and the marker
-    // says where the 0 % is measured from.
-    expect(s.points.some((p) => p.t >= min(10).getTime() && p.t < min(40).getTime() && p.v === 100)).toBe(true);
-    expect(s.measuredFromMs).toBe(min(40).getTime());
   });
 
-  it("takes the LATER of the two anchors, and a stale recovery stamp is inert", () => {
-    const rows = probes(60, Array.from({ length: 40 }, (_, i) => i));
-    // Recovery stamp older than the window (a device that recovered long ago
-    // and has been flapping since): every row already sits after it, so the
-    // first-success anchor decides — 0 %, as without the stamp.
-    expect(probeLossSeriesFrom(rows, 2 * 60_000, T0 - 3_600_000).ratioPct).toBe(0);
-    // Stamp inside the window but before the first success (cannot happen in
-    // practice — the stamp IS a success — but the max() must not widen the
-    // window backwards if it ever did).
-    expect(probeLossSeriesFrom(rows, 2 * 60_000, min(10).getTime()).ratioPct).toBe(0);
+  it("weights a burst row by its PACKETS, not as one outcome", () => {
+    // Mirrors probeLossQuery: a 5-echo burst that got 1 reply back is an
+    // 80%-lossy reading, and counting the row once would call it a success.
+    const rows = [
+      { timestamp: min(0), success: true, packetsSent: 5, packetsReceived: 1 },
+      { timestamp: min(1), success: true, packetsSent: 5, packetsReceived: 1 },
+    ];
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(80);
   });
 
-  it("keeps every row when nothing answered, whatever the recovery stamp says", () => {
-    // includeFullyDown semantics: an asset-down alert's chart must read 100 %,
-    // and a stamp from an earlier recovery must not trim it to nothing.
-    const rows = probes(30, Array.from({ length: 30 }, (_, i) => i));
-    const s = probeLossSeriesFrom(rows, 2 * 60_000, min(20).getTime());
-    expect(s.ratioPct).toBe(100);
-    expect(s.points.length).toBeGreaterThan(0);
-    // Nothing was excluded, so there is nothing to mark.
-    expect(s.measuredFromMs).toBeNull();
+  it("treats a row with no packet columns as one probe, never as zero sent", () => {
+    // The response-time poll leaves them NULL. Reading NULL as 0 sent would
+    // drop those rows out of the denominator entirely.
+    const mixed = [
+      { timestamp: min(0), success: false },
+      { timestamp: min(1), success: true, packetsSent: 4, packetsReceived: 4 },
+    ];
+    // 1 lost of 5 sent — the bare row contributed a denominator of 1.
+    expect(probeLossSeriesFrom(mixed, 2 * 60_000).ratioPct).toBe(20);
   });
 
-  it("marks nothing on an ordinary clean window — the caption covers the whole picture", () => {
-    expect(probeLossSeriesFrom(probes(30, []), 2 * 60_000).measuredFromMs).toBeNull();
-    // A recovery stamp older than the window trims no rows either.
-    expect(probeLossSeriesFrom(probes(30, [5]), 2 * 60_000, T0 - 3_600_000).measuredFromMs).toBeNull();
+  it("clamps a received count above sent rather than yielding negative loss", () => {
+    const rows = [{ timestamp: min(0), success: true, packetsSent: 3, packetsReceived: 9 }];
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(0);
   });
-
   it("skips empty buckets rather than plotting a polling gap as perfect health", () => {
     const rows = [
       { timestamp: min(0), success: true },
@@ -197,7 +181,7 @@ describe("probeLossSeriesFrom", () => {
   });
 
   it("has no ratio for an empty window", () => {
-    expect(probeLossSeriesFrom([], 2 * 60_000)).toEqual({ points: [], ratioPct: null, measuredFromMs: null });
+    expect(probeLossSeriesFrom([], 2 * 60_000)).toEqual({ points: [], ratioPct: null });
   });
 });
 
@@ -211,5 +195,55 @@ describe("lossBucketMs", () => {
   it("scales up so a long History still plots ~30 points", () => {
     expect(lossBucketMs(4 * 60 * 60_000)).toBe(8 * 60_000);
     expect(lossBucketMs(24 * 60 * 60_000)).toBe(48 * 60_000);
+  });
+});
+
+describe("readingAtOrAboveCeiling", () => {
+  const loss = (ignoreAtOrAbove?: number) => ({
+    type: "asset_metric", metric: "probeLossPct",
+    ...(ignoreAtOrAbove === undefined ? {} : { ignoreAtOrAbove }),
+  });
+
+  it("defaults to 100, so only a total outage is suppressed", () => {
+    expect(DEFAULT_READING_CEILING_PCT).toBe(100);
+    expect(readingAtOrAboveCeiling(loss(), 100)).toBe(true);
+    expect(readingAtOrAboveCeiling(loss(), 99.9)).toBe(false);
+    // Which is what leaves every rule authored before the control unchanged.
+    expect(readingAtOrAboveCeiling(loss(), 92)).toBe(false);
+  });
+
+  it("is inclusive at the stated ceiling", () => {
+    // The control reads "ignore at or above". Were it exclusive, a ceiling of
+    // 100 would suppress nothing and the default would be inert.
+    expect(readingAtOrAboveCeiling(loss(90), 90)).toBe(true);
+    expect(readingAtOrAboveCeiling(loss(90), 89.9)).toBe(false);
+  });
+
+  it("suppresses the post-outage reading an operator sets it for", () => {
+    // A device back from a 55-minute outage reads ~92% for the rest of a
+    // 60-minute window now that the loss anchor is gone.
+    expect(readingAtOrAboveCeiling(loss(90), 92)).toBe(true);
+  });
+
+  it("treats a non-numeric reading as unmeasurable, not saturated", () => {
+    expect(readingAtOrAboveCeiling(loss(90), null)).toBe(false);
+    expect(readingAtOrAboveCeiling(loss(90), Number.NaN)).toBe(false);
+  });
+
+  it("ignores a non-numeric ceiling rather than suppressing everything", () => {
+    // A hand-written or corrupted rule must not silence the metric outright.
+    expect(readingAtOrAboveCeiling({ ...loss(), ignoreAtOrAbove: "90" }, 95)).toBe(false);
+    expect(readingAtOrAboveCeiling({ ...loss(), ignoreAtOrAbove: null }, 95)).toBe(false);
+  });
+
+  it("applies only to asset_metric triggers", () => {
+    expect(readingAtOrAboveCeiling({ type: "asset_state", ignoreAtOrAbove: 50 }, 100)).toBe(false);
+    expect(readingAtOrAboveCeiling({ type: "host_metric" }, 100)).toBe(false);
+    expect(readingAtOrAboveCeiling(null, 100)).toBe(false);
+  });
+
+  it("allows a ceiling of 0 to mean suppress everything", () => {
+    // Degenerate but well-defined: 0 is a real value, not "unset".
+    expect(readingAtOrAboveCeiling(loss(0), 0)).toBe(true);
   });
 });

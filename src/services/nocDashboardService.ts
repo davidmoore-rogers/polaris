@@ -37,6 +37,7 @@ import { resolveMonitorSettings } from "./monitoringService.js";
 import { computeStorageForecast } from "./storageForecastService.js";
 import { queryProbeLossRatios } from "./probeLossQuery.js";
 import { createTtlCache } from "../utils/ttlCache.js";
+import { ALERT_SEVERITY_RANK } from "../utils/alertSeverity.js";
 
 // Asset types treated as "infrastructure" for the uptime % gauge — mirrors the
 // SolarWinds Fortinet-only uptime tile. These are the built-in network-gear
@@ -206,12 +207,14 @@ function idWhere(assetIds: string[] | null): Record<string, unknown> {
 // Widgets sort SEVERITY-FIRST: a row whose asset carries an active (uncleared)
 // automation alert floats above unalerted rows, ordered by the alert's
 // severity; within the same severity each feed keeps its own order (value /
-// outage recency / overdue-ness — the sorts below are stable). Rank map covers
-// the current 5-level vocabulary plus the legacy info/error values on
-// pre-redesign notifications.
-export const ALERT_SEVERITY_RANK: Record<string, number> = {
-  notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5,
-};
+// outage recency / overdue-ness — the sorts below are stable).
+//
+// The rank map moved to utils/alertSeverity.ts when the assets list grew its
+// own active-alert indicator — two services ranking severities from two copies
+// of the same object is how they end up disagreeing about `serious`. Re-exported
+// here because it was exported from this module first and the widget tests
+// import it by that name.
+export { ALERT_SEVERITY_RANK } from "../utils/alertSeverity.js";
 
 // ─── Widget ↔ automation relevance ───────────────────────────────────────────
 // A row shows a severity pill ONLY when the asset carries an active alert whose
@@ -272,42 +275,62 @@ function triggerMatchesRelevance(trigger: unknown, rel: AlertRelevance): boolean
 /** Highest active-alert severity per asset, considering ONLY alerts whose
  *  automation is relevant to the caller's widget (see AlertRelevance). One
  *  bounded findMany over the uncleared notifications joined to their rule's
- *  trigger; covered by @@index([assetId]) + [cleared, ...]. */
+ *  trigger; covered by @@index([assetId]) + [cleared, ...].
+ *
+ *  The winner also NAMES itself (`id`) and says whether someone already has it
+ *  (`acknowledged`), so a widget row can offer the acknowledge verb for the
+ *  same alert its severity pill is showing instead of re-deriving which of an
+ *  asset's alerts that was. Ties break toward the UNACKNOWLEDGED one: at equal
+ *  severity the choice is invisible to the pill, and it is the only one that
+ *  keeps "already acknowledged" meaning every relevant alert is handled. */
 export async function activeAlertSeverityByAsset(
   assetIds: string[] | null,
   relevance: AlertRelevance = { kind: "any" },
-): Promise<Map<string, { severity: string; rank: number }>> {
+): Promise<Map<string, { severity: string; rank: number; id: string; acknowledged: boolean }>> {
   if (relevance.kind === "none") return new Map();
   const rows = await prisma.notification.findMany({
     where: { cleared: false, assetId: assetIds ? { in: assetIds } : { not: null } },
-    select: { assetId: true, severity: true, rule: { select: { trigger: true } } },
+    select: { id: true, assetId: true, severity: true, acknowledged: true, rule: { select: { trigger: true } } },
   });
-  const out = new Map<string, { severity: string; rank: number }>();
+  const out = new Map<string, { severity: string; rank: number; id: string; acknowledged: boolean }>();
   for (const r of rows) {
     if (!r.assetId) continue;
     if (!triggerMatchesRelevance(r.rule?.trigger, relevance)) continue;
     const rank = ALERT_SEVERITY_RANK[r.severity] ?? 0;
+    const acknowledged = r.acknowledged === true;
     const cur = out.get(r.assetId);
-    if (!cur || rank > cur.rank) out.set(r.assetId, { severity: r.severity, rank });
+    const wins = !cur || rank > cur.rank || (rank === cur.rank && cur.acknowledged && !acknowledged);
+    if (wins) out.set(r.assetId, { severity: r.severity, rank, id: r.id, acknowledged });
   }
   return out;
 }
 
 /** Decorate feed rows with the owning asset's highest RELEVANT active-alert
  *  severity. One severity fetch bounded to the rows' own asset ids (feeds are
- *  capped, so this stays small at 2000 assets). */
+ *  capped, so this stays small at 2000 assets).
+ *
+ *  `withAlertRef` additionally names that alert on the row (`alertId` +
+ *  `alertAcknowledged`), for a feed whose rows are ACTED on rather than only
+ *  read — Down Assets, whose click-through offers Acknowledge. Opt-in so the
+ *  other feeds' payload shapes are untouched. */
 async function attachAlertSeverity<T extends object>(
   rows: T[],
   idOf: (r: T) => string | null | undefined,
   relevance: AlertRelevance = { kind: "any" },
-): Promise<Array<T & { alertSeverity?: string; alertRank: number }>> {
+  withAlertRef = false,
+): Promise<Array<T & { alertSeverity?: string; alertRank: number; alertId?: string; alertAcknowledged?: boolean }>> {
   const ids = Array.from(new Set(rows.map(idOf).filter((x): x is string => !!x)));
   if (ids.length === 0 || relevance.kind === "none") return rows.map((r) => ({ ...r, alertRank: 0 }));
   const sev = await activeAlertSeverityByAsset(ids, relevance);
   return rows.map((r) => {
     const id = idOf(r);
     const s = id ? sev.get(id) : undefined;
-    return { ...r, ...(s ? { alertSeverity: s.severity } : {}), alertRank: s?.rank ?? 0 };
+    return {
+      ...r,
+      ...(s ? { alertSeverity: s.severity } : {}),
+      ...(s && withAlertRef ? { alertId: s.id, alertAcknowledged: s.acknowledged } : {}),
+      alertRank: s?.rank ?? 0,
+    };
   });
 }
 
@@ -395,6 +418,12 @@ export interface DownNode {
   dependencySuppressed: boolean;
   alertSeverity?: string;
   alertRank?: number;
+  // The alert the severity pill is showing, NAMED so the widget's row menu can
+  // offer Acknowledge for that same alert — plus whether it is already handled,
+  // which is what decides whether the menu is offered at all (an alert someone
+  // already owns is nothing to act on, so the click just opens the device).
+  alertId?: string;
+  alertAcknowledged?: boolean;
 }
 
 function siteOf(a: { location: string | null; learnedLocation: string | null; snmpLocation: string | null }): string {
@@ -457,7 +486,7 @@ export async function getDownNodes(
   }));
   // Severity-first: alerted nodes float to the top; within a severity (and for
   // unalerted nodes) the youngest-outage order above holds (stable sort).
-  return { nodes: severityFirst(await attachAlertSeverity(nodes, (n) => n.id, stateRel("monitorStatus"))), total };
+  return { nodes: severityFirst(await attachAlertSeverity(nodes, (n) => n.id, stateRel("monitorStatus"), true)), total };
 }
 
 export interface DownInterface {
@@ -903,7 +932,10 @@ export async function getPacketLoss(limit: number | null = 100, sinceMinutes = 1
   // rather than dropping off the widget (which would read as "no loss"). Display
   // only — the engine path must not, or a loss automation would double-alert an
   // outage asset-down already owns.
-  const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit, includeFullyDown: true });
+  // `includeFullyDown` retired 2026-09-01: with the first-success anchor gone
+  // every row in the window counts, so an asset with no successful probe reads
+  // 100% naturally instead of needing an opt-in to avoid vanishing.
+  const rows = await queryProbeLossRatios({ sinceMinutes, assetIds, onlyLossy: true, limit });
   const ordered = rows.map((r) => ({
     assetId: r.assetId,
     value: Math.round((Number(r.failed) / Number(r.total)) * 1000) / 10,

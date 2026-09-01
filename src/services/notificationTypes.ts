@@ -501,6 +501,21 @@ const assetMetricTrigger = z.object({
   /** The hold as a COUNT OF READINGS — see FOR_POLLS_NOTE. */
   forPolls: FOR_POLLS_FIELD,
   dimensionFilter: dimensionFilterSchema,
+  /**
+   * SATURATION CEILING: a reading at or above this produces no reading at all,
+   * and clears any alert this rule already had on that asset.
+   *
+   * Offered for the windowed-ratio metrics (packet loss), where the top of the
+   * scale stops describing the thing the metric is named after. 100% loss is an
+   * outage, which the down automation already owns; and since the loss anchor
+   * was removed (business rule 29) a device coming back from a 55-minute outage
+   * genuinely reads ~92% for the rest of the window, so an operator who does not
+   * want an alert trailing every outage sets this to 90.
+   *
+   * Defaults to 100 when absent, which suppresses only a total outage and
+   * leaves every pre-existing rule behaving as it always has.
+   */
+  ignoreAtOrAbove: z.number().min(0).max(100).optional(),
 });
 
 const assetStateTrigger = z.object({
@@ -3051,6 +3066,34 @@ export const WINDOWED_RATIO_METRICS = ["probeLossPct"] as const;
 export const PROBE_LOSS_DEFAULT_WINDOW_SEC = 15 * 60;
 export const PROBE_LOSS_MIN_WINDOW_SEC = 5 * 60;
 
+/**
+ * The saturation ceiling a trigger uses when it states none. 100 means only a
+ * TOTAL outage is suppressed, so a rule authored before the control existed
+ * behaves exactly as it did.
+ */
+export const DEFAULT_READING_CEILING_PCT = 100;
+
+/**
+ * Is this reading at or above the trigger's saturation ceiling, i.e. should it
+ * be treated as no reading at all?
+ *
+ * ">= " rather than "> " on purpose: the operator-facing control reads "ignore
+ * at or above", and a ceiling of 100 has to suppress a reading of exactly 100 —
+ * suppressing only what EXCEEDS 100 would make the default do nothing.
+ *
+ * Only continuous asset-metric triggers have one. A non-numeric reading is not
+ * saturated, it is unmeasurable, and the caller decides what that means.
+ */
+export function readingAtOrAboveCeiling(trigger: unknown, value: number | null): boolean {
+  if (typeof value !== "number" || !Number.isFinite(value)) return false;
+  const t = trigger as { type?: string; ignoreAtOrAbove?: unknown } | null;
+  if (!t || t.type !== "asset_metric") return false;
+  const ceiling = typeof t.ignoreAtOrAbove === "number" && Number.isFinite(t.ignoreAtOrAbove)
+    ? t.ignoreAtOrAbove
+    : DEFAULT_READING_CEILING_PCT;
+  return value >= ceiling;
+}
+
 export function probeLossWindowSec(windowSec: number | null | undefined): number {
   return typeof windowSec === "number" && windowSec > 0
     ? Math.max(windowSec, PROBE_LOSS_MIN_WINDOW_SEC)
@@ -3421,6 +3464,9 @@ export function buildSchemaCatalog() {
     // labels its one time field "History", drops the meaningless aggregation
     // control, and gives severity tiers no hold clock of their own.
     windowedRatioMetrics: WINDOWED_RATIO_METRICS,
+    // The saturation ceiling the wizard prefills for those metrics, served
+    // rather than hardcoded client-side so the two cannot drift.
+    readingCeilingDefault: DEFAULT_READING_CEILING_PCT,
     // Per-metric state names, so a boolean metric with no probe behind it still
     // renders "is Alarm" rather than "is true".
     booleanMetricLabels: BOOLEAN_METRIC_LABELS,

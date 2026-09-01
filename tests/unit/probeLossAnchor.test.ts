@@ -1,19 +1,20 @@
 /**
  * tests/unit/probeLossAnchor.test.ts
  *
- * The two halves of the packet-loss recovery anchor (business rule 29b):
- * `stampsRecoveryAnchor` (which probe ends an outage and stamps
- * Asset.recoveryStartedAt) and `effectiveLossAnchorMs` (where the measurement
- * then starts — the JS mirror of the query's GREATEST).
+ * `stampsRecoveryAnchor` — which probe ends an outage and so stamps
+ * `Asset.recoveryStartedAt`.
  *
- * Both are one-liners with silent failure modes, which is why they're pinned:
- * stamping on warning->up collapses a flapping device's window to its last few
- * probes and reports ~0% forever, and taking the wrong side of the anchor makes
- * the alert email's chart contradict the reading that fired it.
+ * The column is DORMANT since 2026-09-01: the loss ratio used to start no
+ * earlier than it, and that trim is gone (business rule 29). The predicate is
+ * still pinned because the write survives, and because the reasoning behind it
+ * is exactly the reasoning that removed its reader — stamping on a warning->up
+ * recovery would have collapsed a flapping device's window to its last few
+ * probes and reported ~0% loss forever, which is precisely what the anchor
+ * turned out to be doing from the `down` side.
  */
 
 import { describe, it, expect } from "vitest";
-import { stampsRecoveryAnchor, effectiveLossAnchorMs } from "../../src/utils/probeLossAnchor.js";
+import { stampsRecoveryAnchor } from "../../src/utils/probeLossAnchor.js";
 
 describe("stampsRecoveryAnchor", () => {
   it("stamps the success that ends an outage", () => {
@@ -47,25 +48,5 @@ describe("stampsRecoveryAnchor", () => {
     for (const s of ["up", "warning", "recovering", "down", "unknown", null]) {
       expect(stampsRecoveryAnchor(s, false)).toBe(false);
     }
-  });
-});
-
-describe("effectiveLossAnchorMs", () => {
-  const first = 1_000_000;
-
-  it("takes the recovery when it is later — the outage that started mid-window", () => {
-    expect(effectiveLossAnchorMs(first, first + 60_000)).toBe(first + 60_000);
-  });
-
-  it("ignores a recovery older than the window (mirrors GREATEST's NULL handling)", () => {
-    expect(effectiveLossAnchorMs(first, first - 3_600_000)).toBe(first);
-    expect(effectiveLossAnchorMs(first, null)).toBe(first);
-  });
-
-  it("has no anchor when nothing answered — the caller decides what that means", () => {
-    // The engine drops such an asset (asset-down owns a total outage); display
-    // paths keep every row and read 100%.
-    expect(effectiveLossAnchorMs(null, first)).toBeNull();
-    expect(effectiveLossAnchorMs(null, null)).toBeNull();
   });
 });

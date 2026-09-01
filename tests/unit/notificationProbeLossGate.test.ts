@@ -222,3 +222,109 @@ describe("packet-loss gate", () => {
     expect(h.prisma.notification.create.mock.calls[0][0].data.assetId).toBe("down-1");
   });
 });
+
+describe("saturation ceiling", () => {
+  /** Report every queried asset at exactly `pct` loss. */
+  const reportAll = (pct: number) =>
+    h.queryProbeLossRatios.mockImplementation(async (opts: any) =>
+      (opts.assetIds ?? []).map((assetId: string) => ({
+        assetId, total: 1000n, failed: BigInt(Math.round(pct * 10)),
+      })),
+    );
+
+  it("drops a 100% reading under the default ceiling", async () => {
+    // An answering device CAN read 100% now that the loss anchor is gone — a
+    // window full of dead bursts with one late reply is the ordinary shape just
+    // after recovery. At 100% the number describes an outage, which the down
+    // automation owns.
+    reportAll(100);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.create).not.toHaveBeenCalled();
+  });
+
+  it("still fires just below the ceiling", async () => {
+    reportAll(99.9);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("honours a lower ceiling the automation sets", async () => {
+    // THE POST-OUTAGE CASE. With the anchor removed a device back from a
+    // 55-minute outage genuinely reads ~92% for the rest of the window; an
+    // operator who does not want an alert trailing every outage sets 90.
+    h.prisma.notificationRule.findMany.mockResolvedValue([
+      lossRule({
+        trigger: {
+          type: "asset_metric", metric: "probeLossPct", aggregation: "latest",
+          windowSec: 900, operator: ">", threshold: 10, forDurationSec: 0,
+          ignoreAtOrAbove: 90,
+        },
+      }),
+    ]);
+    reportAll(92);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.create).not.toHaveBeenCalled();
+  });
+
+  it("is inclusive — a reading exactly AT the ceiling is dropped", async () => {
+    // "Ignore at or above" has to mean it, or a default of 100 would suppress
+    // nothing at all.
+    h.prisma.notificationRule.findMany.mockResolvedValue([
+      lossRule({
+        trigger: {
+          type: "asset_metric", metric: "probeLossPct", aggregation: "latest",
+          windowSec: 900, operator: ">", threshold: 10, forDurationSec: 0,
+          ignoreAtOrAbove: 90,
+        },
+      }),
+    ]);
+    reportAll(90);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.create).not.toHaveBeenCalled();
+  });
+
+  it("CLEARS a live alert whose reading saturated, rather than freezing it", async () => {
+    // The device is still answering, so the not-answering handoff never sees
+    // it. Without its own handoff the dropped reading looks like "stopped
+    // reporting" to clearVanishedStates, which FREEZES — leaving a loss alert
+    // escalating through the outage, the exact duplicate rule 29 exists to stop.
+    reportAll(100);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+    h.prisma.notificationRuleState.findMany.mockResolvedValue([firingState("up-1")]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.updateMany).toHaveBeenCalledTimes(1);
+    const cleared = h.prisma.notification.updateMany.mock.calls[0][0];
+    expect(cleared.where.id).toBe("n9");
+    expect(cleared.data.clearedBy).toBe("system:reading-saturated");
+    const upd = h.prisma.notificationRuleState.update.mock.calls.find((c: any) => c[0].where.id === "s1");
+    expect(upd?.[0].data.state).toBe("clear");
+    expect(upd?.[0].data.notificationId).toBe(null);
+  });
+
+  it("does not apply to a metric with no ceiling semantics", async () => {
+    // 100 is a perfectly ordinary CPU reading and must still alert.
+    h.prisma.notificationRule.findMany.mockResolvedValue([CPU_RULE]);
+    h.prisma.asset.findMany.mockResolvedValue([scopeAsset("up-1")]);
+    h.prisma.assetTelemetrySample.findMany.mockResolvedValue([
+      { assetId: "up-1", timestamp: new Date(), cpuPct: 100, memPct: null, memUsedBytes: null, sessionCount: null },
+    ]);
+
+    await evaluateAllNotificationRules();
+
+    expect(h.prisma.notification.create).toHaveBeenCalledTimes(1);
+  });
+});

@@ -167,6 +167,71 @@ describe("getDownNodes", () => {
     expect(where).toMatchObject({ monitorStatus: "down" });
     expect(r.nodes.map((n) => n.dependencySuppressed)).toEqual([false, true]);
   });
+
+  // The widget's click-through offers "Acknowledge" for the alert its severity
+  // pill is showing, so the row has to NAME that alert. Without the id the
+  // widget would have to guess which of an asset's alerts the pill meant.
+  it("names the alert behind the severity pill, and whether it is already acknowledged", async () => {
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "fw-1", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+      { id: "b", hostname: "sw-2", ipAddress: null, assetType: "switch", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+      { id: "c", hostname: "ap-3", ipAddress: null, assetType: "access_point", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+    ]);
+    count.mockResolvedValueOnce(3);
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "n-a", assetId: "a", severity: "critical", acknowledged: false, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+      { id: "n-b", assetId: "b", severity: "warning", acknowledged: true, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+      // c is down with no automation covering it (business rule 36's `passive`)
+      // — nothing to acknowledge, so the row must carry no alert id at all.
+    ]);
+    const r = await noc.getDownNodes();
+    const byId = Object.fromEntries(r.nodes.map((n) => [n.id, n]));
+    expect(byId.a.alertId).toBe("n-a");
+    expect(byId.a.alertAcknowledged).toBe(false);
+    expect(byId.b.alertId).toBe("n-b");
+    expect(byId.b.alertAcknowledged).toBe(true);
+    expect(byId.c.alertId).toBeUndefined();
+    expect(byId.c.alertAcknowledged).toBeUndefined();
+  });
+
+  // At equal severity the choice is invisible to the pill, so it goes to the
+  // one that still needs a human — otherwise an asset with two criticals, one
+  // taken and one not, could read as "already acknowledged" and lose the verb.
+  it("breaks a severity tie toward the UNACKNOWLEDGED alert", async () => {
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "fw-1", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+    ]);
+    count.mockResolvedValueOnce(1);
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "n-taken", assetId: "a", severity: "critical", acknowledged: true, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+      { id: "n-open", assetId: "a", severity: "critical", acknowledged: false, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+    ]);
+    const r = await noc.getDownNodes();
+    expect(r.nodes[0].alertId).toBe("n-open");
+    expect(r.nodes[0].alertAcknowledged).toBe(false);
+    // The pill is unchanged either way — same severity.
+    expect(r.nodes[0].alertSeverity).toBe("critical");
+  });
+
+  // A higher severity still wins outright, acknowledged or not: the row's pill
+  // and the alert it names must be the same alert.
+  it("still takes the most severe alert even when it is the acknowledged one", async () => {
+    findMany.mockResolvedValueOnce([
+      { id: "a", hostname: "fw-1", ipAddress: null, assetType: "firewall", location: "HQ", learnedLocation: null, snmpLocation: null, department: null, monitorStatus: "down", monitorStatusChangedAt: null, dependencySuppressed: false },
+    ]);
+    count.mockResolvedValueOnce(1);
+    notifFindMany.mockReset();
+    notifFindMany.mockResolvedValueOnce([
+      { id: "n-crit", assetId: "a", severity: "critical", acknowledged: true, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+      { id: "n-warn", assetId: "a", severity: "warning", acknowledged: false, rule: { trigger: { type: "asset_state", field: "monitorStatus" } } },
+    ]);
+    const r = await noc.getDownNodes();
+    expect(r.nodes[0].alertSeverity).toBe("critical");
+    expect(r.nodes[0].alertId).toBe("n-crit");
+    expect(r.nodes[0].alertAcknowledged).toBe(true);
+  });
 });
 
 describe("getDownInterfaces", () => {
@@ -281,40 +346,41 @@ describe("getPacketLoss", () => {
     rawUnsafe.mockResolvedValueOnce([]);
     await noc.getPacketLoss();
     const sql = rawUnsafe.mock.calls[0][0] as string;
-    // Actual loss (HAVING) AND at least one success — the latter comes from the
-    // first-success anchor, which drops an asset with no successful probe
-    // outright: a window with zero successes is a down node, not a lossy one.
-    //
-    // The loss half is asked of PACKETS now, not of row outcomes. A row-based
+    // The loss test is asked of PACKETS, not of row outcomes. A row-based
     // `>= 1 failed row` test would filter out a device whose every ICMP burst
     // dropped packets while still getting something back (so no row is a
-    // failure) — which is precisely the device this widget exists to surface.
+    // failure) — precisely the device this widget exists to surface.
     expect(sql).toContain("HAVING");
     expect(sql).toContain(`"packetsSent"`);
-    expect(sql).toContain(`"firstOk" IS NOT NULL`);
   });
 
-  it("measures from the first successful probe, not the window's leading edge", async () => {
-    // A device recovering from an outage must not read the outage back as loss
-    // (probeLossQuery's header). The anchor is what keeps the pre-recovery
-    // failures out of the denominator.
+  it("no longer trims the window to the first successful probe", async () => {
+    // Both anchors were removed on 2026-09-01 (business rule 29). They existed
+    // so a device coming back from an outage did not read ~92% and alert
+    // because it had recovered — but they also collapsed a flapping device's
+    // window to its last few probes and reported ~0% loss forever. Suppression
+    // moved to the engine (the answering gate and ignoreAtOrAbove); the
+    // measurement is plainly failed/total over the whole window.
+    //
+    // Asserted as ABSENCE on purpose: re-introducing a trim here would silently
+    // restore the flapping bug, and nothing else in the suite would notice.
     rawUnsafe.mockResolvedValueOnce([]);
     await noc.getPacketLoss();
     const sql = rawUnsafe.mock.calls[0][0] as string;
-    expect(sql).toContain(`min(s."timestamp") FILTER (WHERE s."success") OVER (PARTITION BY s."assetId")`);
-    expect(sql).toContain(`"timestamp" >= GREATEST("firstOk", "recoveredAt")`);
+    expect(sql).not.toContain("firstOk");
+    expect(sql).not.toContain("GREATEST");
+    expect(sql).not.toContain("recoveryStartedAt");
+    expect(sql).not.toContain("LEFT JOIN");
   });
 
-  it("also measures from the end of an outage that started mid-window", async () => {
-    // The second anchor (business rule 29b): the first-success anchor is inert
-    // once a healthy sample precedes the outage, so the window ALSO starts no
-    // earlier than Asset.recoveryStartedAt. Joined per asset, LEFT so a sample
-    // row whose asset is gone still counts.
-    rawUnsafe.mockResolvedValueOnce([]);
-    await noc.getPacketLoss();
-    const sql = rawUnsafe.mock.calls[0][0] as string;
-    expect(sql).toContain(`LEFT JOIN "assets" a ON a."id" = s."assetId"`);
-    expect(sql).toContain(`a."recoveryStartedAt" AS "recoveredAt"`);
+  it("reports a fully-dark asset at 100% with no opt-in flag", async () => {
+    // What includeFullyDown used to buy. With every row in the window counted,
+    // an asset that answered nothing reads 100% naturally — and vanishing from
+    // the widget would have read as "no loss", the opposite of the truth.
+    rawUnsafe.mockResolvedValueOnce([{ assetId: "a", total: 20n, failed: 20n }]);
+    findMany.mockResolvedValueOnce([{ id: "a", hostname: "h", ipAddress: "1.2.3.4" }]);
+    const r = await noc.getPacketLoss();
+    expect(r[0].value).toBe(100);
   });
 
   it("bounds the window with a timezone-proof now() (naive-UTC columns vs server TimeZone)", async () => {
@@ -831,16 +897,18 @@ describe("resolveFilteredAssetIds", () => {
 describe("alert-severity-aware ordering", () => {
   it("activeAlertSeverityByAsset keeps the HIGHEST severity per asset and maps legacy values", async () => {
     notifFindMany.mockResolvedValueOnce([
-      { assetId: "a", severity: "warning" },
-      { assetId: "a", severity: "critical" },
-      { assetId: "b", severity: "info" },     // legacy → rank 2
-      { assetId: "c", severity: "error" },    // legacy → rank 5
-      { assetId: null, severity: "critical" }, // host alert — no asset key
+      { id: "n1", assetId: "a", severity: "warning", acknowledged: false },
+      { id: "n2", assetId: "a", severity: "critical", acknowledged: false },
+      { id: "n3", assetId: "b", severity: "info", acknowledged: false },     // legacy → rank 2
+      { id: "n4", assetId: "c", severity: "error", acknowledged: true },     // legacy → rank 5
+      { id: "n5", assetId: null, severity: "critical", acknowledged: false }, // host alert — no asset key
     ]);
     const m = await noc.activeAlertSeverityByAsset(["a", "b", "c"]);
-    expect(m.get("a")).toEqual({ severity: "critical", rank: 5 });
-    expect(m.get("b")).toEqual({ severity: "info", rank: 2 });
-    expect(m.get("c")).toEqual({ severity: "error", rank: 5 });
+    // The winner names itself and says whether someone has it, so a widget row
+    // can offer Acknowledge for the same alert its pill is showing.
+    expect(m.get("a")).toEqual({ severity: "critical", rank: 5, id: "n2", acknowledged: false });
+    expect(m.get("b")).toEqual({ severity: "info", rank: 2, id: "n3", acknowledged: false });
+    expect(m.get("c")).toEqual({ severity: "error", rank: 5, id: "n4", acknowledged: true });
     expect(m.has("")).toBe(false);
   });
 
@@ -940,12 +1008,12 @@ describe("per-widget alert relevance (pill only when a matching automation fires
 
   it("activeAlertSeverityByAsset filters out non-matching triggers under a metric relevance", async () => {
     notifFindMany.mockResolvedValueOnce([
-      { assetId: "a", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 } } },
-      { assetId: "b", severity: "critical", rule: { trigger: { type: "asset_metric", metric: "storageUsedPct", operator: ">", threshold: 90 } } },
-      { assetId: "c", severity: "warning", rule: null }, // rule deleted → matches nothing specific
+      { id: "n-a", assetId: "a", severity: "critical", acknowledged: false, rule: { trigger: { type: "asset_metric", metric: "cpuPct", operator: ">", threshold: 90 } } },
+      { id: "n-b", assetId: "b", severity: "critical", acknowledged: false, rule: { trigger: { type: "asset_metric", metric: "storageUsedPct", operator: ">", threshold: 90 } } },
+      { id: "n-c", assetId: "c", severity: "warning", acknowledged: false, rule: null }, // rule deleted → matches nothing specific
     ]);
     const m = await noc.activeAlertSeverityByAsset(["a", "b", "c"], { kind: "metric", metrics: ["cpuPct"] });
-    expect(m.get("a")).toEqual({ severity: "critical", rank: 5 });
+    expect(m.get("a")).toEqual({ severity: "critical", rank: 5, id: "n-a", acknowledged: false });
     expect(m.has("b")).toBe(false);
     expect(m.has("c")).toBe(false);
   });

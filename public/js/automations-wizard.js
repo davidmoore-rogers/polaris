@@ -3171,6 +3171,40 @@ async function openAutomationWizard(existing, opts) {
     );
   }
 
+  /**
+   * The THIRD ratio-only field (2026-09-01): the saturation ceiling. At or above
+   * it the reading is dropped and any live alert on that device clears.
+   *
+   * It exists because the loss measurement stopped trimming outages out of its
+   * own window (business rule 29). A device back from a 55-minute outage now
+   * genuinely reads ~92% for the rest of the window, and this is the control
+   * that decides whether that deserves an alert. Prefilled from the server's
+   * `readingCeilingDefault` (100 — suppressing only a total outage, so every
+   * pre-existing rule is unchanged); an operator who does not want an alert
+   * trailing every outage lowers it.
+   *
+   * Rendered for every device/host trigger but hidden unless a ratio condition
+   * is present, the same rendered-not-omitted pattern as the sustain field, so
+   * syncDurationRequirement can toggle it live as the metric changes.
+   */
+  function ratioCeilingFieldHtml(tr) {
+    var ratio = triggerIsWindowedRatio(tr);
+    var stored = tr && typeof tr.ignoreAtOrAbove === "number" ? tr.ignoreAtOrAbove : null;
+    var val = stored === null ? "" : String(stored);
+    return '<div class="form-group aw-ratio-ceiling"' + (ratio ? "" : ' style="display:none"') + '>' +
+      '<label>Ignore readings at or above (%)</label>' +
+      '<input type="number" id="tf-ratio-ceiling" min="0" max="100" step="1" value="' + escapeHtml(val) + '" placeholder="' + ratioCeilingDefault() + '">' +
+      '<p style="margin:2px 0 0;font-size:0.78rem;color:var(--color-text-tertiary)">' +
+      'At or above this the reading is treated as an outage rather than packet loss: no alert fires, and any alert this automation already raised on that device clears. ' +
+      'The default of 100% ignores only a total outage. A device that has just come back from a long one still reads close to 100% for the rest of the History window, so lower this to stop an alert trailing every outage.</p>' +
+      '</div>';
+  }
+  /** The server publishes the default so the two cannot drift. */
+  function ratioCeilingDefault() {
+    var n = s.readingCeilingDefault;
+    return typeof n === "number" ? n : 100;
+  }
+
   // ── Poll cadence ──────────────────────────────────────────────────────────
   // How often the draft's OWN devices take the reading it watches — the number
   // every poll-counted field converts through, from POST /automations/poll-cadence.
@@ -3539,6 +3573,8 @@ async function openAutomationWizard(existing, opts) {
     }
     // The ratio-only sustain field appears exactly when the History relabel
     // does — switching the metric to/from packet loss toggles both together.
+    var ceilingWrap = panel.querySelector(".aw-ratio-ceiling");
+    if (ceilingWrap) ceilingWrap.style.display = ratio ? "" : "none";
     var sustainWrap = panel.querySelector(".aw-ratio-sustain");
     if (sustainWrap) {
       if (ratio) sustainWrap.removeAttribute("data-hold-off");
@@ -3589,7 +3625,8 @@ async function openAutomationWizard(existing, opts) {
           // use of this field is a hold, and a hold is a count.
           triggerIsWindowedRatio(tr) ? "sec" : "polls",
         ) +
-        ratioSustainFieldHtml(tr);
+        ratioSustainFieldHtml(tr) +
+        ratioCeilingFieldHtml(tr);
       if (cat === "host") {
         html += '<p style="font-size:0.78rem;color:var(--color-text-tertiary)">Polaris-host conditions aren’t tied to assets — the device filter from the previous step is ignored.</p>';
       }
@@ -3678,6 +3715,13 @@ async function openAutomationWizard(existing, opts) {
         // rides the dedicated #tf-sustain-min field (hidden for everything
         // else, so a non-ratio trigger can never pick a value up from it).
         var aggregated = tgStampWindows(tree, holdSec);
+        // Saturation ceiling — ratio leaves only. An empty box means "use the
+        // default", stored as absent rather than as a literal 100 so the
+        // server-side default stays the single source of that number.
+        var cEl = panel.querySelector("#tf-ratio-ceiling");
+        var cRaw = cEl ? String(cEl.value).trim() : "";
+        var cNum = cRaw === "" ? null : Math.max(0, Math.min(100, Number(cRaw)));
+        tgStampCeiling(tree, cNum !== null && isFinite(cNum) ? cNum : null);
         var ratio = !!root.querySelector('.scr-row[data-ratio="1"]');
         var sEl = panel.querySelector("#tf-sustain-min");
         var sustainSec = ratio ? Math.min(pollFieldSec(sEl), RATIO_WINDOW_MAX_SEC) : 0;
@@ -3757,6 +3801,26 @@ async function openAutomationWizard(existing, opts) {
     })(node);
     return aggregated;
   }
+  /**
+   * Stamp the saturation ceiling onto every windowed-ratio leaf, and STRIP it
+   * from every other leaf. The strip half matters: switching a condition off
+   * packet loss must not leave an ignoreAtOrAbove behind on a metric whose
+   * builder no longer shows the field, silencing readings nobody can see a
+   * reason for. Null clears it, which is what an emptied box means.
+   */
+  function tgStampCeiling(node, pct) {
+    (function walk(n) {
+      if (!n) return;
+      if (n.type === undefined && Array.isArray(n.children)) { n.children.forEach(walk); return; }
+      if (tgLeafWindowedRatio(n)) {
+        if (pct === null) delete n.ignoreAtOrAbove;
+        else n.ignoreAtOrAbove = pct;
+      } else if (n.type !== "asset_state") {
+        delete n.ignoreAtOrAbove;
+      }
+    })(node);
+  }
+
   /** The trigger's measurement window in seconds — the widest window any of its
    *  aggregated leaves carries, 0 when every leaf reads `latest`. Reset leaves
    *  inherit it (see collectStep4): they answer the same question about the same

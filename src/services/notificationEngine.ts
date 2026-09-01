@@ -70,6 +70,7 @@ import {
   scopeRankLabel,
   numMeets,
   probeLossWindowSec,
+  readingAtOrAboveCeiling,
   DEVICE_FILTER_DIMENSIONS,
   deviceFilterMatch,
   type DeviceFilterAsset,
@@ -622,7 +623,16 @@ function reduceReadings(
   return out;
 }
 
-async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "asset_metric" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
+/**
+ * `saturated` (optional, out-param): asset ids whose reading was DROPPED for
+ * sitting at or above the trigger's `ignoreAtOrAbove` ceiling. The threshold
+ * path passes one so it can CLEAR those assets' live alerts rather than let
+ * them freeze — a dropped reading is indistinguishable from "stopped
+ * reporting" to clearVanishedStates, and freezing an alert through an outage
+ * is exactly what business rule 29 exists to prevent. Composite leaves and the
+ * preview pass nothing: they only need the reading gone.
+ */
+async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "asset_metric" }>, assets: ScopeAssetRow[], saturated?: Set<string>): Promise<Reading[]> {
   const df = trigger.dimensionFilter ?? {};
   // The device-identifier dimensions narrow the ASSET set before any sample
   // query — every metric takes them (they name the device rather than a
@@ -696,6 +706,14 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
         // A windowed RATIO is recomputed from scratch every tick — there is no
         // series of ratios to count, so a poll-counted hold on one counts
         // observations against the probe's own anchor instead.
+        // SATURATION CEILING (business rule 29). At or above it the number has
+        // stopped describing a lossy link and started describing an outage —
+        // which the down automation already owns — so it is not a reading at
+        // all. Recorded rather than silently dropped so the caller can clear.
+        if (readingAtOrAboveCeiling(trigger, value)) {
+          saturated?.add(a.id);
+          return null;
+        }
         return { assetId: a.id, hostname: a.hostname, tags: a.tags, dimKey: "", dimLabel: "", value, readingAt: a.lastMonitorAt ?? null };
       }).filter((r): r is Reading => r !== null);
     }
@@ -1357,6 +1375,10 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   // Assets whose device isn't answering, on a rule whose metric needs it to be
   // (packet loss — business rule 29). Handed off to asset-down alerting.
   const notAnsweringIds = new Set<string>();
+  // Assets whose reading sat at or above the trigger's saturation ceiling, so
+  // there is no reading this tick. Handled like notAnswering: cleared, not
+  // frozen (business rule 29).
+  const saturatedIds = new Set<string>();
   // Every asset the scope resolved this tick (incl. suppressed/shadowed);
   // null for host rules, which have no asset scope to leave.
   let scopeIds: Set<string> | null = null;
@@ -1398,7 +1420,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     }
     activeAssets = active;
     readings = trigger.type === "asset_metric"
-      ? await resolveAssetMetricReadings(trigger, active)
+      ? await resolveAssetMetricReadings(trigger, active, saturatedIds)
       : await resolveAssetStateReadings(trigger, active);
   } else {
     return;
@@ -1627,19 +1649,34 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
     }
   }
 
-  // Devices that stopped answering, on a rule that needs them to (packet loss):
-  // a handoff to asset-down alerting, so — like the carve-out and unlike
-  // maintenance — the live alert CLEARS rather than freezing. Freezing is what
-  // used to leave a packet-loss alert sitting next to the asset-down alert for
-  // the whole outage, which is the duplicate operators were seeing.
+  // TWO HANDOFFS TO ASSET-DOWN ALERTING, both on a rule whose metric needs an
+  // answering device (packet loss). Like the carve-out and unlike maintenance,
+  // the live alert CLEARS rather than freezing — freezing is what used to leave
+  // a packet-loss alert sitting next to the asset-down alert for a whole
+  // outage, which is the duplicate operators were seeing.
+  //
+  //   device-down       — the device stopped answering, so it produces no
+  //                       reading at all (assetIsAnsweringProbes).
+  //   reading-saturated — it IS answering, but the ratio reached the rule's
+  //                       own `ignoreAtOrAbove` ceiling, so the number has
+  //                       stopped describing a lossy link. This is the case
+  //                       the removed loss anchor used to hide: a device back
+  //                       from a 55-minute outage really does read ~92% for
+  //                       the rest of the window, and an operator who does not
+  //                       want an alert trailing every outage sets the ceiling
+  //                       below that (business rule 29).
   //
   // Deliberately no reset actions (matching the carve-out): the alert isn't
   // recovering, and mailing "packet loss resolved" about a device that just went
   // dark would be worse than saying nothing. The Event is the audit trail.
   for (const st of states) {
-    if (!st.assetId || !notAnsweringIds.has(st.assetId)) continue;
+    if (!st.assetId) continue;
+    const handoff = notAnsweringIds.has(st.assetId)
+      ? "device-down"
+      : saturatedIds.has(st.assetId) ? "reading-saturated" : null;
+    if (!handoff) continue;
     if (st.state === "firing") {
-      await clearActiveNotification(st, "system:device-down");
+      await clearActiveNotification(st, `system:${handoff}`);
       await prisma.notificationRuleState.update({
         where: { id: st.id },
         data: { state: "clear", conditionMetSince: null, recoveredSince: null, notificationId: null, bandMetSince: Prisma.DbNull, ...CLEARED_RUNS },
@@ -1650,8 +1687,10 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
         resourceId: st.notificationId ?? undefined,
         resourceName: rule.name,
         actor: "system:notification-engine",
-        message: `Cleared: ${rule.name} — the device is no longer answering, so its outage is the asset-down alert`,
-        details: { ruleId: rule.id, assetId: st.assetId, reason: "device-down" },
+        message: handoff === "device-down"
+          ? `Cleared: ${rule.name} — the device is no longer answering, so its outage is the asset-down alert`
+          : `Cleared: ${rule.name} — the reading reached the automation's ignore-at-or-above ceiling, so it describes an outage rather than a lossy link`,
+        details: { ruleId: rule.id, assetId: st.assetId, reason: handoff },
       }).catch(() => {});
     } else if (st.state === "pending") {
       await prisma.notificationRuleState.update({
@@ -1666,7 +1705,7 @@ async function evaluateThresholdRule(rule: DbRule, shadowIndex?: ShadowIndex): P
   // (suppressed assets stay frozen, in-scope assets with no readings at all
   // stay frozen; see clearVanishedStates).
   if (scopeIds) {
-    const handled = new Set([...suppressedIds, ...shadowedIds, ...notAnsweringIds]);
+    const handled = new Set([...suppressedIds, ...shadowedIds, ...notAnsweringIds, ...saturatedIds]);
     const assetsWithReadings = new Set(readings.map((r) => r.assetId).filter(Boolean));
     // activeAssets suffices as the pin-test index: any state row that passes
     // the handled/scope checks belongs to an active asset by construction.

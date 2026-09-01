@@ -29,7 +29,6 @@ import { resolveMonitorSettings } from "./monitoringService.js";
 import { logger } from "../utils/logger.js";
 import { sparklineSvg, seriesStats, formatReading, timeAxisLabel, type SparkPoint } from "../utils/sparklineSvg.js";
 import { alarmStatusToFlag, convertSensorForDisplay, sensorDisplayUnit } from "../utils/hardwareSensors.js";
-import { effectiveLossAnchorMs } from "../utils/probeLossAnchor.js";
 import { getBranding } from "./brandingService.js";
 import type { InlineAttachment } from "./notificationChannels/emailChannel.js";
 
@@ -485,23 +484,14 @@ export function lossBucketMs(windowMs: number): number {
 }
 
 export interface ProbeLossSeries {
-  /** Per-bucket loss ratio, for the plotted line — the WHOLE window, including
-   *  any outage `ratioPct` deliberately excludes. */
+  /** Per-bucket loss ratio, for the plotted line. */
   points: SparkPoint[];
   /**
-   * `failed / total` over the ANCHORED window — the SAME quantity the engine's
-   * `probeLossPct` metric reports, so the chart's caption states the number the
-   * alert fired on. Null when the window held no probes at all.
+   * failed / total over the WHOLE window — the same quantity the engine's
+   * `probeLossPct` metric reports, so the caption states the number the alert
+   * fired on. Null when the window held no probes at all.
    */
   ratioPct: number | null;
-  /**
-   * The anchor, in epoch ms, but only when it actually starts later than the
-   * plotted data — i.e. when the caption measures less of the picture than is
-   * drawn. The chart marks it, so the loss to its left reads as outside the
-   * measurement rather than as a contradiction of it. Null when the whole
-   * plotted window is measured, which is the ordinary case.
-   */
-  measuredFromMs: number | null;
 }
 
 /**
@@ -514,80 +504,64 @@ export interface ProbeLossSeries {
  * "18.3 %" over a chart captioned "avg 6.7 %": the per-bucket values are the
  * line's shape, while `ratioPct` weighs every probe equally across the window.
  * A 4-minute burst of total loss among 30 quiet 2-minute buckets is 2/30 ≈
- * 6.7 % of BUCKETS but ~18 % of PROBES (the ICMP sampler used to add to that
- * skew, and the poll cadence alone still produces it) — and it is the probe
- * ratio the automation compares to its threshold, so that is what the caption
- * must print.
+ * 6.7 % of BUCKETS but ~18 % of PROBES — and it is the probe ratio the
+ * automation compares to its threshold, so that is what the caption prints.
  *
- * THE ANCHOR APPLIES TO THE RATIO ONLY. Mirroring `probeLossQuery`'s DISPLAY
- * mode, `ratioPct` discards samples before the window's first successful probe
- * — and before `recoveryStartedAt`, the end of an outage that started
- * mid-window, passed in as `recoveryMs` — because a device that was unreachable
- * for part of the window had no probes there to lose (business rule 29b). That
- * trim is what makes `ratioPct` equal the engine's reading, so both halves of
- * it have to be here.
+ * IT COUNTS PACKETS WHEREVER IT CAN, mirroring `probeLossQuery`: a burst row
+ * from the ICMP sweep carries `packetsSent` / `packetsReceived` and describes N
+ * echoes, so counting it as one outcome would understate loss exactly as it did
+ * in the query. A row without them is the single-probe equivalent — 1 sent, 1
+ * received on success. Unlike the query this does NOT drop poll rows once burst
+ * rows exist: the chart is a picture of the window and dropping half its
+ * samples would leave visible holes in the line. The caption can therefore sit
+ * a little under the engine's reading on a mixed asset, which is the honest
+ * trade — the line has to be continuous, the number has to be comparable.
  *
- * THE LINE IS NOT TRIMMED: it plots every bucket in the window. Anchoring the
- * picture too (the behaviour until 2026-08-28) meant a loss chart that began at
- * the moment the device came back, so the outage that paged the operator was
- * missing from the graph sent to explain it — an email captioned "60 min"
- * showing four. `measuredFromMs` reconciles the two: the chart draws a marker
- * where the measurement starts, so the loss to its left is visibly OUTSIDE the
- * caption's number instead of contradicting it.
- *
- * An asset with NO success in the window is measured whole and reads 100 %,
- * exactly as the NOC widget's `includeFullyDown` does: the alert body embeds a
- * loss chart for asset-down alerts too, and a blank chart there would read as
- * "no loss" when the truth is that nothing got through. The engine never sees
- * this case (a loss alert only fires on an answering device), so there is no
- * reading for it to disagree with.
+ * THE ANCHOR IS GONE (2026-09-01), and with it `measuredFromMs` and the marker
+ * the chart drew for it. `ratioPct` used to discard everything before the
+ * window's first successful probe and before `Asset.recoveryStartedAt`, so the
+ * caption measured less of the window than the line drew and the two had to be
+ * reconciled with a rule drawn across the chart. Both halves now cover the same
+ * window, so there is nothing left to mark.
  *
  * Empty buckets are skipped rather than plotted as 0 %: a gap in polling is not
  * a period of perfect health.
  */
 export function probeLossSeriesFrom(
-  rows: Array<{ timestamp: Date; success: boolean }>,
+  rows: Array<{
+    timestamp: Date;
+    success: boolean;
+    packetsSent?: number | null;
+    packetsReceived?: number | null;
+  }>,
   bucketMs: number = LOSS_BUCKET_MS,
-  /**
-   * `Asset.recoveryStartedAt` as epoch ms — the success that ended the last
-   * outage. The later of it and the first success is the anchor, matching
-   * SQL's `GREATEST("firstOk", "recoveredAt")`. Null/absent (no recovery on
-   * record) leaves the first-success anchor alone; a stamp older than the
-   * window is inert, since every row already sits after it.
-   */
-  recoveryMs: number | null = null,
 ): ProbeLossSeries {
-  const firstOkMs = rows.find((r) => r.success)?.timestamp.getTime() ?? null;
-  // Same arithmetic as the query's GREATEST("firstOk", "recoveredAt").
-  const anchorMs = effectiveLossAnchorMs(firstOkMs, recoveryMs);
-
-  const buckets = new Map<number, { total: number; failed: number }>();
-  let total = 0;
-  let failed = 0;
+  const buckets = new Map<number, { sent: number; recv: number }>();
+  let sent = 0;
+  let recv = 0;
   for (const r of rows) {
-    const ms = r.timestamp.getTime();
-    // Every row is PLOTTED; only the anchored ones are COUNTED.
-    const key = Math.floor(ms / bucketMs) * bucketMs;
-    const b = buckets.get(key) ?? { total: 0, failed: 0 };
-    b.total++;
-    if (!r.success) b.failed++;
+    // NULL is the single-probe equivalent, never zero — reading it as zero
+    // would drop the response-time poll's own rows out of the denominator.
+    const s = typeof r.packetsSent === "number" && r.packetsSent > 0 ? r.packetsSent : 1;
+    const v = typeof r.packetsReceived === "number" && r.packetsReceived >= 0
+      ? Math.min(r.packetsReceived, s)
+      : (r.success ? 1 : 0);
+    const key = Math.floor(r.timestamp.getTime() / bucketMs) * bucketMs;
+    const b = buckets.get(key) ?? { sent: 0, recv: 0 };
+    b.sent += s;
+    b.recv += v;
     buckets.set(key, b);
-    if (anchorMs !== null && ms < anchorMs) continue;
-    total++;
-    if (!r.success) failed++;
+    sent += s;
+    recv += v;
   }
   const points = thin(
     Array.from(buckets.entries())
       .sort((a, b) => a[0] - b[0])
-      .map(([t, b]) => ({ t, v: Math.round((b.failed / b.total) * 1000) / 10 })),
+      .map(([t, b]) => ({ t, v: Math.round(((b.sent - b.recv) / b.sent) * 1000) / 10 })),
   );
-  // Only report the marker when the anchor actually leaves something outside it
-  // — otherwise every clean chart would carry a rule at its left edge.
-  const trimmed = anchorMs !== null && rows.length > 0 && rows[0]!.timestamp.getTime() < anchorMs;
   return {
     points,
-    ratioPct: total ? Math.round((failed / total) * 1000) / 10 : null,
-    measuredFromMs: trimmed ? anchorMs : null,
+    ratioPct: sent ? Math.round(((sent - recv) / sent) * 1000) / 10 : null,
   };
 }
 
@@ -597,22 +571,15 @@ export function probeLossSeriesFrom(
  * than it saves, and it keeps the loader shaped like its neighbours.
  */
 async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LOSS_BUCKET_MS): Promise<ProbeLossSeries> {
-  // The recovery anchor lives on the asset row, so the chart needs it too —
-  // one narrow select, and null (a deleted asset, a device that has never
-  // recovered) degrades to the first-success anchor alone.
-  const [asset, rows] = await Promise.all([
-    prisma.asset.findUnique({ where: { id: assetId }, select: { recoveryStartedAt: true } }),
-    prisma.assetMonitorSample.findMany({
-      // EVERY probeKind, deliberately — this is a loss chart, and the ICMP
-      // sampler exists to give it resolution through the warning/recovering
-      // windows. One of only three all-kinds readers (with probeLossQuery's two
-      // modes); everything else is response-time-poll only.
-      where: { assetId, timestamp: { gte: since } },
-      orderBy: { timestamp: "asc" },
-      select: { timestamp: true, success: true },
-    }),
-  ]);
-  return probeLossSeriesFrom(rows, bucketMs, asset?.recoveryStartedAt?.getTime() ?? null);
+  const rows = await prisma.assetMonitorSample.findMany({
+    // EVERY probeKind, deliberately — this is a loss chart, and the ICMP sweep
+    // exists to give it resolution. One of only two all-kinds readers (with
+    // probeLossQuery); everything else is response-time-poll only.
+    where: { assetId, timestamp: { gte: since } },
+    orderBy: { timestamp: "asc" },
+    select: { timestamp: true, success: true, packetsSent: true, packetsReceived: true },
+  });
+  return probeLossSeriesFrom(rows, bucketMs);
 }
 
 async function rasterize(svg: string): Promise<Buffer | null> {
@@ -709,7 +676,7 @@ export async function buildAlertCharts(
   let cpu: SparkPoint[] = [];
   let mem: SparkPoint[] = [];
   let rt: SparkPoint[] = [];
-  let loss: ProbeLossSeries = { points: [], ratioPct: null, measuredFromMs: null };
+  let loss: ProbeLossSeries = { points: [], ratioPct: null };
   let sensor: SensorSeries = { points: [], alarmSpans: [], unit: "", sensorClass: null };
   let fail: FailSpanSeries = { spans: [], recoverySpans: [], failedCount: 0 };
   try {
@@ -779,9 +746,6 @@ export async function buildAlertCharts(
       // fault). Absent ⇒ the red sparklineSvg has always used.
       ...(withFailSpans && fail.downColor ? { downColor: fail.downColor } : {}),
       ...(withRecoverSpans ? { recoverSpans: fail.recoverySpans } : {}),
-      // Only the loss chart sets this — where its caption's ratio starts, when
-      // the anchor left part of the plotted window outside the measurement.
-      ...(isLoss && loss.measuredFromMs ? { measuredFrom: loss.measuredFromMs } : {}),
       from: (isLoss ? lossSince : since).getTime(),
       to: now.getTime(),
       avgOverride,
@@ -801,12 +765,10 @@ export async function buildAlertCharts(
         // is missing data rather than a steady reading, so a text reader needs
         // the count.
         (withFailSpans ? ` — ${fail.failedCount} poll${fail.failedCount === 1 ? "" : "s"} failed during this window` : "") +
-        // The chart says this with its "measured" rule; a reader with images
-        // blocked has only the text, and without the clause the avg looks wrong
-        // for the window it claims to cover.
-        (isLoss && loss.measuredFromMs
-          ? ` — avg covers the last ${timeAxisLabel(now.getTime() - loss.measuredFromMs)}, since the device last came back; the loss before that is the outage itself`
-          : ""),
+        // The caption and the line now cover the SAME window (the first-success
+        // anchor is gone), so there is no longer a shorter measured span to
+        // explain in text for a reader with images blocked.
+        "",
       attachment: png
         ? { cid, filename: `${token.replace(".", "-")}.png`, contentType: "image/png", content: png }
         : null,

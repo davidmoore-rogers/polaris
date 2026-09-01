@@ -136,145 +136,66 @@ async function seedAssetWithRecovery(assetId: string, recoveryStartedAt: Date | 
   });
 }
 
-d("queryProbeLossRatios — anchoring at the first successful probe", () => {
-  it("excludes the outage that preceded recovery (the 92%-on-a-healthy-device case)", async () => {
-    // 50 minutes dark, then 5 clean minutes: the pre-anchor failures are not
-    // loss, they were an outage, so the reading is 0% rather than 50/55.
-    await seedProbes(A, [...Array(50).fill(F), ...Array(5).fill(S)]);
+d("queryProbeLossRatios — every miss in the window counts", () => {
+  it("counts an outage that preceded recovery — the case the anchor used to hide", async () => {
+    // Ten failures then two successes. The first-success anchor made this 0%;
+    // it is 83%, and that is the honest reading of the last twelve probes.
+    await seedProbes(A, [F, F, F, F, F, F, F, F, F, F, S, S]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(12);
+    expect(Number(rows[0]!.failed)).toBe(10);
+  });
 
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: ALL });
+  it("keeps measuring a device that flaps to down and back every cycle", async () => {
+    // THE BUG THE ANCHOR CAUSED. Every recovery out of `down` re-stamped
+    // Asset.recoveryStartedAt, collapsing the window to the last few probes, so
+    // a device losing half its packets reported ~0% loss forever. The stamp is
+    // still written and must now be ignored.
+    await seedAssetWithRecovery(A, ago(1));
+    await seedProbes(A, [S, F, S, F, S, F, S, F]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(8);
+    expect(Number(rows[0]!.failed)).toBe(4);
+  });
+
+  it("counts a leading failure run that no success precedes", async () => {
+    // Previously an asset with zero successes was dropped outright. It now
+    // reads 100%, and whether that may ALERT is the engine's decision (the
+    // answering gate and the ignoreAtOrAbove ceiling), not this query's.
+    await seedProbes(A, [F, F, F, F, F]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
     expect(rows).toHaveLength(1);
-    expect(Number(rows[0].total)).toBe(5);
-    expect(Number(rows[0].failed)).toBe(0);
+    expect(Number(rows[0]!.failed)).toBe(Number(rows[0]!.total));
   });
 
-  it("counts every sample from the first success onward", async () => {
-    // Anchor at minute -10; two of the ten samples from there on failed.
-    await seedProbes(A, [F, F, S, F, S, S, F, S, S, S]);
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(8);
-    expect(Number(rows[0].failed)).toBe(2);
-  });
-
-  it("counts loss that starts after the first success (a device going down now)", async () => {
-    await seedProbes(A, [S, S, S, S, S, F, F, F, F, F]);
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(10);
-    expect(Number(rows[0].failed)).toBe(5);
-  });
-
-  it("anchors per asset, not fleet-wide", async () => {
-    await seedProbes(A, [F, F, F, F, S]);        // recovered — 0%
-    await seedProbes(B, [S, F, S, F, S]);        // flapping  — 2/5
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: ALL });
-    const byId = new Map(rows.map((r) => [r.assetId, r]));
-    expect(Number(byId.get(A)!.failed)).toBe(0);
-    expect(Number(byId.get(A)!.total)).toBe(1);
-    expect(Number(byId.get(B)!.failed)).toBe(2);
-    expect(Number(byId.get(B)!.total)).toBe(5);
-  });
-});
-
-d("queryProbeLossRatios — the recovery anchor (an outage that started mid-window)", () => {
-  // 10 clean minutes, then 20 dark, then 5 clean: the window's FIRST success is
-  // at minute -35, before the outage, so the first-success anchor is inert here.
-  const acrossOutage = [...Array(10).fill(S), ...Array(20).fill(F), ...Array(5).fill(S)];
-  // The success that ended it sits 5 minutes back. The stamp is set a half
-  // minute earlier so it lands between that success and the last failure —
-  // `ago()` is relative to its own call, so aiming exactly at the sample's
-  // timestamp would land a few ms past it and trim the anchor row itself.
-  const recoveredAt = () => ago(5.5);
-
-  it("excludes the outage, so a device that just came back reads 0% instead of 57%", async () => {
-    await seedProbes(A, acrossOutage);
-    await seedAssetWithRecovery(A, recoveredAt());
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(5);
-    expect(Number(rows[0].failed)).toBe(0);
-  });
-
-  it("without the stamp the same samples read the outage back as loss (the bug)", async () => {
-    // Pins WHY the column exists: the first-success anchor alone keeps every
-    // failed probe of a mid-window outage in the denominator, so the device
-    // alerts *because* it recovered — for a whole window.
-    await seedProbes(A, acrossOutage);
-    await seedAssetWithRecovery(A, null);
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(35);
-    expect(Number(rows[0].failed)).toBe(20);
-  });
-
-  it("is inert once the recovery falls out of the window (flapping stays measurable)", async () => {
-    // A device that recovered two hours ago and has been dropping probes since:
-    // the stamp is older than every row, so GREATEST picks the first success and
-    // the whole window counts. This is also the warning->up case by construction
-    // — that transition never stamps at all.
-    await seedProbes(A, [S, F, S, F, S, F, S, F, S, F]);
-    await seedAssetWithRecovery(A, ago(120));
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(10);
-    expect(Number(rows[0].failed)).toBe(5);
-  });
-
-  it("anchors per asset — one device's recovery doesn't trim another's window", async () => {
-    await seedProbes(A, acrossOutage);
-    await seedAssetWithRecovery(A, recoveredAt());
-    await seedProbes(B, acrossOutage);
-    await seedAssetWithRecovery(B, null);
-
-    const byId = new Map(
-      (await queryProbeLossRatios({ sinceMinutes: 60, assetIds: ALL })).map((r) => [r.assetId, r]),
-    );
-    expect(Number(byId.get(A)!.total)).toBe(5);
-    expect(Number(byId.get(B)!.total)).toBe(35);
-  });
-
-  it("drops the recovered device from the Packet Loss widget instead of topping it", async () => {
-    // Widget mode: the trimmed window holds no failures, so HAVING hides it —
-    // a device that is answering every probe is not "lossy".
-    await seedProbes(A, acrossOutage);
-    await seedAssetWithRecovery(A, recoveredAt());
-
+  it("surfaces the fully-dark asset in widget mode with no opt-in flag", async () => {
+    // This is what includeFullyDown used to buy. Vanishing read as "no loss",
+    // the opposite of the truth.
+    await seedProbes(A, [F, F, F]);
     const rows = await queryProbeLossRatios({
-      sinceMinutes: 60, assetIds: ALL, onlyLossy: true, limit: null, includeFullyDown: true,
-    });
-    expect(rows).toHaveLength(0);
-  });
-
-  it("still reads 100% for a device that answered nothing, stamp or no stamp", async () => {
-    // The stamp is from a recovery attempt that failed — includeFullyDown's
-    // keep-every-row branch must win, or the widget loses the outage entirely.
-    await seedProbes(A, Array(20).fill(F));
-    await seedAssetWithRecovery(A, ago(10));
-
-    const rows = await queryProbeLossRatios({
-      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: null, includeFullyDown: true,
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10,
     });
     expect(rows).toHaveLength(1);
-    expect(Number(rows[0].failed)).toBe(20);
+    expect(Number(rows[0]!.failed)).toBe(Number(rows[0]!.total));
+  });
+
+  it("ignores Asset.recoveryStartedAt entirely", async () => {
+    // The column is still stamped by the probe path; nothing may read it.
+    await seedAssetWithRecovery(A, ago(2));
+    await seedProbes(A, [F, F, F, F, S, S]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(6);
+    expect(Number(rows[0]!.failed)).toBe(4);
   });
 });
 
 d("queryProbeLossRatios — mode + scoping contracts", () => {
-  it("drops assets with no successful probe in the window (asset-down owns them)", async () => {
-    await seedProbes(A, [F, F, F, F, F]);
-
-    expect(await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] })).toHaveLength(0);
-    expect(await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10 })).toHaveLength(0);
-  });
-
   it("engine mode keeps a clean asset (0% feeds hysteresis recovery); widget mode hides it", async () => {
     await seedProbes(A, [S, S, S, S, S]);
 
     const engine = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
     expect(engine).toHaveLength(1);
-    expect(Number(engine[0].failed)).toBe(0);
+    expect(Number(engine[0]!.failed)).toBe(0);
 
     const widget = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10 });
     expect(widget).toHaveLength(0);
@@ -298,8 +219,7 @@ d("queryProbeLossRatios — mode + scoping contracts", () => {
     const scoped = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
     expect(scoped.map((r) => r.assetId)).toEqual([A]);
 
-    // Samples older than the window are invisible — including the success that
-    // would otherwise have anchored the measurement.
+    // Samples older than the window are invisible.
     await prisma.assetMonitorSample.deleteMany({ where: { assetId: { in: ALL } } });
     await prisma.assetMonitorSample.createMany({
       data: [
@@ -311,49 +231,14 @@ d("queryProbeLossRatios — mode + scoping contracts", () => {
   });
 });
 
-d("queryProbeLossRatios — includeFullyDown (display only)", () => {
-  it("reads 100% for an asset that answered nothing in the window", async () => {
-    // Before this flag such an asset was dropped by the anchor (no first
-    // success to anchor to), so it VANISHED from the Packet Loss widget — which
-    // reads as "no loss", the opposite of the truth.
-    await seedProbes(A, Array(20).fill(F));
-
-    const rows = await queryProbeLossRatios({
-      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: null, includeFullyDown: true,
-    });
-    expect(rows).toHaveLength(1);
-    expect(Number(rows[0].total)).toBe(20);
-    expect(Number(rows[0].failed)).toBe(20);
-  });
-
-  it("still drops the fully-down asset without the flag (the engine path)", async () => {
-    // The engine must never see 100% here: asset-down owns a total outage, and a
-    // loss alert on top of it is the double-alert business rule 29 forbids.
-    await seedProbes(A, Array(20).fill(F));
-
-    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(rows).toHaveLength(0);
-  });
-
-  it("does not change the anchored reading for an asset that DID answer", async () => {
-    // The flag only adds the no-anchor case; a recovering device still reads 0%.
-    await seedProbes(A, [...Array(50).fill(F), ...Array(5).fill(S)]);
-
-    const rows = await queryProbeLossRatios({
-      sinceMinutes: 60, assetIds: [A], includeFullyDown: true,
-    });
-    expect(Number(rows[0].total)).toBe(5);
-    expect(Number(rows[0].failed)).toBe(0);
-  });
-});
 
 d("queryProbeLossRatios — probeKind", () => {
   it("counts ICMP loss-sampler rows alongside the response-time poll", async () => {
     // The whole point of the sampler: a 15-minute ratio divides ~90 samples
-    // instead of ~15. A success leads (so the anchor keeps everything), then
-    // 3 primary polls (1 failed) and 6 sampler pings (3 failed) → 4/10, not 1/4.
+    // instead of ~15. Three primary polls (1 failed) and six sampler pings
+    // (3 failed) all count together: 4 of 10, not 1 of 4.
     await seedAt(A, [
-      { secondsAgo: 300, success: S },                     // anchor
+      { secondsAgo: 300, success: S },
       { secondsAgo: 240, success: F },
       { secondsAgo: 180, success: S },
       { secondsAgo: 120, success: S },
@@ -370,10 +255,10 @@ d("queryProbeLossRatios — probeKind", () => {
     expect(Number(rows[0].failed)).toBe(4);
   });
 
-  it("lets a sampler probe anchor the window like any other success", async () => {
-    // The anchor asks "did anything answer", not "which probe answered": the
-    // sampler's ping is the first success, so the primary failures before it are
-    // an outage rather than loss.
+  it("counts sampler rows that precede any primary success", async () => {
+    // This used to test the ANCHOR: the sampler ping was the first success, so
+    // the three primary failures before it were discarded as "an outage". With
+    // the trim gone they are loss like any other miss — 3 of 5.
     await seedAt(A, [
       { secondsAgo: 300, success: F },
       { secondsAgo: 240, success: F },
@@ -383,8 +268,8 @@ d("queryProbeLossRatios — probeKind", () => {
     ]);
 
     const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
-    expect(Number(rows[0].total)).toBe(2);
-    expect(Number(rows[0].failed)).toBe(0);
+    expect(Number(rows[0]!.total)).toBe(5);
+    expect(Number(rows[0]!.failed)).toBe(3);
   });
 });
 

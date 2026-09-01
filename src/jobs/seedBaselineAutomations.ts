@@ -54,6 +54,7 @@
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV2SeededAt'; -- event set
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV3SeededAt'; -- down detection
  *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV4ResetEventSeededAt'; -- counterpart resets
+ *   DELETE FROM "settings" WHERE key = 'seedBaselineAutomationsV5LossCeilingSeededAt'; -- loss ceiling
  * then restart. (This resurrects that ENTIRE set, including rules you deleted.
  * For V3 that means re-deriving the thresholds from the settings tiers, which
  * are dormant but still stored — and it will NOT re-retire an Asset down rule
@@ -75,6 +76,22 @@ const MARKER_KEY = "seedBaselineAutomationsSeededAt";
 const MARKER_KEY_V2 = "seedBaselineAutomationsV2SeededAt";
 const MARKER_KEY_V3 = "seedBaselineAutomationsV3SeededAt";
 const MARKER_KEY_V4 = "seedBaselineAutomationsV4ResetEventSeededAt";
+const MARKER_KEY_V5 = "seedBaselineAutomationsV5LossCeilingSeededAt";
+
+/**
+ * The saturation ceiling the baseline packet-loss automation ships with.
+ *
+ * 90 rather than the schema default of 100, and the difference is deliberate.
+ * The loss ratio stopped trimming outages out of its own window (business rule
+ * 29), so a device back from a 55-minute outage genuinely reads ~92% for the
+ * rest of a 60-minute window. True, but it describes the outage Asset down has
+ * already alerted on. At 100 this ALL-ASSETS baseline would trail a second
+ * alert behind every outage on every device.
+ *
+ * The schema default stays 100 so a hand-written rule is never silently
+ * narrowed; Polaris opts its OWN default rule out instead.
+ */
+const BASELINE_LOSS_CEILING_PCT = 90;
 const SEED_ACTOR = "system:seed-baseline-automations";
 /** The name the pre-cutover baseline row carries — the only fingerprint the
  *  V3 retire step has, alongside createdBy. */
@@ -187,9 +204,9 @@ const BASELINE_RULES: Record<string, unknown>[] = [
   {
     name: "High packet loss",
     description:
-      "Fires at three levels over the last 15 minutes of probe history: warning above 10% loss, serious above 20%, critical above 30%, clearing below 5%. Only devices that are currently answering are measured, counting from their first successful probe in the window — a full outage alerts as Asset down instead, so one outage never raises two alerts. Mirrors the Packet Loss widget — works for any monitored asset. Baseline example — edit or delete freely.",
+      "Fires at three levels over the last 15 minutes of probe history: warning above 10% loss, serious above 20%, critical above 30%, clearing below 5%. Only devices that are currently answering are measured, and readings at or above 90% are ignored — at that point the device is having an outage rather than a lossy link, and Asset down already alerts on it, so one outage never raises two alerts and none trails it as the outage ages out of the window. Mirrors the Packet Loss widget — works for any monitored asset. Baseline example — edit or delete freely.",
     severity: "warning",
-    trigger: { type: "asset_metric", metric: "probeLossPct", windowSec: 900, operator: ">", threshold: 10 },
+    trigger: { type: "asset_metric", metric: "probeLossPct", windowSec: 900, operator: ">", threshold: 10, ignoreAtOrAbove: BASELINE_LOSS_CEILING_PCT },
     severityBands: [
       { threshold: 20, severity: "serious" },
       { threshold: 30, severity: "critical" },
@@ -656,6 +673,80 @@ async function migrateEventResetsV4(): Promise<{ updated: number; skipped: boole
   return { updated: repointed.length, skipped: false };
 }
 
+/**
+ * V5 — give the baseline packet-loss automation a saturation ceiling on
+ * installs that already have it.
+ *
+ * The seed above is marker-guarded and never re-runs, so without this every
+ * existing install keeps a probeLossPct rule with no ceiling. That was harmless
+ * while the ratio discarded outages from its own window; it is not now that the
+ * anchor is gone, because the baseline rule is scoped to ALL ASSETS and would
+ * raise a second alert trailing every outage on every device as it ages out of
+ * the 15-minute window. The anchor removal introduced that regression, so
+ * repairing it is this change's job rather than the operator's.
+ *
+ * Bounded exactly like V3's retire step and V4:
+ *   - only probeLossPct triggers that state NO ceiling (an operator who set one
+ *     has already answered this question), and
+ *   - only rules never edited (updatedAt === createdAt). A tuned rule is theirs,
+ *     and silently narrowing when someone's alert fires is worse than leaving it
+ *     noisy and saying so.
+ *
+ * An edited rule is therefore left alone AND NAMED in the Event, at warning
+ * level: the operator has to be told that one of their own rules will now alert
+ * after outages unless they set a ceiling on it themselves.
+ */
+async function migrateLossCeilingV5(): Promise<{ updated: number; skipped: boolean }> {
+  if (await hasRunMarker(MARKER_KEY_V5)) return { updated: 0, skipped: true };
+
+  const rows = await prisma.notificationRule.findMany({
+    select: { id: true, name: true, trigger: true, createdAt: true, updatedAt: true },
+  });
+  const updated: string[] = [];
+  const leftAlone: string[] = [];
+  for (const row of rows) {
+    const trigger = row.trigger as Record<string, unknown> | null;
+    if (!trigger || trigger.type !== "asset_metric" || trigger.metric !== "probeLossPct") continue;
+    if (typeof trigger.ignoreAtOrAbove === "number") continue;
+    if (row.updatedAt.getTime() !== row.createdAt.getTime()) {
+      leftAlone.push(row.name);
+      continue;
+    }
+    try {
+      await prisma.notificationRule.update({
+        where: { id: row.id },
+        data: { trigger: { ...trigger, ignoreAtOrAbove: BASELINE_LOSS_CEILING_PCT } },
+      });
+      updated.push(row.name);
+    } catch (err) {
+      logger.warn({ err, rule: row.name }, "Failed to add a saturation ceiling to a packet-loss automation");
+    }
+  }
+
+  if (updated.length > 0 || leftAlone.length > 0) {
+    const didUpdate = updated.length > 0
+      ? `${updated.length} unedited packet-loss automation(s) now ignore readings at or above ` +
+        `${BASELINE_LOSS_CEILING_PCT}%, so an outage no longer trails a loss alert behind it: ` +
+        `${updated.join(", ")}. `
+      : "";
+    const didSkip = leftAlone.length > 0
+      ? `${leftAlone.length} edited packet-loss automation(s) were left alone and carry NO ceiling, so they may ` +
+        `now alert as an outage ages out of their window — set "Ignore readings at or above" on each if that ` +
+        `is unwanted: ${leftAlone.join(", ")}`
+      : "";
+    await logEvent({
+      action: "automation.seed.v5_loss_ceiling",
+      resourceType: "notification-rule",
+      actor: SEED_ACTOR,
+      level: leftAlone.length > 0 ? "warning" : "info",
+      message: didUpdate + didSkip,
+      details: { updated, leftAlone, ceilingPct: BASELINE_LOSS_CEILING_PCT },
+    }).catch(() => {});
+  }
+  await stampRunMarker(MARKER_KEY_V5, { updated: updated.length, leftAlone: leftAlone.length });
+  return { updated: updated.length, skipped: false };
+}
+
 export async function seedBaselineAutomations(): Promise<{ created: number; skipped: boolean }> {
   // Independent markers: a pre-V2 install has the first marker stamped and
   // still picks up the event set; a fresh install seeds both.
@@ -669,9 +760,14 @@ export async function seedBaselineAutomations(): Promise<{ created: number; skip
   // the counterpart reset and this finds nothing to do — it exists for installs
   // that stamped the V2 marker before the reset existed.
   const v4 = await migrateEventResetsV4();
+  // V5 runs after V1 so a fresh install's just-seeded loss rule already carries
+  // the ceiling and this finds nothing to do; it exists for installs that
+  // stamped the V1 marker before the ceiling existed, where the anchor removal
+  // would otherwise leave an all-assets rule alerting after every outage.
+  const v5 = await migrateLossCeilingV5();
   return {
     created: v1.created + v2.created + v3.created,
-    skipped: v1.skipped && v2.skipped && v3.skipped && v4.skipped,
+    skipped: v1.skipped && v2.skipped && v3.skipped && v4.skipped && v5.skipped,
   };
 }
 
