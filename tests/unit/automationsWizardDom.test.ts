@@ -283,18 +283,49 @@ describe("automation wizard DOM render", () => {
     expect((doc.querySelector("#aw-bn-increase") as unknown as { checked: boolean }).checked).toBe(true);
     expect((doc.querySelector("#aw-bn-decrease") as unknown as { checked: boolean }).checked).toBe(false);
 
-    // ONE hold for the whole trigger (2026-08-28): no tier carries its own, and
-    // the trigger's stays where it renders — above the tiers, belonging to none
-    // of them — instead of being moved inside the base condition group.
+    // ONE hold for the whole trigger (2026-08-28): no tier carries an editable
+    // one. It lives INSIDE the base severity block (2026-08-31) — between the
+    // tiers it read as the first tier's — and every added tier shows it again as
+    // a disabled mirror, so the ladder states it in each tier rather than once,
+    // ambiguously, between two of them.
     expect(band.querySelector(".band-duration")).toBeNull();
-    expect(doc.querySelector("#aw-trig-root .scg-group .aw-dur")).toBeNull();
-    expect(doc.querySelector("#aw-trigger-fields > .aw-dur #tf-duration-min")).toBeTruthy();
-    // ...which is also what keeps the loss-only sustain field hidden here. While
-    // it was moved into the base severity group it was marked `.aw-collapse-part`,
-    // and expanding that group set `display: ""` on every part — so a CPU
-    // automation rendered a second "Sustained for" captioned about packet loss.
+    expect(doc.querySelector("#aw-trig-root .scg-group > .aw-dur #tf-duration-min")).toBeTruthy();
+    const mirror = band.querySelector(".aw-band-dur .aw-band-dur-input") as unknown as { disabled: boolean };
+    expect(mirror).toBeTruthy();
+    expect(mirror.disabled).toBe(true);
+    // The loss-only sustain field stays hidden on a CPU automation even though it
+    // now folds with the base severity group: it is marked `.aw-collapse-part`,
+    // and expanding that group sets `display: ""` on every part — which is how a
+    // CPU automation once rendered a second "Sustained for" captioned about
+    // packet loss. `data-hold-off` is what keeps a switched-off part off.
     expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("none");
     expect(doc.querySelectorAll("#aw-step-3 .aw-poll-input").length).toBe(2); // the hold + the hidden ratio sustain
+
+    // A stated hold reaches every tier's mirror, value and all. Nothing about
+    // what is SAVED changes — the mirror is disabled and carries no
+    // `.aw-poll-input`, so neither collection nor the cadence repaint sees it.
+    const durInput = doc.querySelector("#tf-duration-min") as unknown as { value: string; dispatchEvent: (e: unknown) => void };
+    durInput.value = "3";
+    durInput.dispatchEvent(new win.Event("input", { bubbles: true }));
+    const mirrorWrap = band.querySelector(".aw-band-dur") as unknown as { style: { display: string } };
+    expect(mirrorWrap.style.display).toBe("");
+    expect((band.querySelector(".aw-band-dur-input") as unknown as { value: string }).value).toBe("3");
+    expect(doc.querySelectorAll("#aw-step-3 .aw-poll-input").length).toBe(2);
+
+    // Folding the base severity takes the hold down with it — and must NOT take
+    // the mirrors: the tiers below still wait it out whether or not the block
+    // stating it is open.
+    const chev = doc.querySelector('#aw-trig-root .scg-group [data-collapse="t3:base"]') as unknown as { click: () => void };
+    expect(chev).toBeTruthy();
+    const durWrap = doc.querySelector("#aw-trig-root .scg-group > .aw-dur") as unknown as { style: { display: string } };
+    chev.click();
+    expect(durWrap.style.display).toBe("none");
+    expect(mirrorWrap.style.display).toBe("");
+    chev.click();
+    expect(durWrap.style.display).toBe("");
+    // Unfolding re-offers the parts it hid — but not one the trigger switched
+    // off, which is what `data-hold-off` on the loss-only sustain field pins.
+    expect((doc.querySelector(".aw-ratio-sustain") as unknown as { style: { display: string } }).style.display).toBe("none");
   });
 
   it("step 4 shows the default-checked 'trigger no longer true' checkbox; step 6 lists affected devices", async () => {

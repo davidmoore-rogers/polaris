@@ -1915,7 +1915,11 @@ async function openAutomationWizard(existing, opts) {
     // select has to stay in the header (tgCollectGroup reads it as
     // `:scope > div > .scg-op`) but must still fold away with everything else.
     container.querySelectorAll(":scope > .aw-collapse-part, :scope > .aw-collapse-head > .aw-collapse-part").forEach(function (b) {
-      b.style.display = on ? "none" : "";
+      // A part the trigger has switched OFF stays off through an unfold: the
+      // fields that live inside the base severity block (the hold, a ratio's
+      // sustain) are hidden by syncDurationRequirement for reasons this
+      // function knows nothing about, and unfolding must not re-offer them.
+      b.style.display = on || b.getAttribute("data-hold-off") === "1" ? "none" : "";
     });
     var btn = container.querySelector(':scope [data-collapse="' + key + '"]');
     if (btn) {
@@ -3413,6 +3417,18 @@ async function openAutomationWizard(existing, opts) {
     });
   }
   /**
+   * "" unless the element folds away with a collapsed severity block. Every
+   * show/hide of a field that lives INSIDE the base tier has to ask: the hold
+   * is a collapse part now, so an unrelated edit repainting it would otherwise
+   * re-open it inside a folded block.
+   */
+  function unfoldedDisplay(el) {
+    if (!el || !el.classList || !el.classList.contains("aw-collapse-part")) return "";
+    var grp = el.closest("[data-collapse-key]");
+    var key = grp && grp.getAttribute("data-collapse-key");
+    return key && _awCollapsed[key] ? "none" : "";
+  }
+  /**
    * Every severity tier waits out the ONE hold on the trigger (rule 19), so each
    * tier renders it read-only rather than leaving the operator to infer that the
    * number above the first tier governs all of them. Mirrors the trigger field's
@@ -3432,7 +3448,10 @@ async function openAutomationWizard(existing, opts) {
     wrap = wrap && wrap.closest(".aw-dur");
     var input = wrap && wrap.querySelector("#tf-duration-min");
     var labelEl = wrap && wrap.querySelector("label");
-    var hidden = !wrap || (wrap.style && wrap.style.display === "none");
+    // `data-hold-off`, not the wrap's display: inside the base tier the field is
+    // also display:none while that block is folded, and a folded first tier must
+    // not blank the hold out of the tiers below it.
+    var hidden = !wrap || wrap.getAttribute("data-hold-off") === "1";
     var label = labelEl ? (labelEl.textContent || "").replace(/\*+\s*$/, "").trim() : "";
     var show = !hidden && !!input && pollFieldCount(input) > 0;
     Array.prototype.forEach.call(rows, function (mirror) {
@@ -3461,10 +3480,12 @@ async function openAutomationWizard(existing, opts) {
     var allRows = root ? root.querySelectorAll(".scr-row") : [];
     if (allRows.length && ddRows.length === allRows.length) {
       wrap.style.display = "none";
+      wrap.setAttribute("data-hold-off", "1");
       syncBandDurationMirrors(panel);
       return;
     }
-    wrap.style.display = "";
+    wrap.removeAttribute("data-hold-off");
+    wrap.style.display = unfoldedDisplay(wrap);
     var star = wrap.querySelector(".aw-dur-req");
     var note = wrap.querySelector(".aw-dur-note");
     var input = wrap.querySelector("#tf-duration-min");
@@ -3519,7 +3540,11 @@ async function openAutomationWizard(existing, opts) {
     // The ratio-only sustain field appears exactly when the History relabel
     // does — switching the metric to/from packet loss toggles both together.
     var sustainWrap = panel.querySelector(".aw-ratio-sustain");
-    if (sustainWrap) sustainWrap.style.display = ratio ? "" : "none";
+    if (sustainWrap) {
+      if (ratio) sustainWrap.removeAttribute("data-hold-off");
+      else sustainWrap.setAttribute("data-hold-off", "1");
+      sustainWrap.style.display = ratio ? unfoldedDisplay(sustainWrap) : "none";
+    }
     syncPollFields(panel, false);
   }
   function step3Html() {
@@ -4994,20 +5019,29 @@ async function openAutomationWizard(existing, opts) {
     if (btnRow) btnRow.classList.add("scg-btnrow"); // pinned: the duration field moves in below the conditions
     var existingSev = header && header.querySelector(".scg-sev-wrap");
     var existingAdd = btnRow && btnRow.querySelector(".scg-add-sev");
-    // The hold used to be moved INTO the base tier, back when every added tier
-    // had one of its own and a field sitting between the tiers read as a
-    // rule-wide setting. There is one hold now — the trigger's — so it stays
-    // where it is rendered, above the tiers, and belongs to none of them. The
-    // lookups survive to move it back OUT of a group left over from a render
-    // that predates this change.
+    // The hold lives INSIDE the base tier in multi-severity mode, below its
+    // conditions — where every added tier carries the same field as a read-only
+    // mirror (syncBandDurationMirrors). Left between the first tier and the
+    // second it read as the first tier's own hold; inside the block, with each
+    // later tier showing the count it will wait out, the ladder states the one
+    // hold in every tier instead of once, ambiguously, between two of them.
+    // Single-severity mode moves it back out to #aw-trigger-fields, where there
+    // is no tier for it to belong to.
     var durGroup = panel.querySelector("#tf-duration-min");
     durGroup = durGroup && durGroup.closest(".aw-dur");
     var sustainGroup = panel.querySelector(".aw-ratio-sustain");
     if (!multi) {
       if (existingSev) existingSev.remove();
       if (existingAdd) existingAdd.remove();
-      if (durGroup && root.contains(durGroup)) panel.querySelector("#aw-trigger-fields").appendChild(durGroup);
-      if (sustainGroup && root.contains(sustainGroup)) panel.querySelector("#aw-trigger-fields").appendChild(sustainGroup);
+      // Out of the tier AND out of its fold: a group left collapsed when the
+      // operator switched back to one severity would take the hold's display
+      // with it, and nothing outside a severity block would ever restore it.
+      [durGroup, sustainGroup].forEach(function (g) {
+        if (!g || !root.contains(g)) return;
+        g.classList.remove("aw-collapse-part");
+        g.style.display = g.getAttribute("data-hold-off") === "1" ? "none" : "";
+        panel.querySelector("#aw-trigger-fields").appendChild(g);
+      });
       root.style.borderLeftColor = "";
       // Put the group's own chrome back: with one severity there is no tier to
       // line up with, so the combinator shares the header row again and each
@@ -5036,13 +5070,17 @@ async function openAutomationWizard(existing, opts) {
       });
       return;
     }
-    var fieldsHost = panel.querySelector("#aw-trigger-fields");
-    if (fieldsHost && durGroup && root.contains(durGroup)) fieldsHost.appendChild(durGroup);
-    if (fieldsHost && sustainGroup && root.contains(sustainGroup)) fieldsHost.appendChild(sustainGroup);
+    // Below the conditions, above the +Condition/+Group/+Severity row — the
+    // place the mirrors take in every added tier. Re-anchored on each pass
+    // rather than moved once: the tree re-renders under this function.
+    if (btnRow) {
+      if (durGroup) root.insertBefore(durGroup, btnRow);
+      if (sustainGroup) root.insertBefore(sustainGroup, btnRow);
+    }
     // The +Condition row is moved in/marked on a different tick, so (re)mark
     // whatever is currently there rather than assuming order.
     if (multi) {
-      root.querySelectorAll(":scope > .scg-children, :scope > .scg-btnrow").forEach(function (el) {
+      root.querySelectorAll(":scope > .scg-children, :scope > .scg-btnrow, :scope > .aw-dur, :scope > .aw-ratio-sustain").forEach(function (el) {
         el.classList.add("aw-collapse-part");
       });
     }
@@ -5095,7 +5133,7 @@ async function openAutomationWizard(existing, opts) {
       header.insertBefore(sum, wrap.nextSibling);
       // Everything below the header line folds. Marked in place — see
       // applyCollapsed for why these can't be wrapped.
-      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .scg-btnrow").forEach(function (el) {
+      root.querySelectorAll(":scope > .scg-children, :scope > .aw-dur, :scope > .aw-ratio-sustain, :scope > .scg-btnrow").forEach(function (el) {
         el.classList.add("aw-collapse-part");
       });
       if (opSel) opSel.classList.add("aw-collapse-part");
