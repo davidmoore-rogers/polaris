@@ -258,6 +258,18 @@ export async function refreshSubnet(
   let released = 0;
   let skipped = 0;
 
+  // A busy /21 carries ~1500 leases, so the reconcile below accumulates its
+  // writes and flushes them batched rather than one awaited round trip per IP.
+  // The two pending-push paths stay inline: they are rare, and each pairs its
+  // write with an Event that must name that row's outcome.
+  const existingByIp = new Map<string, (typeof existing)[number]>();
+  for (const r of existing) if (r.ipAddress) existingByIp.set(r.ipAddress, r);
+  const diffUpdates: Array<{ id: string; data: Record<string, unknown> }> = [];
+  const toCreate: Array<{
+    subnetId: string; ipAddress: string; hostname: string | null; macAddress: string | null;
+    status: "active"; sourceType: "dhcp_reservation" | "dhcp_lease"; lastSeenLeased: Date; createdBy: string;
+  }> = [];
+
   // Upsert each fresh entry.
   for (const [ip, f] of fresh) {
     const pending = pendingByIp.get(ip);
@@ -341,7 +353,7 @@ export async function refreshSubnet(
       skipped++;
       continue;
     }
-    const matched = existing.find((r) => r.ipAddress === ip);
+    const matched = existingByIp.get(ip);
     if (matched) {
       const diff: Record<string, unknown> = {};
       if (matched.sourceType !== f.sourceType) {
@@ -360,35 +372,47 @@ export async function refreshSubnet(
         diff.lastSeenLeased = new Date();
       }
       if (Object.keys(diff).length > 0) {
-        await prisma.reservation.update({ where: { id: matched.id }, data: diff });
+        diffUpdates.push({ id: matched.id, data: diff });
         updated++;
       }
     } else {
-      await prisma.reservation.create({
-        data: {
-          subnetId: subnet.id,
-          ipAddress: ip,
-          hostname: f.hostname,
-          macAddress: f.mac,
-          status: "active",
-          sourceType: f.sourceType,
-          lastSeenLeased: new Date(),
-          createdBy: actor || "refresh",
-        },
+      toCreate.push({
+        subnetId: subnet.id,
+        ipAddress: ip,
+        hostname: f.hostname,
+        macAddress: f.mac,
+        status: "active",
+        sourceType: f.sourceType,
+        lastSeenLeased: new Date(),
+        createdBy: actor || "refresh",
       });
-      created++;
     }
   }
 
-  // Release dhcp_* rows that are no longer on the device.
-  for (const r of existing) {
-    if (!fresh.has(r.ipAddress!)) {
-      await prisma.reservation.update({
-        where: { id: r.id },
-        data: { status: "released" },
-      });
-      released++;
-    }
+  // Flush the accumulated writes. Updates target disjoint rows, so ordering
+  // within a chunk is irrelevant; chunked so one transaction never spans a
+  // whole /21's diff.
+  const UPDATE_CHUNK = 500;
+  for (let i = 0; i < diffUpdates.length; i += UPDATE_CHUNK) {
+    await prisma.$transaction(
+      diffUpdates.slice(i, i + UPDATE_CHUNK).map((u) => prisma.reservation.update({ where: { id: u.id }, data: u.data })),
+    );
+  }
+  if (toCreate.length > 0) {
+    // skipDuplicates: a row created between our subnet read and this flush
+    // (e.g. the dns_resolved auto-create racing on the @@unique) skips that
+    // one IP instead of aborting the whole refresh, and `created` reports
+    // what actually landed.
+    const res = await prisma.reservation.createMany({ data: toCreate, skipDuplicates: true });
+    created = res.count;
+  }
+
+  // Release dhcp_* rows that are no longer on the device — one write, the
+  // staged value is identical for every row.
+  const releasedIds = existing.filter((r) => !fresh.has(r.ipAddress!)).map((r) => r.id);
+  if (releasedIds.length > 0) {
+    await prisma.reservation.updateMany({ where: { id: { in: releasedIds } }, data: { status: "released" } });
+    released = releasedIds.length;
   }
 
   const lastDiscoveredAt = new Date();
