@@ -5,7 +5,7 @@
  * cadence up-only gates, the per-method telemetry/systemInfo exclusions, the
  * fastFiltered skip-when-systemInfo-due rule, the agentless processes gating,
  * the absence of any mid-run probe acceleration, and the ICMP loss sampler's
- * disabled state (LOSS_SAMPLER_ENABLED kill switch — see utils/lossSampler.ts).
+ * uniform ICMP loss sweep (utils/lossSweep.ts).
  * Candidates are synthetic — computeDueWork touches the DB only
  * through the (cached) settings resolver -- which is why this lives in
  * tests/integration: the resolver reads the manual-tier Setting row.
