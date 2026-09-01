@@ -14,6 +14,7 @@ import { Prisma } from "../generated/prisma/client.js";
 import { AppError } from "../utils/errors.js";
 import { logEvent, logEventsBatch } from "./eventLogService.js";
 import { findRulesMatchingAsset } from "./notificationRuleService.js";
+import { higherAlertSeverity } from "../utils/alertSeverity.js";
 
 // Both moved to utils/tagNormalize (a leaf) so regionHierarchyService can use
 // them without closing an import cycle through this file. Re-exported here
@@ -476,6 +477,63 @@ export async function clearExpiredTestAlerts(now = new Date()): Promise<number> 
     }).catch(() => {});
   }
   return res.count;
+}
+
+export interface AssetActiveAlertSummary {
+  /** The most severe active alert's severity — what the indicator is coloured by. */
+  severity: string;
+  /** Every uncleared alert on the asset, acknowledged ones included. */
+  count: number;
+  /** How many of those nobody has taken yet. Zero = the indicator stops asking. */
+  unacknowledged: number;
+}
+
+/**
+ * "Does this device have an active alert, and how bad is the worst one?" for a
+ * page of assets — the assets list's per-row indicator.
+ *
+ * ONE indexed findMany over the uncleared notifications for the ids on screen
+ * (covered by @@index([assetId]) + [cleared, ...]), reduced in JS. Deliberately
+ * not a per-row count: the list ships up to 10 000 rows on the export path, and
+ * a query per row is the shape that makes a page of assets cost a page of
+ * queries.
+ *
+ * Two things it deliberately does NOT do. It applies no automation-relevance
+ * filter — unlike the NOC widgets, whose pills answer "is there an alert about
+ * the thing THIS panel measures", the list's indicator answers "is anything
+ * wrong with this device", so every uncleared alert counts. And it applies no
+ * region scope: the assets list itself is unscoped, so scoping only the
+ * indicator would mark a row quiet that the operator can open and find noisy.
+ *
+ * `unacknowledged` rides along because it decides whether the indicator strobes
+ * or sits still. An acknowledged alert is still active and still shown — it has
+ * simply stopped needing to catch an eye.
+ */
+export async function activeAlertSummaryByAsset(
+  assetIds: string[],
+): Promise<Map<string, AssetActiveAlertSummary>> {
+  const out = new Map<string, AssetActiveAlertSummary>();
+  if (assetIds.length === 0) return out;
+  const rows = await prisma.notification.findMany({
+    where: { assetId: { in: assetIds }, cleared: false },
+    select: { assetId: true, severity: true, acknowledged: true },
+  });
+  for (const r of rows) {
+    if (!r.assetId) continue;
+    const cur = out.get(r.assetId);
+    if (!cur) {
+      out.set(r.assetId, {
+        severity: r.severity,
+        count: 1,
+        unacknowledged: r.acknowledged ? 0 : 1,
+      });
+      continue;
+    }
+    cur.count += 1;
+    if (!r.acknowledged) cur.unacknowledged += 1;
+    cur.severity = higherAlertSeverity(cur.severity, r.severity) ?? cur.severity;
+  }
+  return out;
 }
 
 /**

@@ -1587,6 +1587,10 @@ function renderAssetsPage() {
       '<td><button type="button" class="row-menu-trigger asset-menu" data-asset-id="' + a.id + '" ' +
         'aria-haspopup="menu" aria-expanded="false" title="Actions for this asset">' +
         '<strong>' + escapeHtml(a.hostname || "-") + '</strong></button>' +
+        // Outside the button, not inside it: the trigger's accessible name is
+        // the hostname, and folding an alert count into it would make every
+        // alerted row announce itself differently to a screen reader.
+        assetAlertDotHTML(a) +
         hostnameOriginalLineHTML(a) +
         (a.assetTag ? '<br><span class="asset-tag-label">' + escapeHtml(a.assetTag) + '</span>' : '') +
       '</td>' +
@@ -3501,6 +3505,99 @@ function assetMonitorBadge(asset) {
 // when nothing is pinned, when no source has a hostname opinion (a manually
 // created asset has no original), or when discovery happens to agree with the
 // pin — a duplicate line would say nothing.
+// ─── Active-alert indicator ──────────────────────────────────────────────────
+//
+// A dot beside the hostname in the Assets list, and the slide-over's Alerts tab
+// itself, both saying "something is wrong with this device" in the colour of
+// the WORST active alert on it. The animation lives in styles.css
+// (.alert-strobe-* — including the prefers-reduced-motion opt-out); all these
+// decide is the colour and whether it should be moving.
+//
+// Two properties worth keeping:
+//   • THE COLOUR IS THE SAME VOCABULARY EVERYWHERE. assetAlertStrobeColor maps
+//     each severity onto the SAME --color-sev-* token the .badge-level-* pills
+//     and the acknowledge card read, so an alert looks the same severity in the
+//     list, in the tab, in the slide-over table and in the email. An unknown
+//     severity falls back to the danger token rather than to nothing: Polaris
+//     is still asserting something is wrong, and a colourless indicator
+//     understates that (business rule 36's posture on an unresolved severity).
+//   • IT STROBES ONLY WHILE SOMETHING IS UNACKNOWLEDGED. An acknowledged alert
+//     is still active and still marked — it has just stopped asking, which is
+//     what keeps a wallboard of pulsing dots from becoming background noise.
+
+/** Severity → the CSS colour the indicator takes. */
+function assetAlertStrobeColor(severity) {
+  var token = {
+    notice: "--color-sev-notice",
+    informational: "--color-accent",
+    info: "--color-accent",
+    warning: "--color-warning",
+    serious: "--color-sev-serious",
+    error: "--color-danger",
+    critical: "--color-danger",
+  }[severity];
+  return "var(" + (token || "--color-danger") + ")";
+}
+
+/**
+ * Severity rank, mirroring ALERT_SEVERITY_RANK in src/utils/alertSeverity.ts.
+ * The browser cannot import that, and the server-side copy is what picks the
+ * colour of the LIST's indicator — so the two must agree that `serious`
+ * outranks `warning` or a device would strobe one colour in the list and
+ * another in its own slide-over.
+ */
+function _alertSevRank(sev) {
+  return { notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5 }[sev] || 0;
+}
+
+/**
+ * The Assets-list dot, from the row's `activeAlert` summary
+ * ({severity, count, unacknowledged}, or null when nothing is firing).
+ *
+ * The title says which of the two states it is in, because the difference
+ * between "moving" and "not moving" is not something to make anyone squint at
+ * — and it is the only thing a reduced-motion viewer has, the animation being
+ * off for them entirely.
+ */
+function assetAlertDotHTML(asset) {
+  var a = asset && asset.activeAlert;
+  if (!a || !a.count) return "";
+  var handled = !a.unacknowledged;
+  var sev = a.severity || "critical";
+  var title = a.count === 1
+    ? "1 active " + sev + " alert" + (handled ? " — acknowledged" : "")
+    : a.count + " active alerts, worst " + sev +
+      (handled ? " — all acknowledged" : " — " + a.unacknowledged + " unacknowledged");
+  return '<span class="alert-strobe-dot' + (handled ? " is-handled" : "") +
+    '" style="--strobe-color:' + assetAlertStrobeColor(sev) + '"' +
+    ' role="img" aria-label="' + escapeHtml(title) + '" title="' + escapeHtml(title) + '"></span>';
+}
+
+/**
+ * The slide-over's Alerts TAB, strobing in the same colour for the same reason.
+ *
+ * Driven from the alerts the tab itself just loaded rather than from a second
+ * payload — so it is right the moment the tab renders, and re-running the
+ * loader after an acknowledge or a clear settles it with no page refresh. An
+ * EMPTY list clears the marking, which is the state that matters most: the last
+ * alert being cleared has to stop the strobe, not leave it running until the
+ * panel is closed.
+ */
+function _paintAssetAlertsTabStrobe(alerts) {
+  var tab = document.querySelector('#asset-view-tabs .page-tab[data-tab="notifications"]');
+  if (!tab) return;
+  var worst = null;
+  var unacked = 0;
+  (alerts || []).forEach(function (n) {
+    if (!n.acknowledged) unacked += 1;
+    if (!worst || _alertSevRank(n.severity) > _alertSevRank(worst)) worst = n.severity;
+  });
+  tab.classList.toggle("alert-strobe", !!worst);
+  tab.classList.toggle("is-handled", !!worst && unacked === 0);
+  if (worst) tab.style.setProperty("--strobe-color", assetAlertStrobeColor(worst));
+  else tab.style.removeProperty("--strobe-color");
+}
+
 function hostnameOriginalLineHTML(asset) {
   if (!asset.hostnameOverride) return "";
   var orig = asset.hostnameDiscovered;
@@ -19286,6 +19383,9 @@ function _loadAssetNotificationsTab(assetId) {
   api.assets.alerts(assetId).then(function (data) {
     var active = _sortAssetAlerts((data && data.active) || []);
     var rules = (data && data.matchingRules) || [];
+    // Before the table renders: the tab is worth marking even if the body
+    // below it fails to paint for some reason.
+    _paintAssetAlertsTabStrobe(active);
     var aTbody = document.getElementById("asset-notif-active-tbody");
     if (aTbody) {
       var shape = _assetAlertTableShape();

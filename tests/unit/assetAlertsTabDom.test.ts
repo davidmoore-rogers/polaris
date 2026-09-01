@@ -66,6 +66,11 @@ const FN_NAMES = [
   // tables. Sliced in because _loadAssetNotificationsTab calls it directly.
   "_paintAssetDownDetectionPanel",
   "_wireAssetAlertSelection",
+  // The tab's own strobe — painted from the alerts the tab just loaded, so it
+  // settles on acknowledge/clear without a second fetch.
+  "_paintAssetAlertsTabStrobe",
+  "assetAlertStrobeColor",
+  "_alertSevRank",
   "_alertCountLabel",
   "_ackPromptOpts",
   "_promptAckNote",
@@ -125,7 +130,13 @@ async function mount(opts?: { perm?: string; alerts?: any[]; downDetection?: any
   g._assetRuleSentences = () => Promise.resolve(null);
   g._renderAssetRuleRows = vi.fn();
 
-  document.body.innerHTML = `<div id="tab">${g._assetNotificationsTabHTML()}</div>`;
+  // The slide-over's real tab strip, so the tab strobe has something to mark.
+  document.body.innerHTML =
+    `<div class="page-tabs" id="asset-view-tabs">` +
+    `<button type="button" class="page-tab active" data-tab="general">General</button>` +
+    `<button type="button" class="page-tab" data-tab="notifications">Alerts</button>` +
+    `</div>` +
+    `<div id="tab">${g._assetNotificationsTabHTML()}</div>`;
   g._loadAssetNotificationsTab("A1");
   await new Promise((r) => setTimeout(r, 0));
 }
@@ -448,5 +459,54 @@ describe("asset Alerts tab — down detection panel", () => {
     expect(txt).toMatch(/equally-specific/i);
     expect(txt).toContain("10");
     expect(txt).toMatch(/smaller count/i);
+  });
+});
+
+/**
+ * The Alerts tab strobes in the colour of the worst active alert on the device
+ * — the same signal the Assets list puts beside the hostname, so an operator
+ * who opened the slide-over off a strobing row can see which tab it was about.
+ */
+describe("asset Alerts tab — the tab's own strobe", () => {
+  const alertsTab = () => document.querySelector('#asset-view-tabs .page-tab[data-tab="notifications"]') as HTMLElement;
+
+  it("marks the tab in the colour of the HIGHEST severity, not the newest alert", async () => {
+    // makeAlerts(): two serious (newest) and one warning. Serious wins.
+    await mount();
+    const tab = alertsTab();
+    expect(tab.classList.contains("alert-strobe")).toBe(true);
+    expect(tab.style.getPropertyValue("--strobe-color")).toBe("var(--color-sev-serious)");
+  });
+
+  it("moves only while something is unacknowledged", async () => {
+    await mount({
+      alerts: [
+        { id: "n1", severity: "critical", message: "down", dimension: null, triggeredAt: "2026-07-23T14:50:00Z", acknowledged: true, acknowledgedBy: "jsmith" },
+      ],
+    });
+    const tab = alertsTab();
+    // Still marked — an acknowledged alert is still active — but settled.
+    expect(tab.classList.contains("alert-strobe")).toBe(true);
+    expect(tab.classList.contains("is-handled")).toBe(true);
+    expect(tab.style.getPropertyValue("--strobe-color")).toBe("var(--color-danger)");
+  });
+
+  it("clears the marking entirely when the last alert is gone", async () => {
+    // The state that matters most: clearing the last alert must STOP the
+    // strobe, not leave it running until the panel is closed.
+    await mount({ alerts: [] });
+    const tab = alertsTab();
+    expect(tab.classList.contains("alert-strobe")).toBe(false);
+    expect(tab.classList.contains("is-handled")).toBe(false);
+    expect(tab.style.getPropertyValue("--strobe-color")).toBe("");
+  });
+
+  // The severity → colour map and the rank order this tab shares with the
+  // Assets list's dot are pinned in tests/unit/assetAlertIndicator.test.ts,
+  // where both halves of that agreement live.
+
+  it("is a no-op when no slide-over is open", () => {
+    document.body.innerHTML = "";
+    expect(() => g._paintAssetAlertsTabStrobe([{ severity: "critical", acknowledged: false }])).not.toThrow();
   });
 });

@@ -5740,3 +5740,66 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   vertical-align: top;
 }
 .ipalloc-result-table td.mono { font-family: var(--font-mono, monospace); white-space: nowrap; }
+/* ─── Active-alert strobe ───────────────────────────────────────────
+   "Something is wrong with this device", carried by two surfaces: a dot beside
+   the hostname in the Assets list, and the asset slide-over's own Alerts tab.
+   Both are driven by ONE custom property, --strobe-color, set inline from the
+   severity of the worst active alert (assetAlertStrobeColor in assets.js reads
+   the same --color-sev-* tokens the .badge-level-* pills and the acknowledge
+   card do), so the three never disagree about what "serious" looks like.
+
+   It STROBES only while at least one of those alerts is unacknowledged. An
+   acknowledged alert is still active and still shown — it has simply stopped
+   needing to catch an eye, and a wallboard full of pulsing dots nobody can
+   quiet is a wallboard people stop looking at. `.is-handled` is that state.
+
+   Motion is an accessibility hazard and a distraction on a NOC screen left
+   open all day, so prefers-reduced-motion drops to the same steady rendering
+   the handled state uses — the colour still carries the whole meaning. */
+@keyframes polaris-alert-strobe {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 0 0 var(--strobe-color); }
+  50%      { opacity: 0.3; box-shadow: 0 0 0 4px transparent; }
+}
+.alert-strobe-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--strobe-color, var(--color-danger));
+  animation: polaris-alert-strobe 1.4s ease-in-out infinite;
+}
+.alert-strobe-dot.is-handled { animation: none; opacity: 0.55; }
+
+/* The Alerts tab itself pulses — text and underline together, so it reads as
+   the TAB strobing rather than an ornament stuck to it. Two keyframes because
+   the trough differs: an inactive tab falls back to its normal tertiary text
+   and no underline, while the ACTIVE tab must keep looking active, so it
+   troughs to the accent the .active rule would have painted anyway. */
+@keyframes polaris-alert-tab-strobe {
+  0%, 100% { color: var(--strobe-color); border-bottom-color: var(--strobe-color); }
+  50%      { color: var(--color-text-tertiary); border-bottom-color: transparent; }
+}
+@keyframes polaris-alert-tab-strobe-active {
+  0%, 100% { color: var(--strobe-color); border-bottom-color: var(--strobe-color); }
+  50%      { color: var(--color-accent); border-bottom-color: var(--color-accent); }
+}
+.page-tab.alert-strobe { animation: polaris-alert-tab-strobe 1.4s ease-in-out infinite; }
+.page-tab.alert-strobe.active { animation: polaris-alert-tab-strobe-active 1.4s ease-in-out infinite; }
+.page-tab.alert-strobe.is-handled,
+.page-tab.alert-strobe.is-handled.active {
+  animation: none;
+  color: var(--strobe-color);
+  border-bottom-color: var(--strobe-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .alert-strobe-dot { animation: none; }
+  .page-tab.alert-strobe,
+  .page-tab.alert-strobe.active {
+    animation: none;
+    color: var(--strobe-color);
+    border-bottom-color: var(--strobe-color);
+  }
+}

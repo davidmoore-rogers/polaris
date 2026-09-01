@@ -74,7 +74,7 @@ import {
   readPollingHistorySummary,
 } from "../../services/sampleHistoryService.js";
 import { evaluateLogFlags } from "../../services/logFlagRuleService.js";
-import { getAssetNotifications } from "../../services/notificationService.js";
+import { getAssetNotifications, activeAlertSummaryByAsset } from "../../services/notificationService.js";
 import { getMetricSeverityTiers, listScopeOptions } from "../../services/notificationRuleService.js";
 import { SCOPE_FIELD_OPS, scopeConditionMeta, scopeConditionSchema } from "../../services/notificationTypes.js";
 import { loadScopeAssetIds } from "../../services/notificationEngine.js";
@@ -779,6 +779,11 @@ async function enrichAssetList(
     ? await getDiscoveredHostnames(overriddenIds)
     : new Map<string, string | null>();
 
+  // `activeAlert` — the Name column's alert indicator: is anything wrong with
+  // this device, and how bad is the worst of it. ONE query for the whole page
+  // (see activeAlertSummaryByAsset), not one per row.
+  const alertSummaries = await activeAlertSummaryByAsset(assets.map((a) => a.id as string));
+
   return Promise.all(assets.map(async ({
     associatedIpRows, macAddressRows, fortinetTopology, managementAccess,
     // Strip the raw resolver inputs from the wire shape — only the reduced
@@ -794,6 +799,7 @@ async function enrichAssetList(
     ipContext: a.ipAddress ? (ipCtx.get(a.ipAddress) || null) : null,
     ha: shapeHaInfo(fortinetTopology),
     managementAccess: shapeManagementAccess(managementAccess),
+    activeAlert: alertSummaries.get(a.id as string) ?? null,
     monitoringMethods: await computeMonitoringMethods({
       monitored: a.monitored as boolean | undefined,
       assetType: a.assetType,
