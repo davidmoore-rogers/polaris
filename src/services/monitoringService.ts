@@ -83,7 +83,7 @@ import {
   lossSweepIsDue,
   chunkForSweep,
 } from "../utils/lossSweep.js";
-import { burstPing } from "../utils/burstPing.js";
+import { burstPing, pingTargets } from "../utils/burstPing.js";
 import { stampsRecoveryAnchor } from "../utils/probeLossAnchor.js";
 import {
   fortiosBool,
@@ -11203,6 +11203,130 @@ export interface WorkItemLabels {
  * record metrics. `labels` stamp the work histogram + per-transport probe
  * histogram so operators can slice by asset_type × transport.
  */
+/** One asset in a batched ICMP probe, as the publisher resolved it. */
+export interface ProbeBatchItem {
+  id: string;
+  /** The address to ping — `Asset.ipAddress`, matching probeAsset's icmp branch. */
+  target: string;
+  /** The RESOLVED probeTimeoutMs, carried from the publisher so the worker does
+   *  not re-walk the monitor-settings hierarchy 250 times. */
+  timeoutMs: number;
+}
+
+/**
+ * BATCHED ICMP status probe for one chunk of assets.
+ *
+ * This is the same measurement `runProbeFor` makes, for the one transport where
+ * a single process can serve every host. `pingHost` forks per asset per
+ * interval, so a 2000-asset ICMP fleet spawned ~2000 processes a minute for one
+ * echo each; bucketed through fping that is a handful. The packets were never
+ * the cost.
+ *
+ * Three things are deliberately NOT changed, because this is business rule 30's
+ * path and its semantics are the product:
+ *
+ * 1. **ONE echo per asset per cycle.** Down is defined in missed POLLS, so
+ *    sending more echoes here would redefine what a missed poll means. Bursts
+ *    belong to the loss sweep.
+ * 2. **Per-asset verdicts through `recordProbeResult`**, one call each, exactly
+ *    as the unbatched path does. Nothing about the state machine, the leaky
+ *    bucket, reboot detection or dependency marking is reimplemented here — the
+ *    batch changes how the reading is TAKEN, never how it is judged.
+ * 3. **Each asset's own timeout is honoured** (`bucketByTimeout`), so a batch
+ *    cannot silently give one asset another's setting.
+ *
+ * It is also cheaper on the database than the path it replaces: one findMany
+ * for the whole chunk, and each snapshot handed to `recordProbeResult` so it
+ * skips its own findUnique — where the unbatched path pays one read per asset.
+ *
+ * A target ABSENT from the ping result was never attempted (an unresolvable
+ * name, no pinger on PATH). It is left entirely alone — no sample, no counter
+ * movement, not even a cadence stamp — because recording it as a failed probe
+ * would march a fleet toward `down` on a DNS outage.
+ */
+export async function runProbeBatchFor(items: ProbeBatchItem[], labels: WorkItemLabels): Promise<CadenceOutcome> {
+  const stopWork = startWorkTimer("probe", labels);
+  const batchStart = Date.now();
+  try {
+    if (items.length === 0) {
+      recordWorkOutcome("probe", "success", labels);
+      return "success";
+    }
+    const snapshots = await prisma.asset.findMany({
+      where: { id: { in: items.map((i) => i.id) } },
+      select: {
+        id: true, hostname: true, assetType: true, monitored: true, monitorStatus: true,
+        lastUptimeSec: true, consecutiveFailures: true, consecutiveSuccesses: true,
+        discoveredByIntegrationId: true, monitorIntervalSec: true, cpuMemoryIntervalSec: true,
+        temperatureIntervalSec: true, systemInfoIntervalSec: true, probeTimeoutMs: true,
+        dependencySuppressed: true, cpuMemoryTimeoutMs: true, temperatureTimeoutMs: true,
+        systemInfoTimeoutMs: true,
+      },
+    });
+    const byId = new Map(snapshots.map((a) => [a.id, a as AssetMonitorSnapshot]));
+
+    // Re-check only the CHEAP half at pickup — a pg-boss job can land seconds
+    // after publication and the asset may have been un-monitored since. The
+    // monitor-settings hierarchy was already resolved by the publisher and
+    // re-walking it per asset would cost more than the batch it guards, which
+    // is why `timeoutMs` rides the payload.
+    const live = items.filter((i) => byId.get(i.id)?.monitored === true);
+    if (live.length === 0) {
+      recordWorkOutcome("probe", "success", labels);
+      return "success";
+    }
+
+    const results = await pingTargets(
+      live.map((i) => ({ target: i.target, timeoutMs: i.timeoutMs })),
+      { count: 1 },
+    );
+
+    let attempted = 0;
+    let failed = 0;
+    for (const item of live) {
+      const r = results.get(item.target);
+      // Never attempted — not a miss. Deliberately leaves the cadence anchor
+      // alone too, so the next tick retries rather than treating a resolver
+      // blip as a completed poll.
+      if (!r || r.sent === 0) continue;
+      const success = r.received > 0;
+      // The RTT ping itself measured, not wall clock around a spawn. On a batch
+      // the wall clock is meaningless anyway — every host in a bucket shares one
+      // invocation, so there is no per-asset duration to report.
+      const result: ProbeResult = success
+        ? { success: true, responseTimeMs: Math.max(0, Math.round(r.avgRttMs ?? 0)) }
+        : { success: false, responseTimeMs: item.timeoutMs, error: "no echo reply" };
+      attempted++;
+      if (!success) failed++;
+      try {
+        await recordProbeResult(item.id, result, byId.get(item.id) ?? null);
+      } catch (err) {
+        // One asset's state write must not abandon the rest of the chunk.
+        logger.error({ err, assetId: item.id }, "Batched ICMP probe failed to record a result");
+      }
+    }
+
+    // One histogram observation per asset ACTUALLY attempted — an unresolvable
+    // target is not a probe and must not be counted as one in either bucket.
+    // The duration is the batch amortised across them: a bucket shares a single
+    // invocation, so there is no per-asset wall clock to report, and dividing
+    // is the honest way to keep polaris_probe_duration comparable with the
+    // unbatched path rather than reporting one 2-second probe per chunk.
+    const perAssetSec = (Date.now() - batchStart) / Math.max(1, attempted) / 1000;
+    for (let i = 0; i < attempted; i++) {
+      recordProbe(labels.transport, perAssetSec, i < attempted - failed ? "success" : "failure");
+    }
+    recordWorkOutcome("probe", "success", labels);
+    return "success";
+  } catch (err) {
+    logger.error({ err, chunk: items.length }, "Batched ICMP probe crashed");
+    recordWorkOutcome("probe", "crash", labels);
+    return "crash";
+  } finally {
+    stopWork();
+  }
+}
+
 export async function runProbeFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("probe", labels);
   const probeStart = Date.now();
@@ -12454,6 +12578,8 @@ export interface DueMonitorWork {
   processesWork: MonitorWork[];
   eventLogWork: MonitorWork[];
   lossSamples: MonitorWork[];
+  /** ICMP assets due a probe, batched rather than dispatched per item. */
+  probeBatch: ProbeBatchItem[];
 }
 
 /**
@@ -12486,6 +12612,7 @@ export async function computeDueWork(
   const processesWork: MonitorWork[] = [];
   const eventLogWork: MonitorWork[] = [];
   const lossSamples: MonitorWork[] = [];
+  const probeBatch: ProbeBatchItem[] = [];
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
@@ -12609,7 +12736,17 @@ export async function computeDueWork(
     // processes below already do — "disabled" means don't poll, and queueing it
     // anyway is what let an off-switch read as an outage.
     const probeMethodOk = responseTimeProbeShouldQueue(eff.responseTimePolling);
-    if (probe      && enabled.has("probe") && probeMethodOk)                     probes.push({ id: a.id, kind: "probe" });
+    if (probe && enabled.has("probe") && probeMethodOk) {
+      // ICMP is batched (one fping per timeout bucket serves the whole chunk),
+      // so it leaves the per-item work array entirely — same split the pg-boss
+      // publisher makes. Every other transport needs its own authenticated
+      // conversation and stays one work item per asset.
+      if (eff.responseTimePolling === "icmp" && a.ipAddress) {
+        probeBatch.push({ id: a.id, target: a.ipAddress, timeoutMs: eff.probeTimeoutMs });
+      } else {
+        probes.push({ id: a.id, kind: "probe" });
+      }
+    }
     if (telemetry  && canTelemetry  && enabled.has("telemetry")  && isUp)        telemetries.push({ id: a.id, kind: "telemetry" });
     if (systemInfo && canSystemInfo && enabled.has("systemInfo") && isUp)        systemInfos.push({ id: a.id, kind: "systemInfo" });
     // Fast-cadence pinned scrape rides the response-time cadence (default 60s).
@@ -12677,7 +12814,7 @@ export async function computeDueWork(
     );
     lossSamples.length = LOSS_SAMPLES_MAX_PER_PASS;
   }
-  return { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples };
+  return { probes, probeBatch, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples };
 }
 
 export async function runMonitorPass(opts?: { concurrency?: number; cadences?: MonitorCadence[] }): Promise<RunStats> {
@@ -12750,7 +12887,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     assetTypeById.set(a.id, a.assetType ?? "unknown");
   }
 
-  const { probes, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples } =
+  const { probes, probeBatch, fastFiltereds, telemetries, systemInfos, processesWork, eventLogWork, lossSamples } =
     await computeDueWork(candidates, enabled, now);
 
   // Order matters: probes first so a saturated worker pool drains the cheap
@@ -12858,6 +12995,14 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
     // shortening the sweep, which is bounded by burst period rather than by
     // host count. Its failures never fail the pass — loss is resolution, and
     // the response-time probes in `work` above are what decide reachability.
+    // Batched ICMP status probes, before the loss sweep: this is the cadence
+    // that decides whether a device is down, and it must not queue behind a
+    // resolution-only measurement.
+    for (let i = 0; i < probeBatch.length; i += 250) {
+      const slice = probeBatch.slice(i, i + 250);
+      const outcome = await runProbeBatchFor(slice, { assetType: "mixed", transport: "icmp" });
+      if (outcome === "success") stats.probed += slice.length;
+    }
     for (const c of chunkForSweep(lossSamples.map((w) => w.id))) {
       // A chunk spans many asset types, so per-type labelling is a category
       // error here rather than a missing lookup — "mixed" says so honestly

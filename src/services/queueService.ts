@@ -44,6 +44,7 @@ import {
 import { setPgbossQueueJobs, setPgbossJobAge, recordQueueMode, setMonitorWorkers } from "../metrics.js";
 import {
   runProbeFor,
+  runProbeBatchFor,
   runTelemetryFor,
   runSystemInfoFor,
   runFastFilteredFor,
@@ -209,6 +210,15 @@ interface MonitorJobPayload {
    * a job enqueued before this field existed still deserialises.
    */
   assetIds?: string[];
+  /**
+   * BATCHED ICMP STATUS PROBE. Carries the whole chunk with each asset's
+   * resolved target and probeTimeoutMs, so the worker neither re-walks the
+   * monitor-settings hierarchy per asset nor guesses a timeout. Present only on
+   * the probe queue, and only for assets whose resolved method is `icmp` —
+   * every other transport stays one job per asset, because only ICMP has a
+   * batching primitive (see utils/burstPing.ts).
+   */
+  probeBatch?: Array<{ id: string; target: string; timeoutMs: number }>;
 }
 
 // ─── discovery queue ───────────────────────────────────────────────────────
@@ -826,8 +836,16 @@ export async function startPgbossWorkers(): Promise<void> {
   await boss.work<MonitorJobPayload>(QUEUE_NAMES.probe, {
     localConcurrency: probeWorkers, batchSize: 1, pollingIntervalSeconds: 1,
   }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
-    await runDedicatedWorker("probe", jobs[0], (assetId, labels) =>
-      runProbeFor(assetId, labels),
+    const job = jobs[0];
+    if (!job) return;
+    // ICMP arrives as a CHUNK (one fping per timeout bucket serves the lot);
+    // every other transport is still one asset per job, since none of them has
+    // a way to ask about many devices at once.
+    const batch = job.data.probeBatch;
+    await runDedicatedWorker("probe", job, (assetId, labels) =>
+      batch && batch.length > 0
+        ? runProbeBatchFor(batch, labels)
+        : runProbeFor(assetId, labels),
     );
   });
 
@@ -999,7 +1017,11 @@ async function dispatchFloatingJob(
   let outcome: "success" | "failure" = "success";
   try {
     switch (cadence) {
-      case "probe":        await runProbeFor(assetId, labels);        break;
+      case "probe":
+        await (job.data.probeBatch && job.data.probeBatch.length > 0
+          ? runProbeBatchFor(job.data.probeBatch, labels)
+          : runProbeFor(assetId, labels));
+        break;
       case "fastFiltered": await runFastFilteredFor(assetId, labels); break;
       case "telemetry":    await runTelemetryFor(assetId, labels);    break;
       case "systemInfo":   await runSystemInfoFor(assetId, labels);   break;
@@ -1067,6 +1089,35 @@ export async function publishMonitorJob(
     {
       singletonKey: `${assetId}:${cadence}`,
     },
+  );
+}
+
+/**
+ * Enqueue one CHUNK of batched ICMP status probes.
+ *
+ * Same coalescing contract as publishMonitorSweepJob: the singleton key is the
+ * chunk INDEX, so re-publishing chunk N while the previous cycle's chunk N is
+ * still queued replaces it rather than piling on. For the STATUS probe that
+ * matters more than for the loss sweep — a backlog here would delay down
+ * detection, and skipping a cycle is strictly better than deciding an outage
+ * from a stale queue.
+ */
+export async function publishProbeBatchJob(
+  items: Array<{ id: string; target: string; timeoutMs: number }>,
+  chunkIndex: number,
+  labels?: { verboseDebug?: boolean },
+): Promise<void> {
+  if (!bossInstance || items.length === 0) return;
+  await bossInstance.send(
+    QUEUE_NAMES.probe,
+    {
+      assetId: `probe-batch:${chunkIndex}`,
+      probeBatch: items,
+      transport: "icmp",
+      assetType: "mixed",
+      verboseDebug: labels?.verboseDebug,
+    } as MonitorJobPayload,
+    { singletonKey: `probe:chunk:${chunkIndex}` },
   );
 }
 

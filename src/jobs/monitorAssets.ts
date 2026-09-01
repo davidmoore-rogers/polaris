@@ -44,7 +44,7 @@ import {
   MONITOR_CANDIDATE_WHERE,
   type MonitorCadence,
 } from "../services/monitoringService.js";
-import { getBootTimeMode, publishMonitorJob, publishMonitorSweepJob } from "../services/queueService.js";
+import { getBootTimeMode, publishMonitorJob, publishMonitorSweepJob, publishProbeBatchJob } from "../services/queueService.js";
 import { lossSweepIncludes, lossSweepIsDue, chunkForSweep } from "../utils/lossSweep.js";
 import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
@@ -107,6 +107,11 @@ let runningHeavy = false;
  * call `resolveMonitorSettings` per asset and use the same `isDue` semantics,
  * so the due-set is always identical between modes.
  */
+/** Assets per batched-probe job. Smaller than the loss sweep's 500 because this
+ *  payload carries a target + timeout per asset rather than a bare id, and
+ *  because a status probe holding a worker slot delays down detection. */
+const PROBE_BATCH_CHUNK = 250;
+
 async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   const enabled = new Set<MonitorCadence>(cadences);
   const now = new Date();
@@ -167,6 +172,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   // published as chunks afterwards — the sweep measures a batch in one process
   // (utils/burstPing.ts), so it must not be enqueued one asset at a time.
   const sweepDue: string[] = [];
+  // ICMP assets due a status probe this tick, published as chunks after the
+  // loop. Each carries its RESOLVED timeout so the worker does not re-walk the
+  // settings hierarchy per asset (and so a batch can never hand one asset
+  // another's timeout — they are bucketed by it).
+  const probeBatchDue: Array<{ id: string; target: string; timeoutMs: number }> = [];
 
   for (const a of candidates) {
     // Resolve effective settings via the four-tier hierarchy. Cached after
@@ -265,7 +275,17 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     // lockstep with the matching push in monitoringService.computeDueWork —
     // both call the shared predicate for exactly that reason.
     if (probe && enabled.has("probe") && responseTimeProbeShouldQueue(eff.responseTimePolling)) {
-      await publishMonitorJob("probe", a.id, labels);
+      // ICMP is the ONE transport where a single process can serve many hosts,
+      // so it is collected here and published as chunks after the loop. Every
+      // other transport stays one job per asset — SNMP, WinRM, SSH and REST
+      // each need their own authenticated conversation with their own
+      // credentials, so there is nothing to batch (snmpMultiGet batches OIDs
+      // WITHIN one session; it cannot span hosts).
+      if (eff.responseTimePolling === "icmp" && a.ipAddress) {
+        probeBatchDue.push({ id: a.id, target: a.ipAddress, timeoutMs: eff.probeTimeoutMs });
+      } else {
+        await publishMonitorJob("probe", a.id, labels);
+      }
     }
     if (telemetry && canTelemetry && isUp && enabled.has("telemetry")) {
       await publishMonitorJob("telemetry", a.id, telLabels);
@@ -336,6 +356,14 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
 
   // One job per chunk, keyed by chunk INDEX so a backed-up sweep coalesces
   // rather than piling on (see publishMonitorSweepJob).
+  // Batched ICMP status probes. A smaller chunk than the loss sweep on purpose:
+  // this payload carries a target and a timeout per asset rather than bare ids,
+  // and one job is one worker slot held for the whole bucket set.
+  let probeChunk = 0;
+  for (let i = 0; i < probeBatchDue.length; i += PROBE_BATCH_CHUNK) {
+    await publishProbeBatchJob(probeBatchDue.slice(i, i + PROBE_BATCH_CHUNK), probeChunk++);
+  }
+
   let chunkIndex = 0;
   for (const c of chunkForSweep(sweepDue)) {
     await publishMonitorSweepJob("lossSample", c, chunkIndex++, { transport: "icmp", verboseDebug: false });

@@ -74,6 +74,19 @@ function cand(over: Partial<MonitorPassCandidate> & { id?: string } = {}): Monit
   } as MonitorPassCandidate;
 }
 
+/**
+ * Every asset due a status probe this tick, whichever collection it landed in.
+ *
+ * ICMP is published as BATCHES (one fping per timeout bucket serves the chunk)
+ * while every other transport stays one work item per asset, so the due-set has
+ * two halves. These tests are about the CADENCE — is this asset due? — not about
+ * which half it lands in, so they ask the union. The split itself is pinned
+ * separately, in "probe batching".
+ */
+function probeDueIds(due: { probes: Array<{ id: string }>; probeBatch: Array<{ id: string }> }): string[] {
+  return [...due.probes.map((p) => p.id), ...due.probeBatch.map((p) => p.id)];
+}
+
 function ago(sec: number): Date {
   return new Date(now.getTime() - sec * 1000);
 }
@@ -93,7 +106,7 @@ beforeAll(async () => {
 dbDescribe("computeDueWork", () => {
   it("a never-probed asset is probe-due; a freshly probed one is not", async () => {
     const due = await computeDueWork([cand()], ALL, now);
-    expect(due.probes.map((w) => w.id)).toEqual(["cand-1"]);
+    expect(probeDueIds(due)).toEqual(["cand-1"]);
 
     const fresh = await computeDueWork([cand({ lastMonitorAt: now })], ALL, now);
     expect(fresh.probes).toEqual([]);
@@ -102,17 +115,17 @@ dbDescribe("computeDueWork", () => {
   it("dependency suppression doubles the probe cadence", async () => {
     const staleBy1_5 = ago(Math.round(probeSec * 1.5));
     const normal = await computeDueWork([cand({ lastMonitorAt: staleBy1_5 })], ALL, now);
-    expect(normal.probes).toHaveLength(1);
+    expect(probeDueIds(normal)).toHaveLength(1);
 
     const suppressed = await computeDueWork(
       [cand({ lastMonitorAt: staleBy1_5, dependencySuppressed: true })], ALL, now,
     );
-    expect(suppressed.probes).toEqual([]);
+    expect(probeDueIds(suppressed)).toEqual([]);
 
     const veryStale = await computeDueWork(
       [cand({ lastMonitorAt: ago(Math.round(probeSec * 2.5)), dependencySuppressed: true })], ALL, now,
     );
-    expect(veryStale.probes).toHaveLength(1);
+    expect(probeDueIds(veryStale)).toHaveLength(1);
   });
 
   it("telemetry runs only for confirmed-up assets on a telemetry-capable method", async () => {
@@ -201,7 +214,7 @@ dbDescribe("computeDueWork", () => {
       new Set<MonitorCadence>(["probe"]),
       now,
     );
-    expect(probeOnly.probes).toHaveLength(1);
+    expect(probeDueIds(probeOnly)).toHaveLength(1);
     expect(probeOnly.telemetries).toEqual([]);
     expect(probeOnly.systemInfos).toEqual([]);
     expect(probeOnly.processesWork).toEqual([]);
@@ -224,28 +237,28 @@ dbDescribe("probe cadence is not accelerated mid-run", () => {
     const steady = cand({ id: "steady", lastMonitorAt: quarterIn() });
 
     const due = await computeDueWork([midRun, steady], ALL, now);
-    expect(due.probes).toEqual([]);
+    expect(probeDueIds(due)).toEqual([]);
   });
 
   it("leaves an unconfirmed recovery on its configured interval", async () => {
     const recovering = cand({ monitorStatus: "recovering", consecutiveFailures: 0, consecutiveSuccesses: 1, lastMonitorAt: quarterIn() });
 
     const due = await computeDueWork([recovering], ALL, now);
-    expect(due.probes).toEqual([]);
+    expect(probeDueIds(due)).toEqual([]);
   });
 
   it("still probes a mid-run asset once its interval has elapsed", async () => {
     const midRun = cand({ monitorStatus: "warning", consecutiveFailures: 1, consecutiveSuccesses: 0, lastMonitorAt: ago(probeSec) });
 
     const due = await computeDueWork([midRun], ALL, now);
-    expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
+    expect(probeDueIds(due)).toEqual(["cand-1"]);
   });
 
   it("leaves a down asset on its configured interval too", async () => {
     const down = cand({ monitorStatus: "down", consecutiveFailures: 12, consecutiveSuccesses: 0, lastMonitorAt: quarterIn() });
 
     const due = await computeDueWork([down], ALL, now);
-    expect(due.probes).toEqual([]);
+    expect(probeDueIds(due)).toEqual([]);
   });
 });
 
@@ -299,7 +312,7 @@ dbDescribe("loss-sweep due-set", () => {
     // that probes an asset may also burst it.
     const a = cand({ lastMonitorAt: ago(probeSec), lastLossSampleAt: ago(600) });
     const due = await computeDueWork([a], ALL, now);
-    expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
+    expect(probeDueIds(due)).toEqual(["cand-1"]);
     expect(due.lossSamples.map((w) => w.id)).toEqual(["cand-1"]);
   });
 
@@ -314,5 +327,53 @@ dbDescribe("loss-sweep due-set", () => {
   it("collects nothing when the cadence is not requested", async () => {
     const due = await computeDueWork([cand()], new Set<MonitorCadence>(["probe"]), now);
     expect(due.lossSamples).toEqual([]);
+  });
+});
+
+dbDescribe("probe batching", () => {
+  it("routes an ICMP asset into the BATCH and everything else per asset", async () => {
+    // Only ICMP has a primitive that can ask about many hosts at once. SNMP,
+    // WinRM, SSH and REST each need their own authenticated conversation, so
+    // they stay one job per asset — snmpMultiGet batches OIDs WITHIN a session
+    // and cannot span hosts.
+    const due = await computeDueWork([
+      cand({ id: "pingable", responseTimePolling: "icmp" }),
+      cand({ id: "snmp-one", responseTimePolling: "snmp" }),
+      cand({ id: "ssh-one",  responseTimePolling: "ssh" }),
+    ], ALL, now);
+
+    expect(due.probeBatch.map((p) => p.id)).toEqual(["pingable"]);
+    expect(due.probes.map((p) => p.id).sort()).toEqual(["snmp-one", "ssh-one"]);
+  });
+
+  it("carries each asset's own RESOLVED timeout so a bucket cannot borrow another's", async () => {
+    const due = await computeDueWork([
+      cand({ id: "fast", responseTimePolling: "icmp", probeTimeoutMs: 1000 }),
+      cand({ id: "slow", responseTimePolling: "icmp", probeTimeoutMs: 9000 }),
+    ], ALL, now);
+
+    const byId = new Map(due.probeBatch.map((p) => [p.id, p]));
+    expect(byId.get("fast")?.timeoutMs).toBe(1000);
+    expect(byId.get("slow")?.timeoutMs).toBe(9000);
+  });
+
+  it("leaves an ICMP asset with no address on the PER-ASSET path", async () => {
+    // There is nothing to ping, and an empty target would become an fping
+    // argument. Dropping it from the due-set entirely would be worse than the
+    // batch: the asset would silently stop being probed. The per-asset path
+    // still rejects it with "Asset has no IP address", which is a recorded
+    // failure and exactly what happens today.
+    const due = await computeDueWork(
+      [cand({ id: "noaddr", responseTimePolling: "icmp", ipAddress: null })], ALL, now,
+    );
+    expect(due.probeBatch).toEqual([]);
+    expect(due.probes.map((p) => p.id)).toEqual(["noaddr"]);
+  });
+
+  it("still honours the disabled gate", async () => {
+    const due = await computeDueWork(
+      [cand({ responseTimePolling: "disabled" })], ALL, now,
+    );
+    expect(probeDueIds(due)).toEqual([]);
   });
 });
