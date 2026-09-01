@@ -25,6 +25,11 @@
  *     Safe Links, Proofpoint) fetch every link in every message before a human
  *     sees it. Those fetches carry no session and, even if they did, this page
  *     acts only when someone presses the button.
+ *
+ * The alert's own presentation — the test flag, its sentence, the facts table,
+ * the note field — comes from PolarisAlertAckView (public/js/alert-ack-view.js),
+ * shared with the in-app acknowledge modal so the two cannot drift. What stays
+ * here is this page's shell, its states, and its fetch.
  */
 
 (function () {
@@ -52,25 +57,9 @@
     window.location.href = "/login.html";
   };
 
-  /* Severity → the card's accent stripe. Mirrors the .badge-level-* palette in
-   * styles.css and utils/severityStyle.ts, so this page, the in-app badge and
-   * the emailed alert agree about what "serious" looks like. */
-  var SEVERITY_VAR = {
-    notice: "--color-sev-notice",
-    informational: "--color-accent",
-    warning: "--color-warning",
-    serious: "--color-sev-serious",
-    critical: "--color-danger",
-  };
-
-  function esc(s) {
-    return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
+  /* Presentation of the alert itself, shared with the in-app modal. */
+  var View = window.PolarisAlertAckView;
+  var esc = View.esc;
 
   function qs(name) {
     try {
@@ -80,60 +69,14 @@
     }
   }
 
-  function fmtTime(iso) {
-    if (!iso) return "";
-    var d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    try {
-      return d.toLocaleString(undefined, {
-        year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
-      });
-    } catch (_) {
-      return d.toISOString();
-    }
-  }
-
+  /* The card's 4px accent stripe. The colour itself is the shared module's
+   * (SEVERITY_VAR there), so the page and the modal tint from one palette. */
   function accent(severity) {
-    var v = SEVERITY_VAR[severity];
-    cardEl.style.setProperty("--ack-accent", v ? "var(" + v + ")" : "var(--color-border)");
+    cardEl.style.setProperty("--ack-accent", View.accentValue(severity));
   }
 
-  /* Where "Open in Polaris" goes: the device's slide-over when the alert has
-   * one, else the Automations page. The same two destinations the alert
-   * email's own "Open device" button chooses between. */
-  function appLink() {
-    return alertRow && alertRow.assetId
-      ? "/assets.html#view=asset:" + encodeURIComponent(alertRow.assetId)
-      : "/automations.html";
-  }
-
-  function factsHtml() {
-    var rows = [];
-    if (alertRow.assetHostname) rows.push(["Device", alertRow.assetHostname]);
-    if (alertRow.ruleName) rows.push(["Automation", alertRow.ruleName]);
-    if (alertRow.dimension) rows.push(["Dimension", alertRow.dimension]);
-    rows.push(["Severity", alertRow.severity]);
-    rows.push(["Raised", fmtTime(alertRow.triggeredAt)]);
-    if (alertRow.acknowledgedBy) {
-      rows.push([
-        "Acknowledged by",
-        alertRow.acknowledgedBy + (alertRow.acknowledgedAt ? " · " + fmtTime(alertRow.acknowledgedAt) : ""),
-      ]);
-    }
-    // Show the note back once there is one. Requiring a note and then
-    // displaying it nowhere is what left the in-app note write-only for a whole
-    // release (business rule 25).
-    if (alertRow.acknowledged && alertRow.acknowledgeNote) rows.push(["Note", alertRow.acknowledgeNote]);
-    return '<table class="ack-facts">' + rows.map(function (r) {
-      return "<tr><th>" + esc(r[0]) + "</th><td>" + esc(r[1]) + "</td></tr>";
-    }).join("") + "</table>";
-  }
-
-  function alertHeaderHtml() {
-    return (alertRow.testRun ? '<span class="ack-testflag">Test alert</span>' : "")
-      + '<p class="ack-message">' + esc(alertRow.message) + "</p>"
-      + factsHtml();
-  }
+  function appLink() { return View.appLink(alertRow); }
+  function alertHeaderHtml() { return View.headerHtml(alertRow); }
 
   function footHtml(label) {
     return '<p class="ack-foot"><a href="' + esc(appLink()) + '">'
@@ -157,11 +100,8 @@
       title: "Acknowledge this alert?",
       lead: needNote ? "This automation asks for a note before it can be acknowledged." : "",
       html: alertHeaderHtml()
-        + '<label class="ack-note-label" for="ack-note">'
-        + (needNote ? "Add a note (required)" : "Add a note (optional)") + "</label>"
-        + '<textarea id="ack-note" maxlength="2000" placeholder="What is the problem and what is the fix?"'
-        + (needNote ? " required" : "") + "></textarea>"
-        + (errorText ? '<p class="ack-error">' + esc(errorText) + "</p>" : "")
+        + View.noteFieldHtml("ack-note", needNote)
+        + View.errorHtml(errorText)
         + '<div class="ack-actions">'
         + '<button type="button" class="btn btn-primary" id="ack-submit">Acknowledge</button>'
         + '<a class="btn btn-secondary" href="' + esc(appLink()) + '">Open in ' + esc(appName) + "</a>"

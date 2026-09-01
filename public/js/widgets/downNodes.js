@@ -13,6 +13,16 @@
  * alertRank desc), then youngest outage first (monitorStatusChangedAt desc — server-side, so the newest
  * outages survive the cap). Reuses the monitorAlerts row markup (dash-alert
  * classes + alert-severity pill). Data from noc-summary downNodes[].
+ *
+ * Clicking a row is a CHOICE, not an assumption. A down device with an
+ * unacknowledged alert offers Acknowledge / Open device from a row menu, since
+ * on a wallboard the first thing an operator wants to do is take the alert —
+ * and walking to the device page, finding the Alerts tab and picking the row
+ * out of it is three steps to say "I've got this". A row with nothing to
+ * acknowledge (no alert, or one someone already owns) keeps the old behaviour
+ * and opens the device straight away. The decision lives in ONE place,
+ * PolarisWidgets.openAssetRow — including the surfaces where it can't ask
+ * (/dash loads no dialogs) and the roles that may not acknowledge.
  */
 
 (function () {
@@ -35,7 +45,13 @@
       sub.push('<span class="badge badge-monitor-dep-down" title="Upstream parent is down — this outage is probably not its own">Dep. Down</span>');
     }
     var href = '/assets.html#view=asset:' + encodeURIComponent(n.id);
-    return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.id) + '" style="text-decoration:none">' +
+    // The alert behind the severity pill, named so the click can offer to
+    // acknowledge THAT alert. Absent on a row with no active alert — which is
+    // what makes the click fall through to opening the device.
+    var alertAttrs = n.alertId
+      ? ' data-alert-id="' + escapeHtml(n.alertId) + '" data-alert-ack="' + (n.alertAcknowledged ? "1" : "0") + '"'
+      : "";
+    return '<a class="dash-alert-item" href="' + href + '" data-asset-id="' + escapeHtml(n.id) + '"' + alertAttrs + ' style="text-decoration:none">' +
       '<div class="dash-alert-row" style="width:100%">' +
         '<div class="dash-alert-body">' +
           '<div class="dash-alert-title">' + (PolarisWidgets.alertSeverityPill ? PolarisWidgets.alertSeverityPill(n.alertSeverity) : "") + escapeHtml(name) + '</div>' +
@@ -129,24 +145,39 @@
 
     renderInstance: function (el, config, data, ctx) {
       render(el, data, config);
-      // Click a node → open its asset details slide-in in place (over the
-      // dashboard) when openViewModal is loaded; fall back to navigation. Plain
-      // left-clicks open in place; ctrl/meta/middle-click keep the href so the
-      // operator can still open the Assets page in a new tab. Delegated on el
-      // so it survives the 30s re-render (which replaces el's children).
+      // The one fetch+render, so the refresh timer and the post-acknowledge
+      // refresh can't fall out of step.
+      var refresh = function () {
+        return PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) {
+          render(el, { nodes: (d && d.downNodes) || [], total: d && d.downNodesTotal != null ? d.downNodesTotal : null }, config);
+        }).catch(function () {});
+      };
+      // Click a node → Acknowledge / Open device when there is an unhandled
+      // alert to take, else straight into the asset details slide-in in place
+      // (over the dashboard) when openViewModal is loaded, falling back to
+      // navigation. Plain left-clicks only; ctrl/meta/middle-click keep the
+      // href so the operator can still open the Assets page in a new tab.
+      // Delegated on el so it survives the 30s re-render (which replaces el's
+      // children) — and so the menu's anchor is a row that may be replaced
+      // under it, which showRowMenu already handles by closing on scroll and
+      // teardown.
       var onClick = function (ev) {
         if (ev.defaultPrevented || ev.button === 1 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
         var link = ev.target.closest(".dash-alert-item[data-asset-id]");
         if (!link || !el.contains(link)) return;
         ev.preventDefault();
-        PolarisWidgets.openAssetDetail(link.getAttribute("data-asset-id"));
+        PolarisWidgets.openAssetRow(link, {
+          assetId: link.getAttribute("data-asset-id"),
+          alertId: link.getAttribute("data-alert-id"),
+          alertAcknowledged: link.getAttribute("data-alert-ack") === "1",
+          // Re-fetch rather than patching the row: the acknowledgement is one
+          // of several things that may have changed in the up-to-30s the row
+          // has been on screen, and the feed is the only thing that knows.
+          onAcknowledged: refresh,
+        });
       };
       el.addEventListener("click", onClick);
-      var timer = setInterval(function () {
-        PolarisWidgets.getNocSummary(PolarisWidgets.nocFilterOpts(config), ["downNodes"]).then(function (d) {
-          render(el, { nodes: (d && d.downNodes) || [], total: d && d.downNodesTotal != null ? d.downNodesTotal : null }, config);
-        }).catch(function () {});
-      }, PolarisWidgets.REFRESH.normal);
+      var timer = setInterval(refresh, PolarisWidgets.REFRESH.normal);
       ctx.onUnmount(function () { clearInterval(timer); el.removeEventListener("click", onClick); });
     },
 

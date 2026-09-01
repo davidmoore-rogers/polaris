@@ -382,6 +382,8 @@ Vanilla JavaScript SPA served from `/public/`. **No build step** — plain ES mo
 | `public/js/automations-wizard.js` | `openAutomationWizard` | the 6-step automation wizard; loads on every page that loads `assets.js` |
 | `public/js/automations-portability.js` | `PolarisAutomationPortability` | automation export / import / view code |
 | `public/js/automations-wizard.js` | `PolarisAutomationSentences` | trigger/reset prose — one phrasing for the list AND the editor |
+| `public/js/alert-ack-view.js` | `PolarisAlertAckView` | the presentation of ONE alert about to be acknowledged — shared by `/alert-ack.html` and the in-app modal so the two cards cannot drift |
+| `public/js/alert-ack-modal.js` | `PolarisAlertAckModal` | that card in a modal: the in-app acknowledge dialog, opened from the Down Assets widget's row menu |
 | `public/js/brand-logo.js` | `PolarisBrandLogo` | which logo variant a theme gets (business rule 27) |
 | `public/js/region-pills.js` | `PolarisRegionPills` | the only browser-side reader of the region catalogue |
 | `public/js/region-tree.js` | `PolarisRegionTree` | region containment tree + overlay styling |

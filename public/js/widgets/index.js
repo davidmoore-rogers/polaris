@@ -715,6 +715,58 @@
     return false;
   };
 
+  // ── Clicking a row that carries an ALERT ──────────────────────────────────
+  //
+  // A row on an outage widget is a prompt to do one of two things — put your
+  // name on the alert, or go look at the device — so the click ASKS instead of
+  // assuming the second. It only asks when asking is meaningful: an alert
+  // nobody has yet, on a surface that can show a dialog, for an operator whose
+  // role may actually acknowledge. Everything else goes straight to the device,
+  // which is what the click did before this existed.
+  //
+  // Six ways it resolves to a plain open, and each is deliberate:
+  //   • no live alert on the row      — a down device with no automation
+  //                                     covering it (business rule 36's
+  //                                     `passive`) has nothing to acknowledge
+  //   • already acknowledged          — someone owns it; the row's own pill
+  //                                     says so, and re-acknowledging is a
+  //                                     no-op the server would skip
+  //   • no showRowMenu / no modal     — the /dash wallboard loads neither
+  //                                     app.js nor the ack modules
+  //   • alerts < write                — withholding the verb beats a menu item
+  //                                     that 403s (the row-menu canon: a verb
+  //                                     you can't perform isn't offered).
+  //                                     A COURTESY only — the route is the
+  //                                     control, and the modal renders its
+  //                                     refusal as a state either way
+  //
+  // opts: { assetId, alertId, alertAcknowledged, onAcknowledged }
+  window.PolarisWidgets.openAssetRow = function (anchor, opts) {
+    opts = opts || {};
+    var openDevice = function () { window.PolarisWidgets.openAssetDetail(opts.assetId); };
+    var canAck = typeof window.permAtLeast !== "function" || window.permAtLeast("alerts", "write");
+    if (!opts.alertId || opts.alertAcknowledged || !canAck
+        || typeof window.showRowMenu !== "function"
+        || !window.PolarisAlertAckModal || !window.openModal) {
+      openDevice();
+      return false;
+    }
+    window.showRowMenu(anchor, [
+      {
+        label: "Acknowledge alert…",
+        title: "Put your name on this alert without leaving the dashboard",
+        onSelect: function () {
+          window.PolarisAlertAckModal.open(opts.alertId, {
+            onAcknowledged: opts.onAcknowledged,
+            onOpenDevice: openDevice,
+          });
+        },
+      },
+      { label: "Open device", onSelect: openDevice },
+    ], { label: "Alert actions" });
+    return true;
+  };
+
   // Append the shared per-widget filter controls into a gear-popover container.
   // Region scope (All / My regions / Selected regions) goes on every NOC
   // widget; "Selected regions" reveals a checkbox list of the created regions

@@ -190,6 +190,11 @@ describe("post-login return target", () => {
 
 /* ─── The page itself ──────────────────────────────────────────────────────── */
 
+// The page's shell + states. Its markup for the alert itself comes from
+// PolarisAlertAckView, which the page loads first (and which the in-app
+// acknowledge modal loads too) — so the harness evaluates that module before
+// the page, exactly as alert-ack.html orders the two <script> tags.
+const VIEW_SRC = readFileSync(join(process.cwd(), "public", "js", "alert-ack-view.js"), "utf-8");
 const PAGE_SRC = readFileSync(join(process.cwd(), "public", "js", "alert-ack.js"), "utf-8");
 
 const ALERT = {
@@ -249,6 +254,8 @@ async function renderPage(opts?: { alert?: any; getFails?: number; ackFails?: { 
     },
   };
 
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  new Function(VIEW_SRC)();
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   new Function(PAGE_SRC)();
   await new Promise((r) => setTimeout(r, 0));

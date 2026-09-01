@@ -5740,6 +5740,72 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   vertical-align: top;
 }
 .ipalloc-result-table td.mono { font-family: var(--font-mono, monospace); white-space: nowrap; }
+/* ─── Alert acknowledgement (shared by the page and the in-app modal) ────────
+   These are the PRESENTATION of one alert about to be acknowledged: the test
+   flag, the alert's own sentence, the facts table, the note field, the error
+   line. They live here rather than inside alert-ack.html because two surfaces
+   render them (public/js/alert-ack-view.js is the markup) — the standalone
+   /alert-ack.html card an emailed button lands on, and the modal the Down
+   Assets widget opens. The page keeps only its own shell rules (the centring
+   wrapper, the card, the brand row); a modal already has those. */
+.ack-testflag {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--color-accent);
+  background: rgba(79, 195, 247, 0.12);
+  border: 1px solid rgba(79, 195, 247, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 0.1rem 0.4rem;
+  margin: 0 0 0.6rem;
+}
+.ack-message {
+  margin: 0 0 1rem;
+  color: var(--color-text-primary);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+.ack-facts { width: 100%; border-collapse: collapse; margin: 0 0 1.15rem; font-size: 0.8125rem; }
+.ack-facts th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+  padding: 0.25rem 0.85rem 0.25rem 0;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.ack-facts td { padding: 0.25rem 0; color: var(--color-text-primary); word-break: break-word; }
+.ack-note-label {
+  display: block;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  margin: 0 0 0.35rem;
+}
+.ack-note-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 0.875rem;
+  min-height: 4.5rem;
+  resize: vertical;
+}
+.ack-error {
+  margin: 0.6rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--color-danger);
+}
+/* The modal's own accent: a severity-coloured rule above the alert's sentence,
+   which is what the page spends its 4px card top-border on. Same custom
+   property name, so PolarisAlertAckView.accentValue feeds both. */
+.ack-modal-accent {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ack-accent, var(--color-border));
+  margin: 0 0 0.9rem;
+}
+
 /* ─── Active-alert strobe ───────────────────────────────────────────
    "Something is wrong with this device", carried by two surfaces: a dot beside
    the hostname in the Assets list, and the asset slide-over's own Alerts tab.
