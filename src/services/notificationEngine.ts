@@ -927,7 +927,8 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // gate). An interface that leaves the pin set (or gets admin-downed)
       // stops producing readings; the vanished-state sweep clears its alert.
       const byPort = groupSeries(rows, (r) => `${r.assetId}|${r.ifName}`);
-      return byPort.map((g) => g[0]!).filter((r) => {
+      return byPort.filter((g) => {
+        const r = g[0]!;
         const a = index.get(r.assetId);
         if (!interfaceIsPinned(a, r.ifName)) return false;
         if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
@@ -941,9 +942,9 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
         // is unaffected: a disabled port reports "disabled", never "fault".
         if (trigger.field === "poeStatus" && r.poeStatus === "disabled") return false;
         return substringMatch(r.ifName, df.ifNamePattern);
-      }).map((r) => {
+      }).map((g) => {
+        const r = g[0]!;
         const a = index.get(r.assetId)!;
-        const g = byPort.find((x) => x[0]!.assetId === r.assetId && x[0]!.ifName === r.ifName)!;
         return { ...mk(a, r.ifName, interfaceDimLabel(r.ifName, r.alias), (r as any)[col]), series: g.slice(0, SERIES_CAP).map((x) => (x as any)[col] ?? null), readingAt: r.timestamp };
       });
     }
@@ -955,9 +956,9 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // the full system-info scrape samples every tunnel the gate reports, and
       // an unpinned tunnel is one nobody selected for monitoring, so a "tunnel
       // down" rule must not alert on it. See tunnelIsPinned.
-      return byTunnel.map((g) => g[0]!).filter((r) => tunnelIsPinned(index.get(r.assetId), r.tunnelName) && substringMatch(r.tunnelName, df.tunnelName)).map((r) => {
+      return byTunnel.filter((g) => tunnelIsPinned(index.get(g[0]!.assetId), g[0]!.tunnelName) && substringMatch(g[0]!.tunnelName, df.tunnelName)).map((g) => {
+        const r = g[0]!;
         const a = index.get(r.assetId)!;
-        const g = byTunnel.find((x) => x[0]!.assetId === r.assetId && x[0]!.tunnelName === r.tunnelName)!;
         return { ...mk(a, r.tunnelName, r.tunnelName, r.status), series: g.slice(0, SERIES_CAP).map((x) => x.status ?? null), readingAt: r.timestamp };
       });
     }
