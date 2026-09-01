@@ -399,29 +399,29 @@ model Credential {
   updatedAt DateTime @updatedAt
 
   customWidgets                   ManufacturerCustomWidget[] @relation("ManufacturerCustomWidgetCredential")
-  assets                          Asset[]                @relation("AssetMonitorCred") // default credential back-relation
-  rtAssets                        Asset[]                @relation("AssetRTCred")
-  cpuMemoryAssets                 Asset[]                @relation("AssetCpuMemCred")
-  temperatureAssets               Asset[]                @relation("AssetTempCred")
-  interfacesAssets                Asset[]                @relation("AssetInterfacesCred")
-  lldpAssets                      Asset[]                @relation("AssetLldpCred")
-  customWidgetAssets              Asset[]                @relation("AssetCustomWidgetCred")
-  processesAssets                 Asset[]                @relation("AssetProcessesCred")
-  eventLogAssets                  Asset[]                @relation("AssetEventLogCred")
+  assets                          Asset[]                    @relation("AssetMonitorCred") // default credential back-relation
+  rtAssets                        Asset[]                    @relation("AssetRTCred")
+  cpuMemoryAssets                 Asset[]                    @relation("AssetCpuMemCred")
+  temperatureAssets               Asset[]                    @relation("AssetTempCred")
+  interfacesAssets                Asset[]                    @relation("AssetInterfacesCred")
+  lldpAssets                      Asset[]                    @relation("AssetLldpCred")
+  customWidgetAssets              Asset[]                    @relation("AssetCustomWidgetCred")
+  processesAssets                 Asset[]                    @relation("AssetProcessesCred")
+  eventLogAssets                  Asset[]                    @relation("AssetEventLogCred")
   // Back-relations for per-stream class override credentials
-  classOverrideRTAssets           MonitorClassOverride[] @relation("ClassOverrideRTCred")
-  classOverrideCpuMemAssets       MonitorClassOverride[] @relation("ClassOverrideCpuMemCred")
-  classOverrideTempAssets         MonitorClassOverride[] @relation("ClassOverrideTempCred")
-  classOverrideIfAssets           MonitorClassOverride[] @relation("ClassOverrideIfCred")
-  classOverrideLldpAssets         MonitorClassOverride[] @relation("ClassOverrideLldpCred")
-  classOverrideCustomWidgetAssets MonitorClassOverride[] @relation("ClassOverrideCustomWidgetCred")
-  classOverrideProcessesAssets    MonitorClassOverride[] @relation("ClassOverrideProcessesCred")
-  classOverrideEventLogAssets     MonitorClassOverride[] @relation("ClassOverrideEventLogCred")
+  classOverrideRTAssets           MonitorClassOverride[]     @relation("ClassOverrideRTCred")
+  classOverrideCpuMemAssets       MonitorClassOverride[]     @relation("ClassOverrideCpuMemCred")
+  classOverrideTempAssets         MonitorClassOverride[]     @relation("ClassOverrideTempCred")
+  classOverrideIfAssets           MonitorClassOverride[]     @relation("ClassOverrideIfCred")
+  classOverrideLldpAssets         MonitorClassOverride[]     @relation("ClassOverrideLldpCred")
+  classOverrideCustomWidgetAssets MonitorClassOverride[]     @relation("ClassOverrideCustomWidgetCred")
+  classOverrideProcessesAssets    MonitorClassOverride[]     @relation("ClassOverrideProcessesCred")
+  classOverrideEventLogAssets     MonitorClassOverride[]     @relation("ClassOverrideEventLogCred")
   // Back-relation for the Polaris Agent install credential (one per
   // ManagedAgent row). SetNull on credential delete so removing a
   // credential doesn't block a stuck agent install — operator falls
   // back to DELETE /assets/:id/agent?force=true in that case.
-  managedAgents                   ManagedAgent[]         @relation("AgentInstallCredential")
+  managedAgents                   ManagedAgent[]             @relation("AgentInstallCredential")
 
   @@index([type])
   @@map("credentials")
@@ -1030,7 +1030,7 @@ model Asset {
   // push (partial-across-fortigates is allowed; per-FortiGate is all-or-
   // nothing). Release best-efforts an unpush from each target before flipping
   // status back; per-target failure does not block the release.
-  statusBeforeQuarantine AssetStatus?
+  statusBeforeQuarantine    AssetStatus?
   // Parks `monitored` across the quarantine the same way
   // statusBeforeQuarantine parks the status. Quarantine is one of the statuses
   // that cannot be monitor-enabled (every probe fails by design — see
@@ -1040,10 +1040,10 @@ model Asset {
   // monitored when it was quarantined (or predates this column), which pops
   // back to not-monitored either way.
   monitoredBeforeQuarantine Boolean?
-  quarantineReason       String?      @db.Text
-  quarantinedAt          DateTime?
-  quarantinedBy          String?
-  quarantineTargets      Json         @default("[]")
+  quarantineReason          String?      @db.Text
+  quarantinedAt             DateTime?
+  quarantinedBy             String?
+  quarantineTargets         Json         @default("[]")
 
   // Dependency-aware monitoring suppression. dependencyLayer is the BFS
   // shortest-path distance from any FortiGate root (1 = FortiGate, 2 =
@@ -1159,12 +1159,12 @@ model Asset {
 // Rolling time-series of monitoring probe results. One row per probe;
 // `responseTimeMs` is null on failure (used as the "packet loss" signal).
 model AssetMonitorSample {
-  id             String   @default(uuid())
-  assetId        String
-  timestamp      DateTime @default(now())
-  success        Boolean
-  responseTimeMs Int?
-  error          String?  @db.Text
+  id              String   @default(uuid())
+  assetId         String
+  timestamp       DateTime @default(now())
+  success         Boolean
+  responseTimeMs  Int?
+  error           String?  @db.Text
   // Which probe produced this row. NULL (and the literal "primary") = the
   // response-time poll on the asset's configured transport — the only rows that
   // may inform response-time figures. "icmp" = the packet-loss sampler
@@ -1176,13 +1176,33 @@ model AssetMonitorSample {
   // kind — that is the whole point of the sampler. Nullable rather than
   // defaulted so the add is free on the hypertable (the uptimeSec precedent);
   // readers must treat NULL as primary, never as unknown.
-  probeKind      String?
+  probeKind       String?
+  // PACKET ACCOUNTING for the ICMP burst sweep (utils/burstPing.ts) — the two
+  // columns that make packet loss a ratio of PACKETS instead of a ratio of
+  // poll OUTCOMES. A sweep row carries sent=N (the burst size) and
+  // received=M; `success` stays M > 0 so every existing reader that only
+  // knows about success/failure keeps working unchanged.
+  //
+  // NULL on every row the sweep did not write — the response-time poll's own
+  // rows and everything written before this migration — and readers MUST
+  // treat NULL as the single-probe equivalent (sent 1, received 1 on success
+  // / 0 on failure) rather than as zero. Nullable with no default so the add
+  // is catalog-only on the hypertable (the uptimeSec / dependencyDown
+  // precedent): no chunk rewrite, no decompression.
+  //
+  // packetsSent is never 0. A target that could not be attempted at all
+  // (unresolvable name, no pinger) writes NO ROW, because "we never asked" and
+  // "we asked and heard nothing" are different facts and only the second is
+  // loss — collapsing them would report a fleet-wide outage the moment DNS
+  // broke.
+  packetsSent     Int?
+  packetsReceived Int?
   // Device sysUpTime at probe time, in whole seconds (SNMP probes only; null
   // for ICMP/TCP/REST probes that don't read sysUpTime). A decrease between
   // consecutive samples is the reboot signal — see Asset.lastRebootAt and the
   // device.reboot Event emitted by recordProbeResult. Nullable column added
   // post-hoc; safe on the TimescaleDB hypertable (no row rewrite).
-  uptimeSec      Int?
+  uptimeSec       Int?
   // TRUE on a FAILED probe recorded while the asset was dependency-suppressed
   // (`Asset.dependencySuppressed` — its parent was dark at probe time). The probe
   // still runs while suppressed, at half cadence (resolveProbeIntervalSec),
@@ -1192,7 +1212,7 @@ model AssetMonitorSample {
   // NULL/false = an ordinary probe; never set on a success. Nullable rather than
   // defaulted so the add is free on the hypertable (the uptimeSec precedent);
   // readers must treat NULL as false, never as unknown.
-  dependencyDown Boolean?
+  dependencyDown  Boolean?
 
   // Composite PK (id, timestamp) — required by TimescaleDB hypertables to
   // include the partitioning column. Works fine on plain Postgres too;
@@ -2156,7 +2176,7 @@ model AssetArpEntry {
   /// of the business key and Postgres treats NULLs as DISTINCT in a unique
   /// index, so a nullable column would let every unattributed binding insert a
   /// duplicate per scrape. The route maps "" back to null on the way out.
-  ifName     String  @default("")
+  ifName     String @default("")
   /// Entry age in seconds, when FortiOS exposes it. NULL otherwise -- absence
   /// is "the firmware did not say", never zero.
   ageSec     Int?
@@ -2563,23 +2583,29 @@ model AssetServiceLogSample {
 // yet. The rollup job + tier-routing helper land in phases 2 and 4.
 
 model AssetMonitorSampleHourly {
-  id                String   @default(uuid())
-  assetId           String
-  bucketStart       DateTime
-  sampleCount       Int
-  successCount      Int
-  failureCount      Int
+  id                     String   @default(uuid())
+  assetId                String
+  bucketStart            DateTime
+  sampleCount            Int
+  successCount           Int
+  failureCount           Int
   // How many of `failureCount` were dependency-suppressed failures
   // (AssetMonitorSample.dependencyDown). A bucket whose failures were ALL
   // dependency ones is drawn grey; a mixed bucket keeps the red outage
   // treatment, because at least one failure was unexplained. Nullable — buckets
   // rolled up before this column existed carry NULL, read as 0.
   dependencyFailureCount Int?
+  // Burst-sweep packet totals for the bucket, summed (not averaged) so a long
+  // range's loss stays a true packets-lost/packets-sent ratio rather than a
+  // mean of per-bucket percentages, which would weight a quiet bucket the same
+  // as a busy one. NULL where the bucket held no sweep rows.
+  packetsSent            Int?
+  packetsReceived        Int?
   // avgResponseTimeMs is computed over successful samples only; null when
   // the bucket had zero successes. min/max likewise restricted to successes.
-  avgResponseTimeMs Float?
-  minResponseTimeMs Int?
-  maxResponseTimeMs Int?
+  avgResponseTimeMs      Float?
+  minResponseTimeMs      Int?
+  maxResponseTimeMs      Int?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])
@@ -2588,21 +2614,27 @@ model AssetMonitorSampleHourly {
 }
 
 model AssetMonitorSampleDaily {
-  id                String   @default(uuid())
-  assetId           String
-  bucketStart       DateTime
-  sampleCount       Int
-  successCount      Int
-  failureCount      Int
+  id                     String   @default(uuid())
+  assetId                String
+  bucketStart            DateTime
+  sampleCount            Int
+  successCount           Int
+  failureCount           Int
   // How many of `failureCount` were dependency-suppressed failures
   // (AssetMonitorSample.dependencyDown). A bucket whose failures were ALL
   // dependency ones is drawn grey; a mixed bucket keeps the red outage
   // treatment, because at least one failure was unexplained. Nullable — buckets
   // rolled up before this column existed carry NULL, read as 0.
   dependencyFailureCount Int?
-  avgResponseTimeMs Float?
-  minResponseTimeMs Int?
-  maxResponseTimeMs Int?
+  // Burst-sweep packet totals for the bucket, summed (not averaged) so a long
+  // range's loss stays a true packets-lost/packets-sent ratio rather than a
+  // mean of per-bucket percentages, which would weight a quiet bucket the same
+  // as a busy one. NULL where the bucket held no sweep rows.
+  packetsSent            Int?
+  packetsReceived        Int?
+  avgResponseTimeMs      Float?
+  minResponseTimeMs      Int?
+  maxResponseTimeMs      Int?
 
   @@id([id, bucketStart])
   @@unique([bucketStart, assetId])
@@ -4229,7 +4261,7 @@ model NotificationRule {
   // only (REPEATABLE_ACTION_TYPES) — unbounded re-execution of a
   // ticket-creating webhook or a registry script is not symmetric with an extra
   // email. NULL = never repeats, which is every pre-feature automation.
-  repeat Json?
+  repeat       Json?
   createdBy    String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -4293,7 +4325,7 @@ model Notification {
   // The metric that fired ("responseTimeMs", "hwSensorValue", …). Read at
   // DELIVERY time so the chart explaining THIS alert leads the email — the
   // body is rendered long after the rule that produced it was in hand.
-  metric    String?
+  metric String?
 
   deliveries NotificationDelivery[]
 
@@ -4458,10 +4490,10 @@ model NotificationRuleState {
 // `createdBy` drives the ownership gate on the `contacts` function key:
 // write = manage your own rows, fullwrite = manage anyone's.
 model Contact {
-  id            String   @id @default(uuid())
-  email         String   @unique // normalized: trimmed + lower-cased on write
-  name          String?
-  description   String?
+  id          String  @id @default(uuid())
+  email       String  @unique // normalized: trimmed + lower-cased on write
+  name        String?
+  description String?
 
   // Directory sync (business rule 35).
   /// WHO owns this row: "manual" | "entra" | "ad". Denormalized from
@@ -4471,18 +4503,18 @@ model Contact {
   /// AddressBookEntry.source is that same vocabulary, so it maps straight
   /// through to what the picker badges. Single writer: directorySyncService,
   /// plus adoptDirectoryContact, which flips it back to "manual".
-  origin        String   @default("manual")
+  origin         String   @default("manual")
   /// "person" | "group" - a mail-enabled distribution list is not a person,
   /// and the picker says so. Manual rows are people by default.
-  kind          String   @default("person")
+  kind           String   @default("person")
   /// Directory-sourced identity. Operator-editable on a manual row, overwritten
   /// from the directory on a synced one. jobTitle + department are what let an
   /// operator tell two people with the same name apart in the picker; phone is
   /// on-call context. All of it is employee PII - see the posture note in
   /// directorySyncService.ts. None of it may reach Event.details.
-  jobTitle      String?
-  department    String?
-  phone         String?
+  jobTitle       String?
+  department     String?
+  phone          String?
   // Device ownership, two shapes, one live at a time. assetCondition is the
   // nested AND/OR tree the automations device filter uses (evaluated by
   // evaluateScopeCondition over the wider DEVICE_FILTER vocabulary);
@@ -4492,9 +4524,9 @@ model Contact {
   assetCondition Json? // ScopeConditionGroup; null = no filter (see assetCriteria)
   assetCriteria  Json? // LEGACY flat criteria; null once folded forward
   assetIds       String[] @default([]) // explicit pins, unioned with filter matches
-  createdBy     String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdBy      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   directorySources DirectoryContactSource[]
 
