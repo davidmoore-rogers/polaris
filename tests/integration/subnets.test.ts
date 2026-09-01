@@ -176,6 +176,24 @@ d("GET /api/v1/subnets", () => {
     expect(dep.body.subnets.length).toBe(1);
     expect(avl.body.subnets.find((s: any) => s.id === sub.body.id)).toBeUndefined();
   });
+
+  it("filters by tag in SQL: total counts only matches and pages stay full", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const block = await createBlock(agent, csrf, "Parent", "10.55.0.0/16");
+    // Three tagged subnets interleaved (by cidr sort order) with two untagged
+    // ones — the old post-paginate filter returned a short first page here
+    // and a total of 5.
+    for (const [i, tags] of [["1", ["dmz"]], ["2", []], ["3", ["dmz"]], ["4", []], ["5", ["dmz"]]] as const) {
+      await agent.post("/api/v1/subnets").set("X-CSRF-Token", csrf)
+        .send({ blockId: block.id, cidr: `10.55.${i}.0/24`, name: `S${i}`, tags: [...tags] });
+    }
+    const page1 = await agent.get("/api/v1/subnets?tag=dmz&limit=2&offset=0");
+    expect(page1.status).toBe(200);
+    expect(page1.body.total).toBe(3);
+    expect(page1.body.subnets.map((s: any) => s.cidr)).toEqual(["10.55.1.0/24", "10.55.3.0/24"]);
+    const page2 = await agent.get("/api/v1/subnets?tag=dmz&limit=2&offset=2");
+    expect(page2.body.subnets.map((s: any) => s.cidr)).toEqual(["10.55.5.0/24"]);
+  });
 });
 
 // ─── GET /api/v1/subnets/:id ──────────────────────────────────────────────────

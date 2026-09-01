@@ -248,6 +248,10 @@ export async function listSubnets(filter: ListSubnetsFilter = {}) {
   if (filter.blockId) where.blockId = filter.blockId;
   if (filter.status) where.status = filter.status;
   if (filter.createdBy) where.createdBy = filter.createdBy;
+  // In the WHERE, not filtered in JS after the fact: a post-paginate filter
+  // returned short (or empty) pages while later pages held matches, and
+  // `total` counted the unfiltered set.
+  if (filter.tag) where.tags = { has: filter.tag };
 
   const [subnets, total] = await Promise.all([
     prisma.subnet.findMany({
@@ -264,8 +268,7 @@ export async function listSubnets(filter: ListSubnetsFilter = {}) {
     prisma.subnet.count({ where }),
   ]);
 
-  const filtered = filter.tag ? subnets.filter((s) => s.tags.includes(filter.tag!)) : subnets;
-  return { subnets: filtered, total, limit, offset };
+  return { subnets, total, limit, offset };
 }
 
 // ─── Get ──────────────────────────────────────────────────────────────────────
