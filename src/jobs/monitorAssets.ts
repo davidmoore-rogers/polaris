@@ -44,8 +44,8 @@ import {
   MONITOR_CANDIDATE_WHERE,
   type MonitorCadence,
 } from "../services/monitoringService.js";
-import { getBootTimeMode, publishMonitorJob } from "../services/queueService.js";
-import { lossSamplerAppliesTo, lossSampleIsDue } from "../utils/lossSampler.js";
+import { getBootTimeMode, publishMonitorJob, publishMonitorSweepJob } from "../services/queueService.js";
+import { lossSweepIncludes, lossSweepIsDue, chunkForSweep } from "../utils/lossSweep.js";
 import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
@@ -162,6 +162,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     if (!last) return true;
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
+
+  // Assets due a loss burst this tick, accumulated across the loop and
+  // published as chunks afterwards — the sweep measures a batch in one process
+  // (utils/burstPing.ts), so it must not be enqueued one asset at a time.
+  const sweepDue: string[] = [];
 
   for (const a of candidates) {
     // Resolve effective settings via the four-tier hierarchy. Cached after
@@ -315,18 +320,25 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
         isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
       await publishMonitorJob("eventLog", a.id, { transport: eff.eventLogPolling, assetType, verboseDebug });
     }
-    // ICMP packet-loss sampler: 10s side-probe while the state machine is
-    // mid-run (warning / recovering only — utils/lossSampler.ts explains why
-    // `down` is excluded: an uncorroborated ICMP reply could be a squatter on
-    // the address, and a fully-down asset should read 100% loss). Deliberately
-    // NOT gated on isUp like the cadences above — the whole point is that it
-    // runs when the asset is NOT healthy. Keep in sync with the matching block
-    // in computeDueWork.
+    // ICMP loss sweep: a uniform burst at EVERY eligible asset, whatever state
+    // it is in. Deliberately NOT gated on isUp like the cadences above, and
+    // deliberately not gated on monitorStatus either — the old sampler ran only
+    // while an asset looked bad, and that window WAS the sampling bias that got
+    // it disabled (utils/lossSweep.ts). Collected here and published in chunks
+    // after the loop: one job per asset would put back the ~2000 process spawns
+    // a minute that batching exists to remove. Keep in sync with computeDueWork.
     if (enabled.has("lossSample") &&
-        lossSamplerAppliesTo(a, eff) &&
-        lossSampleIsDue(a.lastLossSampleAt, now)) {
-      await publishMonitorJob("lossSample", a.id, { transport: "icmp", assetType, verboseDebug });
+        lossSweepIncludes(a, eff) &&
+        lossSweepIsDue(a.lastLossSampleAt, now)) {
+      sweepDue.push(a.id);
     }
+  }
+
+  // One job per chunk, keyed by chunk INDEX so a backed-up sweep coalesces
+  // rather than piling on (see publishMonitorSweepJob).
+  let chunkIndex = 0;
+  for (const c of chunkForSweep(sweepDue)) {
+    await publishMonitorSweepJob("lossSample", c, chunkIndex++, { transport: "icmp", verboseDebug: false });
   }
 
   const total   = candidates.length;

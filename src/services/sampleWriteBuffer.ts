@@ -64,7 +64,7 @@ export interface MonitorSampleRow {
   /**
    * Which probe produced the row: omitted/null/"primary" = the response-time
    * poll on the asset's configured transport, "icmp" = the packet-loss sampler
-   * (utils/lossSampler.ts). Loss counts every kind; response-time readers must
+   * (utils/lossSweep.ts). Loss counts every kind; response-time readers must
    * filter to primary. Flushed straight through by createMany.
    */
   probeKind?: string | null;
@@ -75,6 +75,19 @@ export interface MonitorSampleRow {
    * reads as false. Flushed straight through by createMany.
    */
   dependencyDown?: boolean | null;
+  /**
+   * PACKET ACCOUNTING for a burst row (the ICMP loss sweep — utils/burstPing.ts).
+   * `packetsSent` is the burst size and `packetsReceived` how many came back;
+   * `success` must be maintained as `packetsReceived > 0` so every reader that
+   * only understands success/failure is unaffected.
+   *
+   * Omitted on the response-time poll's own rows, where NULL means the
+   * single-probe equivalent (sent 1, received 1 on success / 0 on failure) —
+   * never zero, which would drop those rows out of the loss denominator.
+   * Flushed straight through by createMany.
+   */
+  packetsSent?: number | null;
+  packetsReceived?: number | null;
 }
 
 export interface TelemetrySampleRow {

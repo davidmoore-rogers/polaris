@@ -488,7 +488,7 @@ interface WorkloadModelInputs {
 // match the prior single-tier defaults.
 const DEFAULT_ROWS_PER_ASSET_PER_DAY: Record<string, (c: WorkloadModelInputs) => number> = {
   // Source tables — rate × extra-key multiplier
-  // One row per response-time poll. The ICMP loss sampler (utils/lossSampler.ts)
+  // One row per response-time poll. The ICMP loss sampler (utils/lossSweep.ts)
   // writes additional rows at 10s, but ONLY while an asset sits in
   // warning/recovering — so its volume is a function of how much of the day the
   // fleet spends mid-incident, not of fleet size. Deliberately not modelled:

@@ -19,7 +19,7 @@
  * THIS QUERY COUNTS EVERY `probeKind`. It is one of only three readers of
  * asset_monitor_samples that does (with alertChartService's loss chart);
  * everything else filters to the response-time poll. That is the point of the
- * ICMP loss sampler (utils/lossSampler.ts): a 10s side-probe during
+ * ICMP loss sweep (utils/lossSweep.ts): a uniform burst of echoes
  * warning/recovering windows so a 15-minute ratio divides ~90 samples instead
  * of ~15. The sampler's rows carry probeKind='icmp' and a NULL responseTimeMs,
  * so they can only ever affect a ratio, never a timing.

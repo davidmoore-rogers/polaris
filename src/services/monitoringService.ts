@@ -78,11 +78,12 @@ import {
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
 import { pingHost } from "../utils/icmpPing.js";
 import {
-  lossSamplerAppliesTo,
-  lossSampleIsDue,
-  lossSamplerTarget,
-  LOSS_SAMPLER_TIMEOUT_MS,
-} from "../utils/lossSampler.js";
+  lossSweepIncludes,
+  lossSweepTarget,
+  lossSweepIsDue,
+  chunkForSweep,
+} from "../utils/lossSweep.js";
+import { burstPing } from "../utils/burstPing.js";
 import { stampsRecoveryAnchor } from "../utils/probeLossAnchor.js";
 import {
   fortiosBool,
@@ -12106,79 +12107,116 @@ export async function runProcessesFor(assetId: string, labels: WorkItemLabels): 
 }
 
 /**
- * ICMP packet-loss sampler for ONE asset. See `utils/lossSampler.ts` for the
- * window rule (warning / recovering only) and why it exists.
+ * ICMP loss sweep for ONE CHUNK of assets. See utils/burstPing.ts for the
+ * batching argument and utils/lossSweep.ts for who is in the sweep and why the
+ * window is uniform rather than "while things look bad".
  *
- * Three properties this runner must keep:
+ * Four properties this runner must keep:
  *
- * 1. It NEVER calls `recordProbeResult`. The sample row is enqueued directly, so
- *    nothing here can move `consecutiveFailures` / `consecutiveSuccesses` or
- *    `monitorStatus`. Down stays a statement about the operator's configured
- *    transport at the operator's configured cadence.
+ * 1. It NEVER calls recordProbeResult. Rows are enqueued straight to the sample
+ *    buffer, so nothing here can move consecutiveFailures / consecutiveSuccesses
+ *    or monitorStatus. Down stays a statement about the operator's configured
+ *    transport at the operator's configured cadence, because ICMP does not
+ *    authenticate the device it reaches.
  *
- * 2. `responseTimeMs` is written as NULL, not as elapsed wall-clock. We spawn
- *    the system `ping`, so the measured time is dominated by process spawn and
- *    is not an RTT worth recording — and NULL makes the row inert to any RTT
- *    reader that forgets to filter on `probeKind` (belt to the braces of the
- *    column itself). Loss only ever needs success/failure.
+ * 2. responseTimeMs is NULL. A burst's mean RTT is a different transport's
+ *    timing (ICMP answers in ~1-5ms where SNMP takes 20-200ms), so letting it
+ *    into the column would dent every response-time chart and drag a "slow
+ *    response time" automation's reading down mid-incident. probeKind="icmp" is
+ *    the belt; the NULL is the braces.
  *
- * 3. `lastLossSampleAt` is stamped on EVERY attempt, success or failure. A
- *    ping-blocked or unresolvable host must not be re-queued on every 5s tick.
+ * 3. A target that could not be ATTEMPTED writes no row and does not stamp its
+ *    anchor. burstPing omits a host it never reached the network for (an
+ *    unresolvable name, a missing pinger) rather than reporting it at 100%, and
+ *    that distinction has to survive here: recording those as total loss would
+ *    turn a DNS outage into a fleet-wide packet-loss event.
  *
- * The window is re-checked here rather than trusted from the due-set: under
- * pg-boss the job can be picked up seconds later, by which time the asset may
- * have reached `down` (where an uncorroborated ICMP reply is exactly what we
- * refuse to record) or recovered to `up`.
+ * 4. The anchor is stamped for every asset we DID attempt in ONE updateMany.
+ *    A host that never answers must not be re-queued every tick, and 500
+ *    sequential per-asset updates on a 60s cadence is exactly the anti-pattern
+ *    the fleet-scale review exists to catch.
+ *
+ * Eligibility is re-checked here because a pg-boss job can be picked up seconds
+ * after publication — but only the CHEAP half (monitored, maintenance, target),
+ * since the monitor-settings hierarchy was already resolved per asset by the
+ * publisher and re-resolving it 500 times would cost more than the sweep it
+ * guards.
  */
-export async function runLossSampleFor(assetId: string, labels: WorkItemLabels): Promise<CadenceOutcome> {
+export async function runLossSweepFor(assetIds: string[], labels: WorkItemLabels): Promise<CadenceOutcome> {
   const stopWork = startWorkTimer("lossSample", labels);
   try {
-    const asset = await prisma.asset.findUnique({
-      where: { id: assetId },
-      select: {
-        id: true, monitored: true, status: true, monitorStatus: true,
-        dependencySuppressed: true, lastLossSampleAt: true,
-        ipAddress: true, dnsName: true, hostname: true,
-        assetType: true, discoveredByIntegrationId: true,
-        responseTimePolling: true, monitorIntervalSec: true, probeTimeoutMs: true,
-        discoveredByIntegration: { select: { type: true } },
-      },
-    });
-    if (!asset || !asset.monitored) {
-      recordWorkOutcome("lossSample", "failure", labels);
-      return "failure";
-    }
-    const effective = await resolveMonitorSettings({
-      ...asset,
-      discoveredByIntegrationType: asset.discoveredByIntegration?.type ?? null,
-    } as any);
-    // Re-check the window + cadence against current state (see the doc above).
-    // Not an error — the asset simply left the window between queue and pickup.
-    if (!lossSamplerAppliesTo(asset, effective) || !lossSampleIsDue(asset.lastLossSampleAt, new Date())) {
+    if (assetIds.length === 0) {
       recordWorkOutcome("lossSample", "success", labels);
       return "success";
     }
-    const target = lossSamplerTarget(asset);
-    if (!target) {
-      recordWorkOutcome("lossSample", "failure", labels);
-      return "failure";
-    }
-    const now = new Date();
-    const r = await pingHost(target, LOSS_SAMPLER_TIMEOUT_MS);
-    enqueueMonitorSample({
-      assetId,
-      timestamp: now,
-      success: r.success,
-      responseTimeMs: null,
-      error: r.success ? null : (r.error ?? "ping failed"),
-      probeKind: "icmp",
+    const assets = await prisma.asset.findMany({
+      where: { id: { in: assetIds } },
+      select: {
+        id: true, monitored: true, status: true, dependencySuppressed: true,
+        ipAddress: true, dnsName: true, hostname: true,
+      },
     });
-    // Stamped unconditionally — the anchor is "we tried", not "it answered".
-    await prisma.asset.update({ where: { id: assetId }, data: { lastLossSampleAt: now } });
+    // Cheap re-check only (see the doc above). Passing responseTimePolling null
+    // is not a claim that the stream is enabled — it says this pass is not the
+    // thing resolving that, which the publisher already did.
+    const eligible = assets.filter((a) => lossSweepIncludes(a, { responseTimePolling: null }));
+    if (eligible.length === 0) {
+      recordWorkOutcome("lossSample", "success", labels);
+      return "success";
+    }
+
+    // Several assets can share one address (an HA pair mid-failover, a stale
+    // duplicate row). Ping it ONCE and fan the single reading out to each:
+    // pinging twice would double the traffic and, worse, hand two assets
+    // different readings of the same link.
+    const byTarget = new Map<string, string[]>();
+    for (const a of eligible) {
+      const t = lossSweepTarget(a);
+      if (!t) continue;
+      const list = byTarget.get(t);
+      if (list) list.push(a.id);
+      else byTarget.set(t, [a.id]);
+    }
+    const suppressed = new Set(
+      eligible.filter((a) => a.dependencySuppressed === true).map((a) => a.id),
+    );
+
+    const now = new Date();
+    const results = await burstPing(Array.from(byTarget.keys()));
+
+    const attempted: string[] = [];
+    for (const [target, ids] of byTarget) {
+      const r = results.get(target);
+      if (!r) continue; // never attempted — not loss, and not a completed cycle
+      const success = r.received > 0;
+      for (const id of ids) {
+        enqueueMonitorSample({
+          assetId: id,
+          timestamp: now,
+          success,
+          responseTimeMs: null,
+          error: success ? null : "no echo reply",
+          probeKind: "icmp",
+          packetsSent: r.sent,
+          packetsReceived: r.received,
+          // The same marking the probe path applies (business rule 38b): a miss
+          // the upstream explains is drawn grey, not as an accusation.
+          dependencyDown: !success && suppressed.has(id) ? true : undefined,
+        });
+        attempted.push(id);
+      }
+    }
+
+    if (attempted.length > 0) {
+      await prisma.asset.updateMany({
+        where: { id: { in: attempted } },
+        data: { lastLossSampleAt: now },
+      });
+    }
     recordWorkOutcome("lossSample", "success", labels);
     return "success";
   } catch (err) {
-    logger.debug({ err, assetId }, "ICMP loss sample crashed");
+    logger.debug({ err, chunk: assetIds.length }, "ICMP loss sweep crashed");
     recordWorkOutcome("lossSample", "crash", labels);
     return "crash";
   } finally {
@@ -12285,6 +12323,13 @@ export async function loadMonitorPassCandidates() {
     where: MONITOR_CANDIDATE_WHERE,
     select: {
       id: true,
+      // Redundant against MONITOR_CANDIDATE_WHERE, and selected anyway so the
+      // shared eligibility predicates can be EVALUATED here rather than
+      // relying on the WHERE to have already been true. lossSweepIncludes
+      // tests `monitored === true`, so an unselected column reads as
+      // undefined and silently excludes every asset from the sweep — a
+      // whole cadence collecting nothing, with no error anywhere.
+      monitored: true,
       assetType: true,
       discoveredByIntegrationId: true,
       // Joined for the resolver — picks the source-default polling method
@@ -12348,7 +12393,7 @@ export type MonitorWork = { id: string; kind: MonitorWorkKind };
  *
  * The fast-confirm re-probe that used to live here (business rule 30,
  * 2026-08-17) was removed alongside the ICMP loss sampler change. Extra
- * resolution during a run is now the sampler's job (`utils/lossSampler.ts`),
+ * resolution is now the uniform loss sweep's job (`utils/lossSweep.ts`),
  * and it feeds packet-loss statistics ONLY — it never touches the counters,
  * because ICMP cannot authenticate the device it reaches and a second transport
  * voting on `down` would make the state mean whichever of the two answered
@@ -12424,7 +12469,7 @@ export async function computeDueWork(
     // suppression — there's nothing to slow down.
     //
     // Extra resolution DURING a run is the ICMP loss sampler's job
-    // (utils/lossSampler.ts, queued below): it feeds packet-loss statistics
+    // (utils/lossSweep.ts, queued below): it feeds packet-loss statistics
     // only and never touches the state machine's counters.
     //
     // The clamp lives in `resolveProbeIntervalSec` (shared with the pg-boss
@@ -12565,13 +12610,16 @@ export async function computeDueWork(
         isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
       eventLogWork.push({ id: a.id, kind: "eventLog" });
     }
-    // ICMP packet-loss sampler: 10s side-probe while the state machine is
-    // mid-run (warning / recovering only — see utils/lossSampler.ts for why
-    // `down` is excluded). Independent of `probe` above: it has its own anchor
-    // and never touches the counters, so both can be due on the same tick.
+    // ICMP loss sweep: a uniform burst at EVERY eligible asset, whatever state
+    // it is in — see utils/lossSweep.ts for why the old warning/recovering
+    // window was itself the bias that got the sampler disabled. Independent of
+    // `probe` above: its own anchor, and it never touches the counters, so both
+    // can be due on the same tick. These ids are swept in BATCHES rather than
+    // dispatched per asset (see runMonitorPass), which is the whole reason a
+    // fleet-wide window is affordable.
     if (enabled.has("lossSample") &&
-        lossSamplerAppliesTo(a, eff) &&
-        lossSampleIsDue(a.lastLossSampleAt, now)) {
+        lossSweepIncludes(a, eff) &&
+        lossSweepIsDue(a.lastLossSampleAt, now)) {
       lossSamples.push({ id: a.id, kind: "lossSample" });
     }
   }
@@ -12679,7 +12727,11 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // one is already due), so queueing them behind the heavy walks would mean
   // collecting nothing during exactly the incident they exist to measure.
   // They still yield to probes, which decide whether the asset is down at all.
-  const work: MonitorWork[] = [...probes, ...lossSamples, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork, ...eventLogWork];
+  // lossSamples are deliberately NOT in this array: the sweep is batched, so it
+  // runs as one call over all due ids after the per-asset pass rather than as
+  // one work item per asset. Dispatching it per item would put back exactly the
+  // per-host process spawn the batching exists to remove.
+  const work: MonitorWork[] = [...probes, ...fastFiltereds, ...telemetries, ...systemInfos, ...processesWork, ...eventLogWork];
 
   setQueueDepth({
     probe: probes.length,
@@ -12754,12 +12806,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
             else stats.eventLog.failed++;
             break;
           }
-          case "lossSample": {
-            const outcome = await runLossSampleFor(w.id, labelFor("lossSample"));
-            if (outcome === "success") stats.lossSample.collected++;
-            else stats.lossSample.failed++;
-            break;
-          }
+
         }
       };
       await runWork();
@@ -12767,6 +12814,21 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   }
   try {
     await Promise.all(Array.from({ length: Math.min(concurrency, work.length) }, () => worker()));
+    // The loss sweep runs as ONE batched call per chunk after the per-asset
+    // work, not as work items inside it. Sequential across chunks on purpose:
+    // each chunk is already one fping process pinging up to 500 hosts, and
+    // running several of those at once would multiply the packet rate without
+    // shortening the sweep, which is bounded by burst period rather than by
+    // host count. Its failures never fail the pass — loss is resolution, and
+    // the response-time probes in `work` above are what decide reachability.
+    for (const c of chunkForSweep(lossSamples.map((w) => w.id))) {
+      // A chunk spans many asset types, so per-type labelling is a category
+      // error here rather than a missing lookup — "mixed" says so honestly
+      // instead of attributing a 500-host sweep to whichever type came first.
+      const outcome = await runLossSweepFor(c, { assetType: "mixed", transport: "icmp" });
+      if (outcome === "success") stats.lossSample.collected += c.length;
+      else stats.lossSample.failed += c.length;
+    }
   } finally {
     endPassTimer();
   }

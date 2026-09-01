@@ -10,7 +10,7 @@
  * clamp: a dependency-suppressed asset drops to 2× the interval. There is
  * deliberately NO acceleration while a failure or recovery run is being
  * confirmed — the fast-confirm re-probe was removed 2026-08-19, and extra
- * resolution during a run is the ICMP loss sampler's job (lossSampler.test.ts),
+ * resolution is the ICMP loss sweep's job (lossSweep.test.ts),
  * which feeds packet-loss statistics only and never the state machine. So
  * time-to-down is `failureThreshold × intervalSeconds`, which is what the
  * monitor-settings card reports.

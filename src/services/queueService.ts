@@ -51,7 +51,7 @@ import {
   runStorageFor,
   runProcessesFor,
   runEventLogFor,
-  runLossSampleFor,
+  runLossSweepFor,
   type MonitorCadence,
 } from "./monitoringService.js";
 
@@ -200,6 +200,15 @@ interface MonitorJobPayload {
    * quiet operation (the default for every install).
    */
   verboseDebug?: boolean;
+  /**
+   * CHUNK FORM, used only by the ICMP loss sweep. That cadence measures a
+   * batch of assets in ONE fping process rather than one process per asset
+   * (utils/burstPing.ts), so its job carries the whole chunk and `assetId`
+   * carries the chunk KEY instead of a real asset — the runner reads this
+   * array. Optional so every other cadence keeps the one-asset shape, and so
+   * a job enqueued before this field existed still deserialises.
+   */
+  assetIds?: string[];
 }
 
 // ─── discovery queue ───────────────────────────────────────────────────────
@@ -878,13 +887,20 @@ export async function startPgbossWorkers(): Promise<void> {
     );
   });
 
-  // Loss sampler: 2s polling rather than the usual 5s, since a 10s cadence
-  // cannot tolerate a 5s pickup delay on top of the probe itself.
+  // ICMP loss sweep. One job is one CHUNK of up to LOSS_SWEEP_CHUNK assets, not
+  // one asset — the sweep exists to replace ~2000 process spawns a minute with
+  // four, so a per-asset job would defeat it before the runner is even reached.
+  // The queue name, worker pool and env var deliberately keep their
+  // "losssample" spelling: renaming them would orphan the persisted pg-boss
+  // queue and an operator-set POLARIS_MONITOR_LOSS_SAMPLE_WORKERS for nothing.
   await boss.work<MonitorJobPayload>(QUEUE_NAMES.lossSample, {
     localConcurrency: lossSampleWorkers, batchSize: 1, pollingIntervalSeconds: 2,
   }, async (jobs: PgBossJob<MonitorJobPayload>[]) => {
-    await runDedicatedWorker("lossSample", jobs[0], (assetId, labels) =>
-      runLossSampleFor(assetId, labels),
+    const job = jobs[0];
+    if (!job) return;
+    const ids = job.data.assetIds ?? (job.data.assetId ? [job.data.assetId] : []);
+    await runDedicatedWorker("lossSample", job, (_assetId, labels) =>
+      runLossSweepFor(ids, labels),
     );
   });
 
@@ -991,7 +1007,13 @@ async function dispatchFloatingJob(
       case "storage":      await runStorageFor(assetId, labels);      break;
       case "processes":    await runProcessesFor(assetId, labels);    break;
       case "eventLog":     await runEventLogFor(assetId, labels);     break;
-      case "lossSample":   await runLossSampleFor(assetId, labels);   break;
+      // The sweep is the one chunked cadence, so it reads the whole array off
+      // the payload rather than the single assetId the others take. (It is not
+      // in the floating pool's priority list today — if its own budget is
+      // saturated the right answer is to drop resolution, not to borrow
+      // capacity from the pool absorbing real monitoring work — but the case
+      // has to be correct for the day that list changes.)
+      case "lossSample":   await runLossSweepFor(job.data.assetIds ?? (assetId ? [assetId] : []), labels); break;
     }
     await boss.complete(queueName, job.id);
   } catch (err) {
@@ -1045,6 +1067,43 @@ export async function publishMonitorJob(
     {
       singletonKey: `${assetId}:${cadence}`,
     },
+  );
+}
+
+/**
+ * Enqueue ONE CHUNK of a batched cadence — today only the ICMP loss sweep.
+ *
+ * The singleton key is the chunk INDEX, not an asset id, and that is the
+ * backpressure: re-publishing chunk N while chunk N from the previous cycle is
+ * still queued coalesces, so a sweep that cannot keep up skips a cycle instead
+ * of growing a queue without bound. Chunk membership is stable for a stable
+ * fleet (chunkForSweep preserves order), so the same index means roughly the
+ * same assets from cycle to cycle.
+ *
+ * `assetId` carries the chunk key rather than a real asset because the payload
+ * type and the worker plumbing are shared with the per-asset cadences; the
+ * runner reads `assetIds`.
+ */
+export async function publishMonitorSweepJob(
+  cadence: MonitorCadence,
+  assetIds: string[],
+  chunkIndex: number,
+  labels?: { transport?: string; verboseDebug?: boolean },
+): Promise<void> {
+  if (!bossInstance || assetIds.length === 0) return;
+  await bossInstance.send(
+    QUEUE_NAMES[cadence],
+    {
+      assetId: `sweep:${chunkIndex}`,
+      assetIds,
+      transport: labels?.transport,
+      // A chunk spans many asset types, so per-type labelling would attribute
+      // the whole sweep to whichever type sorted first. "mixed" is the honest
+      // value and keeps the work-duration histogram readable.
+      assetType: "mixed",
+      verboseDebug: labels?.verboseDebug,
+    } as MonitorJobPayload,
+    { singletonKey: `${cadence}:chunk:${chunkIndex}` },
   );
 }
 

@@ -18,6 +18,7 @@ import {
   resolveMonitorSettings,
   type MonitorPassCandidate,
   type MonitorCadence,
+  LOSS_SAMPLES_MAX_PER_PASS,
 } from "../../src/services/monitoringService.js";
 
 const ALL = new Set<MonitorCadence>(["probe", "fastFiltered", "telemetry", "systemInfo", "processes", "lossSample"]);
@@ -29,6 +30,10 @@ let sysInfoSec = 600;
 function cand(over: Partial<MonitorPassCandidate> & { id?: string } = {}): MonitorPassCandidate {
   return {
     id: "cand-1",
+    // Redundant against MONITOR_CANDIDATE_WHERE in production, but the loss
+    // sweep's eligibility predicate EVALUATES it, so a candidate that omits
+    // it excludes itself from the sweep and every assertion below reads [].
+    monitored: true,
     assetType: "server",
     discoveredByIntegrationId: null,
     discoveredByIntegration: null,
@@ -244,32 +249,70 @@ dbDescribe("probe cadence is not accelerated mid-run", () => {
   });
 });
 
-// ─── ICMP packet-loss sampler (business rule 30) ──────────────────────────────
-// The 10s side-probe that replaced fast-confirm — currently DISABLED via the
-// LOSS_SAMPLER_ENABLED kill switch in utils/lossSampler.ts (operator decision,
-// 2026-08-20: the non-uniform sampling bias made alert readings diverge from
-// the wall-clock chart average; packet loss reads from the response-time poll
-// alone for now). These pin the disabled state: an otherwise-eligible asset
-// collects nothing, and probes are untouched. The window predicate itself
-// stays verified in tests/unit/lossSampler.test.ts (explicit enabled=true);
-// the enabled-path due-set tests (window, 10s cadence, per-pass cap,
-// probe-independence) lived here before the switch — restore them from this
-// block's git history when the sampler is re-enabled.
+// ─── ICMP loss sweep (business rules 29 / 30) ────────────────────────────────
+// The sampler this replaced ran only while an asset was `warning` or
+// `recovering`, and that window WAS the sampling bias that got it disabled: it
+// sampled precisely when probes were already failing. The sweep is uniform
+// instead, so the tests that matter are the INCLUSIONS — anything that narrows
+// the due-set back down to "when things look bad" reintroduces the bias.
 
-dbDescribe("loss-sample due-set (sampler disabled)", () => {
-  it("collects nothing even for warning/recovering assets while the kill switch is off", async () => {
-    const warning = cand({ id: "warning", monitorStatus: "warning", consecutiveFailures: 1, consecutiveSuccesses: 0 });
-    const recovering = cand({ id: "recovering", monitorStatus: "recovering", consecutiveFailures: 0, consecutiveSuccesses: 1 });
+dbDescribe("loss-sweep due-set", () => {
+  it("includes an asset in EVERY monitor state, not just the unhealthy ones", async () => {
+    const assets = ["up", "warning", "recovering", "down", "unknown", "passive"].map((st) =>
+      cand({ id: st, monitorStatus: st }),
+    );
+    const due = await computeDueWork(assets, ALL, now);
+    expect(due.lossSamples.map((w) => w.id).sort()).toEqual(
+      ["down", "passive", "recovering", "unknown", "up", "warning"],
+    );
+  });
 
-    const due = await computeDueWork([warning, recovering], ALL, now);
+  it("includes a dependency-suppressed asset", async () => {
+    // Excluding these was a cost argument the batched pinger retired; the
+    // failures are still marked explained via dependencyDown (rule 38b).
+    const due = await computeDueWork([cand({ dependencySuppressed: true })], ALL, now);
+    expect(due.lossSamples.map((w) => w.id)).toEqual(["cand-1"]);
+  });
+
+  it("excludes maintenance and an asset with nothing to ping", async () => {
+    const due = await computeDueWork([
+      cand({ id: "maint", status: "maintenance" }),
+      cand({ id: "noaddr", ipAddress: null, dnsName: null, hostname: null }),
+    ], ALL, now);
     expect(due.lossSamples).toEqual([]);
   });
 
-  it("leaves the probe cadence untouched — down detection is unaffected", async () => {
-    const warning = cand({ monitorStatus: "warning", consecutiveFailures: 1, lastMonitorAt: ago(probeSec), lastLossSampleAt: ago(30) });
+  it("excludes an asset whose response-time polling is disabled", async () => {
+    const due = await computeDueWork([cand({ responseTimePolling: "disabled" })], ALL, now);
+    expect(due.lossSamples).toEqual([]);
+  });
 
-    const due = await computeDueWork([warning], ALL, now);
+  it("honours the sweep cadence", async () => {
+    const fresh = cand({ id: "fresh", lastLossSampleAt: ago(5) });
+    const stale = cand({ id: "stale", lastLossSampleAt: ago(600) });
+    const due = await computeDueWork([fresh, stale], ALL, now);
+    expect(due.lossSamples.map((w) => w.id)).toEqual(["stale"]);
+  });
+
+  it("is independent of the probe cadence — both can be due on one tick", async () => {
+    // Separate anchors, and the sweep never touches the counters, so a tick
+    // that probes an asset may also burst it.
+    const a = cand({ lastMonitorAt: ago(probeSec), lastLossSampleAt: ago(600) });
+    const due = await computeDueWork([a], ALL, now);
     expect(due.probes.map((p) => p.id)).toEqual(["cand-1"]);
+    expect(due.lossSamples.map((w) => w.id)).toEqual(["cand-1"]);
+  });
+
+  it("caps the per-pass due-set to protect the probe cadence in cursor mode", async () => {
+    const many = Array.from({ length: LOSS_SAMPLES_MAX_PER_PASS + 25 }, (_, i) =>
+      cand({ id: `a${i}` }),
+    );
+    const due = await computeDueWork(many, ALL, now);
+    expect(due.lossSamples.length).toBe(LOSS_SAMPLES_MAX_PER_PASS);
+  });
+
+  it("collects nothing when the cadence is not requested", async () => {
+    const due = await computeDueWork([cand()], new Set<MonitorCadence>(["probe"]), now);
     expect(due.lossSamples).toEqual([]);
   });
 });
