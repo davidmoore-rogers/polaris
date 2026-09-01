@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parseFpingOutput, suggestedSweepIntervalSec } from "../../src/utils/burstPing.js";
+import { parseFpingOutput, suggestedSweepIntervalSec, bucketByTimeout } from "../../src/utils/burstPing.js";
 import { parsePingSummary } from "../../src/utils/icmpPing.js";
 
 describe("parseFpingOutput", () => {
@@ -180,5 +180,66 @@ describe("suggestedSweepIntervalSec", () => {
     const a = suggestedSweepIntervalSec(2000, false);
     const b = suggestedSweepIntervalSec(8000, false);
     expect(b).toBeGreaterThanOrEqual(a);
+  });
+});
+
+describe("bucketByTimeout", () => {
+  const t = (target: string, timeoutMs: number) => ({ target, timeoutMs });
+
+  it("groups targets sharing a timeout into one invocation", () => {
+    // The whole cost model: real fleets carry two or three distinct
+    // probeTimeoutMs values, so this is a handful of processes rather than one
+    // per host.
+    expect(bucketByTimeout([t("a", 1000), t("b", 5000), t("c", 1000)])).toEqual([
+      { timeoutMs: 1000, targets: ["a", "c"] },
+      { timeoutMs: 5000, targets: ["b"] },
+    ]);
+  });
+
+  it("orders buckets fastest-first", () => {
+    // So the fast majority of a fleet is measured and recorded before one
+    // slow-timeout outlier holds a worker slot.
+    const out = bucketByTimeout([t("slow", 30000), t("mid", 5000), t("fast", 500)]);
+    expect(out.map((b) => b.timeoutMs)).toEqual([500, 5000, 30000]);
+  });
+
+  it("preserves target order inside a bucket", () => {
+    expect(bucketByTimeout([t("a", 1000), t("b", 1000), t("c", 1000)])[0]!.targets)
+      .toEqual(["a", "b", "c"]);
+  });
+
+  it("collapses a duplicate target within a bucket", () => {
+    // Two assets can share an address; pinging it twice would double the
+    // traffic and give them different readings of the same link.
+    expect(bucketByTimeout([t("a", 1000), t("a", 1000)])[0]!.targets).toEqual(["a"]);
+  });
+
+  it("keeps the same target in two DIFFERENT buckets", () => {
+    // Deliberate: the two assets are entitled to different timeouts, and
+    // collapsing across buckets would silently give one of them the other's.
+    const out = bucketByTimeout([t("a", 1000), t("a", 9000)]);
+    expect(out).toEqual([
+      { timeoutMs: 1000, targets: ["a"] },
+      { timeoutMs: 9000, targets: ["a"] },
+    ]);
+  });
+
+  it("falls back to the default for a nonsense timeout rather than dropping the host", () => {
+    // A missing or corrupt setting must not silently exclude an asset from
+    // being probed at all — that reads as a device nobody is watching.
+    const out = bucketByTimeout([t("a", 0), t("b", -5), t("c", Number.NaN)]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.targets.sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("skips empty targets and an empty input", () => {
+    expect(bucketByTimeout([])).toEqual([]);
+    expect(bucketByTimeout([t("", 1000), t("   ", 1000)])).toEqual([]);
+  });
+
+  it("rounds a fractional timeout so it cannot fragment into per-host buckets", () => {
+    const out = bucketByTimeout([t("a", 1000.4), t("b", 1000.2)]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.timeoutMs).toBe(1000);
   });
 });

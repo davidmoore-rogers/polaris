@@ -310,3 +310,88 @@ export async function burstPing(
   }
   return out;
 }
+
+// ─── Per-target timeouts ─────────────────────────────────────────────────────
+
+/** One host to reach, with the timeout THAT host is entitled to. */
+export interface PingTarget {
+  target: string;
+  /** The asset's resolved probeTimeoutMs. */
+  timeoutMs: number;
+}
+
+/**
+ * Group targets that share a timeout. Exported for tests and for the caller's
+ * own logging — how many buckets a due-set produces is the whole cost model of
+ * `pingTargets`, and it is worth being able to assert on.
+ *
+ * Buckets come back in ASCENDING timeout order, so the fast majority of a fleet
+ * is measured and recorded before one slow-timeout outlier holds a worker.
+ * Targets keep their relative order inside a bucket, and a duplicate target
+ * inside one bucket is collapsed.
+ */
+export function bucketByTimeout(targets: PingTarget[]): Array<{ timeoutMs: number; targets: string[] }> {
+  const byTimeout = new Map<number, string[]>();
+  const seen = new Map<number, Set<string>>();
+  for (const t of targets) {
+    if (!t.target || t.target.trim() === "") continue;
+    const ms = Number.isFinite(t.timeoutMs) && t.timeoutMs > 0 ? Math.round(t.timeoutMs) : BURST_TIMEOUT_MS;
+    let list = byTimeout.get(ms);
+    let dedup = seen.get(ms);
+    if (!list || !dedup) {
+      list = [];
+      dedup = new Set<string>();
+      byTimeout.set(ms, list);
+      seen.set(ms, dedup);
+    }
+    if (dedup.has(t.target)) continue;
+    dedup.add(t.target);
+    list.push(t.target);
+  }
+  return Array.from(byTimeout.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([timeoutMs, list]) => ({ timeoutMs, targets: list }));
+}
+
+/**
+ * Ping many hosts that do NOT share a timeout — the status-probe shape, as
+ * distinct from `burstPing`'s uniform loss sweep.
+ *
+ * WHY BUCKETING RATHER THAN ONE INVOCATION. fping's `-t` is per invocation, not
+ * per target, but `probeTimeoutMs` is a per-asset setting an operator chose.
+ * Running everything at the batch maximum would work — each result could then
+ * be judged against its own asset's timeout using the reported RTT — but it
+ * makes the whole batch wait out its slowest member, so one asset configured at
+ * 30s would hold up the fleet's verdict every cycle. One invocation per
+ * DISTINCT timeout keeps each group bounded by its own number, and real fleets
+ * carry two or three distinct values, so this is a handful of processes rather
+ * than one per host.
+ *
+ * `count` defaults to **1**: this replaces a single-echo status probe, and down
+ * detection is defined in missed POLLS (business rule 30). Sending more echoes
+ * here would quietly redefine what one missed poll means, which is not this
+ * function's decision to make — the loss sweep is where bursts belong.
+ *
+ * Same contract as `burstPing`: a target ABSENT from the returned map was never
+ * successfully attempted and must NOT be recorded as a failed probe.
+ */
+export async function pingTargets(
+  targets: PingTarget[],
+  opts: { count?: number } = {},
+): Promise<Map<string, BurstPingResult>> {
+  const buckets = bucketByTimeout(targets);
+  if (buckets.length === 0) return new Map();
+  const count = opts.count ?? 1;
+  const out = new Map<string, BurstPingResult>();
+  for (const b of buckets) {
+    const got = await burstPing(b.targets, {
+      count,
+      timeoutMs: b.timeoutMs,
+      // One echo needs no spacing; the period only matters for a real burst.
+      periodMs: count > 1 ? BURST_PERIOD_MS : BURST_TIMEOUT_MS,
+    });
+    for (const [k, v] of got) out.set(k, v);
+  }
+  return out;
+}
+
