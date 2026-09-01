@@ -476,6 +476,29 @@ export function interfaceIsPinned(asset: { monitoredInterfaces?: string[] } | un
 }
 
 /**
+ * What an interface-dimensioned alert CALLS the port.
+ *
+ * The dimension KEY stays the stored `ifName` — it is the identity the state
+ * row, the vanished-state sweep and `Notification.dimension` are all keyed on,
+ * and none of them may drift for a caption. The LABEL is the only part a human
+ * reads, and on a switch it has to name the PORT: an operator paged about
+ * "Indoor AP" has to go and find which port that is before they can do
+ * anything about it, and two ports described alike are indistinguishable in
+ * the one line the alert gets. So the label states the interface name and
+ * carries the operator's own label — SNMP `ifAlias`, the FortiOS CMDB alias —
+ * beside it when the two differ, which is what makes the alert name the port
+ * AND what is plugged into it instead of one or the other.
+ *
+ * Read off the sample row rather than joined from `AssetInterface`: the
+ * resolvers already select the row, and an extra per-tick query for a caption
+ * is the wrong trade at 2000 assets.
+ */
+export function interfaceDimLabel(ifName: string, alias?: string | null): string {
+  const a = typeof alias === "string" ? alias.trim() : "";
+  return a && a !== ifName ? `${ifName} (${a})` : ifName;
+}
+
+/**
  * The IPsec analogue of interfaceIsPinned: only tunnels the operator PINNED
  * (`Asset.monitoredIpsecTunnels`) may produce readings. Unlike interfaces,
  * whose sample table became pinned-only in the 2026-08 cutover, the IPsec
@@ -784,12 +807,12 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
     case "ifInBps": case "ifOutBps": case "ifInErrorRate": case "ifOutErrorRate": {
       const col = trigger.metric === "ifInBps" ? "inOctets" : trigger.metric === "ifOutBps" ? "outOctets" : trigger.metric === "ifInErrorRate" ? "inErrors" : "outErrors";
       const mult = trigger.metric === "ifInBps" || trigger.metric === "ifOutBps" ? 8 : 1; // octets→bits
-      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, select: { assetId: true, timestamp: true, ifName: true, inOctets: true, outOctets: true, inErrors: true, outErrors: true } });
+      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, select: { assetId: true, timestamp: true, ifName: true, alias: true, inOctets: true, outOctets: true, inErrors: true, outErrors: true } });
       // Pinned interfaces only (interfaceIsPinned) — the same default the
       // ifOperStatus/ifAdminStatus/poeStatus resolvers apply. See its header for
       // why the pinned-only sample table isn't a gate by itself.
       const filtered = rows.filter((r) => interfaceIsPinned(index.get(r.assetId), r.ifName) && substringMatch(r.ifName, df.ifNamePattern));
-      return rateReadings(filtered, index, (r) => r.ifName, (r) => r.ifName, (r) => num((r as any)[col]), mult);
+      return rateReadings(filtered, index, (r) => r.ifName, (r) => interfaceDimLabel(r.ifName, r.alias), (r) => num((r as any)[col]), mult);
     }
     case "ipsecThroughputBps": {
       const rows = await prisma.assetIpsecTunnelSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, select: { assetId: true, timestamp: true, tunnelName: true, incomingBytes: true, outgoingBytes: true } });
@@ -876,7 +899,7 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // No `distinct` any more: a poll-counted hold needs the RUN of readings
       // per port, so the rows are grouped here (newest first) and the newest of
       // each group is the current value the un-counted paths always used.
-      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], select: { assetId: true, ifName: true, timestamp: true, operStatus: true, adminStatus: true, poeStatus: true } });
+      const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], select: { assetId: true, ifName: true, alias: true, timestamp: true, operStatus: true, adminStatus: true, poeStatus: true } });
       // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
       // the same join the Down Interfaces widget uses): the interfaces stream
       // samples every port a device reports, and an unpinned port is usually
@@ -903,7 +926,7 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       }).map((r) => {
         const a = index.get(r.assetId)!;
         const g = byPort.find((x) => x[0]!.assetId === r.assetId && x[0]!.ifName === r.ifName)!;
-        return { ...mk(a, r.ifName, r.ifName, (r as any)[col]), series: g.slice(0, SERIES_CAP).map((x) => (x as any)[col] ?? null), readingAt: r.timestamp };
+        return { ...mk(a, r.ifName, interfaceDimLabel(r.ifName, r.alias), (r as any)[col]), series: g.slice(0, SERIES_CAP).map((x) => (x as any)[col] ?? null), readingAt: r.timestamp };
       });
     }
     case "ipsecStatus": {

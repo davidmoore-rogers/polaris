@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, tunnelIsPinned, applyDeviceFilters } from "../../src/services/notificationEngine.js";
+import { compareNum, compareValue, globToRegExp, readingMeets, interfaceIsPinned, interfaceDimLabel, tunnelIsPinned, applyDeviceFilters } from "../../src/services/notificationEngine.js";
 import { scopeMatchesAsset, type ScopeAsset } from "../../src/services/notificationRuleService.js";
 import { stripRegionPrefix } from "../../src/services/notificationService.js";
 import { ruleInputSchema, buildSchemaCatalog, triggerDimensionApplicable } from "../../src/services/notificationTypes.js";
@@ -100,6 +100,29 @@ describe("interfaceIsPinned", () => {
     // A reading whose asset fell out of the scope index is dropped rather than
     // defaulting to allowed — fail closed, same as the resolvers' `index.get`.
     expect(interfaceIsPinned(undefined, "port1")).toBe(false);
+  });
+});
+
+describe("interfaceDimLabel", () => {
+  it("names the port and carries the operator's label beside it", () => {
+    // The complaint this exists for: a PoE fault on port39 mailed as
+    // "Interface PoE status on Indoor AP is fault" sends the operator hunting
+    // for which port that is. The port comes first; the label rides along.
+    expect(interfaceDimLabel("port39", "Indoor AP")).toBe("port39 (Indoor AP)");
+  });
+  it("states the name alone when there is nothing to add", () => {
+    expect(interfaceDimLabel("port39", null)).toBe("port39");
+    expect(interfaceDimLabel("port39", undefined)).toBe("port39");
+    expect(interfaceDimLabel("port39", "   ")).toBe("port39");
+    // A FortiSwitch reports ifAlias = the port name, so alias == ifName is the
+    // common case, not the corner — "port39 (port39)" would be noise.
+    expect(interfaceDimLabel("port39", "port39")).toBe("port39");
+  });
+  it("leaves the KEY untouched — this is a caption, not an identity", () => {
+    // Whatever the device called the port stays the label's first token, so a
+    // reader can match the alert to the state row and the System tab even on a
+    // switch whose ifName walk handed back a description.
+    expect(interfaceDimLabel("Indoor AP", "port39")).toBe("Indoor AP (port39)");
   });
 });
 
