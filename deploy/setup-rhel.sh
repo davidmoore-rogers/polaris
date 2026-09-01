@@ -30,6 +30,7 @@
 #   --public-url        https://<hostname>[:<port>]  (default: https://$(hostname -f))
 #   --monitor-replicas  N                            (default: 2)
 #   --prometheus-ip     <IP>                         (default: 127.0.0.1)
+#   --no-epel           skip enabling EPEL for fping (optional dep, see below)
 #
 # Local dev (npm run dev with POLARIS_ROLE unset = "all") still works without
 # any of this — it's a runtime mode in src/utils/role.ts, separate from
@@ -37,6 +38,10 @@
 
 set -euo pipefail
 
+# Whether to enable EPEL if fping is not already available (see the fping
+# step below). --no-epel turns it off; the repo is never enabled for
+# anything else.
+INSTALL_EPEL="yes"
 APP_DIR="/opt/polaris"
 APP_USER="polaris"
 APP_GROUP="polaris"
@@ -65,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --public-url)        PUBLIC_URL="$2"; shift 2;;
     --monitor-replicas)  MONITOR_REPLICAS="$2"; shift 2;;
     --prometheus-ip)     PROMETHEUS_IP="$2"; shift 2;;
+    --no-epel)           INSTALL_EPEL="no"; shift;;
     -h|--help)
       head -40 "$0" | sed -n '/^#/p'
       exit 0;;
@@ -146,6 +152,34 @@ module_hotfixes=true
 REPO
   dnf install -y nginx
   info "nginx $(nginx -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') installed"
+fi
+
+# ─── 1d. Install fping (OPTIONAL — ICMP packet-loss sweep) ──────────────────
+# Polaris measures packet loss with a burst of ICMP echoes at every monitored
+# asset each cycle. fping sends that burst to up to 500 hosts from ONE process;
+# without it Polaris falls back to one `ping` process per host, which is
+# CORRECT but forks per host and cannot hold a 60s cadence on a large fleet
+# (the sweep interval is floored automatically to whatever the host can finish).
+#
+# Optional on purpose: fping lives in EPEL on RHEL, and adding a third-party
+# repo to an enterprise host is the operator's decision, not this script's.
+# Pass --no-epel to skip that step — the plain `dnf install` is still tried
+# first, in case a local mirror already carries it. Never fatal.
+#
+# The packaged binary carries cap_net_raw=ep as a file capability, so the
+# unprivileged polaris service user can run it with no sudo wiring.
+if command -v fping &>/dev/null; then
+  info "fping already installed ($(fping -v 2>&1 | head -1))"
+elif dnf install -y fping &>/dev/null; then
+  info "fping installed"
+elif [[ "$INSTALL_EPEL" == "yes" ]] \
+     && dnf install -y epel-release &>/dev/null \
+     && dnf install -y fping &>/dev/null; then
+  info "fping installed (enabled the EPEL repository to do it)"
+else
+  warn "fping not installed — packet loss is still measured, but via one ping"
+  warn "  process per host. On a large fleet Polaris stretches the loss sweep"
+  warn "  interval to suit. To fix later:  dnf install -y epel-release fping"
 fi
 
 # ─── 2. Install PostgreSQL 15 ────────────────────────────────────────────────

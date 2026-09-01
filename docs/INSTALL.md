@@ -458,6 +458,62 @@ are remote).
 
 ---
 
+## Optional: fping (ICMP packet-loss sweep)
+
+Polaris measures packet loss by sending a short burst of ICMP echoes to every
+monitored asset each cycle and counting what comes back. It will do this on any
+install with no configuration. `fping` only changes **how fast** it can.
+
+| | With fping | Without it |
+|---|---|---|
+| Processes per sweep | one per 500 targets | one per host |
+| 2000-asset sweep | ~4 spawns | ~2000 spawns |
+| Sustainable cadence | 60s at any fleet size | widens with the fleet |
+| Loss figures | identical | identical |
+
+The fallback is **correct, not degraded** — the numbers are the same. It simply
+forks per host, so on a large fleet Polaris widens the sweep interval to
+whatever the host can actually finish (`resolveSweepIntervalSec`) rather than
+publishing sweeps faster than they drain. You get loss on a 2–3 minute cadence
+instead of 60s. Nothing breaks and nothing needs configuring either way.
+
+The setup scripts install it best-effort and never fail on it. To add it later:
+
+```bash
+# RHEL / Rocky / AlmaLinux 9 — fping lives in EPEL
+sudo dnf install -y epel-release
+sudo dnf install -y fping
+
+# Ubuntu / Debian — in the standard archive
+sudo apt install -y fping
+```
+
+**Windows Server has no fping build**, so those installs always use the per-host
+fallback. It is slower there than on Linux for a reason worth knowing: Windows
+`ping` paces at a fixed ~1s per echo and has no interval flag, where POSIX
+`ping -i 0.2` completes the same burst in ~0.8s. A 2000-asset Windows install
+therefore lands nearer a 2–3 minute loss cadence. Response-time polling and down
+detection are unaffected — they are a different measurement on a different
+clock (business rule 30).
+
+**Permissions.** The packaged binary ships with the `cap_net_raw` file
+capability, so the unprivileged `polaris` service user runs it with no sudo
+wiring and no setuid. If you build fping yourself, grant it that capability or
+the sweep silently falls back to per-host pings:
+
+```bash
+sudo setcap cap_net_raw+ep "$(command -v fping)"
+getcap "$(command -v fping)"      # → /usr/sbin/fping cap_net_raw=ep
+```
+
+**Verifying which backend is live.** Polaris probes for fping once per process
+at startup and caches the answer. When it runs fping but cannot parse the
+output — an old build, a refused capability — it logs
+`fping produced no parseable summaries — falling back to per-host ping for this
+chunk` and keeps measuring. A quiet log means the batched path is working.
+
+---
+
 ## The split-role deployment (web / monitor / discovery)
 
 Since Phase 3 this is the **default and only supported production layout**

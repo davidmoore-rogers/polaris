@@ -120,6 +120,28 @@ else
   fi
 fi
 
+# ─── 1c. Install fping (OPTIONAL — ICMP packet-loss sweep) ──────────────────
+# Polaris measures packet loss with a burst of ICMP echoes at every monitored
+# asset each cycle. fping sends that burst to up to 500 hosts from ONE process;
+# without it Polaris falls back to one `ping` process per host, which is
+# CORRECT but forks per host and cannot hold a 60s cadence on a large fleet
+# (the sweep interval is floored automatically to whatever the host can finish).
+#
+# In the standard Debian/Ubuntu archive, so no extra repo is needed — but the
+# install is still best-effort and never fatal, because a missing fping costs
+# throughput rather than correctness. The packaged binary carries cap_net_raw
+# as a file capability, so the unprivileged polaris user can run it with no
+# sudo wiring.
+if command -v fping &>/dev/null; then
+  info "fping already installed ($(fping -v 2>&1 | head -1))"
+elif apt-get install -y fping &>/dev/null; then
+  info "fping installed"
+else
+  warn "fping not installed — packet loss is still measured, but via one ping"
+  warn "  process per host. On a large fleet Polaris stretches the loss sweep"
+  warn "  interval to suit. To fix later:  apt-get install -y fping"
+fi
+
 # ─── 2. Install git ──────────────────────────────────────────────────────────
 if command -v git &>/dev/null; then
   info "Git already installed"

@@ -41,10 +41,16 @@ ENV NODE_ENV=production \
     POLARIS_STATE_DIR=/app/state \
     POLARIS_BUILD_COMMIT_COUNT=${POLARIS_BUILD_COMMIT_COUNT}
 
+# fping batches the ICMP packet-loss sweep: ONE process per 500 targets rather
+# than one `ping` per host. Polaris works without it — it falls back to
+# per-host bursts and stretches the sweep interval to whatever the host can
+# finish — but a container is a controlled environment with no reason to make
+# it take the slow path. ~100 KB.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       postgresql-client \
       iputils-ping \
+      fping \
       ca-certificates \
       tini \
  && rm -rf /var/lib/apt/lists/*
