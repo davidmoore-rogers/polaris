@@ -76,7 +76,7 @@ import {
   canonicalizeInterfaceRows,
 } from "../utils/interfaceIdentity.js";
 import { makeOidMonotonicGuard } from "../utils/oidCompare.js";
-import { pingHost } from "../utils/icmpPing.js";
+import { burstPingHost } from "../utils/icmpPing.js";
 import {
   lossSweepIncludes,
   lossSweepTarget,
@@ -1930,6 +1930,17 @@ export async function probeAsset(
 
     // REST-API probes for managed FortiSwitches/FortiAPs query the parent
     // FortiGate's controller-status table, not the asset itself — so they
+    // THE TIMER FOR THE DEVICE, taken here rather than at the top of the
+    // function. `start` above is stamped before a findUnique with three
+    // includes and the whole monitor-settings resolution — measured at ~4ms
+    // for the query alone against a local Postgres — so every responseTimeMs
+    // Polaris has ever recorded, on EVERY transport, carried a few
+    // milliseconds of Polaris's own bookkeeping. The column is called
+    // round-trip time and is charted as the device's latency, so that
+    // overhead is simply wrong. `start` stays for the validation failures
+    // below, where the number means nothing anyway.
+    const dispatchStart = performance.now();
+
     // don't need an asset IP and dispatch before the IP guard below.
     if (
       polling === "rest_api" &&
@@ -1937,7 +1948,7 @@ export async function probeAsset(
       integration &&
       (asset.assetType === "switch" || asset.assetType === "access_point")
     ) {
-      return await probeFortinetController(asset, integration as any, start, timeoutMs);
+      return await probeFortinetController(asset, integration as any, dispatchStart, timeoutMs);
     }
 
     // Asks FortiManager's own device database instead of the device. Needs no
@@ -1947,7 +1958,7 @@ export async function probeAsset(
       if (!integration) {
         return finish(start, false, "FortiManager polling requires a FortiManager integration");
       }
-      return await probeFortimanagerNative(asset, integration as any, start);
+      return await probeFortimanagerNative(asset, integration as any, dispatchStart);
     }
 
     // vCenter probes ask the vCenter SERVER about the asset, so they need no
@@ -1955,7 +1966,7 @@ export async function probeAsset(
     // ESXi host added to vCenter by a name that never resolved, are both still
     // probeable. Dispatches before the IP guard for exactly that reason.
     if (polling === "vcenter") {
-      return await probeVcenter(assetId, start);
+      return await probeVcenter(assetId, dispatchStart);
     }
 
     // AD-discovered Windows hosts often have no IP yet (only dnsName/hostname),
@@ -1972,7 +1983,7 @@ export async function probeAsset(
     if (!targetIp) return finish(start, false, "Asset has no IP address");
 
     if (polling === "icmp") {
-      return await probeIcmp(targetIp, start, timeoutMs);
+      return await probeIcmp(targetIp, dispatchStart, timeoutMs);
     }
     // NOTE: there is no `polling === "http"` branch. The HTTP check was retired
     // as a polling method (2026-08) and is now a manufacturer custom widget —
@@ -1985,7 +1996,7 @@ export async function probeAsset(
       // they query the parent FortiGate rather than the asset's own IP.)
       // Manual REST API targets pull from a stored "restapi"-typed credential.
       if (isFortinetSrc && integration) {
-        const result = await probeFortinet(targetIp, integration as any, start, timeoutMs);
+        const result = await probeFortinet(targetIp, integration as any, dispatchStart, timeoutMs);
         // Proxy mode only: after a successful FortiGate probe, pre-warm the
         // switch + AP controller-inventory cache so children that fire within
         // the 30 s TTL window get a free cache hit instead of a separate FMG
@@ -2004,7 +2015,7 @@ export async function probeAsset(
         return result;
       }
       if (effectiveRTCred?.type === "restapi") {
-        return await probeRestApiCredential(effectiveRTCred.config as Record<string, unknown>, start, timeoutMs);
+        return await probeRestApiCredential(effectiveRTCred.config as Record<string, unknown>, dispatchStart, timeoutMs);
       }
       return finish(start, false, "REST API polling requires either a Fortinet integration or a REST API credential");
     }
@@ -2021,33 +2032,33 @@ export async function probeAsset(
       } catch (err: any) {
         return finish(start, false, err?.message || "SNMP credential lookup failed");
       }
-      return await probeSnmp(targetIp, probeCfg, start, timeoutMs);
+      return await probeSnmp(targetIp, probeCfg, dispatchStart, timeoutMs);
     }
     if (polling === "winrm") {
       // Per-stream credential wins, then asset default, then AD bind fallback.
       if (effectiveRTCred?.type === "winrm") {
-        return await probeWinRm(targetIp, effectiveRTCred.config as Record<string, unknown>, start, timeoutMs);
+        return await probeWinRm(targetIp, effectiveRTCred.config as Record<string, unknown>, dispatchStart, timeoutMs);
       }
       if (isAdSrc && integration) {
         const cfg      = (integration.config as Record<string, unknown>) || {};
         const username = String(cfg.bindDn || "");
         const password = String(cfg.bindPassword || "");
         if (!username || !password) return finish(start, false, "Active Directory bind credentials not configured");
-        return await probeWinRm(targetIp, { username, password, useHttps: true, port: 5986 }, start, timeoutMs);
+        return await probeWinRm(targetIp, { username, password, useHttps: true, port: 5986 }, dispatchStart, timeoutMs);
       }
       return finish(start, false, "No WinRM credential selected");
     }
     if (polling === "ssh") {
       // Per-stream credential wins, then asset default, then AD bind fallback.
       if (effectiveRTCred?.type === "ssh") {
-        return await probeSsh(targetIp, effectiveRTCred.config as Record<string, unknown>, start, timeoutMs);
+        return await probeSsh(targetIp, effectiveRTCred.config as Record<string, unknown>, dispatchStart, timeoutMs);
       }
       if (isAdSrc && integration) {
         const cfg      = (integration.config as Record<string, unknown>) || {};
         const username = String(cfg.bindDn || "");
         const password = String(cfg.bindPassword || "");
         if (!username || !password) return finish(start, false, "Active Directory bind credentials not configured");
-        return await probeSsh(targetIp, { username, password, port: 22 }, start, timeoutMs);
+        return await probeSsh(targetIp, { username, password, port: 22 }, dispatchStart, timeoutMs);
       }
       return finish(start, false, "No SSH credential selected");
     }
@@ -2071,7 +2082,7 @@ export async function probeAsset(
         'Asset still configured for the retired "http" polling method — probing over ICMP instead. ' +
         "Re-point the Response Time stream; the HTTP check now lives on a manufacturer custom widget.",
       );
-      return await probeIcmp(targetIp, start, timeoutMs);
+      return await probeIcmp(targetIp, dispatchStart, timeoutMs);
     }
     return finish(start, false, `Unknown polling method "${polling}"`);
   } catch (err: any) {
@@ -3495,9 +3506,35 @@ async function collectHardwareSensorsFortiapRest(
   }
 }
 
+/**
+ * ONE ICMP echo, reporting the round trip `ping` ITSELF measured rather than
+ * the wall clock around the call.
+ *
+ * Wall clock here is dominated by process spawn, not by the network: 20
+ * sequential single-echo pings at 127.0.0.1 measured 36ms each on Windows
+ * against a reported RTT of <1ms. A LAN device with a 0.2ms round trip cannot
+ * chart as 0.2ms if the number includes a fork+exec.
+ *
+ * The codebase already knew this in one place and drew the opposite
+ * conclusion: the loss sampler wrote responseTimeMs NULL because "we spawn
+ * the system ping, so the measured time is dominated by process spawn and is
+ * not an RTT worth recording". True of the wall clock; not true of the figure
+ * ping prints, which is the actual round trip. So we parse it out instead of
+ * discarding it.
+ *
+ * Falls back to the wall clock when the summary carried no timing — a total
+ * loss has no RTT, and a failed probe's duration is at least a real bound.
+ */
 async function probeIcmp(host: string, start: number, timeoutMs: number): Promise<ProbeResult> {
-  const r = await pingHost(host, timeoutMs);
-  return finish(start, r.success, r.error);
+  const r = await burstPingHost(host, { count: 1, intervalMs: 200, timeoutMs });
+  // sent === 0 means we never reached the network (no ping binary): not a
+  // measurement, and not the device's fault.
+  if (r.sent === 0) return finish(start, false, "ping unavailable");
+  const success = r.received > 0;
+  if (success && r.avgRttMs != null) {
+    return { success: true, responseTimeMs: Math.max(0, Math.round(r.avgRttMs)) };
+  }
+  return finish(start, success, success ? undefined : "no echo reply");
 }
 
 function mapSnmpAuthProtocol(value: unknown): unknown {
