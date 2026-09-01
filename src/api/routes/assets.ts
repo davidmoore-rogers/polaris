@@ -33,7 +33,7 @@ import {
 } from "../../services/assetQuarantineService.js";
 import { syncDescriptionsOnSave } from "../../services/descriptionSyncService.js";
 import { cidrContains } from "../../utils/cidr.js";
-import { buildIpContexts, type IpContext } from "../../services/subnetService.js";
+import { buildIpContexts } from "../../services/subnetService.js";
 import { isKnownAssetType } from "../../utils/assetTypes.js";
 import { recomputeMonitorOverrideForAssets, getAddAsMonitoredFromConfig } from "../../services/monitorOverrideService.js";
 import { reconcileTagsForAsset, listAssetTags } from "../../services/tagAssignmentService.js";
@@ -766,7 +766,6 @@ async function computeMonitoringMethods(a: {
 
 async function enrichAssetList(
   assets: Array<{ ipAddress: string | null; associatedIpRows: unknown; macAddressRows: unknown; fortinetTopology?: unknown; managementAccess?: unknown } & Record<string, unknown>>,
-  ipCtx: Map<string, IpContext>,
 ) {
   // `hostnameDiscovered` — what discovery says the hostname is, for the rows
   // where an operator pin is currently overriding it (the list renders it as a
@@ -775,14 +774,17 @@ async function enrichAssetList(
   const overriddenIds = assets
     .filter((a) => typeof a.hostnameOverride === "string" && a.hostnameOverride)
     .map((a) => a.id as string);
-  const discoveredHostnames = overriddenIds.length
-    ? await getDiscoveredHostnames(overriddenIds)
-    : new Map<string, string | null>();
 
-  // `activeAlert` — the Name column's alert indicator: is anything wrong with
-  // this device, and how bad is the worst of it. ONE query for the whole page
-  // (see activeAlertSummaryByAsset), not one per row.
-  const alertSummaries = await activeAlertSummaryByAsset(assets.map((a) => a.id as string));
+  // The three page-level lookups depend only on the fetched rows, not on each
+  // other — one Promise.all instead of three serialized round trips on the
+  // hottest list endpoint. `activeAlert` is the Name column's alert indicator
+  // (worst live alert per device; ONE query for the whole page, see
+  // activeAlertSummaryByAsset).
+  const [discoveredHostnames, alertSummaries, ipCtx] = await Promise.all([
+    overriddenIds.length ? getDiscoveredHostnames(overriddenIds) : Promise.resolve(new Map<string, string | null>()),
+    activeAlertSummaryByAsset(assets.map((a) => a.id as string)),
+    buildIpContexts(assets.map((a) => a.ipAddress).filter(Boolean) as string[]),
+  ]);
 
   return Promise.all(assets.map(async ({
     associatedIpRows, macAddressRows, fortinetTopology, managementAccess,
@@ -869,8 +871,7 @@ router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
       total = totalCount;
     }
 
-    const ipCtx = await buildIpContexts(assets.map((a) => a.ipAddress as string | null).filter(Boolean) as string[]);
-    const enriched = await enrichAssetList(assets as never, ipCtx);
+    const enriched = await enrichAssetList(assets as never);
     res.json({ assets: enriched, total, limit, offset });
   } catch (err) {
     next(err);
