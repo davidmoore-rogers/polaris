@@ -559,9 +559,17 @@ TableSF.prototype._updateIcons = function () {
   });
 };
 
+// Key paths are static per column, so split once — _val runs per row per
+// filter key and (pre-decorate) ran per sort comparison.
+TableSF.prototype._path = function (key) {
+  var c = this._pathCache || (this._pathCache = {});
+  return c[key] || (c[key] = key.split("."));
+};
+
 TableSF.prototype._val = function (row, key) {
   var v = row;
-  key.split(".").forEach(function (p) { v = v != null ? v[p] : null; });
+  var path = this._path(key);
+  for (var i = 0; i < path.length; i++) v = v != null ? v[path[i]] : null;
   if (Array.isArray(v)) return v.join(" ");
   return v == null ? "" : v;
 };
@@ -572,7 +580,8 @@ TableSF.prototype._val = function (row, key) {
 // a missing string and an empty array are both correctly classified as empty).
 TableSF.prototype._rawVal = function (row, key) {
   var v = row;
-  key.split(".").forEach(function (p) { v = v != null ? v[p] : null; });
+  var path = this._path(key);
+  for (var i = 0; i < path.length; i++) v = v != null ? v[path[i]] : null;
   return v;
 };
 
@@ -693,17 +702,24 @@ TableSF.prototype.apply = function (data) {
     var thEl = self._thead.querySelector('th[data-sf-key="' + k + '"]');
     var type = thEl ? (thEl.getAttribute("data-sf-type") || "string") : "string";
     var dir  = self._sortDir === "asc" ? 1 : -1;
-    result = result.slice().sort(function (a, b) {
-      var av = self._val(a, k), bv = self._val(b, k);
-      if (type === "number") return (parseFloat(av) - parseFloat(bv)) * dir;
-      if (type === "date")   return (new Date(av)   - new Date(bv))   * dir;
-      if (type === "ip") {
-        var ai = self._ipNum(av), bi = self._ipNum(bv);
-        return (ai < bi ? -1 : ai > bi ? 1 : 0) * dir;
-      }
-      var as = String(av).toLowerCase(), bs = String(bv).toLowerCase();
-      return (as < bs ? -1 : as > bs ? 1 : 0) * dir;
+    // Decorate-sort-undecorate: resolve each row's sort key ONCE. The old
+    // comparator re-walked the key path and re-parsed dates / BigInt IPs on
+    // both sides of every comparison — ~2·n·log₂(n) conversions per sort
+    // click at 2000 rows, on a module shared by five list pages.
+    var decorated = result.map(function (row) {
+      var v = self._val(row, k);
+      var sv;
+      if (type === "number")    sv = parseFloat(v);
+      else if (type === "date") sv = new Date(v).getTime();
+      else if (type === "ip")   sv = self._ipNum(v);
+      else                      sv = String(v).toLowerCase();
+      return { row: row, v: sv };
     });
+    decorated.sort(function (a, b) {
+      if (type === "number" || type === "date") return (a.v - b.v) * dir;
+      return (a.v < b.v ? -1 : a.v > b.v ? 1 : 0) * dir;
+    });
+    result = decorated.map(function (d) { return d.row; });
   }
 
   return result;
