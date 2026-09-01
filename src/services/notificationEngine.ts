@@ -981,7 +981,14 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
 
 async function resolveHostMetricReading(trigger: Extract<Trigger, { type: "host_metric" }>): Promise<Reading | null> {
   const since = new Date(Date.now() - lookbackMsFor(trigger));
-  const rows = await prisma.hostMetricsSample.findMany({ where: { timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, take: 2000 });
+  // Only one of the sample's columns is ever read per rule (valueOf below), so
+  // select just that pair rather than 2000 whole rows. An unrecognized metric
+  // still fetches timestamps and reads NaN, exactly as valueOf's default did.
+  const select: Record<string, true> = { timestamp: true };
+  if (["cpuPct", "memUsedPct", "memUsedBytes", "loadAvg1", "loadAvg5", "loadAvg15", "procRssBytes"].includes(trigger.metric)) {
+    select[trigger.metric] = true;
+  }
+  const rows = await prisma.hostMetricsSample.findMany({ where: { timestamp: { gte: since } }, orderBy: { timestamp: "desc" }, take: 2000, select: select as any });
   if (rows.length === 0) return null;
   const num = (b: bigint) => Number(b);
   const valueOf = (r: any): number => {

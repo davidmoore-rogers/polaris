@@ -33,6 +33,15 @@ describe("compileWildcard", () => {
     expect(() => compileWildcard("a".repeat(MAX_PATTERN_LENGTH + 1))).toThrow(/exceeds/);
     expect(() => compileWildcard("a".repeat(MAX_PATTERN_LENGTH))).not.toThrow();
   });
+
+  it("memoizes per pattern — the engine reaches this per asset per rule per tick", () => {
+    // Same instance back means no recompile; safe to share because the
+    // compiled RegExp has no /g flag, so .test() carries no lastIndex state.
+    const a = compileWildcard("port4*");
+    expect(compileWildcard("port4*")).toBe(a);
+    expect(a.global).toBe(false);
+    expect(compileWildcard("port5*")).not.toBe(a);
+  });
 });
 
 describe("compilePattern", () => {

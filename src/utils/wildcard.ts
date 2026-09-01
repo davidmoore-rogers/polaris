@@ -38,7 +38,16 @@ export const MAX_PATTERN_LENGTH = 512;
  * Compile a shell-style wildcard ("port4*", "wan?") into an anchored regex.
  * Escapes regex metacharacters so e.g. "port[1]" matches the literal string,
  * not a character class.
+ *
+ * Memoized per pattern: the notification engine's scope evaluation reaches
+ * this per asset per rule per tick, and the down-detection index rebuild does
+ * the same — patterns are stored rule text, so the working set is small and
+ * stable. The compiled RegExp carries no /g flag, so sharing one instance
+ * across callers is stateless. Only successful compiles are cached.
  */
+const compiledWildcards = new Map<string, RegExp>();
+const COMPILED_CACHE_MAX = 1000;
+
 export function compileWildcard(pattern: string): RegExp {
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new AppError(400, "Empty wildcard pattern");
@@ -46,6 +55,8 @@ export function compileWildcard(pattern: string): RegExp {
   if (pattern.length > MAX_PATTERN_LENGTH) {
     throw new AppError(400, `Wildcard pattern exceeds ${MAX_PATTERN_LENGTH} characters`);
   }
+  const hit = compiledWildcards.get(pattern);
+  if (hit) return hit;
   let out = "";
   for (const ch of pattern) {
     if (ch === "*") out += ".*";
@@ -54,7 +65,10 @@ export function compileWildcard(pattern: string): RegExp {
     else out += ch;
   }
   try {
-    return new RegExp("^" + out + "$");
+    const re = new RegExp("^" + out + "$");
+    if (compiledWildcards.size >= COMPILED_CACHE_MAX) compiledWildcards.clear();
+    compiledWildcards.set(pattern, re);
+    return re;
   } catch (err: any) {
     throw new AppError(400, `Invalid wildcard "${pattern}": ${err?.message || "regex compile failed"}`);
   }

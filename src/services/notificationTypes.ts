@@ -1038,10 +1038,11 @@ function compareString(operator: string, haystack: string, needle: string): bool
     case "startsWith": return haystack.startsWith(needle);
     case "endsWith": return haystack.endsWith(needle);
     case WILDCARD_OP: {
-      // Compiled per call rather than cached: the fire-time contact path runs
-      // this over ONE asset, and the preview's fleet pass is operator-triggered.
-      // A bad pattern was already refused at save, so this can only throw on a
-      // row written before the operator was validated — false, not an exception.
+      // compileWildcard memoizes per pattern — this is reached per asset per
+      // rule per engine tick via loadScopeAssets, not just the one-asset
+      // contact path it was written for. A bad pattern was already refused at
+      // save, so this can only throw on a row written before the operator was
+      // validated — false, not an exception.
       try { return compileWildcard(needle).test(haystack); } catch { return false; }
     }
     default: return false;
