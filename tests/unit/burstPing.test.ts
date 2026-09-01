@@ -54,6 +54,29 @@ describe("parseFpingOutput", () => {
     expect(m.size).toBe(1);
   });
 
+  it("parses REAL fping output captured from a live run", () => {
+    // Verbatim from `fping -q -c 3 -p 500 -i 1 -t 1000 -B 1 -r 0` (fping 5.x,
+    // alpine 3.20) against loopback, an unroutable address, an unresolvable
+    // name and IPv6 — the exact flag set runFpingChunk builds. Captured rather
+    // than remembered: every other fixture here is only as good as my memory
+    // of the wording, and this one is evidence.
+    //
+    // Note what is NOT in it: `no-such-host.invalid` was on the command line
+    // and produced no summary line whatsoever. That is the "absent means never
+    // attempted" invariant holding in the real tool, not just in the parser.
+    const real = [
+      "127.0.0.1    : xmt/rcv/%loss = 3/3/0%, min/avg/max = 0.027/0.073/0.160",
+      "10.255.255.1 : xmt/rcv/%loss = 3/0/100%",
+      "::1          : xmt/rcv/%loss = 3/3/0%, min/avg/max = 0.019/0.076/0.191",
+    ].join("\n");
+    const m = parseFpingOutput(real);
+    expect(m.size).toBe(3);
+    expect(m.get("127.0.0.1")).toEqual({ sent: 3, received: 3, avgRttMs: 0.073 });
+    expect(m.get("10.255.255.1")).toEqual({ sent: 3, received: 0, avgRttMs: null });
+    expect(m.get("::1")).toEqual({ sent: 3, received: 3, avgRttMs: 0.076 });
+    expect(m.has("no-such-host.invalid")).toBe(false);
+  });
+
   it("ignores noise lines and an empty run", () => {
     expect(parseFpingOutput("").size).toBe(0);
     expect(parseFpingOutput("fping: can't create socket (must run as root?)").size).toBe(0);
