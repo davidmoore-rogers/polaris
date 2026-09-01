@@ -5250,7 +5250,24 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         }
       }
 
+      // One read screens the whole pass: almost every pair resolves to "not
+      // quarantined", so the per-pair findUnique was ~one round trip per
+      // sighting pair to learn nothing. Pairs that survive the screen still
+      // re-read fresh per pair — a second gate's pair for the SAME asset must
+      // see the targets the first pair's extend just wrote.
+      const quarantinedIds = new Set<string>();
+      try {
+        const quarantined = await prisma.asset.findMany({
+          where: { id: { in: [...new Set(uniquePairs.map((p) => p.assetId))] }, status: "quarantined" },
+          select: { id: true },
+        });
+        for (const a of quarantined) quarantinedIds.add(a.id);
+      } catch (err: any) {
+        syncLog("error", `Auto-quarantine pre-read failed, skipping the pass: ${err.message || "Unknown error"}`);
+      }
+
       for (const pair of uniquePairs) {
+        if (!quarantinedIds.has(pair.assetId)) continue;
         try {
           const asset = await prisma.asset.findUnique({
             where: { id: pair.assetId },
