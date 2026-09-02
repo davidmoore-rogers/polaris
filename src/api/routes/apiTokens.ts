@@ -21,6 +21,7 @@ import {
 } from "../../services/apiTokenService.js";
 import { logEvent } from "./events.js";
 import { requirePermission } from "../middleware/permissions.js";
+import { getPublicApiBaseUrl } from "../../utils/publicUrl.js";
 
 const router = Router();
 
@@ -38,7 +39,9 @@ router.get("/", async (_req, res, next) => {
       listRoleChoices(),
       listQuarantineIntegrations(),
     ]);
-    res.json({ tokens, roles, quarantineIntegrations });
+    // apiBaseUrl: what an external caller should dial — null when
+    // POLARIS_PUBLIC_URL is unset (the tab falls back to the browser origin).
+    res.json({ tokens, roles, quarantineIntegrations, apiBaseUrl: getPublicApiBaseUrl() });
   } catch (err) {
     next(err);
   }

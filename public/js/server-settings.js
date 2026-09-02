@@ -7393,7 +7393,7 @@ async function loadApiTokensTab() {
   try {
     var data = await api.apiTokens.list();
     _quarantineIntegrations = data.quarantineIntegrations || [];
-    renderApiTokensTab(data.tokens || [], data.roles || [], _quarantineIntegrations);
+    renderApiTokensTab(data.tokens || [], data.roles || [], _quarantineIntegrations, data.apiBaseUrl || null);
   } catch (err) {
     container.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b);padding:2rem">' + escapeHtml(err.message || "Failed to load API tokens") + '</p>';
   }
@@ -7410,9 +7410,14 @@ function _integrationStatusNote(intg) {
   return '';
 }
 
-function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
+function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl) {
   var container = document.getElementById("tab-api-tokens");
   if (!container) return;
+
+  // Base URL for external callers: POLARIS_PUBLIC_URL's origin + /api/v1 when
+  // the server knows it, else this browser's own origin as a best-effort hint.
+  var baseUrlIsFallback = !apiBaseUrl;
+  var effectiveBaseUrl = apiBaseUrl || (window.location.origin + "/api/v1");
 
   var integrationById = {};
   (quarantineIntegrations || []).forEach(function (i) { integrationById[i.id] = i; });
@@ -7497,6 +7502,17 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
       '<p style="color:var(--color-text-secondary);margin:0 0 1rem">Bearer tokens for external systems (e.g. SIEM) to call the Polaris API. ' +
         'Each token acts with the permissions of the role it is bound to. ' +
         'The raw token value is shown <strong>once</strong> at creation and cannot be recovered.</p>' +
+      '<div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;margin:0 0 0.35rem">' +
+        '<span class="form-label" style="margin:0">Base API URL</span>' +
+        '<code class="mono" style="background:var(--color-surface);border:1px solid var(--color-border);border-radius:6px;padding:0.3rem 0.6rem;font-size:0.88rem;user-select:all">' + escapeHtml(effectiveBaseUrl) + '</code>' +
+        '<button class="btn btn-sm btn-secondary" id="btn-copy-api-base-url">Copy</button>' +
+      '</div>' +
+      '<p style="color:var(--color-text-secondary);font-size:0.82rem;margin:0 0 1rem">' +
+        'Callers send <code class="mono">Authorization: Bearer &lt;token&gt;</code> against this base, e.g. <code class="mono">' + escapeHtml(effectiveBaseUrl) + '/assets</code>.' +
+        (baseUrlIsFallback
+          ? ' Derived from this browser’s address — <code class="mono">POLARIS_PUBLIC_URL</code> is not set on the server.'
+          : '') +
+      '</p>' +
       tableHtml +
     '</div>' +
     '<div class="settings-section" style="margin-top:1.5rem">' +
@@ -7528,6 +7544,15 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations) {
     '</div>';
 
   document.getElementById("btn-create-api-token").addEventListener("click", createApiToken);
+
+  document.getElementById("btn-copy-api-base-url").addEventListener("click", async function () {
+    try {
+      if (!(await copyTextToClipboard(effectiveBaseUrl))) throw new Error("copy failed");
+      showToast("Base API URL copied");
+    } catch (_) {
+      showToast("Copy failed — select the URL text manually", "error");
+    }
+  });
 
   // Toggle the integration block + admin warning as the role selection changes.
   var roleSelect = document.getElementById("f-token-role");

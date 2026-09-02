@@ -36,6 +36,24 @@ export function getPublicUrlPort(): number | null {
 }
 
 /**
+ * The public API base URL — POLARIS_PUBLIC_URL's origin + `/api/v1`, the
+ * address an external caller (SIEM, NOC kiosk, script) dials with a bearer
+ * token. Origin only: any path segment in POLARIS_PUBLIC_URL is dropped,
+ * because the app is always served at the root behind nginx. Returns null
+ * when the env var is unset or malformed (local dev) — the API Tokens tab
+ * falls back to the browser's own origin in that case.
+ */
+export function getPublicApiBaseUrl(): string | null {
+  const raw = process.env.POLARIS_PUBLIC_URL;
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin + "/api/v1";
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Hostname for nginx `server_name` when rendering the managed proxy config —
  * POLARIS_PUBLIC_URL's hostname, else the documented placeholder. The
  * fallback covers dev boxes / unit tests; production proxy mode requires

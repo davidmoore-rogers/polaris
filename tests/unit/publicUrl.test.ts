@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { getPublicUrlPort, deriveNginxServerName, derivePolarisPort } from "../../src/utils/publicUrl.js";
+import { getPublicUrlPort, getPublicApiBaseUrl, deriveNginxServerName, derivePolarisPort } from "../../src/utils/publicUrl.js";
 
 const savedPublicUrl = process.env.POLARIS_PUBLIC_URL;
 const savedPort = process.env.PORT;
@@ -37,6 +37,22 @@ describe("getPublicUrlPort", () => {
   it("returns null on a malformed URL", () => {
     process.env.POLARIS_PUBLIC_URL = "not a url";
     expect(getPublicUrlPort()).toBeNull();
+  });
+});
+
+describe("getPublicApiBaseUrl", () => {
+  it("returns null when unset or malformed", () => {
+    expect(getPublicApiBaseUrl()).toBeNull();
+    process.env.POLARIS_PUBLIC_URL = "not a url";
+    expect(getPublicApiBaseUrl()).toBeNull();
+  });
+  it("appends /api/v1 to the origin", () => {
+    process.env.POLARIS_PUBLIC_URL = "https://polaris.example.com";
+    expect(getPublicApiBaseUrl()).toBe("https://polaris.example.com/api/v1");
+  });
+  it("keeps an explicit port and drops any path", () => {
+    process.env.POLARIS_PUBLIC_URL = "https://polaris.corp.example:8443/some/base/";
+    expect(getPublicApiBaseUrl()).toBe("https://polaris.corp.example:8443/api/v1");
   });
 });
 
