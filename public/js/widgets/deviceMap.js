@@ -107,7 +107,7 @@
     requiredPermission: { key: "deviceMap", level: "read" },
 
     fetchData: function (config) {
-      return api.map.sites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });
+      return PolarisWidgets.getMapSites(PolarisWidgets.regionNamesForConfig(config)).catch(function () { return []; });
     },
 
     renderInstance: function (el, config, data, ctx) {
@@ -274,7 +274,10 @@
       ro.observe(el);
 
       var siteTimer = setInterval(function () {
-        api.map.sites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
+        // A backgrounded window has nobody watching the map; the shared memo
+        // already collapses concurrent instances into one request.
+        if (document.hidden) return;
+        PolarisWidgets.getMapSites(PolarisWidgets.regionNamesForConfig(config)).then(function (sites) { buildMarkers(sites); }).catch(function () {});
       }, PolarisWidgets.REFRESH.slow);
 
       ctx.onUnmount(function () {

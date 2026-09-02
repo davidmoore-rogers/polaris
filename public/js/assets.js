@@ -3175,8 +3175,35 @@ function _wireBulkBarDropdowns() {
   });
 }
 
-// Bulk type change. No bulk endpoint exists — loop per-asset PUT, same as
-// the legacy "Edit Type & Tags" modal's submit path.
+// Bounded-concurrency fan-out for the bulk paths that have no bulk endpoint
+// (type and state; bulkDelete has one). A strictly serial loop held the button
+// disabled for the whole selection — which spans pages, so realistically
+// hundreds of assets — and at a typical RTT that is tens of seconds of dead
+// UI. Eight in flight cuts the wall time by ~8x without stampeding the server
+// the way an unbounded Promise.all over 500 ids would. Never rejects: each
+// task's outcome is counted, exactly as the per-item try/catch did. Writes are
+// independent per asset, so losing the serial order costs nothing.
+async function _bulkApply(ids, apply, limit) {
+  var next = 0;
+  var successCount = 0;
+  var errorCount = 0;
+  async function worker() {
+    for (;;) {
+      var i = next++;
+      if (i >= ids.length) return;
+      try { await apply(ids[i]); successCount++; }
+      catch (_e) { errorCount++; }
+    }
+  }
+  var workers = [];
+  var lanes = Math.min(limit || 8, ids.length);
+  for (var w = 0; w < lanes; w++) workers.push(worker());
+  await Promise.all(workers);
+  return { successCount: successCount, errorCount: errorCount };
+}
+
+// Bulk type change. No bulk endpoint exists — fan out per-asset PUTs, same
+// call as the legacy "Edit Type & Tags" modal's submit path.
 async function bulkChangeType(nextType) {
   var ids = Array.from(_assetsSelected);
   if (!ids.length || !nextType) return;
@@ -3185,16 +3212,11 @@ async function bulkChangeType(nextType) {
   if (!ok) return;
   var btn = document.getElementById("assets-bulk-type-btn");
   if (btn) btn.disabled = true;
-  var successCount = 0;
-  var errorCount = 0;
-  for (var i = 0; i < ids.length; i++) {
-    try {
-      await api.assets.update(ids[i], { assetType: nextType });
-      successCount++;
-    } catch (_e) {
-      errorCount++;
-    }
-  }
+  var counts = await _bulkApply(ids, function (id) {
+    return api.assets.update(id, { assetType: nextType });
+  });
+  var successCount = counts.successCount;
+  var errorCount = counts.errorCount;
   if (btn) btn.disabled = false;
   if (errorCount === 0) {
     showToast("Changed type to " + label + " on " + successCount + " asset" + (successCount !== 1 ? "s" : ""));
@@ -3216,16 +3238,11 @@ async function bulkChangeState(nextStatus) {
   if (!ok) return;
   var btn = document.getElementById("assets-bulk-state-btn");
   if (btn) btn.disabled = true;
-  var successCount = 0;
-  var errorCount = 0;
-  for (var i = 0; i < ids.length; i++) {
-    try {
-      await api.assets.update(ids[i], { status: nextStatus });
-      successCount++;
-    } catch (_e) {
-      errorCount++;
-    }
-  }
+  var counts = await _bulkApply(ids, function (id) {
+    return api.assets.update(id, { status: nextStatus });
+  });
+  var successCount = counts.successCount;
+  var errorCount = counts.errorCount;
   if (btn) btn.disabled = false;
   if (errorCount === 0) {
     showToast("Changed state to " + label + " on " + successCount + " asset" + (successCount !== 1 ? "s" : ""));

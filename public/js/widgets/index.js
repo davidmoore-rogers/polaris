@@ -212,6 +212,35 @@
     return slot.inflight;
   };
 
+  // Shared /map/sites accessor — same memo + in-flight-dedupe as the two
+  // above. The Device Map and Site Map widgets each called api.map.sites()
+  // raw on their own 60s timer, so a dashboard carrying both (or two copies
+  // of one, which a wallboard commonly does) made that many independent
+  // full-fleet fetches every minute. Keyed on the region list so differently
+  // scoped instances still get their own answer.
+  var _mapSitesCache = {}; // key -> { at, data, inflight }
+  window.PolarisWidgets.getMapSites = function (regions) {
+    var list = Array.isArray(regions) ? regions : (regions ? [regions] : []);
+    var key = JSON.stringify(list.slice().sort());
+    var now = Date.now();
+    var slot = _mapSitesCache[key];
+    if (slot && slot.data && now - slot.at < NOC_TTL_MS) return Promise.resolve(slot.data);
+    if (slot && slot.inflight) return slot.inflight;
+    slot = _mapSitesCache[key] = slot || { at: 0, data: null, inflight: null };
+    slot.inflight = api.map.sites(regions)
+      .then(function (data) {
+        slot.at = Date.now();
+        slot.data = data;
+        slot.inflight = null;
+        return data;
+      })
+      .catch(function (err) {
+        slot.inflight = null;
+        throw err;
+      });
+    return slot.inflight;
+  };
+
   // Extract the NOC filter opts a widget should pass to getNocSummary / its
   // own fetch. Centralized so every widget reads the same config keys.
   window.PolarisWidgets.nocFilterOpts = function (config) {
