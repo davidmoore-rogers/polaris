@@ -1390,6 +1390,17 @@ async function upsertFortigateFirewallAssetSource(
   // backfill (they had no recognized assetTag prefix). Once we've written
   // the proper fortigate-firewall row, drop the phantom manual row keyed on
   // this asset's id so the source list reflects truth.
+  //
+  // This delete is NOT a spent migration cleanup and must stay per-device
+  // (checked 2026-09-02, when an efficiency pass proposed hoisting it into a
+  // one-shot job): `deriveSourcesFromAsset`'s manual fallback is LIVE, and
+  // since the assetTag writes were retired it fires on the Asset.create of
+  // every newly discovered firewall — so the row this clears is minted DURING
+  // the same run, which no pre-run snapshot can predict. Dropping it would
+  // leave a phantom `manual` source on each new gate, outranking nothing but
+  // visibly wrong in the Sources column and in projection provenance. The
+  // vCenter and Arc syncs avoid the row instead, by suppressing the fallback
+  // on their own tags (see rules 3 / 3b there).
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
@@ -1557,6 +1568,9 @@ async function upsertFortinetInfraAssetSource(
     create: { assetId, sourceKind, externalId: serial, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
     update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
   });
+  // Clears the phantom `manual` row the shadow-write mints on a new switch/AP
+  // — live, not a spent migration, and must stay per-device. See the fuller
+  // note on the same delete in upsertFortigateFirewallAssetSource.
   await prisma.assetSource.deleteMany({
     where: { assetId, sourceKind: "manual", externalId: assetId },
   });
