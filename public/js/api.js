@@ -1052,6 +1052,11 @@ const api = {
     // what reveals a trust-proxy misconfiguration before the scope is trusted.
     loginAccessGet:       ()      => request("GET",  "/server-settings/login-access"),
     loginAccessPut:       (body)  => request("PUT",  "/server-settings/login-access", body),
+    // API documentation (/api) source-IP scope. GET also reports the caller's
+    // resolved IP (trust-proxy visibility, same as login-access); PUT answers
+    // { apiDocs, callerAllowed, nginx } — warn on callerAllowed false.
+    apiDocsGet:           ()      => request("GET",  "/server-settings/api-docs"),
+    apiDocsPut:           (body)  => request("PUT",  "/server-settings/api-docs", body),
     // nginx GUI (proxy mode is now the only mode). Six controls + cert rotation.
     proxyGet:             ()      => request("GET",  "/server-settings/proxy"),
     proxyPut:             (body)  => request("PUT",  "/server-settings/proxy", body),

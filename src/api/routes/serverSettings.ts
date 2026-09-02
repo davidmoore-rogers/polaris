@@ -29,6 +29,15 @@ import {
   saveLoginAccessSettings,
   loginSourceAllowed,
 } from "../../services/loginAccessService.js";
+import {
+  getApiDocsSettings,
+  saveApiDocsSettings,
+  docsSourceAllowed,
+} from "../../services/apiDocsAccessService.js";
+import { isProxyMode } from "../../utils/proxyMode.js";
+import { isWrapperAvailable } from "../../services/privilegedSysadmin.js";
+import { getProxyConfig } from "../../services/proxyConfigService.js";
+import { applyProxyConfig, getDriftStatus } from "../../services/nginxApplyService.js";
 import { describeIpScope, type IpScope } from "../../utils/ipScope.js";
 import { normalizeAllowlistCidr } from "../../utils/cidr.js";
 import { requirePermission } from "../middleware/permissions.js";
@@ -1619,6 +1628,91 @@ router.put("/login-access", maintenanceLimiter, requirePermission("serverSetting
       details: { before: before as any, after: updated as any, actorIp: callerIp },
     });
     res.json({ loginAccess: updated });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── API documentation access (source-IP scope) ─────────────────────────────
+//
+// Who may reach the unauthenticated /api docs page (gate mounted in
+// src/app.ts; apiDocsAccessService owns the semantics — RFC1918-only custom
+// entries, loopback always allowed, fails closed). Edited on Server Settings →
+// API Tokens, but the routes live here on the serverSettings mount like the
+// dash and login-access pairs: reads ride the blanket serverSettingsSystem
+// read gate, the PUT is fullwrite-gated because it widens/narrows an
+// unauthenticated surface. The scope has NO "all" — the docs are never
+// offered to public networks.
+
+const ApiDocsSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  ipScope: z.enum(["loopback", "rfc1918", "custom"]).optional(),
+  // CIDR validation + the RFC1918-containment rule live in
+  // saveApiDocsSettings (shared with the parse path).
+  allowedCidrs: z.array(z.string()).max(200).optional(),
+});
+
+router.get("/api-docs", async (req, res, next) => {
+  try {
+    // callerIp for the same reason /login-access returns it: the gate compares
+    // req.ip, which is only the real client when `trust proxy` matches the
+    // deployment's hop count — surfacing the observed value lets an operator
+    // catch a misconfigured TRUST_PROXY before relying on the scope.
+    res.json({ apiDocs: await getApiDocsSettings(), callerIp: req.ip ?? "" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/api-docs", maintenanceLimiter, requirePermission("serverSettingsSystem", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = ApiDocsSettingsSchema.parse(req.body ?? {});
+    const before = await getApiDocsSettings();
+    const updated = await saveApiDocsSettings(input);
+
+    // Warn-only, never a refusal — unlike /login-access's anti-lockout guard,
+    // being outside the DOCS scope is not a lockout (this admin UI stays
+    // reachable), and "loopback only" set from a remote admin session is a
+    // legitimate posture. The UI toasts on false.
+    const callerIp = req.ip ?? "";
+    const callerAllowed = docsSourceAllowed(callerIp, updated);
+
+    // Best-effort nginx sync: the managed proxy config carries a matching
+    // `location = /api` allow block (defense in depth), which would otherwise
+    // lag this Setting until the next apply/update — and a STALE NARROWER
+    // block blocks readers the app gate now allows. Re-apply only when it is
+    // safe and meaningful: proxy mode, wrapper installed, managed mode
+    // adopted, and NO drift (never clobber a hand-edited file over a docs
+    // toggle). Failure never fails the save — the app gate is authoritative
+    // on every install type.
+    let nginx: { attempted: boolean; ok?: boolean; detail?: string } = { attempted: false };
+    if (isProxyMode() && isWrapperAvailable()) {
+      try {
+        const cfg = await getProxyConfig();
+        const drift = await getDriftStatus();
+        if (cfg.managedMode && drift.liveHash !== null && drift.liveHash === drift.expectedHash) {
+          const result = await applyProxyConfig();
+          nginx = { attempted: true, ok: result.ok, detail: result.ok ? undefined : result.wrapperOutput };
+        }
+      } catch (err) {
+        nginx = { attempted: true, ok: false, detail: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    await logEvent({
+      // The widest possible posture is RFC1918+loopback (no "all" exists) and
+      // the surface ships enabled, so nothing here reaches warning level.
+      level: "info",
+      action: "api_docs_settings.updated",
+      resourceType: "setting",
+      resourceName: "apiDocsConfig",
+      actor: req.session?.username,
+      message: updated.enabled
+        ? `API documentation page scoped to ${describeIpScope(updated.ipScope, updated.allowedCidrs)}`
+        : "API documentation page disabled",
+      details: { before: before as any, after: updated as any, actorIp: callerIp },
+    });
+    res.json({ apiDocs: updated, callerAllowed, nginx });
   } catch (err) {
     next(err);
   }

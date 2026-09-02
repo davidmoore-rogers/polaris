@@ -7391,9 +7391,21 @@ async function loadApiTokensTab() {
   _apiTokensLoaded = true;
   container.innerHTML = '<p class="empty-state" style="padding:2rem">Loading…</p>';
   try {
-    var data = await api.apiTokens.list();
+    // The docs-access card must not take the whole tab down with it — a
+    // failed apiDocsGet renders as an error state inside its own card.
+    var results = await Promise.allSettled([api.apiTokens.list(), api.serverSettings.apiDocsGet()]);
+    if (results[0].status === "rejected") throw results[0].reason;
+    var data = results[0].value;
+    var docsData = results[1].status === "fulfilled" ? results[1].value : null;
+    var docsError = results[1].status === "rejected"
+      ? ((results[1].reason && results[1].reason.message) || "Failed to load API documentation access settings")
+      : null;
     _quarantineIntegrations = data.quarantineIntegrations || [];
-    renderApiTokensTab(data.tokens || [], data.roles || [], _quarantineIntegrations, data.apiBaseUrl || null);
+    renderApiTokensTab(data.tokens || [], data.roles || [], _quarantineIntegrations, data.apiBaseUrl || null, {
+      apiDocs: docsData ? docsData.apiDocs : null,
+      callerIp: docsData ? docsData.callerIp : "",
+      error: docsError,
+    });
   } catch (err) {
     container.innerHTML = '<p class="empty-state" style="color:var(--color-danger,#c0392b);padding:2rem">' + escapeHtml(err.message || "Failed to load API tokens") + '</p>';
   }
@@ -7410,9 +7422,10 @@ function _integrationStatusNote(intg) {
   return '';
 }
 
-function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl) {
+function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl, docsAccess) {
   var container = document.getElementById("tab-api-tokens");
   if (!container) return;
+  docsAccess = docsAccess || { apiDocs: null, callerIp: "", error: null };
 
   // Base URL for external callers: POLARIS_PUBLIC_URL's origin + /api/v1 when
   // the server knows it, else this browser's own origin as a best-effort hint.
@@ -7513,6 +7526,8 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl) {
           ? ' Derived from this browser’s address — <code class="mono">POLARIS_PUBLIC_URL</code> is not set on the server.'
           : '') +
       '</p>' +
+      '<p style="margin:0 0 1rem"><a href="/api" target="_blank" rel="noopener">View API documentation →</a> ' +
+        '<span style="color:var(--color-text-secondary);font-size:0.82rem">No login required — reachable only from the networks configured under API Documentation Access below.</span></p>' +
       tableHtml +
     '</div>' +
     '<div class="settings-section" style="margin-top:1.5rem">' +
@@ -7541,9 +7556,11 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl) {
         '</div>' +
         '<div><button class="btn btn-primary" id="btn-create-api-token">Create Token</button></div>' +
       '</div>' +
-    '</div>';
+    '</div>' +
+    _apiDocsCardHtml(docsAccess);
 
   document.getElementById("btn-create-api-token").addEventListener("click", createApiToken);
+  _wireApiDocsCard(docsAccess);
 
   document.getElementById("btn-copy-api-base-url").addEventListener("click", async function () {
     try {
@@ -7572,6 +7589,109 @@ function renderApiTokensTab(tokens, roles, quarantineIntegrations, apiBaseUrl) {
 }
 
 var _apiTokenRolesById = {};
+
+// ─── API Documentation Access card ─────────────────────────────────────────
+// Who may reach the unauthenticated /api docs page. Three postures only —
+// loopback / RFC1918 / custom private subnets — deliberately no "all": the
+// server refuses any custom entry outside RFC1918 space, so the widest this
+// card can open the page is the private network.
+
+function _apiDocsCardHtml(docsAccess) {
+  var head =
+    '<div class="settings-section" style="margin-top:1.5rem">' +
+      '<h4 style="margin:0 0 0.35rem">API Documentation Access</h4>' +
+      '<p style="color:var(--color-text-secondary);font-size:0.82rem;margin:0 0 0.75rem">' +
+        'The documentation at <code class="mono">/api</code> is readable without a login, so which networks can reach it is the whole access control. ' +
+        'Loopback (the Polaris host itself) is always allowed while the page is enabled; only private (RFC1918) networks can be added.</p>';
+  if (docsAccess.error || !docsAccess.apiDocs) {
+    return head +
+      '<p class="empty-state" style="color:var(--color-danger,#c0392b);padding:0.5rem 0">' +
+        escapeHtml(docsAccess.error || "Failed to load API documentation access settings") + '</p>' +
+    '</div>';
+  }
+  var s = docsAccess.apiDocs;
+  var scopeRadio = function (value, label, hint) {
+    return '<label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer;padding:2px 0">' +
+      '<input type="radio" name="docs-ip-scope" value="' + value + '"' + (s.ipScope === value ? ' checked' : '') + ' style="margin-top:3px">' +
+      '<span><strong>' + label + '</strong>' +
+        '<div style="font-size:0.8rem;color:var(--color-text-secondary)">' + hint + '</div></span>' +
+    '</label>';
+  };
+  return head +
+    '<div style="display:grid;gap:0.75rem;max-width:560px">' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer">' +
+        '<input type="checkbox" id="docs-enabled"' + (s.enabled ? ' checked' : '') + '>' +
+        '<span>Serve the API documentation page</span>' +
+      '</label>' +
+      '<div id="docs-scope-block"' + (s.enabled ? '' : ' style="opacity:0.55"') + '>' +
+        '<label class="form-label">Allowed source networks</label>' +
+        scopeRadio("loopback", "Loopback only", "Only the Polaris host itself (127.0.0.0/8, ::1).") +
+        scopeRadio("rfc1918", "RFC1918 private networks + loopback (default)", "Any private source — 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16.") +
+        scopeRadio("custom", "Specified private subnets", "Only the networks listed below (plus loopback, always).") +
+        '<div id="docs-cidrs-block" style="margin-top:0.4rem' + (s.ipScope === "custom" ? '' : ';display:none') + '">' +
+          '<textarea id="docs-allowed-cidrs" class="form-input" rows="3" placeholder="10.20.0.0/16&#10;192.168.5.0/24" spellcheck="false">' +
+            escapeHtml((s.allowedCidrs || []).join("\n")) + '</textarea>' +
+          '<div style="font-size:0.8rem;color:var(--color-text-secondary);margin-top:0.25rem">One IPv4 network per line, CIDR or bare address. ' +
+            '<strong>Must be inside RFC1918 private space</strong> — a public network is refused. Loopback needs no entry.</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="font-size:0.8rem;color:var(--color-text-secondary)">Polaris sees your address as <code class="mono">' + escapeHtml(docsAccess.callerIp || "unknown") + '</code>. ' +
+        'This is Express’ <code class="mono">req.ip</code> under the configured <code class="mono">TRUST_PROXY</code> — if it shows a proxy’s address rather than yours, fix TRUST_PROXY before relying on this scope.</div>' +
+      '<div><button class="btn btn-primary" id="btn-save-api-docs">Save Documentation Access</button></div>' +
+    '</div>' +
+  '</div>';
+}
+
+function _wireApiDocsCard(docsAccess) {
+  var saveBtn = document.getElementById("btn-save-api-docs");
+  if (!saveBtn) return; // error state — nothing to wire
+  saveBtn.addEventListener("click", saveApiDocsAccess);
+  var cidrsBlock = document.getElementById("docs-cidrs-block");
+  document.querySelectorAll('input[name="docs-ip-scope"]').forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      if (cidrsBlock) cidrsBlock.style.display = radio.value === "custom" && radio.checked ? "" : "none";
+    });
+  });
+  var enabledBox = document.getElementById("docs-enabled");
+  var scopeBlock = document.getElementById("docs-scope-block");
+  if (enabledBox && scopeBlock) {
+    enabledBox.addEventListener("change", function () {
+      scopeBlock.style.opacity = enabledBox.checked ? "" : "0.55";
+    });
+  }
+}
+
+async function saveApiDocsAccess() {
+  var enabled = !!(document.getElementById("docs-enabled") || {}).checked;
+  var scopeInput = document.querySelector('input[name="docs-ip-scope"]:checked');
+  var ipScope = scopeInput ? scopeInput.value : "rfc1918";
+  var allowedCidrs = ((document.getElementById("docs-allowed-cidrs") || {}).value || "")
+    .split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+  if (enabled && ipScope === "custom" && allowedCidrs.length === 0) {
+    showToast("Add at least one private network, or pick Loopback only", "error");
+    return;
+  }
+  var btn = document.getElementById("btn-save-api-docs");
+  btn.disabled = true;
+  try {
+    var result = await api.serverSettings.apiDocsPut({ enabled: enabled, ipScope: ipScope, allowedCidrs: allowedCidrs });
+    showToast("API documentation access saved");
+    if (result.callerAllowed === false) {
+      showToast(enabled
+        ? "Note: your current address is outside this scope — the docs page will not load from this machine"
+        : "The docs page is now disabled for everyone, this machine included", "warning");
+    }
+    if (result.nginx && result.nginx.attempted && !result.nginx.ok) {
+      showToast("nginx sync failed — the app-level gate is still enforcing the new scope. See the Web Server tab.", "warning");
+    }
+    _apiTokensLoaded = false;
+    await loadApiTokensTab();
+  } catch (err) {
+    showToast(err.message || "Save failed", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 async function createApiToken() {
   var name = (document.getElementById("f-token-name").value || "").trim();
