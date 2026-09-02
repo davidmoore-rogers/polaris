@@ -1208,6 +1208,37 @@ router.get(
   },
 );
 
+// GET|PUT /api/v1/assets/sighting-settings — the quarantine sighting max-age.
+// MUST stay above GET /:id and PUT /:id (the quarantine-availability rule):
+// these two literals sat BELOW the parameterized routes from the day they
+// shipped, so Express captured them as id="sighting-settings" and both verbs
+// answered 404 "Asset not found" — unreachable until 2026-09-02. Nothing in
+// the UI calls them (the api.js wrappers are unused), so only external API
+// callers ever hit the shadowing; found while authoring /api docs.
+router.get("/sighting-settings", requirePermission("assetsQuarantine", "read"), async (_req, res, next) => {
+  try {
+    res.json(await getSightingSettings());
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.put("/sighting-settings", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
+  try {
+    const Schema = z.object({ sightingMaxAgeDays: z.number().int().min(0).max(3650) });
+    const input = Schema.parse(req.body);
+    await updateSightingSettings(input);
+    logEvent({
+      action: "asset.sighting_settings_updated",
+      actor: requestActor(req),
+      message: `Quarantine sighting max-age set to ${input.sightingMaxAgeDays} day(s)`,
+    });
+    res.json(input);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /api/v1/assets/:id — get single asset (all authenticated users)
 router.get("/:id", requirePermission("assets", "read"), async (req, res, next) => {
   try {
@@ -4362,32 +4393,6 @@ router.delete("/:id", requirePermission("assets", "write"), async (req, res, nex
 });
 
 // ─── Quarantine + sightings ─────────────────────────────────────────────
-
-// GET /api/v1/assets/sighting-settings — current settings
-router.get("/sighting-settings", requirePermission("assetsQuarantine", "read"), async (_req, res, next) => {
-  try {
-    res.json(await getSightingSettings());
-  } catch (err) {
-    next(err);
-  }
-});
-
-// PUT /api/v1/assets/sighting-settings — admin or assets admin
-router.put("/sighting-settings", requirePermission("assetsQuarantine", "write"), async (req, res, next) => {
-  try {
-    const Schema = z.object({ sightingMaxAgeDays: z.number().int().min(0).max(3650) });
-    const input = Schema.parse(req.body);
-    await updateSightingSettings(input);
-    logEvent({
-      action: "asset.sighting_settings_updated",
-      actor: requestActor(req),
-      message: `Quarantine sighting max-age set to ${input.sightingMaxAgeDays} day(s)`,
-    });
-    res.json(input);
-  } catch (err) {
-    next(err);
-  }
-});
 
 // GET /api/v1/assets/:id/sightings — DHCP sighting history (any auth user)
 // Each sighting is decorated with subnet name + VLAN resolved from the stored
