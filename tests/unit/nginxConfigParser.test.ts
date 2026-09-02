@@ -11,7 +11,19 @@ import { parseNginxConfigText } from "../../src/services/nginxConfigParser.js";
 import { renderNginxConfig } from "../../src/services/nginxRenderer.js";
 import { defaultProxyConfig, type ProxyConfig } from "../../src/types/proxyConfig.js";
 
-const ENV = { serverName: "polaris.example.com", polarisPort: 3000, dashPort: 3001 };
+// Baseline apiDocsAllow mirrors the shipped default (enabled, rfc1918 +
+// loopback) so every round-trip below ALSO proves the /api block's allow
+// lines never leak into prometheusAllowIps — the cross-contamination the
+// parser's block-scoped collection exists to prevent.
+const ENV = {
+  serverName: "polaris.example.com",
+  polarisPort: 3000,
+  dashPort: 3001,
+  apiDocsAllow: {
+    enabled: true,
+    allow: ["127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+  },
+};
 
 function cfg(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return { ...defaultProxyConfig(), ...overrides };
@@ -32,6 +44,8 @@ describe("parseNginxConfigText — round-trip from renderer", () => {
       includeSubDomains: true,
       preload: true,
     });
+    // The /api docs block carries five allow lines in this render — none may
+    // reach the Prometheus list (block-scoped collection).
     expect(parsed.prometheusAllowIps).toEqual([]);
   });
 
@@ -84,7 +98,8 @@ describe("parseNginxConfigText — round-trip from renderer", () => {
       ...ENV,
     });
     const { config: parsed } = parseNginxConfigText(contents);
-    // Order may not match — the parser dedupes via Set.
+    // Order may not match — the parser dedupes via Set. The /api block's five
+    // RFC1918/loopback allows are in the same file and must NOT appear here.
     expect(parsed.prometheusAllowIps.sort()).toEqual(["10.0.0.42", "10.0.0.43"]);
   });
 });
@@ -164,7 +179,7 @@ describe("parseNginxConfigText — missing pieces", () => {
   location = /metrics-discovery { proxy_pass http://127.0.0.1:9110/metrics; }
 }`;
     const { drift } = parseNginxConfigText(preDash);
-    expect(drift.some((d) => d.includes("location block count is 5 (expected 8)"))).toBe(true);
+    expect(drift.some((d) => d.includes("location block count is 5 (expected 9)"))).toBe(true);
   });
 
   it("reports drift on a pre-restore-override 7-location config", () => {
@@ -184,7 +199,29 @@ describe("parseNginxConfigText — missing pieces", () => {
   location = /metrics-discovery { proxy_pass http://127.0.0.1:9110/metrics; }
 }`;
     const { drift } = parseNginxConfigText(preRestore);
-    expect(drift.some((d) => d.includes("location block count is 7 (expected 8)"))).toBe(true);
+    expect(drift.some((d) => d.includes("location block count is 7 (expected 9)"))).toBe(true);
+  });
+
+  it("reports drift on a pre-api-docs 8-location config (forces re-adoption after upgrade)", () => {
+    // The generation before the /api docs block: / + restore override + 2 dash
+    // + 4 metrics. Same designed refuse-and-banner path — the operator adopts
+    // so the docs block lands explicitly rather than by silent clobber.
+    const preApiDocs = `server {
+  listen 443 ssl;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  location / { proxy_pass http://127.0.0.1:3000; }
+  location = /api/v1/server-settings/database/restore { proxy_pass http://127.0.0.1:3000; }
+  location = /dash { proxy_pass http://127.0.0.1:3001; }
+  location /dash/ { proxy_pass http://127.0.0.1:3001; }
+  location = /metrics { allow 10.0.0.42; deny all; proxy_pass http://127.0.0.1:3000/metrics; }
+  location = /metrics-monitor-1 { allow 10.0.0.42; deny all; proxy_pass http://127.0.0.1:9101/metrics; }
+  location = /metrics-monitor-2 { allow 10.0.0.42; deny all; proxy_pass http://127.0.0.1:9102/metrics; }
+  location = /metrics-discovery { allow 10.0.0.42; deny all; proxy_pass http://127.0.0.1:9110/metrics; }
+}`;
+    const { config, drift } = parseNginxConfigText(preApiDocs);
+    expect(drift.some((d) => d.includes("location block count is 8 (expected 9)"))).toBe(true);
+    // Single-line location bodies still parse: the Prometheus IP is seeded.
+    expect(config.prometheusAllowIps).toEqual(["10.0.0.42"]);
   });
 
   it("defaults managedMode=false (bootstrap caller decides when to flip it)", () => {

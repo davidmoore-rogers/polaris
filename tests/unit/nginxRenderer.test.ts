@@ -11,7 +11,16 @@ import { describe, expect, it } from "vitest";
 import { renderNginxConfig } from "../../src/services/nginxRenderer.js";
 import { defaultProxyConfig, type ProxyConfig } from "../../src/types/proxyConfig.js";
 
-const ENV = { serverName: "polaris.example.com", polarisPort: 3000, dashPort: 3001 };
+// apiDocsAllow disabled in the baseline fixture so the metrics allow-list
+// assertions stay about the metrics blocks alone; the /api block then renders
+// as `deny all;` only, which is why every deny-count below is 5 (4 metrics +
+// 1 api-docs). The api-docs block's own variants get their own describe.
+const ENV = {
+  serverName: "polaris.example.com",
+  polarisPort: 3000,
+  dashPort: 3001,
+  apiDocsAllow: { enabled: false, allow: [] as string[] },
+};
 
 function cfg(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return { ...defaultProxyConfig(), ...overrides };
@@ -46,8 +55,8 @@ describe("renderNginxConfig — defaults", () => {
   });
 
   it("emits only `deny all;` when prometheusAllowIps is empty", () => {
-    // 4 metrics location blocks × 1 `deny all;` line each = 4.
-    expect((contents.match(/deny all;/g) ?? []).length).toBe(4);
+    // 4 metrics location blocks + the (disabled) api-docs block × 1 each = 5.
+    expect((contents.match(/deny all;/g) ?? []).length).toBe(5);
     expect(contents).not.toMatch(/^\s*allow\b/m);
   });
 
@@ -72,8 +81,9 @@ describe("renderNginxConfig — defaults", () => {
     // Two dash locations × one proxy_pass each.
     expect((contents.match(/proxy_pass http:\/\/127\.0\.0\.1:3001;/g) ?? []).length).toBe(2);
     // Deliberately NO allow/deny inside the dash locations — the IP gate is
-    // app-level (dash process). The only deny lines are the 4 metrics ones.
-    expect((contents.match(/deny all;/g) ?? []).length).toBe(4);
+    // app-level (dash process). The only deny lines are the 4 metrics ones
+    // plus the api-docs block's.
+    expect((contents.match(/deny all;/g) ?? []).length).toBe(5);
   });
 
   it("substitutes a custom dash port", () => {
@@ -209,15 +219,16 @@ describe("renderNginxConfig — Prometheus allow-list", () => {
       config: cfg({ prometheusAllowIps: ["10.0.0.42", "10.0.0.43"] }),
       ...ENV,
     });
-    // 4 location blocks each get both allow lines + deny.
+    // 4 metrics location blocks each get both allow lines + deny; the fifth
+    // deny is the (disabled) api-docs block's.
     expect((contents.match(/allow 10\.0\.0\.42;/g) ?? []).length).toBe(4);
     expect((contents.match(/allow 10\.0\.0\.43;/g) ?? []).length).toBe(4);
-    expect((contents.match(/deny all;/g) ?? []).length).toBe(4);
+    expect((contents.match(/deny all;/g) ?? []).length).toBe(5);
   });
 
   it("renders deny-only when the allow-list is empty", () => {
     const { contents } = renderNginxConfig({ config: cfg({ prometheusAllowIps: [] }), ...ENV });
-    expect((contents.match(/deny all;/g) ?? []).length).toBe(4);
+    expect((contents.match(/deny all;/g) ?? []).length).toBe(5);
     expect(contents).not.toMatch(/^\s*allow\b/m);
   });
 });
@@ -225,6 +236,7 @@ describe("renderNginxConfig — Prometheus allow-list", () => {
 describe("renderNginxConfig — server_name + upstream port substitution", () => {
   it("renders custom server_name", () => {
     const { contents } = renderNginxConfig({
+      ...ENV,
       config: cfg(),
       serverName: "polaris.acme.corp",
       polarisPort: 3000,
@@ -234,6 +246,7 @@ describe("renderNginxConfig — server_name + upstream port substitution", () =>
 
   it("renders custom upstream port for the web routes only", () => {
     const { contents } = renderNginxConfig({
+      ...ENV,
       config: cfg(),
       serverName: "polaris.example.com",
       polarisPort: 8080,
@@ -242,6 +255,52 @@ describe("renderNginxConfig — server_name + upstream port substitution", () =>
     expect(contents).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:8080\/metrics;/);
     // Worker ports stay fixed.
     expect(contents).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:9101\/metrics;/);
+  });
+});
+
+describe("renderNginxConfig — API docs allow block", () => {
+  it("emits the /api location with the given allows + deny, proxying to the app port", () => {
+    const { contents } = renderNginxConfig({
+      ...ENV,
+      config: cfg(),
+      apiDocsAllow: {
+        enabled: true,
+        allow: ["127.0.0.0/8", "::1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
+      },
+    });
+    expect(contents).toMatch(/^\s*location = \/api \{/m);
+    const block = contents.split("location = /api {")[1]!.split("}")[0]!;
+    expect(block).toMatch(/^\s*allow 127\.0\.0\.0\/8;/m);
+    expect(block).toMatch(/^\s*allow ::1;/m);
+    expect(block).toMatch(/^\s*allow 10\.0\.0\.0\/8;/m);
+    expect(block).toMatch(/^\s*allow 172\.16\.0\.0\/12;/m);
+    expect(block).toMatch(/^\s*allow 192\.168\.0\.0\/16;/m);
+    expect(block).toMatch(/^\s*deny all;/m);
+    expect(block).toMatch(/proxy_pass http:\/\/127\.0\.0\.1:3000;/);
+    // The allows land ONLY in the /api block — the metrics blocks keep their
+    // own (empty here) list. 5 allow lines total.
+    expect((contents.match(/^\s*allow\b.*;/gm) ?? []).length).toBe(5);
+  });
+
+  it("renders deny-only when disabled — off means off at the edge too", () => {
+    const { contents } = renderNginxConfig({
+      ...ENV,
+      config: cfg(),
+      apiDocsAllow: { enabled: false, allow: [] },
+    });
+    const block = contents.split("location = /api {")[1]!.split("}")[0]!;
+    expect(block).toMatch(/^\s*deny all;/m);
+    expect(block).not.toMatch(/^\s*allow\b/m);
+  });
+
+  it("changes the hash when the docs scope changes — drift detection must see it", () => {
+    const base = renderNginxConfig({ ...ENV, config: cfg() }).sha256;
+    const widened = renderNginxConfig({
+      ...ENV,
+      config: cfg(),
+      apiDocsAllow: { enabled: true, allow: ["127.0.0.0/8", "::1"] },
+    }).sha256;
+    expect(widened).not.toBe(base);
   });
 });
 

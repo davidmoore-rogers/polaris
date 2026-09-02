@@ -35,6 +35,7 @@ import {
 } from "node:crypto";
 import { renderNginxConfig } from "./nginxRenderer.js";
 import { parseNginxConfig } from "./nginxConfigParser.js";
+import { deriveApiDocsNginxAllow, getApiDocsSettings } from "./apiDocsAccessService.js";
 import {
   runNginxApply,
   stageNginxConfig,
@@ -99,6 +100,7 @@ export async function applyProxyConfig(changes?: Partial<ProxyConfig>): Promise<
     serverName: deriveNginxServerName(),
     polarisPort: derivePolarisPort(),
     dashPort: resolveDashPort(),
+    apiDocsAllow: deriveApiDocsNginxAllow(await getApiDocsSettings()),
   });
 
   stageNginxConfig(contents);

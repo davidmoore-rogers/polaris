@@ -25,6 +25,11 @@ import { getAppVersion } from "../utils/version.js";
 import { deriveNginxServerName, derivePolarisPort } from "../utils/publicUrl.js";
 import { renderNginxConfig } from "./nginxRenderer.js";
 import { getProxyConfig, saveProxyConfig } from "./proxyConfigService.js";
+import {
+  defaultApiDocsSettings,
+  deriveApiDocsNginxAllow,
+  getApiDocsSettings,
+} from "./apiDocsAccessService.js";
 import { resolveDashPort } from "../utils/dashConfig.js";
 import { createBackup } from "./backupService.js";
 
@@ -909,11 +914,19 @@ export async function restartService() {
         if (!cfg.managedMode) {
           logger.info("In-app update: skipping nginx config render — proxyConfig.managedMode is false (operator hasn't adopted)");
         } else {
+          // The /api docs allow-block renders from its own Setting. A read
+          // failure here must not abort the nginx sync mid-update — fall back
+          // to the shipped default (rfc1918+loopback), which the app-level
+          // gate would be enforcing anyway.
+          const apiDocsAllow = await getApiDocsSettings()
+            .then(deriveApiDocsNginxAllow)
+            .catch(() => deriveApiDocsNginxAllow(defaultApiDocsSettings()));
           const rendered = renderNginxConfig({
             config: cfg,
             serverName: deriveNginxServerName(),
             polarisPort: derivePolarisPort(),
             dashPort: resolveDashPort(),
+            apiDocsAllow,
           });
           let driftDetected = false;
           try {

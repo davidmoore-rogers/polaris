@@ -38,6 +38,15 @@ export interface RenderInput {
   polarisPort: number;
   /** Dash wallboard upstream port — derived from POLARIS_DASH_PORT (default 3001). */
   dashPort: number;
+  /**
+   * Allow-lines for the /api docs location block, derived from the
+   * `apiDocsConfig` Setting via apiDocsAccessService.deriveApiDocsNginxAllow —
+   * deliberately NOT part of ProxyConfig, because the docs scope must exist on
+   * installs that have no managed nginx at all (the app gate in src/app.ts is
+   * the authoritative enforcement; this block is defense in depth). Required
+   * so the compiler finds every render call site when the seam changes.
+   */
+  apiDocsAllow: { enabled: boolean; allow: string[] };
 }
 
 export interface RenderResult {
@@ -63,6 +72,7 @@ export function renderNginxConfig(input: RenderInput, templateOverride?: string)
     SSL_EARLY_DATA: renderSslEarlyData(input.config),
     HSTS_HEADER: renderHstsHeader(input.config),
     METRICS_ALLOW_BLOCK: renderMetricsAllowBlock(input.config),
+    API_DOCS_ALLOW_BLOCK: renderApiDocsAllowBlock(input.apiDocsAllow),
   };
 
   let contents = template;
@@ -111,6 +121,14 @@ function renderHstsHeader(cfg: ProxyConfig): string {
 
 function renderMetricsAllowBlock(cfg: ProxyConfig): string {
   const lines = cfg.prometheusAllowIps.map((ip) => `    allow ${ip};`);
+  lines.push("    deny all;");
+  return lines.join("\n") + "\n";
+}
+
+function renderApiDocsAllowBlock(apiDocs: RenderInput["apiDocsAllow"]): string {
+  // Disabled renders as `deny all;` alone — off means off, matching the app
+  // gate's posture (docsSourceAllowed denies everyone, loopback included).
+  const lines = apiDocs.enabled ? apiDocs.allow.map((a) => `    allow ${a};`) : [];
   lines.push("    deny all;");
   return lines.join("\n") + "\n";
 }

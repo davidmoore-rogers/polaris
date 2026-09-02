@@ -10,6 +10,11 @@
  * proxy_pass targets, unrecognized location blocks) is reported in `drift`
  * so the bootstrap can keep managedMode=false and surface the refuse-and-
  * banner UX rather than auto-clobbering operator customizations.
+ *
+ * The /api docs block's allow-list is deliberately NOT parsed: it renders
+ * from the separate `apiDocsConfig` Setting (apiDocsAccessService), which is
+ * app-authoritative and never seeded from nginx — the allow collection below
+ * is scoped to the /metrics* blocks so the two lists can't cross-contaminate.
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -31,7 +36,23 @@ const KNOWN_ADD_HEADERS = new Set(["Alt-Svc", "Strict-Transport-Security"]);
 
 /** Location blocks deploy/nginx/polaris.conf.template ships. Keep in lockstep
  *  with that file — a mismatch reports drift on every managed install. */
-const EXPECTED_LOCATION_BLOCKS = 8;
+const EXPECTED_LOCATION_BLOCKS = 9;
+
+/**
+ * Every `location` block in the (comment-stripped) text, as selector + body.
+ * The shipped template nests no braces inside a location block, so a
+ * non-greedy body match to the first closing brace is exact for our files;
+ * a hand-edited file with nested braces mis-splits, which at worst loses
+ * `allow` lines from the Prometheus seed — and such files carry other drift
+ * markers anyway, so managedMode stays false and nothing is clobbered.
+ */
+function extractLocationBlocks(text: string): Array<{ selector: string; body: string }> {
+  const blocks: Array<{ selector: string; body: string }> = [];
+  for (const m of text.matchAll(/^\s*location\s+([^{]+)\{([^}]*)\}/gms)) {
+    blocks.push({ selector: m[1].trim(), body: m[2] });
+  }
+  return blocks;
+}
 
 export function parseNginxConfig(filePath: string): ParseResult {
   if (!existsSync(filePath)) {
@@ -98,10 +119,17 @@ export function parseNginxConfigText(rawText: string): ParseResult {
     cfg.hsts.enabled = false;
   }
 
-  // Prometheus allow-list — unique IPs from `allow <ip>;` lines.
+  // Prometheus allow-list — unique IPs from `allow <ip>;` lines, collected
+  // ONLY from the /metrics* location blocks. The /api docs block carries its
+  // own allow-list (rendered from the separate apiDocsConfig Setting), and a
+  // file-global scan would merge those RFC1918 ranges into prometheusAllowIps
+  // at bootstrap — silently widening the metrics allow-list.
   const allowIps = new Set<string>();
-  for (const m of text.matchAll(/^\s*allow\s+([^\s;]+)\s*;/gm)) {
-    allowIps.add(m[1]);
+  for (const block of extractLocationBlocks(text)) {
+    if (!block.selector.includes("/metrics")) continue;
+    for (const m of block.body.matchAll(/^\s*allow\s+([^\s;]+)\s*;/gm)) {
+      allowIps.add(m[1]);
+    }
   }
   cfg.prometheusAllowIps = Array.from(allowIps);
 
@@ -118,12 +146,12 @@ export function parseNginxConfigText(rawText: string): ParseResult {
       drift.push(`unknown add_header: ${m[1]}`);
     }
   }
-  // We ship exactly 8 location blocks: / + the database-restore override +
-  // 2 dash + 4 metrics. Anything else is custom. (A file rendered by an older
-  // template reports drift here by design — a pre-dash one has 5, a
-  // pre-restore-override one has 7 — because the refuse-and-banner UX makes
-  // the operator re-adopt so the new blocks land explicitly rather than by
-  // silent clobber.)
+  // We ship exactly 9 location blocks: / + the database-restore override +
+  // 2 dash + 4 metrics + the /api docs block. Anything else is custom. (A
+  // file rendered by an older template reports drift here by design — a
+  // pre-dash one has 5, a pre-restore-override one has 7, a pre-api-docs one
+  // has 8 — because the refuse-and-banner UX makes the operator re-adopt so
+  // the new blocks land explicitly rather than by silent clobber.)
   const locationCount = (text.match(/^\s*location\b/gm) ?? []).length;
   if (locationCount !== EXPECTED_LOCATION_BLOCKS) {
     drift.push(`location block count is ${locationCount} (expected ${EXPECTED_LOCATION_BLOCKS})`);

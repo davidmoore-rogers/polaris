@@ -6,7 +6,10 @@
 #
 # Settings managed by the Polaris UI (Server Settings -> Certificates):
 # the HTTPS listen port, HTTP/3 (QUIC) on/off, TLS protocols allow-list,
-# HSTS, and the Prometheus IP allow-list.
+# HSTS, and the Prometheus IP allow-list. The /api docs allow-block is also
+# rendered, but from a DIFFERENT source: the `apiDocsConfig` Setting (Server
+# Settings -> API Tokens), not proxyConfig — see src/services/
+# apiDocsAccessService.ts.
 #
 # Not managed by the UI: server_name (derived from POLARIS_PUBLIC_URL),
 # cert paths (fixed at /etc/polaris-nginx/cert.pem and key.pem), WebSocket
@@ -133,5 +136,18 @@ server {
 
   location = /metrics-discovery {
 {{METRICS_ALLOW_BLOCK}}    proxy_pass http://127.0.0.1:9110/metrics;
+  }
+
+  # ─── API documentation (/api) ─────────────────────────────────────────
+  # The unauthenticated developer-docs page. Source-IP scoped from Server
+  # Settings → API Tokens (the `apiDocsConfig` Setting — NOT one of the six
+  # proxyConfig directives). The app enforces the same scope itself in
+  # src/app.ts, so this block is defense in depth only: it is re-rendered on
+  # the next apply/update after the setting changes, and the app gate is
+  # authoritative whenever the two disagree. Exact match only — /api/ with a
+  # trailing slash and /api.html fall through to `location /` and are gated
+  # by the app, and /api/v1 API traffic never matches an exact location.
+  location = /api {
+{{API_DOCS_ALLOW_BLOCK}}    proxy_pass http://127.0.0.1:{{POLARIS_PORT}};
   }
 }
