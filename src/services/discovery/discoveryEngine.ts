@@ -8320,21 +8320,32 @@ async function buildAdSyncIndex(
   assetIdsWithAdSource: Set<string>;
   assetIdsWithEntraSource: Set<string>;
   assetById: Map<string, any>;
+  /** Asset id → EVERY source row on it (all kinds) — the projection input.
+   *  The sync mirrors its own upserts into this map so projecting an asset
+   *  costs no per-device re-read (the Entra sync's pattern, same rationale). */
+  sourcesByAssetId: Map<string, EntraSourceEntry[]>;
 }> {
   const assetById = new Map<string, any>();
   for (const a of allAssets) assetById.set(a.id, a);
 
+  // ALL kinds, tight select: ad/entra feed the identity indexes below, and
+  // every kind feeds sourcesByAssetId (a hybrid device projects from its
+  // entra + agent + fortigate rows too).
   const sources = await prisma.assetSource.findMany({
-    where: { sourceKind: { in: ["ad", "entra"] } },
+    select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true, lastSeen: true },
   });
 
   const adSourceByGuid = new Map<string, { source: any; asset: any }>();
   const assetIdBySid = new Map<string, string>();
   const assetIdsWithAdSource = new Set<string>();
   const assetIdsWithEntraSource = new Set<string>();
+  const sourcesByAssetId = new Map<string, EntraSourceEntry[]>();
 
   for (const src of sources) {
     const obs = (src.observed as Record<string, unknown> | null) || {};
+    const entry: EntraSourceEntry = { sourceKind: src.sourceKind, externalId: src.externalId, inferred: src.inferred, observed: obs, lastSeen: src.lastSeen };
+    const list = sourcesByAssetId.get(src.assetId);
+    if (list) list.push(entry); else sourcesByAssetId.set(src.assetId, [entry]);
     if (src.sourceKind === "ad") {
       assetIdsWithAdSource.add(src.assetId);
       const a = assetById.get(src.assetId);
@@ -8351,10 +8362,12 @@ async function buildAdSyncIndex(
     }
   }
 
-  return { adSourceByGuid, assetIdBySid, assetIdsWithAdSource, assetIdsWithEntraSource, assetById };
+  return { adSourceByGuid, assetIdBySid, assetIdsWithAdSource, assetIdsWithEntraSource, assetById, sourcesByAssetId };
 }
 
-async function syncActiveDirectoryDevices(
+// Exported for tests, like syncEntraDevices: the map-fed projection below must
+// stay faithful to the DB rows, and only a real round trip proves it.
+export async function syncActiveDirectoryDevices(
   integrationId: string,
   integrationName: string,
   integrationConfig: Record<string, unknown> | null,
@@ -8376,16 +8389,28 @@ async function syncActiveDirectoryDevices(
     : assetType === "server"    ? serverAddAs
     : null;
 
-  // Load the full asset table and the AssetSource lookup index. The AD-source
-  // index is now built from AssetSource (Phase 2 cutover); hostname-collision
-  // maps still derive from in-memory asset properties below.
-  const allAssets = await prisma.asset.findMany();
+  // Load the asset table (tight select — every column the loop, the material-
+  // field snapshot, the conflict snapshot and buildMonitoredSweep read; the
+  // unprojected load pulled the big JSON blobs for the whole fleet) and the
+  // AssetSource lookup index. The AD-source index is built from AssetSource
+  // (Phase 2 cutover); hostname-collision maps still derive from in-memory
+  // asset properties below.
+  const allAssets = await prisma.asset.findMany({
+    select: {
+      id: true, hostname: true, hostnameOverride: true, assetTag: true, assetType: true, status: true,
+      monitored: true, monitorOverride: true, acquiredAt: true, lastSeen: true,
+      tags: true, discoveredByIntegrationId: true, dnsName: true, ipAddress: true,
+      os: true, osVersion: true, serialNumber: true, manufacturer: true, model: true,
+      learnedLocation: true, learnedAddress: true, notes: true, assignedTo: true, macAddress: true,
+    },
+  });
   const {
     adSourceByGuid,
     assetIdBySid,
     assetIdsWithAdSource,
     assetIdsWithEntraSource,
     assetById,
+    sourcesByAssetId,
   } = await buildAdSyncIndex(allAssets);
 
   // Untagged-collision map: assets with neither an AD nor an Entra source
@@ -8450,28 +8475,28 @@ async function syncActiveDirectoryDevices(
       // learnedLocation, serialNumber, manufacturer, model) come from the
       // projection layer. Order:
       //   1. Upsert AD source first so projection sees fresh AD data
-      //   2. Re-fetch all sources for this asset
-      //   3. Compute projection
+      //   2. Mirror the write into the preloaded source map (the per-device
+      //      re-fetch this replaces was one round trip per computer)
+      //   3. Compute projection from the map
       //   4. Apply projected fields + non-projected logic in a single
       //      Asset.update — no double-write.
+      // The mirror is a plain replace-or-insert: unlike Entra, AD's cascade
+      // can never MOVE a source row between assets (a guid already in the
+      // fleet-wide index resolves to its own asset at step 1), and the
+      // helper carries no cleanup sweeps.
       const now = new Date();
       try {
         await upsertAdAssetSource(existing.id, integrationId, dev, now, lastLogon ?? now);
+        let list = sourcesByAssetId.get(existing.id);
+        if (!list) { list = []; sourcesByAssetId.set(existing.id, list); }
+        const row = list.find((s) => s.sourceKind === "ad" && s.externalId.toLowerCase() === guidKey);
+        const adObserved = buildAdObservedBlob(dev, now);
+        if (row) { row.observed = adObserved; row.inferred = false; row.lastSeen = lastLogon ?? now; }
+        else list.push({ sourceKind: "ad", externalId: guidKey, inferred: false, observed: adObserved, lastSeen: lastLogon ?? now });
       } catch (err: any) {
         syncLog("warning", `Failed to upsert AD AssetSource row for ${displayName || dev.objectGuid}: ${err.message || "Unknown error"}`);
       }
-      const sourceRows = await prisma.assetSource.findMany({
-        where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-      });
-      const { projected } = projectAssetFromSources(
-        sourceRows.map((s) => ({
-          sourceKind: s.sourceKind,
-          inferred: s.inferred,
-          observed: s.observed as Record<string, unknown> | null,
-          lastSeen: s.lastSeen,
-        })),
-      );
+      const { projected } = projectAssetFromSources(sourcesByAssetId.get(existing.id) ?? []);
 
       // Pre-write snapshot for the per-asset discovery audit diff.
       const adBefore = snapshotMaterialAssetFields(existing);
@@ -8676,6 +8701,11 @@ async function syncActiveDirectoryDevices(
       // overwrites it with the rich observed blob the projection just used.
       try {
         await upsertAdAssetSource(newAsset.id, integrationId, dev, now, lastLogon ?? now);
+        // Mirror the new row so a later device in this run that resolves to
+        // this asset (SID match) projects with the AD data present. (The
+        // shadow-write's manual skeleton row is deliberately not mirrored —
+        // it snapshots the same create payload the ad row already carries.)
+        sourcesByAssetId.set(newAsset.id, [{ sourceKind: "ad", externalId: guidKey, inferred: false, observed: adObserved, lastSeen: lastLogon ?? now }]);
       } catch (err: any) {
         syncLog("warning", `Created asset for AD computer ${displayName || dev.objectGuid} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
       }

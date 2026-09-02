@@ -20,7 +20,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { prisma } from "../../src/db.js";
 import { dbDescribe, dbReachable } from "./_helpers.js";
-import { syncEntraDevices } from "../../src/services/discovery/discoveryEngine.js";
+import { syncEntraDevices, syncActiveDirectoryDevices } from "../../src/services/discovery/discoveryEngine.js";
 
 const d = dbDescribe;
 const HOST = "ENTRA-MIRROR-T1";
@@ -132,5 +132,33 @@ d("syncEntraDevices source mirror", () => {
     await syncEntraDevices(integrationId, "entra-mirror-test", {}, { devices: [dev({ sources: ["entra"] })] });
     const rows = (await prisma.assetSource.findMany({ where: { assetId: asset.id } })).filter((s) => s.sourceKind === "entra" || s.sourceKind === "intune");
     expect(rows.map((s) => `${s.sourceKind}|${s.externalId}`)).toEqual([`entra|${NEW_ID}`]);
+  });
+
+  it("AD sync: the map-fed projection matches the refreshed row (same mirror, simpler cascade)", async () => {
+    const GUID = "ad-mirror-guid-1";
+    const asset = await seedAsset([{ sourceKind: "ad", externalId: GUID }]);
+    await prisma.assetSource.updateMany({ where: { externalId: GUID }, data: { observed: { objectSid: "S-1-5-21-1" } } });
+    const r = await syncActiveDirectoryDevices(integrationId, "entra-mirror-test", {}, {
+      devices: [{
+        objectGuid: GUID,
+        objectSid: "S-1-5-21-1",
+        cn: HOST,
+        dnsHostName: `${HOST.toLowerCase()}.corp.example.com`,
+        distinguishedName: `CN=${HOST},OU=Workstations,DC=corp`,
+        operatingSystem: "Windows 10 Pro",
+        operatingSystemVersion: "10.0 (26100)",
+        description: "",
+        disabled: false,
+        ouPath: "OU=Workstations",
+      }],
+    });
+    await prisma.assetSource.deleteMany({ where: { externalId: GUID } }); // cleanup key not in the shared list
+    expect(r.updated.length).toBe(1);
+    const after = await prisma.asset.findUnique({ where: { id: asset.id }, select: { hostname: true, learnedLocation: true, dnsName: true } });
+    // hostname/learnedLocation came through the in-memory map's refreshed ad
+    // row: FQDN preferred for hostname, ouPath as the learned location.
+    expect(after?.hostname).toBe(`${HOST.toLowerCase()}.corp.example.com`);
+    expect(after?.learnedLocation).toBe("OU=Workstations");
+    expect(after?.dnsName).toBe(`${HOST.toLowerCase()}.corp.example.com`);
   });
 });
