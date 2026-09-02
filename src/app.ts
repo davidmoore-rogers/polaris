@@ -27,6 +27,7 @@ import { isProxyMode } from "./utils/proxyMode.js";
 import { UPLOADS_DIR } from "./utils/paths.js";
 import { isAzureSsoConfiguredAsync, getSsoSettings } from "./services/azureAuthService.js";
 import { isLoginSourceAllowed } from "./services/loginAccessService.js";
+import { isApiDocsSourceAllowed } from "./services/apiDocsAccessService.js";
 import { logEvent } from "./services/eventLogService.js";
 import { isOidcEnabled } from "./services/oidcAuthService.js";
 import { isEntraProxyLoginAvailable } from "./services/entraProxyAuthService.js";
@@ -458,6 +459,45 @@ app.use(async (req, res, next) => {
     details: { ip: req.ip, userAgent: req.get("user-agent") || undefined },
   });
   return res.status(401).json({ error: "Invalid username or password" });
+});
+
+// ─── API documentation source-IP gate ───────────────────────────────────
+// GET /api serves developer docs (public/api.html) with NO login — source-IP
+// scope is the only gate (the `apiDocsConfig` Setting, edited on Server
+// Settings → API Tokens; default enabled, RFC1918 + loopback). Three exact
+// paths, because express.static below would otherwise serve public/api.html
+// UNGATED at /api.html — the same interception the login gate above does for
+// /login.html. Deny = socket destroy (the dash/login-page stealth posture: a
+// scanner learns nothing). The gate FAILS CLOSED (isApiDocsSourceAllowed) —
+// this fronts an unauthenticated disclosure surface, so a settings-read blip
+// hides the docs briefly rather than exposing them; the login gate above
+// makes the opposite call for the opposite reason. On managed proxy installs
+// nginx renders a matching `location = /api` allow block, but THIS gate is
+// authoritative on every install type (Windows/NSSM, dev, Docker included).
+// This is an unmounted app.use, so req.path is the full path — /api/v1/*
+// never matches the exact-path Set.
+const API_DOCS_PATHS = new Set(["/api", "/api/", "/api.html"]);
+app.use(async (req, _res, next) => {
+  if (!API_DOCS_PATHS.has(req.path)) return next();
+  if (await isApiDocsSourceAllowed(req.ip ?? "")) return next();
+  try {
+    req.socket?.destroy();
+  } catch {
+    /* connection already torn down */
+  }
+});
+
+// The docs page itself — deliberately NOT in protectedPages (no login), and
+// registered long before the /api no-store middleware + /api/v1 router mounts,
+// which a bare app.get("/api") cannot shadow anyway. Express's non-strict
+// routing also matches "/api/".
+app.get("/api", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  // root + relative name, not one absolute path: sendFile applies its
+  // dotfile denial to EVERY segment of a rootless path, so a checkout under
+  // a dot-directory (a .claude worktree) 404s the file. With root set, only
+  // the name itself is checked — the dashServer.ts dash.html pattern.
+  res.sendFile("api.html", { root: path.resolve(__dirname, "..", "public") });
 });
 
 // HTTP → HTTPS redirect lived here in pre-Phase-4 Node-HTTPS mode. After
