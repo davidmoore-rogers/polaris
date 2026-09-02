@@ -219,7 +219,12 @@ discovery)" for the layout and customization details.
 
 ## API overview
 
-All endpoints live under `/api/v1/`.
+All endpoints live under `/api/v1/`. **Developer documentation for the external API is
+served by Polaris itself at `<polaris-url>/api`** — no login required; reachable from
+loopback/RFC1918 (or operator-listed private subnets) per the access scope on Server
+Settings → API Tokens. It covers authentication, errors, the quarantine (SIEM) flow,
+asset inventory, dashboard/NOC feeds, search, IPAM, and the events audit tail, with
+curl examples against the install's own base URL.
 
 | Resource | Base path |
 |---|---|
@@ -242,7 +247,7 @@ All endpoints live under `/api/v1/`.
 | Dashboard | `/dashboard/summary` |
 | Server Settings | `/server-settings` (incl. MIBs, capacity, backups) |
 
-Authentication is session-based for the UI; long-lived bearer tokens (`polaris_<32-char-base64url>`) are accepted on a small allow-listed surface for external callers. See `CLAUDE.md` for the full endpoint catalog and domain model.
+Authentication is session-based for the UI; external callers use long-lived bearer tokens (`polaris_<32-char-base64url>`, minted on Server Settings → API Tokens), each bound to a Role and passing the same permission gates as a logged-in user. See `<polaris-url>/api` for the developer reference and `ARCHITECTURE.md` for the full internal endpoint catalog and domain model.
 
 ## Integrations
 

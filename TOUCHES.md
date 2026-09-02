@@ -567,7 +567,7 @@ build auto-prune + boot-time auto-build are layered on top.
 - Production updates flow through the in-app updater (Server Settings → Maintenance), not manual redeploy. `deploy/update-linux.sh` / `deploy/update-windows.ps1` are operator-facing fallback scripts (NOT invoked by the updater service — the updater does its own git/npm/migrate/restart pipeline in `src/services/updateService.ts`). Changes to update flow need to land in the updater service AND these scripts in lockstep.
 - Unit-file sync is implemented in TWO places that must stay in lockstep: `restartService()` in `src/services/updateService.ts` (in-app updater) and `sync_unit_files()` in `deploy/update-linux.sh` (manual fallback). When ADDING a new shipped unit file under `deploy/polaris-*.service` or `deploy/polaris.target`, add its path to BOTH lists, or one of the update paths will silently drop the change on existing installs. Phase 3 removed the single-process branch from both — every install is split-role; the Linux script bails if `polaris.target` isn't enabled.
 - Nginx-config sync (proxy-mode only) is also implemented in BOTH places: the `nginxSync` snippet in `restartService()` and `sync_nginx_config()` in `deploy/update-linux.sh`. Same cmp-only-overwrite contract, same `nginx -t` validation, same atomic mv. When changing `deploy/nginx/polaris.conf`, BOTH paths pick it up automatically — but if you add a NEW shipped file under `deploy/nginx/`, add it to BOTH sync helpers explicitly. Operator drop-ins belong outside `deploy/nginx/polaris.conf` (e.g. `/etc/nginx/conf.d/polaris-local.conf`) to survive the sync.
-- **Adding or removing a `location` block in `deploy/nginx/polaris.conf.template` is a two-file change.** `nginxConfigParser`'s `EXPECTED_LOCATION_BLOCKS` must move in lockstep, or the parser reports `location block count is N (expected M)` as drift on every managed install and the GUI refuses to apply until the operator re-adopts. The count has gone 5 → 7 (the `/dash` wallboard pair) → 8 (the database-restore `client_max_body_size` override). `tests/unit/nginxConfigParser.test.ts` asserts the render→parse round trip produces EMPTY drift, which is the guard that catches a missed bump.
+- **Adding or removing a `location` block in `deploy/nginx/polaris.conf.template` is a two-file change.** `nginxConfigParser`'s `EXPECTED_LOCATION_BLOCKS` must move in lockstep, or the parser reports `location block count is N (expected M)` as drift on every managed install and the GUI refuses to apply until the operator re-adopts. The count has gone 5 → 7 (the `/dash` wallboard pair) → 8 (the database-restore `client_max_body_size` override) → 9 (the `location = /api` docs allow block). `tests/unit/nginxConfigParser.test.ts` asserts the render→parse round trip produces EMPTY drift, which is the guard that catches a missed bump. A block carrying its own `allow` lines must also keep the parser's allow collection honest: since the /api block landed, `allow` lines are collected ONLY from `/metrics*` blocks (`extractLocationBlocks`) — a file-global scan would merge any new block's allows into `prometheusAllowIps` at bootstrap. The /api block's allow list renders from the `apiDocsConfig` Setting (`apiDocsAccessService.deriveApiDocsNginxAllow` → `RenderInput.apiDocsAllow`, threaded at BOTH render call sites: `applyProxyConfig` and updateService's restart sync), never from proxyConfig, and is never seeded FROM nginx.
 - **Request-body limits live in the nginx config, not just the app.** nginx defaults `client_max_body_size` to 1m, which is below the app's own ceilings (`express.json` 1mb; per-route multer `fileSize` — 256k device icons, 1m MIBs/certs, 5m branding logo) and silently 413'd them at the edge with an HTML error page. The shipped config sets `client_max_body_size 8m` at the server level; the database-restore route gets its own `location` lifting the limit entirely (`0`) plus `proxy_request_buffering off`, because that route deliberately has no `fileSize` (a restore is a whole-DB `pg_dump`) and streams to disk. **If you raise a multer `fileSize` above 8m, raise the server-level cap too** — otherwise the route silently keeps failing at nginx.
 - The first-run setup wizard is unauthenticated by design; the `.setup-complete` marker is the only thing keeping a re-run from being an attack surface on an already-configured host. Don't add a code path that deletes the marker outside the documented "admin with shell access" recovery flow.
 - **The multi-container `docker-compose.yml` stack is the one install path that auto-generates NO secrets.** It supplies `DATABASE_URL` in `./state/.env`, and a set `DATABASE_URL` is exactly the condition that makes `src/app.ts` boot normally instead of starting the wizard — so the wizard's `SESSION_SECRET` / `HEALTH_TOKEN` / `METRICS_TOKEN` / `POLARIS_SECRET_KEY` generation never runs, and no `deploy/setup-*` script runs either. The single-container / Unraid path DOES reach the wizard and is covered. Anything that makes a generated secret load-bearing must document the compose-side manual step in `docs/INSTALL.md` → Docker.
@@ -4846,9 +4846,9 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **Public API:** `applyProxyConfig`, `rotateCertAndKey`, `preflightCertRotation`, `bootstrapProxyConfig`, `getDriftStatus`
 
-**Cross-service deps:** `nginxRenderer.renderNginxConfig`, `nginxConfigParser.parseNginxConfig`, `privilegedSysadmin` (stage + apply + wrapper-available), `proxyConfigService` (get/save/row-exists), `certInfo` (invalidate + fingerprint).
+**Cross-service deps:** `nginxRenderer.renderNginxConfig`, `nginxConfigParser.parseNginxConfig`, `privilegedSysadmin` (stage + apply + wrapper-available), `proxyConfigService` (get/save/row-exists), `certInfo` (invalidate + fingerprint), `apiDocsAccessService` (`getApiDocsSettings` + `deriveApiDocsNginxAllow` — the /api docs allow block renders from that Setting, not proxyConfig).
 
-**Used by:** `src/api/routes/proxySettings.ts` (apply / rotate-cert), `src/jobs/bootstrapProxyConfig.ts` (startup bootstrap).
+**Used by:** `src/api/routes/proxySettings.ts` (apply / rotate-cert), `src/jobs/bootstrapProxyConfig.ts` (startup bootstrap), `src/api/routes/serverSettings.ts` (`PUT /server-settings/api-docs` best-effort re-apply — guarded on proxy mode + wrapper + managedMode + no drift, never failing the docs-scope save).
 
 **Invariants:**
 - Cert-pair validation is SPKI-only and happens before any graceful-reload attempt; the privileged wrapper owns the atomic rename + `nginx -t` + reload.
@@ -4862,7 +4862,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ## services/nginxConfigParser.ts
 
-**What it owns:** Best-effort regex parse of the six operator-settable directives from a live nginx config; used at bootstrap to seed `proxyConfig` and to detect customization beyond those six (drift markers).
+**What it owns:** Best-effort regex parse of the six operator-settable directives from a live nginx config; used at bootstrap to seed `proxyConfig` and to detect customization beyond those six (drift markers). Deliberately does NOT parse the /api docs block's allow-list — `apiDocsConfig` is app-authoritative and never seeded from nginx.
 
 **Public API:** `parseNginxConfig`, `parseNginxConfigText`
 
@@ -4871,27 +4871,30 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 **Used by:** `src/services/nginxApplyService.ts` (bootstrap + drift status), `tests/unit/nginxConfigParser.test.ts`.
 
 **Invariants:**
-- Whole-line comments are stripped before matching so comment text doesn't trip drift detection; drift reports unknown `proxy_pass` targets, unknown `add_header` keys, or a location-block count ≠ 5.
+- Whole-line comments are stripped before matching so comment text doesn't trip drift detection; drift reports unknown `proxy_pass` targets, unknown `add_header` keys, or a location-block count ≠ `EXPECTED_LOCATION_BLOCKS` (9).
 - Missing file returns defaults with `managedMode=false`; `KNOWN_PROXY_PASS_PATTERNS` + `KNOWN_ADD_HEADERS` define the template's expected schema.
+- `allow` lines are collected ONLY from `/metrics*` location blocks (`extractLocationBlocks`, brace-matched) — a file-global scan would merge the /api block's RFC1918 allows into `prometheusAllowIps` at bootstrap, silently widening the metrics allow-list. `tests/unit/nginxConfigParser.test.ts` pins this.
 
 **When changing this:**
 - Update the KNOWN_* sets in lockstep with the nginx template, and keep regexes tight to avoid false-positive drift.
+- Any new location block carrying its own `allow` lines must keep the metrics-scoped collection honest — see cross-cutting/deployment's location-count rule.
 
 ---
 
 ## services/nginxRenderer.ts
 
-**What it owns:** Renders `proxyConfig` + env-derived values into a complete nginx server config (from `deploy/nginx/polaris.conf.template`), with a deterministic SHA-256 so the updater and apply service can detect drift.
+**What it owns:** Renders `proxyConfig` + env-derived values + the API-docs allow posture into a complete nginx server config (from `deploy/nginx/polaris.conf.template`), with a deterministic SHA-256 so the updater and apply service can detect drift.
 
-**Public API:** `renderNginxConfig`
+**Public API:** `renderNginxConfig`, `RenderInput`
 
-**Cross-service deps:** none (reads the on-disk template at runtime).
+**Cross-service deps:** none (reads the on-disk template at runtime; the `apiDocsAllow` input is COMPUTED BY CALLERS via `apiDocsAccessService.deriveApiDocsNginxAllow` so the renderer stays I/O-free and deterministic).
 
-**Used by:** `src/services/nginxApplyService.ts` (apply + drift status), `tests/unit/nginxRenderer.test.ts`.
+**Used by:** `src/services/nginxApplyService.ts` (apply + drift status), `src/services/updateService.ts` (restart-time re-render), `tests/unit/nginxRenderer.test.ts`.
 
 **Invariants:**
 - Rendered bytes are identical for a given input (deterministic hash — no timestamps/random); CRLF is normalized at read time so Windows checkouts match Linux renders.
 - Placeholders are `{{TOKEN}}` substituted by split/join (never regex); togglable directives are whole-line replacements.
+- `RenderInput.apiDocsAllow` is REQUIRED so the compiler finds every call site — a new render caller that forgets it would ship a template with an unsubstituted `{{API_DOCS_ALLOW_BLOCK}}`. Disabled renders as `deny all;` alone (off means off at the edge too).
 
 **When changing this:**
 - Verify the template path resolves in both `src/` (tsx dev) and `dist/` (tsc prod) layouts; substitution token names must match the template exactly.
@@ -4965,6 +4968,33 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - If you add another credential endpoint, add it to `LOGIN_CREDENTIAL_PATHS` in `src/app.ts` — the gate is an explicit path set, not a prefix, so a new one is unguarded by default.
 - Keep the two refusal shapes: the PAGE is dropped (socket destroy, no response — the dashServer stealth posture), the API returns the SAME generic 401 a wrong password gets. Neither may confirm "wrong network".
 - Coverage: `tests/unit/loginAccessService.test.ts`, `tests/integration/loginAccessGate.test.ts` (both halves + SSO-never-gated), `tests/integration/loginAccessRoutes.test.ts` (anti-lockout guard + audit).
+
+---
+
+## services/apiDocsAccessService.ts
+
+**What it owns:** Persistence + the decision for the source-IP scope over the unauthenticated `/api` developer-docs page — the `apiDocsConfig` Setting row `{ enabled (default TRUE), ipScope ("loopback"|"rfc1918"|"custom", default "rfc1918" — deliberately NO "all"), allowedCidrs }` — with a ~10s TTL in-process cache (loginAccessService pattern), plus the nginx allow-line derivation for the managed proxy config's `location = /api` block.
+
+**Why it exists:** The docs page enumerates the external API surface and requires no login, so which networks can reach it IS the access control. The scope therefore never offers "all", and a custom entry outside RFC1918 space is refused at save AND filtered out on read.
+
+**Public API:** `getApiDocsSettings`, `saveApiDocsSettings`, `invalidateApiDocsSettingsCache`, `defaultApiDocsSettings`, `docsSourceAllowed` (pure), `isApiDocsSourceAllowed` (request path, FAIL-CLOSED), `deriveApiDocsNginxAllow` (pure — the nginx allow lines), `API_DOCS_SETTING_KEY`, `ApiDocsSettings`, `ApiDocsIpScope`
+
+**Cross-service deps:** `src/utils/ipScope.ts` (`ipInScope` — shared with the dash + login gates), `src/utils/cidr.ts` (`isLoopbackIp`, `isRfc1918Cidr`, `normalizeAllowlistCidr`, `RFC1918_RANGES`), `settingsStore`, `AppError`.
+
+**Used by:** `src/app.ts` (the gate middleware over `/api` + `/api/` + `/api.html`, and the `GET /api` handler), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/api-docs`), `src/services/nginxApplyService.ts` + `src/services/updateService.ts` (both render call sites thread `deriveApiDocsNginxAllow(...)` into `RenderInput.apiDocsAllow`).
+
+**Invariants:**
+- `enabled` defaults TRUE with the rfc1918 scope — unlike dash/login-access this surface ships on, because RFC1918+loopback is already private-network-only and the docs are the feature.
+- `isApiDocsSourceAllowed` **FAILS CLOSED** — the deliberate opposite of `isLoginSourceAllowed`: this fronts an unauthenticated disclosure surface, so a settings-read blip hides the docs briefly rather than exposing them. (`docsSourceAllowed` is the pure form and swallows nothing.)
+- Loopback is ALWAYS allowed while enabled (`isLoopbackIp` short-circuit — a scope that locks the host out of its own docs serves nobody); disabled denies everyone, loopback included — off means off, so the toggle can fully retire the surface.
+- Custom entries must pass `normalizeAllowlistCidr` AND `isRfc1918Cidr` — enforced at save (400 naming the entry) and re-applied on read, so a hand-edited Setting row cannot smuggle a public CIDR. The parse also uses a LOCAL scope guard, never `isIpScope` (which would admit "all").
+- `deriveApiDocsNginxAllow` is pure and deterministic (loopback pair first) — it feeds the sha256-deterministic renderer. nginx is defense in depth only; the app gate is authoritative on every install type (Windows/NSSM, dev, Docker have no managed nginx at all).
+- The gate DROPS unauthorized sources (socket destroy — dash/login stealth posture) and covers `/api.html` explicitly, because `express.static` would otherwise serve `public/api.html` around the gate.
+
+**When changing this:**
+- New fields need a default + tolerant parse + merge handling, AND the API-Tokens-tab card (`public/js/server-settings.js` `_apiDocsCardHtml`/`saveApiDocsAccess`) + the `PUT /server-settings/api-docs` Zod schema updated in lockstep.
+- The docs CONTENT lives inline in `public/api.html` (the gated artifact); `public/js/api-docs.js` must stay generic — it is served ungated by static, so nothing endpoint-enumerating may move into it.
+- Coverage: `tests/unit/apiDocsAccessService.test.ts` (RFC1918 rejection, loopback-always, fail-closed, derive arrays, read-side re-filter), `tests/integration/apiDocsGate.test.ts` (three gated paths, off-means-off drop, /api/v1 untouched, route pair).
 
 ---
 

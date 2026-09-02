@@ -870,6 +870,17 @@ card (unchanged).
 > `/etc/nginx/conf.d/polaris.conf` by hand. The manual `deploy/update-linux.sh`
 > path syncs the shipped config regardless of managed mode, so it applies the
 > change either way.
+> **Upgrade note (API documentation page):** the shipped nginx config gained a
+> `location = /api` block (8 → 9 locations) carrying an IP allow-list for the
+> unauthenticated developer-docs page served at `/api`. Same managed-mode
+> mechanics as above. The allow-list renders from the **API Documentation
+> Access** card on Server Settings → API Tokens (loopback / RFC1918 /
+> custom private subnets — public networks are refused), NOT from the nginx
+> Proxy card, and it is defense in depth only: Polaris enforces the same
+> source-IP scope itself, on every install type. Windows/NSSM installs, dev
+> boxes, and the Docker stack have no managed nginx and rely on that app-level
+> gate alone — which is the authoritative layer everywhere, so nothing extra
+> is needed there.
 
 A yellow drift banner reads "nginx config not Polaris-managed yet" until
 you click **Adopt managed mode**. Until then the controls are read-only and

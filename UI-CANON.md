@@ -740,6 +740,8 @@ column of numbers to compare by eye.
 
 **When adding a new one:** copy the shell from `alert-ack.html`, then work through the state list above before writing the happy path — on a page reached by a link, the unhappy states are most of the traffic.
 
+**The reading-page variant:** `public/api.html` (the developer API docs at `/api`) is the same shell philosophy — theme-init.js first, tokens only, robots noindex, no app shell — widened from one card to a sticky-TOC + content column layout for a page someone READS rather than acts on. Two deltas from the task-page rules: it is deliberately NOT in `protectedPages` (no login — its gate is the `apiDocsConfig` source-IP scope enforced in `src/app.ts`, which also intercepts `/api.html` so static can't serve the file around it), and because CSP forbids inline `<script>`, its behavior lives in `public/js/api-docs.js`, which must stay GENERIC — the ungated static mount serves every /js asset, so the sensitive content (the endpoint enumeration) belongs only in the gated HTML.
+
 ---
 
 
