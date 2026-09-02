@@ -797,6 +797,69 @@ function getAlertsFormData() {
         }
       });
 
+      // Duplicate-IP conflicts, the other cause: one device recorded twice.
+      // "Merge into this" keeps the clicked row and absorbs the rest through the
+      // operator merge engine. Destructive and irreversible, so the confirm
+      // NAMES every record that will be deleted rather than counting them, and
+      // points at the asset page's Merge modal for per-field control.
+      body.querySelectorAll("[data-dupip-merge]").forEach(function (el) {
+        var conflictId = el.getAttribute("data-conflict-id");
+        var survivorId = el.getAttribute("data-asset-id");
+        el.addEventListener("click", async function () {
+          var card = el.closest(".conflict-card");
+          var rows = card ? Array.prototype.slice.call(card.querySelectorAll("[data-dupip-merge]")) : [];
+          var others = rows
+            .map(function (b) {
+              return {
+                id: b.getAttribute("data-asset-id"),
+                label: (b.closest("tr") || {}).firstElementChild
+                  ? b.closest("tr").firstElementChild.textContent.trim()
+                  : b.getAttribute("data-asset-id"),
+              };
+            })
+            .filter(function (r) { return r.id && r.id !== survivorId; });
+          if (!others.length) { showToast("Nothing to merge — only one asset on this address", "error"); return; }
+          var survivorLabel = (el.closest("tr") && el.closest("tr").firstElementChild)
+            ? el.closest("tr").firstElementChild.textContent.trim()
+            : survivorId;
+
+          // showConfirm renders with white-space:pre-wrap, so the line breaks
+          // below survive into the dialog.
+          var msg = [
+            'Merge into "' + survivorLabel + '"?',
+            "",
+            "These records will be absorbed and then DELETED:",
+            others.map(function (o) { return "  • " + o.label; }).join("\n"),
+            "",
+            'Their sources, MACs, IP history, sightings and dependency links move to "' +
+              survivorLabel + '"; their monitoring history is permanently lost. ' +
+              "Only do this if they are the same physical device.",
+            "",
+            "For per-field control over which values survive, use Merge on the asset's Sources tab instead.",
+          ].join("\n");
+          var ok = typeof showConfirm === "function" ? await showConfirm(msg) : window.confirm(msg);
+          if (!ok) return;
+
+          el.disabled = true;
+          try {
+            var out = await api.conflicts.merge(conflictId, {
+              survivorAssetId: survivorId,
+              absorbAssetIds: others.map(function (o) { return o.id; }),
+            });
+            showToast(out && out.resolved
+              ? "Merged — duplicate resolved, moved " + ((out && out.movedSources) || 0) + " source(s)"
+              : "Merged — " + ((out && out.remaining) || 0) + " assets still share the address");
+            var scrollTop = body.scrollTop;
+            await loadConflicts(true);
+            body.scrollTop = scrollTop;
+            refreshBadge();
+          } catch (err) {
+            showToast(err.message, "error");
+            el.disabled = false;
+          }
+        });
+      });
+
       // Bind accept/reject/merge buttons
       body.querySelectorAll("[data-conflict-action]").forEach(function (el) {
         el.addEventListener("click", async function () {
@@ -1005,21 +1068,36 @@ function getAlertsFormData() {
               'data-asset-id="' + escapeHtml(m.assetId || "") + '" ' +
               'title="Assign this address to ' + escapeHtml(name) + ' and pin it">Apply</button>' +
           '</td>';
+      // The other cause of a shared address: one device recorded twice. Keeping
+      // THIS row absorbs the others through the same merge engine the asset
+      // page's Merge modal uses.
+      var mergeCell = isResolved
+        ? '<td></td>'
+        : '<td style="white-space:nowrap">' +
+            '<button class="btn btn-secondary btn-sm" data-dupip-merge data-conflict-id="' + c.id + '" ' +
+              'data-asset-id="' + escapeHtml(m.assetId || "") + '" ' +
+              'title="These records are the same device — keep ' + escapeHtml(name) + ' and absorb the other' +
+              (members.length > 2 ? 's' : '') + '">Merge into this</button>' +
+          '</td>';
       return '<tr class="conflict-changed">' +
         '<td class="conflict-field">' + link + '</td>' +
         '<td>' + escapeHtml(m.assetType || "—") + '</td>' +
         '<td>' + escapeHtml(m.status || "—") + (m.monitored ? "" : ' <span style="color:var(--color-text-tertiary);font-size:0.7rem">(unmonitored)</span>') + '</td>' +
         '<td style="font-size:0.75rem">' + claim + '</td>' +
         newIpCell +
+        mergeCell +
         '</tr>';
     }).join("");
 
     var explainer = '<strong class="mono">' + escapeHtml(ip) + '</strong> is recorded on ' +
-      members.length + ' assets that are all in a network-present status. ' +
-      'Enter a new address on the row of whichever asset should move — it is saved as a manual pin ' +
-      '(discovery reporting the same address later releases the pin by itself). ' +
-      '<strong>Reject</strong> dismisses the conflict and keeps both records as they are; ' +
-      'the same pair will not re-raise, a changed one will.';
+      members.length + ' assets that are all in a network-present status. Two devices, or one device ' +
+      'recorded twice — resolve it whichever way it actually is. ' +
+      '<strong>Two devices:</strong> enter a new address on the row of whichever one should move; it is saved ' +
+      'as a manual pin (discovery reporting the same address later releases the pin by itself). ' +
+      '<strong>One device:</strong> use <em>Merge into this</em> on the record to keep — the other' +
+      (members.length > 2 ? 's are' : ' is') + ' absorbed into it and deleted. ' +
+      '<strong>Reject</strong> dismisses the conflict and changes nothing; the same set will not re-raise, ' +
+      'a changed one will.';
 
     var actions = isResolved
       ? resolvedActionsHtml(c)
@@ -1039,6 +1117,7 @@ function getAlertsFormData() {
           '<th>Status</th>' +
           '<th>Address claim</th>' +
           '<th>' + (isResolved ? '' : 'New IP address') + '</th>' +
+          '<th>' + (isResolved ? '' : 'Same device') + '</th>' +
         '</tr></thead>' +
         '<tbody>' + rows + '</tbody>' +
         '</table>' +

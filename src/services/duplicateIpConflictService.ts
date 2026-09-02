@@ -44,14 +44,19 @@
  *   dismiss    — reject (conflictResolutionService). The rejected row is the
  *                dedup marker: the SAME member set never re-raises, a changed
  *                one does.
- *   resolve    — `reassignDuplicateIpAsset` gives ONE member a new address; the
- *                conflict closes as accepted once fewer than two current claims
- *                remain (a three-way collision stays open with the survivors).
+ *   resolve    — TWO verbs, because a duplicate address has two real causes.
+ *                `reassignDuplicateIpAsset` gives ONE member a new address (two
+ *                devices, one of them has to move); `mergeDuplicateIpAssets`
+ *                absorbs members into a survivor through the operator merge
+ *                engine (one device recorded twice, where renumbering either
+ *                row would be wrong). Both close the conflict as accepted once
+ *                fewer than two current claims remain, and both leave a
+ *                three-way collision open on whoever still claims the address.
  *   auto-close — a duplicate that resolves itself (a device decommissioned, a
  *                discovery write moving one row) closes on the next pass.
  *
- * Accept is deliberately unsupported: there is nothing to adopt. The verb is
- * "give one of them a different address".
+ * Accept is deliberately unsupported: there is nothing to adopt. The verbs are
+ * "give one of them a different address" and "these are the same device".
  */
 
 import { prisma } from "../db.js";
@@ -61,6 +66,7 @@ import { logEvent, buildChanges } from "./eventLogService.js";
 import { UNMONITORABLE_STATUSES } from "../utils/assetInvariants.js";
 import { isValidIpAddress } from "../utils/cidr.js";
 import { resolvePendingIpOverrideConflicts } from "./ipOverrideService.js";
+import { mergeAssets } from "./assetMergeService.js";
 
 export const DUPLICATE_IP_COLLISION_REASON = "duplicate-ip";
 
@@ -178,6 +184,37 @@ export function groupCurrentClaims(rows: IpClaimRow[], cutoff: Date): DuplicateI
     groups.push({ ip, members: [...members].sort((a, b) => a.id.localeCompare(b.id)) });
   }
   return groups.sort((a, b) => a.ip.localeCompare(b.ip));
+}
+
+/**
+ * Which members a merge may absorb into `survivorAssetId`. Pure so the refusal
+ * rules are testable without a database: the survivor and every target must be
+ * a member of THIS conflict (nothing may reach an asset the card never showed),
+ * the survivor is silently dropped from the target list rather than attempting
+ * a self-merge, duplicates collapse, and an empty result is refused — the
+ * caller is about to delete rows and "merge nothing" is never what was meant.
+ */
+export function resolveMergeTargets(
+  members: { assetId: string }[],
+  survivorAssetId: string,
+  rawAbsorbIds: string[],
+): string[] {
+  const memberIds = new Set(members.map((m) => m.assetId));
+  if (!memberIds.has(survivorAssetId)) {
+    throw new AppError(400, "The surviving asset is not one of the assets sharing this address");
+  }
+  const absorbIds = [...new Set((rawAbsorbIds || []).filter(Boolean))].filter(
+    (id) => id !== survivorAssetId,
+  );
+  if (absorbIds.length === 0) {
+    throw new AppError(400, "Choose at least one other asset to merge into the survivor");
+  }
+  for (const id of absorbIds) {
+    if (!memberIds.has(id)) {
+      throw new AppError(400, "An asset to merge is not one of the assets sharing this address");
+    }
+  }
+  return absorbIds;
 }
 
 /** Stable identity of a member set — the dedup key behind "already dismissed". */
@@ -575,6 +612,150 @@ export async function reassignDuplicateIpAsset(
     },
   });
   return { ipAddress: ip, newIpAddress: newIp, assetId, resolved: false, remaining };
+}
+
+// ─── Resolution: the two records are one device ───────────────────────────────
+
+export interface MergeDuplicateIpOutcome {
+  ipAddress: string;
+  survivorAssetId: string;
+  absorbedAssetIds: string[];
+  movedSources: number;
+  /** True when the conflict closed (fewer than two current claims remain). */
+  resolved: boolean;
+  /** Members still claiming the address after the merges. */
+  remaining: number;
+}
+
+/**
+ * The other reason two assets share an address: they are ONE device recorded
+ * twice, and renumbering either would be wrong. Absorbs the named members into
+ * the survivor through the operator merge engine (`mergeAssets`) — the same
+ * path the asset page's Merge modal and `acceptAssetConflict`'s ghost absorb
+ * use, so provenance, MACs, IP history, sightings, the agent enrolment,
+ * dependency edges and the monitoring carry all behave identically — then
+ * resolves the conflict.
+ *
+ * Field winners are deliberately NOT accepted here: this surface exists to
+ * clear a duplicate address, and the blank-fill default is what every other
+ * automatic absorb uses. Per-field control lives on the asset's Sources tab,
+ * which is what the card's confirm text points at.
+ *
+ * `Conflict.assetId` is re-pointed at the survivor BEFORE the first merge —
+ * deleting an absorbed asset CASCADES to conflicts pointing at it, which would
+ * otherwise destroy this row mid-operation (and with it the audit trail of how
+ * the duplicate was resolved).
+ */
+export async function mergeDuplicateIpAssets(
+  conflict: { id: string; assetId: string | null; proposedAssetFields: unknown },
+  survivorAssetId: string,
+  rawAbsorbIds: string[],
+  actor?: string,
+): Promise<MergeDuplicateIpOutcome> {
+  const proposed = (conflict.proposedAssetFields || {}) as Record<string, unknown>;
+  if (proposed.collisionReason !== DUPLICATE_IP_COLLISION_REASON) {
+    throw new AppError(400, "This conflict is not a duplicate IP address conflict");
+  }
+  const ip = conflictIpOf(conflict);
+  if (!ip) throw new AppError(500, "Duplicate IP conflict is missing its address");
+
+  const members = conflictMembersOf(conflict);
+  const absorbIds = resolveMergeTargets(members, survivorAssetId, rawAbsorbIds);
+
+  const labelOf = (id: string) =>
+    members.find((m) => m.assetId === id)?.hostname || id;
+  const survivorLabel = labelOf(survivorAssetId);
+
+  // Keep the conflict row alive across the deletes (see the header note).
+  if (conflict.assetId !== survivorAssetId) {
+    await prisma.conflict.update({
+      where: { id: conflict.id },
+      data: { assetId: survivorAssetId },
+    });
+  }
+
+  let movedSources = 0;
+  const absorbed: string[] = [];
+  for (const ghostId of absorbIds) {
+    const ghostLabel = labelOf(ghostId);
+    const result = await mergeAssets({ canonicalId: survivorAssetId, ghostId });
+    movedSources += result.movedSources;
+    absorbed.push(result.absorbedId);
+    logEvent({
+      action: "asset.merged",
+      resourceType: "asset",
+      resourceId: result.survivorId,
+      resourceName: survivorLabel,
+      actor,
+      level: "info",
+      message:
+        `Merged asset ${ghostLabel} into ${survivorLabel} — resolving duplicate address ${ip}; ` +
+        `moved ${result.movedSources} source(s)` +
+        (result.carriedMonitoring ? "; monitoring carried over from the absorbed asset" : "") +
+        (result.movedDependents > 0 ? `; re-pointed ${result.movedDependents} dependent device(s)` : "") +
+        (result.movedDependencyParents > 0 ? `; carried ${result.movedDependencyParents} dependency parent link(s)` : ""),
+      details: {
+        survivorId: result.survivorId,
+        absorbedId: result.absorbedId,
+        duplicateIp: ip,
+        collisionReason: DUPLICATE_IP_COLLISION_REASON,
+        carriedMonitoring: result.carriedMonitoring,
+        monitorFieldsAdopted: result.monitorFieldsAdopted,
+        movedSources: result.movedSources,
+        movedMacs: result.movedMacs,
+        movedIps: result.movedIps,
+        movedIpHistory: result.movedIpHistory,
+        movedSightings: result.movedSightings,
+        movedManagedAgent: result.movedManagedAgent,
+        movedDependencyParents: result.movedDependencyParents,
+        replacedDependencyParents: result.replacedDependencyParents,
+        movedDependents: result.movedDependents,
+        appliedFields: result.appliedFields,
+      },
+    });
+  }
+
+  const group = await evaluateIp(ip);
+  const remaining = group ? group.members.length : 0;
+  if (!group) {
+    await prisma.conflict.update({
+      where: { id: conflict.id },
+      data: { status: "accepted", resolvedBy: actor ?? null, resolvedAt: new Date() },
+    });
+    logEvent({
+      action: "conflict.accepted",
+      resourceType: "asset",
+      resourceId: survivorAssetId,
+      resourceName: ip,
+      actor,
+      message:
+        `Duplicate IP conflict on ${ip} resolved by merge — ${absorbed.length} duplicate record(s) absorbed into "${survivorLabel}"`,
+      details: {
+        collisionReason: DUPLICATE_IP_COLLISION_REASON,
+        ipAddress: ip,
+        survivorAssetId,
+        absorbedAssetIds: absorbed,
+      },
+    });
+    return { ipAddress: ip, survivorAssetId, absorbedAssetIds: absorbed, movedSources, resolved: true, remaining };
+  }
+
+  // A member of a 3+ collision was left standing — keep the conflict open on
+  // whoever still claims the address.
+  const survivors = group.members.map(toStoredMember);
+  await prisma.conflict.update({
+    where: { id: conflict.id },
+    data: {
+      proposedAssetFields: {
+        collisionReason: DUPLICATE_IP_COLLISION_REASON,
+        ipAddress: ip,
+        hostname: group.members[0]?.hostname ?? null,
+        members: survivors,
+      } as any,
+      existingAssetSnapshot: { ipAddress: ip, members: survivors } as any,
+    },
+  });
+  return { ipAddress: ip, survivorAssetId, absorbedAssetIds: absorbed, movedSources, resolved: false, remaining };
 }
 
 /** Audit copy for a dismissal — the resolution engine marks the row itself. */

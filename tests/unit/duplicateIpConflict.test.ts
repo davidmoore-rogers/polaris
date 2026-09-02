@@ -6,6 +6,7 @@ import {
   groupCurrentClaims,
   memberSetKey,
   pickPrimaryMemberId,
+  resolveMergeTargets,
   toStoredMember,
   duplicateIpRejectMessage,
   DUPLICATE_IP_COLLISION_REASON,
@@ -214,6 +215,37 @@ describe("toStoredMember", () => {
     expect(stored.ipLastSeen).toBeNull();
     expect(stored.macAddress).toBeNull();
     expect(stored.pinned).toBe(false);
+  });
+});
+
+describe("resolveMergeTargets", () => {
+  const members = [{ assetId: "a1" }, { assetId: "a2" }, { assetId: "a3" }];
+
+  it("returns the chosen targets", () => {
+    expect(resolveMergeTargets(members, "a1", ["a2"])).toEqual(["a2"]);
+    expect(resolveMergeTargets(members, "a1", ["a2", "a3"])).toEqual(["a2", "a3"]);
+  });
+
+  it("drops the survivor from its own target list instead of self-merging", () => {
+    expect(resolveMergeTargets(members, "a1", ["a1", "a2"])).toEqual(["a2"]);
+  });
+
+  it("collapses duplicates and blanks", () => {
+    expect(resolveMergeTargets(members, "a1", ["a2", "a2", ""])).toEqual(["a2"]);
+  });
+
+  it("refuses a survivor that is not a member of this conflict", () => {
+    expect(() => resolveMergeTargets(members, "outsider", ["a2"])).toThrow(/surviving asset is not one/i);
+  });
+
+  it("refuses a target that is not a member of this conflict", () => {
+    // Nothing may reach an asset the card never showed.
+    expect(() => resolveMergeTargets(members, "a1", ["outsider"])).toThrow(/not one of the assets/i);
+  });
+
+  it("refuses an empty merge — the caller is about to delete rows", () => {
+    expect(() => resolveMergeTargets(members, "a1", [])).toThrow(/at least one other asset/i);
+    expect(() => resolveMergeTargets(members, "a1", ["a1"])).toThrow(/at least one other asset/i);
   });
 });
 

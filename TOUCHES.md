@@ -5107,13 +5107,13 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ## services/duplicateIpConflictService.ts
 
-**What it owns:** The `duplicate-ip` Conflict flavour end to end (business rule 40) — detection, the raise/refresh/auto-close lifecycle, and the reassign-one-member resolution. Sibling of `ipOverrideService` (same JSON-path dedup pattern, same auto-resolution convention), but detection-driven rather than write-driven.
+**What it owns:** The `duplicate-ip` Conflict flavour end to end (business rule 40) — detection, the raise/refresh/auto-close lifecycle, and BOTH resolution verbs (reassign one member to a new address; merge members that are one device recorded twice). Sibling of `ipOverrideService` (same JSON-path dedup pattern, same auto-resolution convention), but detection-driven rather than write-driven.
 
-**Public API:** pure — `claimIsOperatorOwned(row)`, `claimIsCurrent(row, cutoff)`, `distinctDeviceCount(members)`, `groupCurrentClaims(rows, cutoff)`, `memberSetKey(members)`, `pickPrimaryMemberId(members)`, `toStoredMember(row)`, `duplicateIpRejectMessage(conflict)`; DB — `loadDuplicateIpClaims()`, `reconcileDuplicateIpConflicts()` (the job's entry point), `reassignDuplicateIpAsset(conflict, assetId, rawIp, actor)`, `logDuplicateIpDismissal(conflict, actor)`, `logScanFailure(err)`. Constants `DUPLICATE_IP_COLLISION_REASON`, `CLAIM_FRESH_DAYS`.
+**Public API:** pure — `claimIsOperatorOwned(row)`, `claimIsCurrent(row, cutoff)`, `distinctDeviceCount(members)`, `groupCurrentClaims(rows, cutoff)`, `memberSetKey(members)`, `pickPrimaryMemberId(members)`, `resolveMergeTargets(members, survivorId, rawAbsorbIds)`, `toStoredMember(row)`, `duplicateIpRejectMessage(conflict)`; DB — `loadDuplicateIpClaims()`, `reconcileDuplicateIpConflicts()` (the job's entry point), `reassignDuplicateIpAsset(conflict, assetId, rawIp, actor)`, `mergeDuplicateIpAssets(conflict, survivorAssetId, absorbIds, actor)`, `logDuplicateIpDismissal(conflict, actor)`, `logScanFailure(err)`. Constants `DUPLICATE_IP_COLLISION_REASON`, `CLAIM_FRESH_DAYS`.
 
-**Cross-service deps:** `prisma`, `logEvent` + `buildChanges` (eventLogService), `UNMONITORABLE_STATUSES` (utils/assetInvariants), `isValidIpAddress` (utils/cidr), `resolvePendingIpOverrideConflicts` (ipOverrideService).
+**Cross-service deps:** `prisma`, `logEvent` + `buildChanges` (eventLogService), `UNMONITORABLE_STATUSES` (utils/assetInvariants), `isValidIpAddress` (utils/cidr), `resolvePendingIpOverrideConflicts` (ipOverrideService), `mergeAssets` (assetMergeService — the merge verb delegates rather than re-implementing an absorb).
 
-**Used by:** `src/jobs/detectDuplicateIpAssets.ts` (10-min sweep, scheduler role), `src/api/routes/conflicts.ts` (`POST /:id/reassign-ip`), `src/services/conflictResolutionService.ts` (imports `DUPLICATE_IP_COLLISION_REASON` + `logDuplicateIpDismissal` for the accept-refusal and reject branches). Frontend reader: `renderDuplicateIpConflictCard` in `public/js/events.js` + the reason label in `public/js/widgets/conflictQueue.js`.
+**Used by:** `src/jobs/detectDuplicateIpAssets.ts` (10-min sweep, scheduler role), `src/api/routes/conflicts.ts` (`POST /:id/reassign-ip` + the duplicate-IP branch of `POST /:id/merge`), `src/services/conflictResolutionService.ts` (imports `DUPLICATE_IP_COLLISION_REASON` + `logDuplicateIpDismissal` for the accept-refusal and reject branches). Frontend reader: `renderDuplicateIpConflictCard` in `public/js/events.js` + the reason label in `public/js/widgets/conflictQueue.js`.
 
 **Invariants:**
 - ONE pending conflict per ADDRESS (never per pair) — a three-way collision is one row, every claimant in `proposedAssetFields.members[]`.
@@ -5124,11 +5124,15 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Accept is REFUSED for this flavour (`acceptAssetConflict` throws 400) — nothing to adopt.
 - A REJECTED row with the SAME member set suppresses re-raise; a changed set raises again.
 - `reassignDuplicateIpAsset` writes `ipAddress` + `ipOverride` + `ipSource="manual"` in ONE update so the `db.ts` override guard defers, and refuses a target another network-present asset already records (409).
+- `mergeDuplicateIpAssets` re-points `Conflict.assetId` at the survivor BEFORE the first merge — deleting an absorbed asset cascades to conflicts pointing at it, which would destroy this row (and the audit trail) mid-operation.
+- The merge verb takes NO field winners: blank-fill is what every automatic absorb uses, and per-field control lives on the asset Sources tab. It delegates to `mergeAssets` — never a private absorb — and writes one `asset.merged` Event per absorbed row, mirroring the `POST /assets/:id/merge` Event shape.
+- Both resolution verbs close the conflict only when fewer than two CURRENT claims remain; a three-way collision stays open on the survivors.
 - Auto-close convention matches `resolveStaleReservationConflicts` / `ipOverrideService`: `status="rejected"`, `resolvedBy="system:auto-resolved"`.
 - Reconcile is idempotent — a fleet with no duplicates issues zero writes.
 
 **When changing this:**
-- The `proposedAssetFields` shape is read by `renderDuplicateIpConflictCard` (events.js), the `conflictQueue` widget subtitle, and `reassignDuplicateIpAsset`'s member check — change all four together.
+- The `proposedAssetFields` shape is read by `renderDuplicateIpConflictCard` (events.js), the `conflictQueue` widget subtitle, `reassignDuplicateIpAsset`'s member check and `resolveMergeTargets` — change all five together.
+- The card's two action wirings (`[data-dupip-apply]` and `[data-dupip-merge]`) are bound in `loadConflicts` in events.js, not in the renderer — a new action needs both halves.
 - The scan's SQL names raw columns (`assets`, `asset_ip_history`); a rename in `prisma/schema.prisma` needs a matching edit here (it bypasses the Prisma client, and therefore also bypasses the secret-at-rest and override extensions — do not add asset WRITES to it).
 - Adding a status to `UNMONITORABLE_STATUSES` (business rule 10) automatically narrows this sweep — intended, but re-read rule 40(a) before assuming it.
 - Keep the raise Event on `conflict.detected`: the baseline "IP conflict detected" automation subscribes to that action string, and a new action would silently un-alert the feature.

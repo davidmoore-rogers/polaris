@@ -5,12 +5,15 @@
  * resolution engine (accept/reject/merge for both entityType variants,
  * including the ip-override flavour and the ghost-absorb transaction) lives
  * in src/services/conflictResolutionService.ts — see its header for the
- * conflict-variant semantics. The duplicate-IP flavour's own verb
- * (`/:id/reassign-ip`) delegates to src/services/duplicateIpConflictService.ts.
+ * conflict-variant semantics. The duplicate-IP flavour's two verbs delegate to
+ * src/services/duplicateIpConflictService.ts: `/:id/reassign-ip` (move one of
+ * the assets to a different address) and `/:id/merge` (same route as the
+ * per-field asset merge, different body — the records are one device).
  *
  * Access rides the discoveryConflicts permission alone: read = list both
- * entity types, write = resolve both — with ONE exception, `/:id/reassign-ip`,
- * which additionally requires `assets:write` because it edits inventory.
+ * entity types, write = resolve both — with two exceptions, `/:id/reassign-ip`
+ * and `/:id/merge` on a duplicate-IP conflict, which additionally require
+ * `assets:write` because they edit (and, for merge, delete) inventory.
  * (The historical networkadmin↔
  * reservation / assetsadmin↔asset role-NAME partition was dropped 2026-08 —
  * it silently stopped applying when the seeded roles were renamed and never
@@ -29,7 +32,11 @@ import {
   mergeAssetConflict,
   rejectConflict,
 } from "../../services/conflictResolutionService.js";
-import { reassignDuplicateIpAsset } from "../../services/duplicateIpConflictService.js";
+import {
+  reassignDuplicateIpAsset,
+  mergeDuplicateIpAssets,
+  DUPLICATE_IP_COLLISION_REASON,
+} from "../../services/duplicateIpConflictService.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -95,8 +102,13 @@ router.post("/:id/accept", async (req, res, next) => {
   }
 });
 
-// POST /api/v1/conflicts/:id/merge — asset conflicts only; per-field winner
-// selection. Body: { fieldWinners: { hostname: "existing"|"proposed", ... } }.
+// POST /api/v1/conflicts/:id/merge — asset conflicts only. TWO bodies, chosen
+// by the conflict's flavour:
+//   • duplicate-IP  → { survivorAssetId, absorbAssetIds: [...] } — the records
+//     are one device; absorb the duplicates into the survivor via the operator
+//     merge engine. Needs `assets:write` on top of discoveryConflicts:write.
+//   • everything else → per-field winner selection, below.
+// Body: { fieldWinners: { hostname: "existing"|"proposed", ... } }.
 // Fields not present in fieldWinners fall back to the default accept logic
 // (today's behavior — blank-fill for most, always-overwrite for os/osVersion,
 // NetBIOS upgrade for hostname). Resolves the conflict the same way Accept
@@ -109,6 +121,33 @@ router.post("/:id/merge", async (req, res, next) => {
     }
     if (!canResolve(req)) {
       throw new AppError(403, "You do not have permission to resolve this conflict");
+    }
+
+    // Duplicate-IP conflicts share the verb but not the body: there is no
+    // proposed side to pick fields from, so the operator names a SURVIVOR and
+    // the records to absorb into it ("these are one device recorded twice").
+    // Same chained gate as /reassign-ip — it deletes asset rows.
+    const proposedKind = (conflict.proposedAssetFields || {}) as Record<string, unknown>;
+    if (proposedKind.collisionReason === DUPLICATE_IP_COLLISION_REASON) {
+      if (!hasPermission(req, "assets", "write")) {
+        throw new AppError(403, "You do not have permission to merge assets");
+      }
+      const survivorAssetId =
+        typeof req.body?.survivorAssetId === "string" ? req.body.survivorAssetId : "";
+      if (!survivorAssetId) throw new AppError(400, "survivorAssetId is required");
+      const absorbAssetIds = Array.isArray(req.body?.absorbAssetIds)
+        ? req.body.absorbAssetIds.filter((v: unknown): v is string => typeof v === "string")
+        : [];
+
+      const outcome = await mergeDuplicateIpAssets(
+        conflict,
+        survivorAssetId,
+        absorbAssetIds,
+        requestActor(req),
+      );
+
+      res.json({ ok: true, ...outcome });
+      return;
     }
 
     const raw = (req.body && req.body.fieldWinners) || {};
