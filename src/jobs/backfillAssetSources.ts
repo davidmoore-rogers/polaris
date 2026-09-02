@@ -72,6 +72,25 @@ async function backfillAssetSources(): Promise<void> {
       });
       if (rows.length === 0) break;
 
+      // One createMany for the whole page instead of one per derived source.
+      // At 1–3 sources per asset that was 2000–6000 SERIAL round trips on
+      // every boot of a 2000-asset install — all of them no-ops via
+      // skipDuplicates after the first run, which is the shape that made this
+      // the startup job most likely to blow past a minute. Batched, a
+      // steady-state boot costs one read + one absorbed insert per 500 assets,
+      // which is what keeps "safe to re-run on every startup" (see the header)
+      // an honest claim rather than an expensive one.
+      //
+      // Offset pagination below is deliberately left alone: at fleet scale
+      // that is four pages with a max skip of 1500, and moving to a cursor
+      // would change the orderBy — which decides WHICH asset wins a duplicated
+      // (sourceKind, externalId) in the dedupe just below.
+      const pageRows: Array<{
+        assetId: string; sourceKind: string; externalId: string;
+        integrationId: string | null; inferred: boolean; observed: any;
+        syncedAt: Date; firstSeen: Date; lastSeen: Date;
+      }> = [];
+
       for (const row of rows) {
         const snapshot: AssetSnapshot = {
           id: row.id,
@@ -114,35 +133,49 @@ async function backfillAssetSources(): Promise<void> {
           }
           seenSourceKeys.add(key);
 
-          try {
-            // createMany + skipDuplicates: rows that already exist (real
-            // discovery-owned data) are left completely untouched — the
-            // (sourceKind, externalId) unique constraint absorbs the
-            // conflict without a write. Only genuinely missing rows are
-            // bootstrapped from the legacy-tag derivation.
-            const res = await prisma.assetSource.createMany({
-              data: [{
-                assetId: row.id,
-                sourceKind: s.sourceKind,
-                externalId: s.externalId,
-                integrationId: s.integrationId,
-                inferred: s.inferred,
-                observed: s.observed as any,
-                syncedAt: now,
-                firstSeen: seen,
-                lastSeen: seen,
-              }],
-              skipDuplicates: true,
-            });
-            sourcesUpserted += res.count;
-          } catch (err: any) {
-            logger.warn(
-              { err: err?.message, sourceKind: s.sourceKind, externalId: s.externalId, assetId: row.id },
-              "Backfill: failed to create AssetSource row",
-            );
-          }
+          // Accumulated, then written once per page below. createMany +
+          // skipDuplicates keeps this CREATE-ONLY: rows that already exist
+          // (real discovery-owned data) are left completely untouched — the
+          // (sourceKind, externalId) unique constraint absorbs the conflict
+          // without a write, which is the property the 2026-07-14 fortiap
+          // incident in the header depends on.
+          pageRows.push({
+            assetId: row.id,
+            sourceKind: s.sourceKind,
+            externalId: s.externalId,
+            integrationId: s.integrationId,
+            inferred: s.inferred,
+            observed: s.observed as any,
+            syncedAt: now,
+            firstSeen: seen,
+            lastSeen: seen,
+          });
         }
         assetsScanned++;
+      }
+
+      if (pageRows.length > 0) {
+        try {
+          const res = await prisma.assetSource.createMany({ data: pageRows, skipDuplicates: true });
+          sourcesUpserted += res.count;
+        } catch (err: any) {
+          // A batch can only fail systemically (a unique conflict is absorbed
+          // by skipDuplicates), but fall back to per-row inserts so one bad
+          // row costs its own skeleton rather than the whole page's — the
+          // isolation the per-source try/catch used to provide.
+          logger.warn({ err: err?.message, rows: pageRows.length }, "Backfill: page insert failed — retrying row by row");
+          for (const r of pageRows) {
+            try {
+              const one = await prisma.assetSource.createMany({ data: [r], skipDuplicates: true });
+              sourcesUpserted += one.count;
+            } catch (rowErr: any) {
+              logger.warn(
+                { err: rowErr?.message, sourceKind: r.sourceKind, externalId: r.externalId, assetId: r.assetId },
+                "Backfill: failed to create AssetSource row",
+              );
+            }
+          }
+        }
       }
 
       if (rows.length < PAGE_SIZE) break;

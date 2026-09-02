@@ -35,25 +35,45 @@ async function backfillMonitorStatusChangedAt(): Promise<void> {
       });
       if (candidates.length === 0) return;
 
-      let stamped = 0;
+      // ONE query for the newest transition event per candidate, not one per
+      // asset: `distinct` on resourceId with resourceId-then-timestamp-desc
+      // ordering resolves to a DISTINCT ON, so each asset's latest
+      // monitor.status_changed comes back in a single read. The per-asset
+      // findFirst this replaces hit the (large, hourly-pruned) Events table
+      // once per candidate, and the pair of round trips ran again on EVERY
+      // boot for any candidate it couldn't stamp — a candidate stays a
+      // candidate while its column is null, and stamping a value the events
+      // don't support would be worse than leaving it blank.
+      const latestByAsset = new Map<string, { timestamp: Date; details: unknown }>();
+      for (const ev of await prisma.event.findMany({
+        where: { action: "monitor.status_changed", resourceId: { in: candidates.map((c) => c.id) } },
+        orderBy: [{ resourceId: "asc" }, { timestamp: "desc" }],
+        distinct: ["resourceId"],
+        select: { resourceId: true, timestamp: true, details: true },
+      })) {
+        if (ev.resourceId) latestByAsset.set(ev.resourceId, { timestamp: ev.timestamp, details: ev.details });
+      }
+
+      const stamps: Array<{ id: string; at: Date }> = [];
       for (const asset of candidates) {
-        const evt = await prisma.event.findFirst({
-          where: {
-            action: "monitor.status_changed",
-            resourceId: asset.id,
-          },
-          orderBy: { timestamp: "desc" },
-          select: { timestamp: true, details: true },
-        });
+        const evt = latestByAsset.get(asset.id);
         if (!evt) continue;
         const details = evt.details as { nextStatus?: string } | null;
         if (!details || details.nextStatus !== asset.monitorStatus) continue;
-        await prisma.asset.update({
-          where: { id: asset.id },
-          data: { monitorStatusChangedAt: evt.timestamp },
-        });
-        stamped++;
+        stamps.push({ id: asset.id, at: evt.timestamp });
       }
+
+      // Each asset takes its own event's timestamp, so these can't collapse
+      // into an updateMany — chunked transactions instead of N awaited writes.
+      const CHUNK = 200;
+      for (let i = 0; i < stamps.length; i += CHUNK) {
+        await prisma.$transaction(
+          stamps.slice(i, i + CHUNK).map((s) =>
+            prisma.asset.update({ where: { id: s.id }, data: { monitorStatusChangedAt: s.at } }),
+          ),
+        );
+      }
+      const stamped = stamps.length;
 
       if (stamped > 0) {
         logger.info(
