@@ -343,8 +343,40 @@ function scopeWhere(scope: RuleScope, monitoredOnly = false): Prisma.AssetWhereI
  * rather than hiding it) and loadScopeAssetIds' callers — the dimension-value
  * picker and mass pinning, neither of which is about firing.
  */
+/**
+ * Per-TICK memo of resolved scopes, keyed on the scope itself + the monitored
+ * gate. Cleared at the top of every engine pass alongside the asset-detail
+ * cache (`clearAssetDetailCache`) — and ONLY populated while a pass owns it,
+ * so the operator-triggered preview paths that also call loadScopeAssets keep
+ * reading live.
+ *
+ * Every asset-scoped rule re-issued its own fleet read: the seeded baseline
+ * set alone is ~30 rules, most of them `allAssets`, so one 60s tick did dozens
+ * of identical `findMany`s over SCOPE_SELECT — which carries three array
+ * columns (tags, monitoredInterfaces, monitoredIpsecTunnels) per row. Sharing
+ * one snapshot per distinct scope also makes the rules in a pass agree with
+ * each other about the fleet, where before a rule late in the loop could judge
+ * a device on fresher state than an earlier one.
+ */
+const _scopeAssetCache = new Map<string, ScopeAssetRow[]>();
+let _scopeCacheActive = false;
+
+function clearScopeAssetCache(active: boolean): void {
+  _scopeAssetCache.clear();
+  _scopeCacheActive = active;
+}
+
 async function loadScopeAssets(scope: RuleScope, opts?: { monitoredOnly?: boolean }): Promise<ScopeAssetRow[]> {
-  const where = scopeWhere(scope, opts?.monitoredOnly === true);
+  const monitoredOnly = opts?.monitoredOnly === true;
+  const cacheKey = _scopeCacheActive ? JSON.stringify([scope ?? {}, monitoredOnly]) : null;
+  if (cacheKey !== null) {
+    const hit = _scopeAssetCache.get(cacheKey);
+    // Returned as-is, not copied: callers filter and read but never mutate the
+    // rows (the one decoration, decorateRelationLeafHits, is applied below
+    // before the result is cached).
+    if (hit) return hit;
+  }
+  const where = scopeWhere(scope, monitoredOnly);
   if (!where) return [];
   let rows: ScopeAssetRow[] = await prisma.asset.findMany({ where, select: SCOPE_SELECT });
   if (scope.subnetCidrs?.length) {
@@ -362,6 +394,7 @@ async function loadScopeAssets(scope: RuleScope, opts?: { monitoredOnly?: boolea
     await decorateRelationLeafHits(rows, [scope.condition]);
     rows = rows.filter((a) => evaluateScopeCondition(scope.condition!, a));
   }
+  if (cacheKey !== null) _scopeAssetCache.set(cacheKey, rows);
   return rows;
 }
 
@@ -3199,6 +3232,11 @@ export async function evaluateAllNotificationRules(): Promise<void> {
   });
 
   clearAssetDetailCache();
+  // Arm the per-tick scope memo for the duration of this pass only. The
+  // finally below disarms it even if the pass throws — left armed, an
+  // operator's preview between ticks would answer from a stale snapshot.
+  clearScopeAssetCache(true);
+  try {
 
   // Precedence index: which asset_metric/asset_state rules can carve assets out
   // of which (same trigger signature, higher scope specificity). Built once.
@@ -3226,6 +3264,10 @@ export async function evaluateAllNotificationRules(): Promise<void> {
     await runEventRuleTimedClear(rules);
   } catch (err) {
     await logEvent({ action: "notification.engine_error", actor: "system:notification-engine", level: "error", message: "Event-rule timed clear failed", details: { err: (err as Error)?.message } }).catch(() => {});
+  }
+
+  } finally {
+    clearScopeAssetCache(false);
   }
 }
 
