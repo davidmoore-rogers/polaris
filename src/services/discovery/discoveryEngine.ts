@@ -6644,6 +6644,26 @@ function buildIntuneObservedBlob(
   };
 }
 
+/** One AssetSource row as the Entra sync's in-memory mirror carries it — the
+ *  projection input shape plus `externalId`, the row's global identity. */
+interface EntraSourceEntry {
+  sourceKind: string;
+  externalId: string;
+  inferred: boolean;
+  observed: Record<string, unknown> | null;
+  lastSeen: Date | null;
+}
+
+/** Which of upsertEntraIntuneSources' cleanup deletes can actually match a
+ *  row, per the sync's preloaded source map. Every flag was an unconditional
+ *  deleteMany — one to three no-op round trips per device per cycle on a
+ *  fleet where deviceIds essentially never change. */
+interface EntraSourceSweepHints {
+  staleExternalId: boolean;
+  entraAtCurrent: boolean;
+  intuneAtCurrent: boolean;
+}
+
 // Upsert the entra and/or intune AssetSource rows for a discovered device.
 // `dev.sources` drives which rows are written — both for the common hybrid
 // case, just one for entra-only or intune-only devices. After upsert,
@@ -6651,13 +6671,16 @@ function buildIntuneObservedBlob(
 // externalId differs from this device's deviceId (covers the
 // "duplicate-Entra-registration: incoming wins" auto-resolve path, where
 // the asset adopts a new deviceId and the old source rows would otherwise
-// orphan-link the prior identity).
+// orphan-link the prior identity). `sweepHints` (when the caller's source map
+// can prove a delete has nothing to match) skips the no-op deletes; absent
+// hints preserve the unconditional behavior.
 async function upsertEntraIntuneSources(
   assetId: string,
   integrationId: string,
   dev: entraId.DiscoveredEntraDevice,
   syncedAt: Date,
   lastSeen: Date,
+  sweepHints?: EntraSourceSweepHints,
 ): Promise<void> {
   const externalId = dev.deviceId.toLowerCase();
   const wantsEntra = dev.sources?.includes("entra") ?? false;
@@ -6684,13 +6707,15 @@ async function upsertEntraIntuneSources(
   // longer matches this device's deviceId. Prevents orphan rows from a
   // prior deviceId silently re-linking a future discovery to the wrong
   // asset.
-  await prisma.assetSource.deleteMany({
-    where: {
-      assetId,
-      sourceKind: { in: ["entra", "intune"] },
-      externalId: { not: externalId },
-    },
-  });
+  if (sweepHints?.staleExternalId !== false) {
+    await prisma.assetSource.deleteMany({
+      where: {
+        assetId,
+        sourceKind: { in: ["entra", "intune"] },
+        externalId: { not: externalId },
+      },
+    });
+  }
 
   // Phase 3b.1 cutover: drift detection no longer fires on Entra/Intune
   // writes — the syncEntraDevices caller projects from sources and uses
@@ -6704,12 +6729,12 @@ async function upsertEntraIntuneSources(
   // should mean "registered in Entra ID," and an Intune-only device isn't.
   // Same rule in reverse for intune: if the device isn't intune-managed and
   // a stale intune source exists at the current deviceId, drop it.
-  if (!wantsEntra) {
+  if (!wantsEntra && sweepHints?.entraAtCurrent !== false) {
     await prisma.assetSource.deleteMany({
       where: { assetId, sourceKind: "entra", externalId },
     });
   }
-  if (!wantsIntune) {
+  if (!wantsIntune && sweepHints?.intuneAtCurrent !== false) {
     await prisma.assetSource.deleteMany({
       where: { assetId, sourceKind: "intune", externalId },
     });
@@ -6746,12 +6771,27 @@ async function buildEntraSyncIndex(
    * and no longer the right operand.
    */
   directoryActivityByAssetId: Map<string, number>;
+  /**
+   * Asset id → EVERY source row on it (all kinds, not just directory kinds) —
+   * the projection input. The sync keeps this map in step with its own writes
+   * (applyEntraSourcesInMemory) so projecting an asset costs no re-read; the
+   * per-device `assetSource.findMany({ where: { assetId } })` it replaces was
+   * one round trip per device (the syncArcDevices docblock names exactly this).
+   */
+  sourcesByAssetId: Map<string, EntraSourceEntry[]>;
+  /** "kind|externalId" → owning asset id, for entra/intune rows only — the
+   *  row's global identity, so the in-memory mirror can move a row between
+   *  assets the way the DB upsert's `update.assetId` does. */
+  sourceOwnerByKey: Map<string, string>;
 }> {
   const assetById = new Map<string, any>();
   for (const a of allAssets) assetById.set(a.id, a);
 
+  // ALL kinds, tight select: entra/intune/ad feed the identity indexes below,
+  // and every kind feeds sourcesByAssetId (projection reads the full set —
+  // a hybrid device projects from its ad + agent + fortigate rows too).
   const sources = await prisma.assetSource.findMany({
-    where: { sourceKind: { in: ["entra", "intune", "ad"] } },
+    select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true, lastSeen: true },
   });
 
   const assetByEntraDeviceId = new Map<string, any>();
@@ -6760,10 +6800,16 @@ async function buildEntraSyncIndex(
   const assetIdsWithAdSource = new Set<string>();
   const entraDeviceIdByAssetId = new Map<string, string>();
   const directoryActivityByAssetId = new Map<string, number>();
+  const sourcesByAssetId = new Map<string, EntraSourceEntry[]>();
+  const sourceOwnerByKey = new Map<string, string>();
 
   for (const src of sources) {
     const obs = (src.observed as Record<string, unknown> | null) || {};
+    const entry: EntraSourceEntry = { sourceKind: src.sourceKind, externalId: src.externalId, inferred: src.inferred, observed: obs, lastSeen: src.lastSeen };
+    const list = sourcesByAssetId.get(src.assetId);
+    if (list) list.push(entry); else sourcesByAssetId.set(src.assetId, [entry]);
     if (src.sourceKind === "entra" || src.sourceKind === "intune") {
+      sourceOwnerByKey.set(`${src.sourceKind}|${src.externalId.toLowerCase()}`, src.assetId);
       assetIdsWithEntraSource.add(src.assetId);
       const a = assetById.get(src.assetId);
       if (a) assetByEntraDeviceId.set(src.externalId.toLowerCase(), a);
@@ -6788,7 +6834,7 @@ async function buildEntraSyncIndex(
     }
   }
 
-  return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId, directoryActivityByAssetId };
+  return { assetByEntraDeviceId, assetIdBySid, assetIdsWithEntraSource, assetIdsWithAdSource, assetById, entraDeviceIdByAssetId, directoryActivityByAssetId, sourcesByAssetId, sourceOwnerByKey };
 }
 
 /**
@@ -6955,11 +7001,12 @@ function isArcManagedTag(t: string): boolean {
  *
  *   • No macAddressRows hydration. Arc reports no MACs, so the match cascade
  *     never needs them and the whole-table load stays a tight `select`.
- *   • Source rows are preloaded ONCE into sourcesByAssetId instead of the
- *     per-device `assetSource.findMany({ where: { assetId } })` the Entra
- *     sync does inside its loop (that's one round trip per machine), and
- *     writes are flushed in chunked $transactions rather than one update per
- *     machine.
+ *   • Source rows are preloaded ONCE into sourcesByAssetId instead of a
+ *     per-device `assetSource.findMany({ where: { assetId } })` inside the
+ *     loop (one round trip per machine — the Entra sync did this until
+ *     2026-09, when it adopted the same preload via its in-memory mirror),
+ *     and writes are flushed in chunked $transactions rather than one update
+ *     per machine.
  *
  * Match cascade: arc AssetSource by ARM resource id → vmUuid (both endian
  * variants — see swapVmUuidEndianness) → hostname (FQDN then short, NetBIOS-
@@ -7399,7 +7446,10 @@ function buildArcProposedFields(
   };
 }
 
-async function syncEntraDevices(
+// Exported for tests: the in-memory source mirror below must stay
+// byte-faithful to upsertEntraIntuneSources' DB effects, and only a real
+// Postgres round trip can prove that (tests/integration/entraSyncSourceMirror).
+export async function syncEntraDevices(
   integrationId: string,
   integrationName: string,
   integrationConfig: Record<string, unknown> | null,
@@ -7444,7 +7494,74 @@ async function syncEntraDevices(
     assetById,
     entraDeviceIdByAssetId,
     directoryActivityByAssetId,
+    sourcesByAssetId,
+    sourceOwnerByKey,
   } = await buildEntraSyncIndex(allAssets);
+
+  // ── In-memory source mirror ────────────────────────────────────────────────
+  // sourcesByAssetId IS the projection input now: the per-device
+  // `assetSource.findMany({ where: { assetId } })` re-read it replaces was one
+  // round trip per device per cycle (the syncArcDevices docblock names this
+  // exact pattern). So every DB effect upsertEntraIntuneSources has must land
+  // in the map too, in the same order — applyEntraSourcesInMemory mirrors it,
+  // and entraSweepHints (computed from the map BEFORE it is mutated) lets the
+  // helper skip the cleanup deletes that provably match nothing.
+  const sourceListOf = (assetId: string): EntraSourceEntry[] => {
+    let l = sourcesByAssetId.get(assetId);
+    if (!l) { l = []; sourcesByAssetId.set(assetId, l); }
+    return l;
+  };
+  const isDirSource = (s: EntraSourceEntry) => s.sourceKind === "entra" || s.sourceKind === "intune";
+  const entraSweepHints = (assetId: string, dev: entraId.DiscoveredEntraDevice): EntraSourceSweepHints => {
+    const externalId = dev.deviceId.toLowerCase();
+    const list = sourcesByAssetId.get(assetId) ?? [];
+    return {
+      staleExternalId: list.some((s) => isDirSource(s) && s.externalId.toLowerCase() !== externalId),
+      entraAtCurrent: list.some((s) => s.sourceKind === "entra" && s.externalId.toLowerCase() === externalId),
+      intuneAtCurrent: list.some((s) => s.sourceKind === "intune" && s.externalId.toLowerCase() === externalId),
+    };
+  };
+  const applyEntraSourcesInMemory = (assetId: string, dev: entraId.DiscoveredEntraDevice, lastSeenVal: Date): void => {
+    const externalId = dev.deviceId.toLowerCase();
+    const kinds: Array<["entra" | "intune", boolean, (d: entraId.DiscoveredEntraDevice, t: Date) => Record<string, unknown>]> = [
+      ["entra", dev.sources?.includes("entra") ?? false, buildEntraObservedBlob],
+      ["intune", dev.sources?.includes("intune") ?? false, buildIntuneObservedBlob],
+    ];
+    for (const [kind, wants, blob] of kinds) {
+      const key = `${kind}|${externalId}`;
+      const prevOwner = sourceOwnerByKey.get(key);
+      if (wants) {
+        // The DB upsert's `update.assetId` moves the row between assets; the
+        // mirror does the same by dropping it from the previous owner's list.
+        if (prevOwner && prevOwner !== assetId) {
+          const prevList = sourcesByAssetId.get(prevOwner);
+          if (prevList) sourcesByAssetId.set(prevOwner, prevList.filter((s) => !(s.sourceKind === kind && s.externalId.toLowerCase() === externalId)));
+        }
+        const list = sourceListOf(assetId);
+        const row = list.find((s) => s.sourceKind === kind && s.externalId.toLowerCase() === externalId);
+        const observed = blob(dev, now);
+        if (row) { row.observed = observed; row.inferred = false; row.lastSeen = lastSeenVal; }
+        else list.push({ sourceKind: kind, externalId, inferred: false, observed, lastSeen: lastSeenVal });
+        sourceOwnerByKey.set(key, assetId);
+      } else if (prevOwner === assetId) {
+        // The belt-and-suspenders delete at the current externalId.
+        sourcesByAssetId.set(assetId, sourceListOf(assetId).filter((s) => !(s.sourceKind === kind && s.externalId.toLowerCase() === externalId)));
+        sourceOwnerByKey.delete(key);
+      }
+    }
+    // The stale-externalId sweep on this asset.
+    const list = sourceListOf(assetId);
+    const keep = list.filter((s) => !(isDirSource(s) && s.externalId.toLowerCase() !== externalId));
+    if (keep.length !== list.length) {
+      for (const s of list) {
+        if (isDirSource(s) && s.externalId.toLowerCase() !== externalId) {
+          const k = `${s.sourceKind}|${s.externalId.toLowerCase()}`;
+          if (sourceOwnerByKey.get(k) === assetId) sourceOwnerByKey.delete(k);
+        }
+      }
+      sourcesByAssetId.set(assetId, keep);
+    }
+  };
 
   // Untagged-collision map: assets with neither an entra/intune nor an ad
   // source (e.g. FortiGate-discovered, manually created). Duplicate-Entra
@@ -7615,7 +7732,10 @@ async function syncEntraDevices(
       // compute projection, single Asset.update with projected + non-
       // projected fields.
       try {
-        await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now);
+        await upsertEntraIntuneSources(existing.id, integrationId, dev, now, lastSeen ?? now, entraSweepHints(existing.id, dev));
+        // Mirror the write into the preloaded source map — the projection
+        // below reads the map instead of re-fetching this asset's rows.
+        applyEntraSourcesInMemory(existing.id, dev, lastSeen ?? now);
         // Keep the in-memory directory-activity map in step with the source
         // row we just upserted — later dup-resolve comparisons read it.
         const actMs = (lastSeen ?? now).getTime();
@@ -7625,18 +7745,7 @@ async function syncEntraDevices(
       } catch (err: any) {
         syncLog("warning", `Failed to upsert Entra/Intune AssetSource row(s) for ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
       }
-      const sourceRows = await prisma.assetSource.findMany({
-        where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-      });
-      const { projected } = projectAssetFromSources(
-        sourceRows.map((s) => ({
-          sourceKind: s.sourceKind,
-          inferred: s.inferred,
-          observed: s.observed as Record<string, unknown> | null,
-          lastSeen: s.lastSeen,
-        })),
-      );
+      const { projected } = projectAssetFromSources(sourcesByAssetId.get(existing.id) ?? []);
 
       // Update the existing asset (either Entra-sourced, or SID-matched take-over)
       // Directory activity (lastSyncDateTime / approximateLastSignInDateTime)
@@ -7825,22 +7934,12 @@ async function syncEntraDevices(
             // rows so the prior identity can't re-link), then project, then
             // single Asset.update.
             try {
-              await upsertEntraIntuneSources(dupEntra.asset.id, integrationId, dev, now, lastSeen ?? now);
+              await upsertEntraIntuneSources(dupEntra.asset.id, integrationId, dev, now, lastSeen ?? now, entraSweepHints(dupEntra.asset.id, dev));
+              applyEntraSourcesInMemory(dupEntra.asset.id, dev, lastSeen ?? now);
             } catch (err: any) {
               syncLog("warning", `Failed to upsert Entra/Intune AssetSource row(s) during duplicate-resolve for ${dev.displayName || dev.deviceId}: ${err.message || "Unknown error"}`);
             }
-            const dupSourceRows = await prisma.assetSource.findMany({
-              where: { assetId: dupEntra.asset.id },
-              select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-            });
-            const { projected: dupProjected } = projectAssetFromSources(
-              dupSourceRows.map((s) => ({
-                sourceKind: s.sourceKind,
-                inferred: s.inferred,
-                observed: s.observed as Record<string, unknown> | null,
-                lastSeen: s.lastSeen,
-              })),
-            );
+            const { projected: dupProjected } = projectAssetFromSources(sourcesByAssetId.get(dupEntra.asset.id) ?? []);
 
             const preserved = ((dupEntra.asset.tags as string[]) || []).filter((t) => !isEntraManagedTag(t));
             const newTags = [...preserved, ...tags.filter((t) => !preserved.includes(t))];
@@ -7980,7 +8079,12 @@ async function syncEntraDevices(
       // from the assetTag during Asset.create — this overwrites it with
       // the rich observed blobs the projection just used.
       try {
+        // No sweep hints here on purpose: the shadow-write skeleton row this
+        // comment describes was laid down AFTER the sync's source map was
+        // loaded, so the map cannot prove the cleanup deletes are no-ops for
+        // a just-created asset. Unconditional is correct and creates are rare.
         await upsertEntraIntuneSources(newAsset.id, integrationId, dev, now, lastSeen ?? now);
+        applyEntraSourcesInMemory(newAsset.id, dev, lastSeen ?? now);
       } catch (err: any) {
         syncLog("warning", `Created asset for Entra device ${dev.displayName || dev.deviceId} but failed to upsert AssetSource row(s): ${err.message || "Unknown error"}`);
       }
