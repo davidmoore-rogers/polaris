@@ -143,8 +143,18 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
       // sides: a pin that happens to collide with another asset's hostname is
       // operator intent (two genuinely different devices), not a discovery
       // ghost — merging on it would absorb a real device.
-      const dupHosts = await prisma.$queryRaw<{ host: string }[]>`
-        SELECT lower(hostname) AS host
+      // The grouping query hands back the ids it already grouped, so the
+      // hydrating read below is keyed on the primary key.
+      //
+      // It used to return only the hostnames, and the read then matched them
+      // with `OR: hosts.map(h => ({ hostname: { equals: h, mode: "insensitive" }}))`
+      // — up to 2000 OR'd ILIKEs, which no hostname index can serve (the old
+      // comment's "hostname is indexed" is true and irrelevant: `ILIKE`
+      // doesn't use it), so Postgres seq-scanned the table and ran 2000
+      // pattern comparisons per row, 48 times a day, and worst exactly when
+      // the fleet is most duplicated.
+      const dupHosts = await prisma.$queryRaw<{ host: string; ids: string[] }[]>`
+        SELECT lower(hostname) AS host, array_agg(id) AS ids
         FROM assets
         WHERE hostname IS NOT NULL
           AND "hostnameOverride" IS NULL
@@ -154,15 +164,13 @@ async function mergeDuplicateHostnameAssets(): Promise<void> {
       `;
       if (dupHosts.length === 0) return;
 
-      const hosts = dupHosts.map((d) => d.host);
+      const dupIds = dupHosts.flatMap((d) => d.ids);
       const rows: AssetRow[] = await prisma.asset.findMany({
         where: {
-          // Prisma has no "lower() match" filter, so we fetch any case
-          // variant and re-bucket in JS by lower(hostname). Hostname is
-          // indexed; even at fleet scale this is a few hundred rows.
-          OR: hosts.map((h) => ({ hostname: { equals: h, mode: "insensitive" as const } })),
+          id: { in: dupIds },
           // Mirror the SQL exclusion — a pinned asset must be neither ghost
-          // nor canonical.
+          // nor canonical. Redundant with the grouping query's own filter,
+          // kept so the read states its own invariant.
           hostnameOverride: null,
         },
         select: {

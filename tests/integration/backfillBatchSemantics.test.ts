@@ -88,6 +88,48 @@ d("backfill batch semantics", () => {
     expect((rows[0]!.observed as any).status).toBe("connected");
   });
 
+  it("the duplicate-hostname grouping returns its ids as a real array, case-folded", async () => {
+    // mergeDuplicateHostnameAssets replaced a 2000-clause OR of
+    // case-insensitive equals (which no hostname index can serve) with this
+    // grouping query handing back the ids it already grouped. The whole job
+    // hinges on Prisma mapping array_agg(id) to a string[]: if it came back
+    // as anything else the flatMap would yield garbage ids, the keyed read
+    // would match nothing, and the job would silently stop merging. Prove
+    // the shape, and prove the case-folding that makes it find duplicates
+    // differing only in case.
+    const a = await prisma.asset.create({ data: { hostname: `${TAG}-DUP`, assetType: "server", status: "active" } });
+    const b = await prisma.asset.create({ data: { hostname: `${TAG}-dup`, assetType: "server", status: "active" } });
+    // A pinned hostname must be excluded on both sides — an operator pin that
+    // collides is intent, not a discovery ghost.
+    await prisma.asset.create({
+      data: { hostname: `${TAG}-dup`, hostnameOverride: `${TAG}-dup`, assetType: "server", status: "active" },
+    });
+    // And a singleton must not be grouped at all.
+    await prisma.asset.create({ data: { hostname: `${TAG}-solo`, assetType: "server", status: "active" } });
+
+    const rows = await prisma.$queryRaw<{ host: string; ids: string[] }[]>`
+      SELECT lower(hostname) AS host, array_agg(id) AS ids
+      FROM assets
+      WHERE hostname IS NOT NULL
+        AND "hostnameOverride" IS NULL
+        AND hostname ILIKE ${`${TAG}%`}
+      GROUP BY lower(hostname)
+      HAVING count(*) > 1
+      LIMIT 2000
+    `;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.host).toBe(`${TAG}-dup`.toLowerCase());
+    expect(Array.isArray(rows[0]!.ids)).toBe(true);
+    expect([...rows[0]!.ids].sort()).toEqual([a.id, b.id].sort());
+    // The ids are usable as-is in the keyed read the job then issues.
+    const hydrated = await prisma.asset.findMany({
+      where: { id: { in: rows.flatMap((r) => r.ids) }, hostnameOverride: null },
+      select: { id: true },
+    });
+    expect(hydrated).toHaveLength(2);
+  });
+
   it("distinct on resourceId returns each asset's NEWEST status_changed event in one query", async () => {
     const a1 = await prisma.asset.create({ data: { hostname: `${TAG}-b`, assetType: "server", status: "active" } });
     const a2 = await prisma.asset.create({ data: { hostname: `${TAG}-c`, assetType: "server", status: "active" } });

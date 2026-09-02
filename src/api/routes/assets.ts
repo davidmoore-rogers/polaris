@@ -4112,19 +4112,31 @@ router.post("/oui-lookup", requirePermission("assets", "write"), async (req, res
     let failed = 0;
     const results: Array<{ id: string; mac: string; manufacturer: string }> = [];
 
+    // Resolve first (lookupOui / lookupOuiOverride are in-memory), then write
+    // GROUPED: manufacturer+model is low-cardinality by nature — an OUI names
+    // a vendor, and a fleet has tens of vendors, not thousands — so the
+    // per-asset update this replaces meant ~1000 statements to write ~50
+    // distinct values over an unbounded, unpaginated candidate set. The
+    // discovery engine already does the batched form of this exact operation
+    // (batchSettled over assetsNeedingOui).
+    const byVendor = new Map<string, { data: { manufacturer: string; model?: string }; ids: string[] }>();
     for (const asset of assets) {
       if (!asset.macAddress) continue;
       const vendor = await lookupOui(asset.macAddress);
-      if (vendor) {
-        const override = await lookupOuiOverride(asset.macAddress);
-        const data: { manufacturer: string; model?: string } = { manufacturer: vendor };
-        if (override?.device) data.model = override.device;
-        await prisma.asset.update({ where: { id: asset.id }, data });
-        results.push({ id: asset.id, mac: asset.macAddress, manufacturer: vendor });
-        resolved++;
-      } else {
-        failed++;
-      }
+      if (!vendor) { failed++; continue; }
+      const override = await lookupOuiOverride(asset.macAddress);
+      const data: { manufacturer: string; model?: string } = { manufacturer: vendor };
+      if (override?.device) data.model = override.device;
+      const key = JSON.stringify([vendor, data.model ?? ""]);
+      const slot = byVendor.get(key);
+      if (slot) slot.ids.push(asset.id);
+      else byVendor.set(key, { data, ids: [asset.id] });
+      results.push({ id: asset.id, mac: asset.macAddress, manufacturer: vendor });
+      resolved++;
+    }
+
+    for (const { data, ids } of byVendor.values()) {
+      await prisma.asset.updateMany({ where: { id: { in: ids } }, data });
     }
 
     logEvent({ action: "asset.oui.bulk", resourceType: "asset", message: `Bulk OUI lookup: ${resolved} resolved, ${failed} unmatched out of ${assets.length} assets`, actor: requestActor(req) });
@@ -4377,12 +4389,17 @@ router.delete("/", requirePermission("assets", "write"), async (req, res, next) 
     const { ids } = req.body as { ids?: unknown };
     if (!Array.isArray(ids) || ids.length === 0) throw new AppError(400, "ids must be a non-empty array");
     if (ids.some((id) => typeof id !== "string")) throw new AppError(400, "All ids must be strings");
+    // ONE read answers both questions about this id set — which rows are
+    // quarantined (refuse the delete) and which are managed infra (release
+    // their reservations first). They used to be two findMany calls over the
+    // same ids.
+    const targets = await prisma.asset.findMany({
+      where: { id: { in: ids as string[] } },
+      select: { id: true, hostname: true, ipAddress: true, status: true, assetType: true },
+    });
     // Refuse to bulk-delete any quarantined asset — the operator must release
     // the quarantine first so the device-side targets get cleaned up.
-    const quarantined = await prisma.asset.findMany({
-      where: { id: { in: ids as string[] }, status: "quarantined" },
-      select: { id: true, hostname: true, ipAddress: true },
-    });
+    const quarantined = targets.filter((a) => a.status === "quarantined");
     if (quarantined.length > 0) {
       const names = quarantined.map((a) => a.hostname || a.ipAddress || a.id).slice(0, 5);
       const more = quarantined.length > 5 ? ` (+${quarantined.length - 5} more)` : "";
@@ -4390,10 +4407,9 @@ router.delete("/", requirePermission("assets", "write"), async (req, res, next) 
     }
     // Same as the single delete: release before the rows go away, and only for
     // the managed-infra types.
-    const infraIds = (await prisma.asset.findMany({
-      where: { id: { in: ids as string[] }, assetType: { in: ["switch", "access_point"] } },
-      select: { id: true },
-    })).map((a) => a.id);
+    const infraIds = targets
+      .filter((a) => a.assetType === "switch" || a.assetType === "access_point")
+      .map((a) => a.id);
     if (infraIds.length > 0) {
       await releaseInfraReservationsForAssets(infraIds, { reason: "asset deleted", actor: requestActor(req) });
     }

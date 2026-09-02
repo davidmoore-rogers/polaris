@@ -23,8 +23,9 @@ const INTERVAL_MS = 30 * 1000;
 async function tick(): Promise<void> {
   try {
     await runInstrumentedJob("discoverySlowCheck", async () => {
-      await checkForSlowRuns();
-      await expireVerboseLogging();
+      // Independent of each other — one supervises in-flight runs, the other
+      // expires the verbose-logging window.
+      await Promise.all([checkForSlowRuns(), expireVerboseLogging()]);
     });
   } catch (err) {
     logger.error(err, "Discovery slow-check job failed");

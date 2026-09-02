@@ -32,15 +32,19 @@ async function runScheduledDiscoveries(): Promise<void> {
     const now = Date.now();
 
     for (const intg of integrations) {
+      // Due-check FIRST: it is free (two fields already in hand), while
+      // isDiscoveryRunning is a query. Asking the DB whether a run is in
+      // flight before asking whether one is even wanted meant one round trip
+      // per integration per tick, almost always to discard the answer.
+      const intervalMs = (intg.pollInterval ?? 12) * 60 * 60 * 1000;
+      const lastRun = intg.lastDiscoveryAt?.getTime();
+      if (lastRun !== undefined && now - lastRun < intervalMs) continue;
+
       // .catch(() => false): a throw here would propagate through
       // runInstrumentedJob (which re-throws) into the bare setInterval kick
       // below — an unhandled rejection in the scheduler process. Same guard
       // the integrationConnectionTester uses on the identical call.
       if (await isDiscoveryRunning(intg.id).catch(() => false)) continue;
-
-      const intervalMs = (intg.pollInterval ?? 12) * 60 * 60 * 1000;
-      const lastRun = intg.lastDiscoveryAt?.getTime();
-      if (lastRun !== undefined && now - lastRun < intervalMs) continue;
 
       triggerDiscovery(intg.id, "auto-discovery").catch((err) => {
         logger.error({ err, integrationId: intg.id, integrationName: intg.name }, "Discovery scheduler: failed to start discovery");

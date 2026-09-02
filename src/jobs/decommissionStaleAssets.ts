@@ -19,7 +19,7 @@
 import { prisma } from "../db.js";
 import { logger } from "../utils/logger.js";
 import { getAssetDecommissionSettings } from "../services/eventArchiveService.js";
-import { logEvent } from "../services/eventLogService.js";
+import { logEventsBatch } from "../services/eventLogService.js";
 import { releaseInfraReservationsForAssets } from "../services/reservationService.js";
 import { runInstrumentedJob } from "./_metrics.js";
 
@@ -83,17 +83,20 @@ async function decommissionStaleAssets(): Promise<void> {
       `Auto-decommissioned ${result.count} stale asset(s) (not seen in >${inactivityMonths} month(s))`,
     );
 
-    for (const a of stale) {
-      logEvent({
-        action: "asset.auto_decommissioned",
-        resourceType: "asset",
-        resourceId: a.id,
-        resourceName: a.hostname || a.ipAddress || undefined,
-        actor: "system",
-        level: "info",
-        message: `Asset "${a.hostname || a.ipAddress || "unknown"}" auto-decommissioned after ${inactivityMonths} month(s) of inactivity`,
-      });
-    }
+    // One batched insert, awaited. These were fired un-awaited in a loop, so
+    // a first run against a neglected install fanned out an unbounded number
+    // of concurrent Event creates at once — the bulk updateMany above already
+    // rejects that shape for the status write. Awaiting also means the audit
+    // rows are durable before the job reports success.
+    await logEventsBatch(stale.map((a) => ({
+      action: "asset.auto_decommissioned",
+      resourceType: "asset",
+      resourceId: a.id,
+      resourceName: a.hostname || a.ipAddress || undefined,
+      actor: "system",
+      level: "info" as const,
+      message: `Asset "${a.hostname || a.ipAddress || "unknown"}" auto-decommissioned after ${inactivityMonths} month(s) of inactivity`,
+    })));
     });
   } catch (err) {
     logger.error(err, "Error running asset auto-decommission job");
