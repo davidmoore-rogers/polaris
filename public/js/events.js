@@ -758,6 +758,45 @@ function getAlertsFormData() {
         });
       });
 
+      // Duplicate-IP conflicts: per-asset "give this one a new address". The
+      // input lives in the same row; Enter submits it like the button does.
+      body.querySelectorAll("[data-dupip-apply]").forEach(function (el) {
+        var conflictId = el.getAttribute("data-conflict-id");
+        var assetId = el.getAttribute("data-asset-id");
+        var row = el.closest("tr");
+        var input = row ? row.querySelector("[data-dupip-input]") : null;
+        var apply = async function () {
+          var value = input ? input.value.trim() : "";
+          if (!value) {
+            showToast("Enter the new IP address for this asset", "error");
+            if (input) input.focus();
+            return;
+          }
+          el.disabled = true;
+          if (input) input.disabled = true;
+          try {
+            var out = await api.conflicts.reassignIp(conflictId, { assetId: assetId, ipAddress: value });
+            showToast(out && out.resolved
+              ? "Address updated — duplicate resolved"
+              : "Address updated — " + ((out && out.remaining) || 0) + " assets still share the old address");
+            var scrollTop = body.scrollTop;
+            await loadConflicts(true);
+            body.scrollTop = scrollTop;
+            refreshBadge();
+          } catch (err) {
+            showToast(err.message, "error");
+            el.disabled = false;
+            if (input) input.disabled = false;
+          }
+        };
+        el.addEventListener("click", apply);
+        if (input) {
+          input.addEventListener("keydown", function (e) {
+            if (e.key === "Enter") { e.preventDefault(); apply(); }
+          });
+        }
+      });
+
       // Bind accept/reject/merge buttons
       body.querySelectorAll("[data-conflict-action]").forEach(function (el) {
         el.addEventListener("click", async function () {
@@ -934,9 +973,84 @@ function getAlertsFormData() {
     '</div>';
   }
 
+  // Duplicate-address conflict (business rule 40): N network-present assets
+  // recording ONE ipAddress. There is nothing to accept — the resolution is to
+  // give one of them a different address — so the card renders a per-asset
+  // "new IP" field instead of the winner pickers, plus Dismiss.
+  function renderDuplicateIpConflictCard(c) {
+    var proposed = c.proposedAssetFields || {};
+    var ip = proposed.ipAddress || "—";
+    var members = Array.isArray(proposed.members) ? proposed.members : [];
+    var isResolved = c.status !== "pending";
+
+    var rows = members.map(function (m) {
+      var name = m.hostname || m.assetId || "(unnamed)";
+      var link = m.assetId
+        ? '<a href="/assets.html#view=asset:' + encodeURIComponent(m.assetId) + '">' + escapeHtml(name) + '</a>'
+        : escapeHtml(name);
+      var claimBits = [];
+      if (m.pinned) claimBits.push("pinned by operator");
+      else if (m.ipSource) claimBits.push("via " + m.ipSource);
+      var confirmed = m.ipLastSeen || m.lastSeen;
+      if (confirmed) claimBits.push("confirmed " + timeAgo(confirmed));
+      var claim = claimBits.length
+        ? escapeHtml(claimBits.join(" · "))
+        : '<span style="color:var(--color-text-tertiary);font-style:italic">unknown</span>';
+      var newIpCell = isResolved
+        ? '<td></td>'
+        : '<td style="white-space:nowrap">' +
+            '<input type="text" class="form-input" style="width:150px;display:inline-block" ' +
+              'placeholder="new IP address" data-dupip-input="' + escapeHtml(m.assetId || "") + '">' +
+            ' <button class="btn btn-primary btn-sm" data-dupip-apply data-conflict-id="' + c.id + '" ' +
+              'data-asset-id="' + escapeHtml(m.assetId || "") + '" ' +
+              'title="Assign this address to ' + escapeHtml(name) + ' and pin it">Apply</button>' +
+          '</td>';
+      return '<tr class="conflict-changed">' +
+        '<td class="conflict-field">' + link + '</td>' +
+        '<td>' + escapeHtml(m.assetType || "—") + '</td>' +
+        '<td>' + escapeHtml(m.status || "—") + (m.monitored ? "" : ' <span style="color:var(--color-text-tertiary);font-size:0.7rem">(unmonitored)</span>') + '</td>' +
+        '<td style="font-size:0.75rem">' + claim + '</td>' +
+        newIpCell +
+        '</tr>';
+    }).join("");
+
+    var explainer = '<strong class="mono">' + escapeHtml(ip) + '</strong> is recorded on ' +
+      members.length + ' assets that are all in a network-present status. ' +
+      'Enter a new address on the row of whichever asset should move — it is saved as a manual pin ' +
+      '(discovery reporting the same address later releases the pin by itself). ' +
+      '<strong>Reject</strong> dismisses the conflict and keeps both records as they are; ' +
+      'the same pair will not re-raise, a changed one will.';
+
+    var actions = isResolved
+      ? resolvedActionsHtml(c)
+      : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '" title="Keep both records on this address">Reject (dismiss)</button>';
+
+    return '<div class="conflict-card">' +
+      '<div class="conflict-card-header">' +
+        '<span class="badge badge-conflict">Duplicate IP</span>' +
+        '<strong>' + escapeHtml(ip) + '</strong>' +
+        '<span class="conflict-card-subnet" style="font-size:0.78rem">' + members.length + ' assets</span>' +
+      '</div>' +
+      '<div style="padding:6px 14px;font-size:0.78rem;color:var(--color-text-secondary)">' + explainer + '</div>' +
+      '<div class="conflict-table" style="padding:0">' +
+        '<table><thead><tr>' +
+          '<th class="conflict-field">Asset</th>' +
+          '<th>Type</th>' +
+          '<th>Status</th>' +
+          '<th>Address claim</th>' +
+          '<th>' + (isResolved ? '' : 'New IP address') + '</th>' +
+        '</tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>' +
+      '</div>' +
+      '<div class="conflict-card-actions">' + actions + '</div>' +
+    '</div>';
+  }
+
   function renderAssetConflictCard(c) {
     var proposedKind = c.proposedAssetFields || {};
     if (proposedKind.collisionReason === "ip-override") return renderIpOverrideConflictCard(c);
+    if (proposedKind.collisionReason === "duplicate-ip") return renderDuplicateIpConflictCard(c);
     // Prefer the conflict-time snapshot of the existing asset so a resolved
     // card shows what the asset looked like when the conflict was raised, not
     // the post-merge live row. Conflicts predating the snapshot column fall

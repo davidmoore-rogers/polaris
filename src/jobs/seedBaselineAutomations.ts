@@ -329,7 +329,7 @@ const EVENT_BASELINE_RULES: Record<string, unknown>[] = [
   {
     name: "IP conflict detected",
     description:
-      "Fires when discovery raises an ip-override conflict — a discovered IP disagreeing with an operator IP pin (conflict.detected; other conflict flavors surface on the Conflicts page without an Event today). Baseline example — edit or delete freely.",
+      "Fires on the two address conflicts that stamp an Event (conflict.detected): an ip-override conflict — a discovered IP disagreeing with an operator IP pin — and a duplicate-IP conflict, two network-present assets recording the same address (business rule 40). The discovery hostname-collision flavors surface on the Conflicts page without an Event. Baseline example — edit or delete freely.",
     severity: "notice",
     trigger: { type: "event", actionPattern: "conflict.detected" },
     reset: { mode: "timed", afterSec: 86400 },

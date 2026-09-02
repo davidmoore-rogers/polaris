@@ -925,6 +925,11 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
       "./jobs/reconcileInfraReservations.js",
       "./jobs/cleanupStaleDnsResolvedReleased.js",
       "./jobs/mergeDuplicateHostnameAssets.js",
+      // Duplicate-address sweep (business rule 40) — raises/closes the
+      // `duplicate-ip` Conflict flavour for two network-present assets
+      // recording one IP. Scheduler role only: one grouped scan for the
+      // fleet, not one per monitor replica.
+      "./jobs/detectDuplicateIpAssets.js",
       "./jobs/dependencyReconciler.js",
       "./jobs/maintenanceScheduler.js",
       "./jobs/retryQueuedReservationPushes.js",

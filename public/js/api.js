@@ -838,6 +838,8 @@ const api = {
     accept: (id)     => request("POST", `/conflicts/${id}/accept`),
     reject: (id)     => request("POST", `/conflicts/${id}/reject`),
     merge:  (id, body) => request("POST", `/conflicts/${id}/merge`, body),
+    // duplicate-IP conflicts only — body { assetId, ipAddress }
+    reassignIp: (id, body) => request("POST", `/conflicts/${id}/reassign-ip`, body),
   },
   events: {
     list: (params) => request("GET", "/events" + toQuery(params)),

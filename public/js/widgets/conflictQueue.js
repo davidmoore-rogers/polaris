@@ -17,7 +17,11 @@
       var subtitle;
       if (c.entityType === "asset") {
         var f = c.proposedAssetFields || {};
-        subtitle = (f.hostname || "(unnamed)") + ' · ' + (f.collisionReason || "asset");
+        var reason = f.collisionReason || "asset";
+        // Reason labels for the flavours whose raw key doesn't read as English.
+        if (reason === "duplicate-ip") reason = "duplicate IP " + (f.ipAddress || "");
+        else if (reason === "ip-override") reason = "IP override";
+        subtitle = (f.hostname || "(unnamed)") + ' · ' + reason;
       } else {
         subtitle = (c.proposedHostname || c.proposedOwner || "—") + ' · ' + (c.proposedSourceType || "reservation");
       }

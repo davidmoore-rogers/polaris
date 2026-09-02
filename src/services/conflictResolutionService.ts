@@ -33,6 +33,13 @@
  *     duplicate's fields/MACs onto the collision target and deletes it —
  *     but reject creates NOTHING (both assets stand; the resolved conflict
  *     row suppresses a re-raise).
+ *       - "duplicate-ip"           — two (or more) network-present assets
+ *         record the SAME `Asset.ipAddress` (raised by
+ *         duplicateIpConflictService's sweep; business rule 40). Accept has no
+ *         meaning here — there is nothing to adopt — so it is REFUSED; the
+ *         resolution verb is `POST /conflicts/:id/reassign-ip`, which gives one
+ *         member a new address. Reject = dismiss (the same member set won't
+ *         re-raise). `proposedAssetFields.members[]` carries every claimant.
  *       - "ip-override"            — a discovery write proposed an IP that
  *         differs from the asset's operator IP pin (Asset.ipOverride; raised
  *         by ipOverrideService). Accept adopts the discovered IP and releases
@@ -53,6 +60,10 @@ import {
   type AbsorbedRelationCounts,
 } from "./assetMergeService.js";
 import { recomputeMonitorOverrideForAssets } from "./monitorOverrideService.js";
+import {
+  DUPLICATE_IP_COLLISION_REASON,
+  logDuplicateIpDismissal,
+} from "./duplicateIpConflictService.js";
 
 // Shared with the discovery sync that writes these tags — see
 // src/utils/assetSourceTags.ts (imported at the top of this file).
@@ -279,6 +290,15 @@ async function acceptAssetConflict(
   if (proposed.collisionReason === "ip-override") {
     await acceptIpOverrideConflict(conflict, actor);
     return;
+  }
+  // Duplicate-address conflicts have no proposed values to adopt — accepting
+  // one would mark it resolved while both assets still answer to the address.
+  // The resolution is POST /conflicts/:id/reassign-ip (or Reject to dismiss).
+  if (proposed.collisionReason === DUPLICATE_IP_COLLISION_REASON) {
+    throw new AppError(
+      400,
+      "A duplicate IP conflict is resolved by assigning a new address to one of the assets, or dismissed with Reject",
+    );
   }
   if (!conflict.proposedDeviceId) {
     throw new AppError(500, "Asset conflict is missing proposedDeviceId");
@@ -596,6 +616,12 @@ async function rejectAssetConflict(conflict: any, actor?: string) {
   const proposedForKind = (conflict.proposedAssetFields || {}) as Record<string, any>;
   if (proposedForKind.collisionReason === "ip-override") {
     await rejectIpOverrideConflict(conflict, actor);
+    return;
+  }
+  // Duplicate address, dismissed: both assets keep the address. The resolved
+  // row is the dedup marker — the sweep re-raises only if the member set moves.
+  if (proposedForKind.collisionReason === DUPLICATE_IP_COLLISION_REASON) {
+    logDuplicateIpDismissal(conflict, actor);
     return;
   }
   if (!conflict.proposedDeviceId) {

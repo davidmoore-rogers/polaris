@@ -5,10 +5,13 @@
  * resolution engine (accept/reject/merge for both entityType variants,
  * including the ip-override flavour and the ghost-absorb transaction) lives
  * in src/services/conflictResolutionService.ts — see its header for the
- * conflict-variant semantics.
+ * conflict-variant semantics. The duplicate-IP flavour's own verb
+ * (`/:id/reassign-ip`) delegates to src/services/duplicateIpConflictService.ts.
  *
  * Access rides the discoveryConflicts permission alone: read = list both
- * entity types, write = resolve both. (The historical networkadmin↔
+ * entity types, write = resolve both — with ONE exception, `/:id/reassign-ip`,
+ * which additionally requires `assets:write` because it edits inventory.
+ * (The historical networkadmin↔
  * reservation / assetsadmin↔asset role-NAME partition was dropped 2026-08 —
  * it silently stopped applying when the seeded roles were renamed and never
  * applied to bearer-token callers.)
@@ -26,6 +29,7 @@ import {
   mergeAssetConflict,
   rejectConflict,
 } from "../../services/conflictResolutionService.js";
+import { reassignDuplicateIpAsset } from "../../services/duplicateIpConflictService.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -116,6 +120,40 @@ router.post("/:id/merge", async (req, res, next) => {
     await mergeAssetConflict(conflict, requestActor(req), fieldWinners);
 
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/conflicts/:id/reassign-ip — duplicate-IP conflicts only.
+// Body: { assetId, ipAddress }. Gives ONE of the assets sharing the address a
+// new one (operator-pin semantics, like editing IP Address on the asset form)
+// and closes the conflict once fewer than two current claims remain.
+//
+// CHAINED gate — discoveryConflicts:write AND assets:write (the
+// /network-scans/:id/adopt precedent): resolving conflict queue entries and
+// editing device inventory are separable grants, and this verb needs both.
+router.post("/:id/reassign-ip", async (req, res, next) => {
+  try {
+    const conflict = await loadPendingConflict(req.params.id);
+    if (!canResolve(req)) {
+      throw new AppError(403, "You do not have permission to resolve this conflict");
+    }
+    if (!hasPermission(req, "assets", "write")) {
+      throw new AppError(403, "You do not have permission to change an asset's IP address");
+    }
+    const assetId = typeof req.body?.assetId === "string" ? req.body.assetId : "";
+    const ipAddress = typeof req.body?.ipAddress === "string" ? req.body.ipAddress : "";
+    if (!assetId) throw new AppError(400, "assetId is required");
+
+    const outcome = await reassignDuplicateIpAsset(
+      conflict,
+      assetId,
+      ipAddress,
+      requestActor(req),
+    );
+
+    res.json({ ok: true, ...outcome });
   } catch (err) {
     next(err);
   }
