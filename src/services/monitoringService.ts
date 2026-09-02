@@ -4498,11 +4498,35 @@ export interface CollectionResult<T> {
 /** Cap on the amount of work a single subtree walk will do. Guards against pathological devices that publish huge ifTables. */
 const SNMP_WALK_MAX = 1000;
 
-export async function collectTelemetry(assetId: string): Promise<CollectionResult<TelemetrySample>> {
-  const asset = await prisma.asset.findUnique({
-    where: { id: assetId },
-    include: { monitorCredential: true, cpuMemoryCredential: true, discoveredByIntegration: true },
-  });
+/**
+ * The asset shape the three telemetry-cadence collectors need, as ONE load.
+ *
+ * They ran a `findUnique` each — same row, three times, two of them
+ * concurrently (runTelemetryFor's Promise.all) — and Asset is the widest
+ * table in the schema at ~170 columns including six JSON blobs
+ * (fortinetTopology, virtualization, managementAccess, quarantineTargets,
+ * associatedUsers, descriptionSync), none of which a collector reads. The
+ * include is the UNION of what the three needed, so a standalone caller
+ * trades one or two extra credential joins for the same asset payload, and
+ * the cadence pass drops from three wide reads to one.
+ */
+const TELEMETRY_ASSET_INCLUDE = {
+  monitorCredential:       true,
+  cpuMemoryCredential:     true,
+  temperatureCredential:   true,
+  customWidgetCredential:  true,
+  discoveredByIntegration: true,
+} as const;
+
+function loadTelemetryAsset(assetId: string) {
+  return prisma.asset.findUnique({ where: { id: assetId }, include: TELEMETRY_ASSET_INCLUDE });
+}
+
+/** One row of TELEMETRY_ASSET_INCLUDE — what the collectors accept preloaded. */
+export type TelemetryAssetRow = Awaited<ReturnType<typeof loadTelemetryAsset>>;
+
+export async function collectTelemetry(assetId: string, preloaded?: TelemetryAssetRow): Promise<CollectionResult<TelemetrySample>> {
+  const asset = preloaded !== undefined ? preloaded : await loadTelemetryAsset(assetId);
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
 
@@ -4626,11 +4650,8 @@ export async function collectTelemetry(assetId: string): Promise<CollectionResul
  * streams). An independent temperatureIntervalSeconds timer is a future
  * follow-up — see `temperatureIntervalSec` on the schema.
  */
-export async function collectHardwareSensors(assetId: string): Promise<CollectionResult<HardwareSensorSample[]>> {
-  const asset = await prisma.asset.findUnique({
-    where: { id: assetId },
-    include: { monitorCredential: true, temperatureCredential: true, discoveredByIntegration: true },
-  });
+export async function collectHardwareSensors(assetId: string, preloaded?: TelemetryAssetRow): Promise<CollectionResult<HardwareSensorSample[]>> {
+  const asset = preloaded !== undefined ? preloaded : await loadTelemetryAsset(assetId);
   if (!asset)            return { supported: false, error: "Asset not found" };
   if (!asset.monitored)  return { supported: false };
 
@@ -11381,12 +11402,18 @@ export async function runTelemetryFor(assetId: string, labels: WorkItemLabels): 
     // serializing would double the wall-time of a typical telemetry pass.
     // Each catch keeps a transport failure on one stream from poisoning the
     // other; thrown errors are packaged into the result shape.
+    // ONE asset read for the whole pass, handed to all three collectors.
+    // Each used to fetch the same row itself — two of them concurrently right
+    // here — so a telemetry tick opened three wide reads of Asset (~170
+    // columns) plus their credential and integration joins to collect from one
+    // device. See TELEMETRY_ASSET_INCLUDE.
+    const asset = await loadTelemetryAsset(assetId);
     const [tr, temp] = await Promise.all([
-      collectTelemetry(assetId).catch((err: unknown) => {
+      collectTelemetry(assetId, asset).catch((err: unknown) => {
         logger.debug({ err, assetId }, "CPU/memory collection threw");
         return { supported: true, error: (err as Error)?.message || "Telemetry collection failed" } as CollectionResult<TelemetrySample>;
       }),
-      collectHardwareSensors(assetId).catch((err: unknown) => {
+      collectHardwareSensors(assetId, asset).catch((err: unknown) => {
         logger.debug({ err, assetId }, "Hardware sensor collection threw");
         return { supported: true, error: (err as Error)?.message || "Hardware sensor collection failed" } as CollectionResult<HardwareSensorSample[]>;
       }),
@@ -11398,7 +11425,7 @@ export async function runTelemetryFor(assetId: string, labels: WorkItemLabels): 
     // Custom widgets ride the telemetry cadence (Slice 7b). Fire-and-forget
     // so a slow walk on one widget can't drag the telemetry tick — failures
     // log inside the helper without escalating to a cadence crash.
-    void collectAndRecordCustomWidgets(assetId).catch((err) => {
+    void collectAndRecordCustomWidgets(assetId, asset).catch((err) => {
       logger.debug({ err, assetId }, "Custom widget collection failed");
     });
     // Outcome aggregates both streams. Success when each stream either
@@ -11438,16 +11465,8 @@ export async function runTelemetryFor(assetId: string, labels: WorkItemLabels): 
 /** Per-probe row cap — see the truncation warning in the state branch below. */
 const MAX_STATE_ROWS_PER_PROBE = 500;
 
-async function collectAndRecordCustomWidgets(assetId: string): Promise<void> {
-  const asset = await prisma.asset.findUnique({
-    where: { id: assetId },
-    include: {
-      monitorCredential:       true,
-      cpuMemoryCredential:     true,
-      customWidgetCredential:  true,
-      discoveredByIntegration: true,
-    },
-  });
+async function collectAndRecordCustomWidgets(assetId: string, preloaded?: TelemetryAssetRow): Promise<void> {
+  const asset = preloaded !== undefined ? preloaded : await loadTelemetryAsset(assetId);
   if (!asset || !asset.monitored || !asset.manufacturer) return;
 
   // Same function as the static top-of-file import (aliased there as
