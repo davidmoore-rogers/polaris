@@ -84,10 +84,26 @@ export function isPrivateIpv4(ip: string): boolean {
 }
 
 /**
+ * Loopback check for source-IP gating: IPv4 127.0.0.0/8, IPv6 ::1, and the
+ * IPv6-mapped IPv4 forms (`::ffff:127.0.0.1`) Node hands out for v4
+ * connections on dual-stack sockets.
+ */
+export function isLoopbackIp(ip: string): boolean {
+  if (!ip) return false;
+  let candidate = ip.trim();
+  if (candidate.toLowerCase().startsWith("::ffff:") && candidate.includes(".")) {
+    candidate = candidate.slice(7);
+  }
+  if (candidate === "::1") return true;
+  if (!isValidIpAddress(candidate) || candidate.includes(":")) return false;
+  return candidate.split(".").map(Number)[0] === 127;
+}
+
+/**
  * RFC 1918 private-range OR loopback check for source-IP gating (the Dash
  * wallboard's app-level gate). Accepts:
  *   - the three RFC 1918 ranges (via isPrivateIpv4)
- *   - IPv4 loopback 127.0.0.0/8 and IPv6 loopback ::1
+ *   - IPv4 loopback 127.0.0.0/8 and IPv6 loopback ::1 (via isLoopbackIp)
  *   - IPv6-mapped IPv4 forms (`::ffff:10.0.0.1`) — Node hands these out for
  *     v4 connections on dual-stack sockets, so they must be unwrapped before
  *     the v4 tests.
@@ -96,14 +112,30 @@ export function isPrivateIpv4(ip: string): boolean {
  */
 export function isPrivateOrLoopbackIp(ip: string): boolean {
   if (!ip) return false;
+  if (isLoopbackIp(ip)) return true;
   let candidate = ip.trim();
   if (candidate.toLowerCase().startsWith("::ffff:") && candidate.includes(".")) {
     candidate = candidate.slice(7);
   }
-  if (candidate === "::1") return true;
   if (!isValidIpAddress(candidate) || candidate.includes(":")) return false;
-  if (candidate.split(".").map(Number)[0] === 127) return true;
   return isPrivateIpv4(candidate);
+}
+
+/** The three RFC 1918 ranges, in the order operators expect to read them. */
+export const RFC1918_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] as const;
+
+/**
+ * Is this IPv4 CIDR fully contained inside RFC 1918 private space? Used to
+ * validate operator-entered source-IP scopes for surfaces that must never be
+ * opened to public networks (the /api docs page). False for anything
+ * unparseable, IPv6, or a range that straddles a private/public boundary —
+ * callers normalize through normalizeAllowlistCidr first, so a well-formed
+ * canonical CIDR is what usually arrives here. Loopback (127/8) is deliberately
+ * NOT included: gating surfaces treat loopback as always allowed, so a
+ * loopback entry in an allow-list is noise, not scope.
+ */
+export function isRfc1918Cidr(cidr: string): boolean {
+  return RFC1918_RANGES.some((outer) => cidrContains(outer, cidr));
 }
 
 /**

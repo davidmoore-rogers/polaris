@@ -21,6 +21,8 @@ import {
   expandIpv6,
   ipToPtrName,
   isPrivateOrLoopbackIp,
+  isLoopbackIp,
+  isRfc1918Cidr,
   normalizeAllowlistCidr,
   buildCidrMatcher,
 } from "../../src/utils/cidr.js";
@@ -314,6 +316,55 @@ describe("isPrivateOrLoopbackIp", () => {
     expect(isPrivateOrLoopbackIp("2001:db8::1")).toBe(false);
     expect(isPrivateOrLoopbackIp("")).toBe(false);
     expect(isPrivateOrLoopbackIp("not-an-ip")).toBe(false);
+  });
+});
+
+describe("isLoopbackIp", () => {
+  it("accepts IPv4 127/8, IPv6 ::1, and v6-mapped loopback forms", () => {
+    expect(isLoopbackIp("127.0.0.1")).toBe(true);
+    expect(isLoopbackIp("127.9.9.9")).toBe(true);
+    expect(isLoopbackIp("127.255.255.254")).toBe(true);
+    expect(isLoopbackIp("::1")).toBe(true);
+    expect(isLoopbackIp("::ffff:127.0.0.1")).toBe(true);
+    expect(isLoopbackIp("::FFFF:127.0.0.1")).toBe(true); // case-insensitive prefix
+    expect(isLoopbackIp("  127.0.0.1  ")).toBe(true); // trimmed
+  });
+
+  it("rejects private, public, and junk input", () => {
+    expect(isLoopbackIp("10.0.0.1")).toBe(false);
+    expect(isLoopbackIp("192.168.1.1")).toBe(false);
+    expect(isLoopbackIp("8.8.8.8")).toBe(false);
+    expect(isLoopbackIp("::ffff:10.0.0.1")).toBe(false);
+    expect(isLoopbackIp("fe80::1")).toBe(false);
+    expect(isLoopbackIp("128.0.0.1")).toBe(false); // boundary: first octet just past 127
+    expect(isLoopbackIp("")).toBe(false);
+    expect(isLoopbackIp("not-an-ip")).toBe(false);
+  });
+});
+
+describe("isRfc1918Cidr", () => {
+  it("accepts CIDRs fully inside each RFC 1918 range", () => {
+    expect(isRfc1918Cidr("10.0.0.0/8")).toBe(true);
+    expect(isRfc1918Cidr("10.50.0.0/16")).toBe(true);
+    expect(isRfc1918Cidr("172.16.0.0/12")).toBe(true);
+    expect(isRfc1918Cidr("172.20.4.0/24")).toBe(true);
+    expect(isRfc1918Cidr("192.168.0.0/16")).toBe(true);
+    expect(isRfc1918Cidr("192.168.44.7/32")).toBe(true); // host route
+  });
+
+  it("rejects public space, straddling ranges, loopback, and junk", () => {
+    expect(isRfc1918Cidr("8.8.8.0/24")).toBe(false);
+    expect(isRfc1918Cidr("203.0.113.5/32")).toBe(false);
+    expect(isRfc1918Cidr("0.0.0.0/0")).toBe(false); // contains RFC1918 but is not contained BY it
+    expect(isRfc1918Cidr("172.15.255.0/24")).toBe(false); // just below 172.16/12
+    expect(isRfc1918Cidr("172.32.0.0/24")).toBe(false); // just above 172.16/12
+    expect(isRfc1918Cidr("192.168.0.0/15")).toBe(false); // wider than 192.168/16
+    expect(isRfc1918Cidr("9.255.255.0/24")).toBe(false); // just below 10/8
+    expect(isRfc1918Cidr("127.0.0.0/8")).toBe(false); // loopback is not RFC1918
+    expect(isRfc1918Cidr("127.0.0.1/32")).toBe(false);
+    expect(isRfc1918Cidr("")).toBe(false);
+    expect(isRfc1918Cidr("not-a-cidr")).toBe(false);
+    expect(isRfc1918Cidr("fd00::/8")).toBe(false); // IPv6 out of scope
   });
 });
 

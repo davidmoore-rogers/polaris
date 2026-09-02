@@ -12,10 +12,11 @@ import { describe, it, expect } from "vitest";
 import { ipInScope, isIpScope, describeIpScope } from "../../src/utils/ipScope.js";
 
 describe("isIpScope", () => {
-  it("accepts the three known scopes", () => {
+  it("accepts the four known scopes", () => {
     expect(isIpScope("rfc1918")).toBe(true);
     expect(isIpScope("all")).toBe(true);
     expect(isIpScope("custom")).toBe(true);
+    expect(isIpScope("loopback")).toBe(true);
   });
 
   it("rejects anything else", () => {
@@ -51,6 +52,25 @@ describe("ipInScope — rfc1918", () => {
   });
 });
 
+describe("ipInScope — loopback", () => {
+  it("admits only loopback sources, in every form Node reports them", () => {
+    expect(ipInScope("127.0.0.1", "loopback", [])).toBe(true);
+    expect(ipInScope("127.4.5.6", "loopback", [])).toBe(true);
+    expect(ipInScope("::1", "loopback", [])).toBe(true);
+    expect(ipInScope("::ffff:127.0.0.1", "loopback", [])).toBe(true);
+  });
+
+  it("refuses private and public sources alike", () => {
+    for (const ip of ["10.0.0.1", "192.168.1.20", "172.16.5.9", "8.8.8.8", ""]) {
+      expect(ipInScope(ip, "loopback", [])).toBe(false);
+    }
+  });
+
+  it("ignores allowedCidrs — a loopback scope has no list", () => {
+    expect(ipInScope("10.0.0.1", "loopback", ["10.0.0.0/8"])).toBe(false);
+  });
+});
+
 describe("ipInScope — custom", () => {
   it("admits only addresses inside a listed network", () => {
     expect(ipInScope("10.5.0.7", "custom", ["10.5.0.0/24"])).toBe(true);
@@ -79,6 +99,7 @@ describe("describeIpScope", () => {
   it("names each posture for the audit trail", () => {
     expect(describeIpScope("all", [])).toBe("ALL source IPs");
     expect(describeIpScope("rfc1918", [])).toBe("RFC1918 + loopback sources only");
+    expect(describeIpScope("loopback", [])).toBe("loopback (this host) only");
     expect(describeIpScope("custom", ["10.0.0.0/8", "192.168.1.0/24"])).toBe(
       "custom source IPs: 10.0.0.0/8, 192.168.1.0/24",
     );
