@@ -20,14 +20,15 @@
  *                        Default concurrency is CPU-aware
  *                        (POLARIS_PROBE_CONCURRENCY / POLARIS_HEAVY_CONCURRENCY).
  *
- *   "pgboss"           — Each tick scans the same due-asset set but submits
- *                        one job per (assetId, cadence) to the pg-boss queue
- *                        registered in queueService.startPgbossWorkers().
- *                        Workers (potentially across multiple processes once
- *                        we go horizontal) drain the queues. The exclusive
- *                        queue policy + singletonKey on every send absorbs
- *                        duplicates so the publisher can re-evaluate every
- *                        tick without piling up stale jobs.
+ *   "pgboss"           — Each tick scans the same due-asset set and submits
+ *                        one job per (assetId, cadence), bulk-inserted per
+ *                        queue, to the pg-boss queues registered in
+ *                        queueService.startPgbossWorkers(). Workers
+ *                        (potentially across multiple processes once we go
+ *                        horizontal) drain the queues. The stately queue
+ *                        policy + per-job singletonKey absorbs duplicates so
+ *                        the publisher can re-evaluate every tick without
+ *                        piling up stale jobs.
  *
  * Cadence pacing is per-asset (Asset.monitorIntervalSec / telemetryIntervalSec
  * / systemInfoIntervalSec, falling back to the global defaults), so the
@@ -44,7 +45,7 @@ import {
   MONITOR_CANDIDATE_WHERE,
   type MonitorCadence,
 } from "../services/monitoringService.js";
-import { getBootTimeMode, publishMonitorJob, publishMonitorSweepJob, publishProbeBatchJob } from "../services/queueService.js";
+import { getBootTimeMode, publishMonitorJobsBulk, publishMonitorSweepJob, publishProbeBatchJob } from "../services/queueService.js";
 import { lossSweepIncludes, lossSweepIsDue, chunkForSweep } from "../utils/lossSweep.js";
 import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
@@ -96,9 +97,9 @@ let runningHeavy = false;
 /**
  * pg-boss publisher. Queries the same candidate set as runMonitorPass, runs
  * the same isDue() per-cadence checks, and submits one job per (assetId,
- * cadence) to the appropriate pg-boss queue. Duplicates for an in-flight
- * job are absorbed by the exclusive queue policy + singletonKey, so calling
- * this every tick is safe.
+ * cadence) to the appropriate pg-boss queue, bulk-inserted per queue after
+ * the loop. Duplicates of a still-queued job are absorbed by the stately
+ * queue policy + singletonKey, so calling this every tick is safe.
  *
  * Note: small amount of intentional code duplication with runMonitorPass —
  * the candidate query and isDue logic are mirrored. Keeping the cursor and
@@ -116,7 +117,14 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   const enabled = new Set<MonitorCadence>(cadences);
   const now = new Date();
 
-  const candidates = await prisma.asset.findMany({
+  // The per-integration verbose-debug flag used to ride a per-asset join of
+  // the ENTIRE integration config — the same handful of blobs serialized once
+  // per asset row, 2000× per tick. One integration read per tick resolves the
+  // flag instead; `type` stays joined below (a scalar, and the identical
+  // select the cursor twin uses in loadMonitorPassCandidates).
+  const [integrations, candidates] = await Promise.all([
+    prisma.integration.findMany({ select: { id: true, config: true } }),
+    prisma.asset.findMany({
     // Shared with runMonitorPass — excludes assets in maintenance mode so
     // both queue modes stop ALL server-driven polling during a window.
     where: MONITOR_CANDIDATE_WHERE,
@@ -125,10 +133,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       assetType: true,
       discoveredByIntegrationId: true,
       // Joined for the resolver — picks the source-default polling method.
-      // Also reads `config` so we can detect per-integration verboseLogging
-      // and stamp `verboseDebug` on the pg-boss job payload. See the matching
-      // comment in monitoringService.runMonitorPass.
-      discoveredByIntegration: { select: { type: true, config: true } },
+      discoveredByIntegration: { select: { type: true } },
       monitorStatus: true,
       // Both counters ride the pg-boss payload for the probe worker; the
       // cursor path selects them too.
@@ -160,13 +165,47 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       monitoredIpsecTunnels: true,
       dependencySuppressed: true,
     },
-  });
+    }),
+  ]);
+
+  // verboseDebug per integration, resolved once per tick: `verboseLogging`
+  // must be true AND within the 30-minute auto-disable window. Workers check
+  // the stamped flag to decide whether to emit pickup/finish lines.
+  const verboseByIntegration = new Map<string, boolean>();
+  for (const i of integrations) {
+    const cfg = i.config as Record<string, unknown> | null;
+    verboseByIntegration.set(
+      i.id,
+      cfg != null &&
+        cfg.verboseLogging === true &&
+        (typeof cfg.verboseLoggingEnabledAt !== "string" ||
+          Date.now() - new Date(cfg.verboseLoggingEnabledAt as string).getTime() < 30 * 60 * 1000),
+    );
+  }
 
   function isDue(last: Date | null, intervalSec: number): boolean {
     if (intervalSec <= 0) return false;
     if (!last) return true;
     return now.getTime() - last.getTime() >= intervalSec * 1000;
   }
+
+  // Every per-asset cadence job accumulates here and is bulk-inserted per
+  // queue after the loop (publishMonitorJobsBulk) — the awaited per-asset
+  // send() this replaces issued up to eight serialized round trips per asset,
+  // which on a REST/SNMP-heavy fleet meant thousands of INSERTs inside one 5s
+  // tick: the likeliest way for the tick to overrun its budget and silently
+  // skip under the runningProbe guard. Same per-job singletonKey, so the
+  // coalescing contract is unchanged.
+  const dueJobs = new Map<MonitorCadence, Array<{ assetId: string; transport?: string; assetType?: string; verboseDebug?: boolean }>>();
+  const queueJob = (
+    cadence: MonitorCadence,
+    assetId: string,
+    labels: { transport?: string; assetType?: string; verboseDebug?: boolean },
+  ): void => {
+    let arr = dueJobs.get(cadence);
+    if (!arr) { arr = []; dueJobs.set(cadence, arr); }
+    arr.push({ assetId, ...labels });
+  };
 
   // Assets due a loss burst this tick, accumulated across the loop and
   // published as chunks afterwards — the sweep measures a batch in one process
@@ -258,15 +297,10 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     const probeTransport = eff.responseTimePolling || "unknown";
     const telTransport   = eff.cpuMemoryPolling    || "unknown";
     const ifTransport    = eff.interfacesPolling   || "unknown";
-    // Per-integration verbose debug toggle — stamped on every job for assets
-    // owned by an integration with `config.verboseLogging === true` AND within
-    // the 30-minute auto-disable window. Workers check this flag to decide
-    // whether to emit pickup/finish lines.
-    const intCfg = a.discoveredByIntegration?.config as Record<string, unknown> | null | undefined;
-    const verboseDebug = intCfg != null &&
-      intCfg.verboseLogging === true &&
-      (typeof intCfg.verboseLoggingEnabledAt !== "string" ||
-       Date.now() - new Date(intCfg.verboseLoggingEnabledAt as string).getTime() < 30 * 60 * 1000);
+    // Per-integration verbose debug toggle, resolved once per tick above.
+    const verboseDebug = a.discoveredByIntegrationId
+      ? (verboseByIntegration.get(a.discoveredByIntegrationId) ?? false)
+      : false;
     const labels = { transport: probeTransport, assetType, verboseDebug };
     const telLabels = { transport: telTransport, assetType, verboseDebug };
     const ifLabels  = { transport: ifTransport,  assetType, verboseDebug };
@@ -284,24 +318,24 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
       if (eff.responseTimePolling === "icmp" && a.ipAddress) {
         probeBatchDue.push({ id: a.id, target: a.ipAddress, timeoutMs: eff.probeTimeoutMs });
       } else {
-        await publishMonitorJob("probe", a.id, labels);
+        queueJob("probe", a.id, labels);
       }
     }
     if (telemetry && canTelemetry && isUp && enabled.has("telemetry")) {
-      await publishMonitorJob("telemetry", a.id, telLabels);
+      queueJob("telemetry", a.id, telLabels);
     }
     if (systemInfo && canSystemInfo && isUp && enabled.has("systemInfo")) {
-      await publishMonitorJob("systemInfo", a.id, ifLabels);
+      queueJob("systemInfo", a.id, ifLabels);
     }
     if (probe && hasFastPin && canSystemInfo && !systemInfo && isUp && enabled.has("fastFiltered")) {
-      await publishMonitorJob("fastFiltered", a.id, ifLabels);
+      queueJob("fastFiltered", a.id, ifLabels);
     }
     // Phase 2 carve-out: LLDP rides "isUp" gate just like systemInfo because
     // it's a heavy SNMP-MIB / FortiOS REST walk we don't want hitting dead
     // hosts. Skipped when the resolved lldpPolling is disabled or not delivered.
     if (lldp && isUp && enabled.has("lldp") && eff.lldpPolling && eff.lldpPolling !== "disabled") {
       const lldpTransport = eff.lldpPolling || "unknown";
-      await publishMonitorJob("lldp", a.id, { transport: lldpTransport, assetType, verboseDebug });
+      queueJob("lldp", a.id, { transport: lldpTransport, assetType, verboseDebug });
     }
     // The dedicated storage cadence covers SNMP (hrStorageTable) and the
     // agentless transports (df / Get-Volume). Agent hosts push on their own
@@ -310,7 +344,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     if (storage && isUp && enabled.has("storage") &&
         (eff.storagePolling === "snmp" || eff.storagePolling === "ssh" || eff.storagePolling === "winrm")) {
       const storageTransport = eff.storagePolling || "unknown";
-      await publishMonitorJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
+      queueJob("storage", a.id, { transport: storageTransport, assetType, verboseDebug });
     }
     // Agentless processes cadence — ssh/winrm only (agent-mode assets
     // self-collect; SNMP hrSWRunTable stays declared-but-unimplemented). Due
@@ -327,7 +361,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
         isDue(a.lastProcessesAt, eff.processesIntervalSeconds) ||
         (procPins && isDue(a.lastProcessPinsAt, 60));
       if (processesDue) {
-        await publishMonitorJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
+        queueJob("processes", a.id, { transport: eff.processesPolling, assetType, verboseDebug });
       }
     }
     // Agentless event-log cadence (ssh/winrm), same shape and the same isUp
@@ -338,7 +372,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     if (isUp && enabled.has("eventLog") &&
         (eff.eventLogPolling === "ssh" || eff.eventLogPolling === "winrm") &&
         isDue(a.lastEventLogAt, eff.eventLogIntervalSeconds)) {
-      await publishMonitorJob("eventLog", a.id, { transport: eff.eventLogPolling, assetType, verboseDebug });
+      queueJob("eventLog", a.id, { transport: eff.eventLogPolling, assetType, verboseDebug });
     }
     // ICMP loss sweep: a uniform burst at EVERY eligible asset, whatever state
     // it is in. Deliberately NOT gated on isUp like the cadences above, and
@@ -352,6 +386,11 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
         lossSweepIsDue(a.lastLossSampleAt, now)) {
       sweepDue.push(a.id);
     }
+  }
+
+  // Flush the accumulated per-asset cadences — one bulk INSERT per queue.
+  for (const [cadence, jobs] of dueJobs) {
+    await publishMonitorJobsBulk(cadence, jobs);
   }
 
   // One job per chunk, keyed by chunk INDEX so a backed-up sweep coalesces
@@ -369,12 +408,15 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     await publishMonitorSweepJob("lossSample", c, chunkIndex++, { transport: "icmp", verboseDebug: false });
   }
 
-  const total   = candidates.length;
-  const up      = candidates.filter(a => a.monitorStatus === "up").length;
-  const down    = candidates.filter(a => a.monitorStatus === "down").length;
   // Passive gets its own bucket: folding it into "unknown" would read as
   // "never probed" about devices that are being polled perfectly well.
-  const passive = candidates.filter(a => a.monitorStatus === "passive").length;
+  const total = candidates.length;
+  let up = 0, down = 0, passive = 0;
+  for (const a of candidates) {
+    if (a.monitorStatus === "up") up++;
+    else if (a.monitorStatus === "down") down++;
+    else if (a.monitorStatus === "passive") passive++;
+  }
   setMonitoredAssets(total, { up, down, passive, unknown: total - up - down - passive });
 }
 

@@ -602,14 +602,21 @@ async function ensureBoss(): Promise<PgBossType | null> {
 async function ensureQueues(boss: PgBossType): Promise<void> {
   if (queuesEnsured) return;
   // Per-queue config:
-  //   - policy "singleton" + singletonKey on every send → only one job
-  //     per (assetId, cadence) can be queued or active. Duplicate submits
-  //     while a job is in flight are absorbed silently. Natural coalescing
-  //     for the publisher's "re-evaluate every tick" pattern. Different
-  //     assetIds run fully in parallel up to localConcurrency. (Earlier
-  //     iterations passed "exclusive" here, which is not a documented
-  //     pg-boss policy and silently throttled each queue to ~1 active job
-  //     globally regardless of localConcurrency.)
+  //   - policy "stately" + singletonKey on every publish → at most one QUEUED
+  //     job and one ACTIVE job per (assetId, cadence). Duplicate submits while
+  //     a job is queued are absorbed silently; while one is ACTIVE the next
+  //     round may queue behind it. Natural coalescing for the publisher's
+  //     "re-evaluate every tick" pattern. Different assetIds run fully in
+  //     parallel up to localConcurrency. This was "singleton" until 2026-09,
+  //     which SOUNDS like that contract but is not: pg-boss 12's singleton
+  //     unique index constrains state='active' only, so every 5s tick
+  //     re-queued a still-queued due asset and a backed-up queue accumulated
+  //     duplicates bounded only by retentionSeconds — verified empirically
+  //     against pg-boss 12.18 (send() and insert() both landed duplicate
+  //     created-state rows under singleton; both are absorbed under stately,
+  //     and a queued duplicate behind a running job activates cleanly when it
+  //     completes). (The still-earlier "exclusive" iteration throttled each
+  //     queue to ~1 active job globally.)
   //   - retryLimit 0: monitor cadences are stateless. Next tick re-evaluates
   //     due state and re-publishes; better than retrying with stale snapshot.
   //   - deleteAfterSeconds 1d: keep recent completed/failed for debugging,
@@ -664,7 +671,19 @@ async function ensureQueues(boss: PgBossType): Promise<void> {
       retentionSeconds: 3_600,
       expireInSeconds: EXPIRE_BY_QUEUE[cadence],
     };
-    await boss.createQueue(name, { policy: "singleton", ...queueOptions });
+    await boss.createQueue(name, { policy: "stately", ...queueOptions });
+    // Policy convergence: createQueue is a no-op on an existing queue and
+    // updateQueue refuses the policy field, so an install upgraded from the
+    // "singleton" era keeps its old policy until the queue is recreated. Safe
+    // for these queues specifically: monitor jobs are stateless, so dropping
+    // a queue's backlog once costs at most one tick's worth of work, which
+    // the next tick re-publishes. Runs exactly once per queue per install.
+    const existing = await boss.getQueue(name);
+    if (existing && existing.policy !== "stately") {
+      logger.info({ queue: name, from: existing.policy }, "recreating monitor queue with stately policy");
+      await boss.deleteQueue(name);
+      await boss.createQueue(name, { policy: "stately", ...queueOptions });
+    }
     await boss.updateQueue(name, queueOptions);
   }
 
@@ -1090,6 +1109,44 @@ export async function publishMonitorJob(
       singletonKey: `${assetId}:${cadence}`,
     },
   );
+}
+
+/** Insert chunk size for publishMonitorJobsBulk — bounds one statement's
+ *  serialized-JSON payload, nothing more. */
+const MONITOR_JOB_INSERT_CHUNK = 500;
+
+/**
+ * Bulk counterpart of publishMonitorJob: one INSERT per queue per tick instead
+ * of one awaited send() round trip per asset — the per-asset shape issued up
+ * to eight serialized inserts per asset per tick on a REST/SNMP-heavy fleet.
+ * Payload and the `${assetId}:${cadence}` singletonKey are identical to
+ * publishMonitorJob's, and pg-boss enforces the stately queue policy with
+ * unique constraints on the job table itself, so insert() coalesces a
+ * duplicate of a queued job exactly the way send() does (verified
+ * empirically against pg-boss 12.18 — see the ensureQueues comment). Neither
+ * path passes retry/expire options — jobs inherit the queue-level values
+ * ensureQueues declared.
+ */
+export async function publishMonitorJobsBulk(
+  cadence: MonitorCadence,
+  jobs: Array<{ assetId: string; transport?: string; assetType?: string; verboseDebug?: boolean }>,
+): Promise<void> {
+  if (!bossInstance || jobs.length === 0) return;
+  const queue = QUEUE_NAMES[cadence];
+  for (let i = 0; i < jobs.length; i += MONITOR_JOB_INSERT_CHUNK) {
+    await bossInstance.insert(
+      queue,
+      jobs.slice(i, i + MONITOR_JOB_INSERT_CHUNK).map((j) => ({
+        data: {
+          assetId: j.assetId,
+          transport: j.transport,
+          assetType: j.assetType,
+          verboseDebug: j.verboseDebug,
+        } as MonitorJobPayload as object,
+        singletonKey: `${j.assetId}:${cadence}`,
+      })),
+    );
+  }
 }
 
 /**
