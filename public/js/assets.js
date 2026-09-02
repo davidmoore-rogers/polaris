@@ -21674,19 +21674,49 @@ async function _loadAssetArpTable(assetId, range) {
     // column would just repeat the header.
     var showLastSeen = activeRange !== "current";
 
-    function render() {
-      var shown  = entries.filter(matches);
-      var groups = groupsFrom(shown);
+    // The shell (heading + range control + filter box) is rendered ONCE and
+    // only the counts span and the table below it re-render as the operator
+    // types. Previously one `render()` rebuilt the whole panel — filter input
+    // included — on every keystroke, which is why it had to save and restore
+    // the caret by hand: re-creating the very element being typed into is what
+    // makes that hack necessary. A core FortiGate's neighbour cache runs into
+    // the thousands, so each keystroke also re-filtered, re-grouped,
+    // re-sorted and re-attached a listener per group and per matched device.
+    var countsId = "arptable-counts-" + assetId;
+    var bodyId   = "arptable-body-" + assetId;
+
+    function countsHTML() {
+      var shown = entries.filter(matches);
       var matched = shown.filter(function (e) { return !!e.matchedAsset; }).length;
       var stamp = data.collectedAt ? timeAgo(data.collectedAt) : null;
+      return '(' +
+        shown.length + (filter ? " of " + entries.length : "") + ' entr' +
+        (shown.length === 1 ? "y" : "ies") + ' · ' + matched + ' matched to a known device' +
+        (stamp ? ' · newest read ' + escapeHtml(stamp) : "") +
+      ')';
+    }
 
-      var head =
+    function renderBody() {
+      var groups = groupsFrom(entries.filter(matches));
+      var counts = document.getElementById(countsId);
+      if (counts) counts.innerHTML = countsHTML();
+      var bodyEl = document.getElementById(bodyId);
+      if (!bodyEl) return;
+      bodyEl.innerHTML = groups.length === 0
+        ? '<div class="empty-state">No entries match that filter.</div>'
+        : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
+            '<th>Interface / IP</th><th>MAC</th><th>Age</th>' +
+            (showLastSeen ? '<th>Last seen</th>' : '') +
+            '<th>Device</th>' +
+          '</tr></thead><tbody>' + groups.map(groupHtml).join("") + '</tbody></table></div>';
+      wireGroupToggles();
+      _wireAssetPivotLinks(bodyEl);
+    }
+
+    function render() {
+      mount.innerHTML =
         '<h4 style="margin:0 0 0.4rem">Neighbour cache ' +
-          '<span style="font-weight:400;color:var(--color-text-secondary)">(' +
-            shown.length + (filter ? " of " + entries.length : "") + ' entr' +
-            (shown.length === 1 ? "y" : "ies") + ' · ' + matched + ' matched to a known device' +
-            (stamp ? ' · newest read ' + escapeHtml(stamp) : "") +
-          ')</span>' +
+          '<span id="' + countsId + '" style="font-weight:400;color:var(--color-text-secondary)"></span>' +
         '</h4>' +
         disclaimerHtml() +
         '<div style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap;margin:0 0 0.5rem">' +
@@ -21694,32 +21724,23 @@ async function _loadAssetArpTable(assetId, range) {
           '<input type="text" id="arptable-filter-' + escapeHtml(assetId) + '" class="form-input" ' +
             'placeholder="Filter by IP, MAC, interface or hostname" ' +
             'style="max-width:22rem;font-size:0.82rem;flex:1 1 14rem" value="' + escapeHtml(filter) + '">' +
-        '</div>';
-
-      var body = groups.length === 0
-        ? '<div class="empty-state">No entries match that filter.</div>'
-        : '<div class="table-wrapper"><table class="data-table" style="font-size:0.82rem"><thead><tr>' +
-            '<th>Interface / IP</th><th>MAC</th><th>Age</th>' +
-            (showLastSeen ? '<th>Last seen</th>' : '') +
-            '<th>Device</th>' +
-          '</tr></thead><tbody>' + groups.map(groupHtml).join("") + '</tbody></table></div>';
-
-      mount.innerHTML = head + body;
+        '</div>' +
+        '<div id="' + bodyId + '"></div>';
 
       var box = document.getElementById("arptable-filter-" + assetId);
       if (box) {
-        box.addEventListener("input", function () {
+        // Debounced (the shared global from table-sf.js, as at ~14 other call
+        // sites): the operator's keystrokes outrun a multi-thousand-row
+        // re-group, and every intermediate prefix is a view nobody asked for.
+        var apply = debounce(function () {
           filter = box.value.trim().toLowerCase();
           _assetArpFilter[assetId] = filter;
-          var caret = box.selectionStart;
-          render();
-          var next = document.getElementById("arptable-filter-" + assetId);
-          if (next) { next.focus(); try { next.setSelectionRange(caret, caret); } catch (_) {} }
-        });
+          renderBody();
+        }, 150);
+        box.addEventListener("input", apply);
       }
       wireRange();
-      wireGroupToggles();
-      _wireAssetPivotLinks(mount);
+      renderBody();
     }
 
     // Changing the range is a re-fetch, not a client-side filter: the window

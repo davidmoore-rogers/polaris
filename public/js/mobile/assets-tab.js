@@ -118,7 +118,10 @@
     _state.seq++;
     var thisSeq = _state.seq;
     _state.loading = true;
-    renderList();
+    // Paint the pending state. On a Load more that is just the button going
+    // to its spinner, so refresh that node rather than re-rendering every
+    // card already on screen (this call was the second full rebuild per tap).
+    if (replace || !refreshFooter()) renderList();
 
     var params = { limit: PAGE_SIZE, offset: _state.offset };
     if (filter.type) params.assetType = filter.type;
@@ -131,7 +134,10 @@
       _state.total = resp.total || fresh.length;
       _state.assets = replace ? fresh : _state.assets.concat(fresh);
       _state.offset = (replace ? 0 : _state.offset) + fresh.length;
-      renderList();
+      // Append the new page's cards when we can; fall back to a full render
+      // for a filter change, the first page, or an empty tail (where the
+      // footer swaps from button to count).
+      if (replace || fresh.length === 0 || !appendCards(fresh)) renderList();
     }).catch(function (err) {
       if (thisSeq !== _state.seq) return;
       _state.loading = false;
@@ -161,11 +167,17 @@
     _state.assets.forEach(function (a) {
       html += renderAssetCard(a);
     });
-    html += '</div>';
+    html += '</div><div id="assets-list-footer">' + footerHTML() + '</div>';
 
-    var hasMore = _state.assets.length < _state.total;
-    if (hasMore) {
-      html += ''
+    host.innerHTML = html;
+    wireListHost(host);
+  }
+
+  // The Load-more button, or the final count once everything is in. Its own
+  // node so an append can refresh it without touching the cards.
+  function footerHTML() {
+    if (_state.assets.length < _state.total) {
+      return ''
         + '<div style="display:flex;justify-content:center;padding:8px 16px 24px;">'
         + '  <button class="btn btn-tonal" id="assets-load-more"' + (_state.loading ? ' disabled' : '') + '>'
         + '    ' + (_state.loading
@@ -173,22 +185,56 @@
           : 'Load more (' + (_state.total - _state.assets.length) + ' remaining)')
         + '  </button>'
         + '</div>';
-    } else {
-      html += '<div style="text-align:center;padding:16px 16px 24px;color:var(--md-on-surface-variant);font-size:12px;letter-spacing:.5px;">' + _state.assets.length + ' asset' + (_state.assets.length === 1 ? "" : "s") + '</div>';
     }
+    return '<div style="text-align:center;padding:16px 16px 24px;color:var(--md-on-surface-variant);font-size:12px;letter-spacing:.5px;">' + _state.assets.length + ' asset' + (_state.assets.length === 1 ? "" : "s") + '</div>';
+  }
 
-    host.innerHTML = html;
+  function refreshFooter() {
+    var f = document.getElementById("assets-list-footer");
+    if (!f) return false;
+    f.innerHTML = footerHTML();
+    return true;
+  }
 
-    host.querySelectorAll(".asset-card").forEach(function (card) {
-      card.addEventListener("click", function () {
-        var id = card.dataset.id;
-        if (!id) return;
-        if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(id);
-        else PolarisRouter.go("asset/" + id);
-      });
+  // ONE delegated listener on the host instead of one per card, attached once.
+  // Walking a 2000-asset fleet is 40 taps of Load more, and the old shape
+  // re-attached a listener to every ACCUMULATED card on each one — tens of
+  // thousands of attachments on a phone, on top of rebuilding every card.
+  function wireListHost(host) {
+    if (host.dataset.listWired === "1") return;
+    host.dataset.listWired = "1";
+    host.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      var more = t.closest("#assets-load-more");
+      if (more) {
+        if (!more.disabled) loadPage(false);
+        return;
+      }
+      var card = t.closest(".asset-card");
+      if (!card) return;
+      var id = card.dataset.id;
+      if (!id) return;
+      if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(id);
+      else PolarisRouter.go("asset/" + id);
     });
-    var more = document.getElementById("assets-load-more");
-    if (more) more.addEventListener("click", function () { loadPage(false); });
+  }
+
+  // Append-only render for a Load more: the page's cards go on the end of the
+  // existing list. Rebuilding the whole accumulated set per tap made the walk
+  // to 2000 assets quadratic in DOM work (~82k card renders across 40 taps),
+  // and the last tap alone destroyed and rebuilt 2000 cards.
+  function appendCards(fresh) {
+    var host = document.getElementById("assets-list-host");
+    if (!host) return false;
+    var list = host.querySelector(".asset-list");
+    if (!list) return false;
+    var holder = document.createElement("div");
+    holder.innerHTML = fresh.map(renderAssetCard).join("");
+    while (holder.firstChild) list.appendChild(holder.firstChild);
+    refreshFooter();
+    wireListHost(host);
+    return true;
   }
 
   function renderError(msg) {
