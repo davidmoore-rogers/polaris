@@ -5109,7 +5109,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **What it owns:** The `duplicate-ip` Conflict flavour end to end (business rule 40) — detection, the raise/refresh/auto-close lifecycle, and BOTH resolution verbs (reassign one member to a new address; merge members that are one device recorded twice). Sibling of `ipOverrideService` (same JSON-path dedup pattern, same auto-resolution convention), but detection-driven rather than write-driven.
 
-**Public API:** pure — `claimIsOperatorOwned(row)`, `claimIsCurrent(row, cutoff)`, `distinctDeviceCount(members)`, `groupCurrentClaims(rows, cutoff)`, `memberSetKey(members)`, `pickPrimaryMemberId(members)`, `resolveMergeTargets(members, survivorId, rawAbsorbIds)`, `toStoredMember(row)`, `duplicateIpRejectMessage(conflict)`; DB — `loadDuplicateIpClaims()`, `reconcileDuplicateIpConflicts()` (the job's entry point), `reassignDuplicateIpAsset(conflict, assetId, rawIp, actor)`, `mergeDuplicateIpAssets(conflict, survivorAssetId, absorbIds, actor)`, `logDuplicateIpDismissal(conflict, actor)`, `logScanFailure(err)`. Constants `DUPLICATE_IP_COLLISION_REASON`, `CLAIM_FRESH_DAYS`.
+**Public API:** pure — `claimIsOperatorOwned(row)`, `claimIsCurrent(row, cutoff)`, `distinctDeviceCount(members)`, `groupCurrentClaims(rows, cutoff)`, `memberSetKey(members)`, `pickPrimaryMemberId(members)`, `groupHasEligibleType(members)`, `resolveMergeTargets(members, survivorId, rawAbsorbIds)`, `toStoredMember(row)`, `duplicateIpRejectMessage(conflict)`; DB — `loadDuplicateIpClaims()`, `reconcileDuplicateIpConflicts()` (the job's entry point), `reassignDuplicateIpAsset(conflict, assetId, rawIp, actor)`, `mergeDuplicateIpAssets(conflict, survivorAssetId, absorbIds, actor)`, `logDuplicateIpDismissal(conflict, actor)`, `logScanFailure(err)`. Constants `DUPLICATE_IP_COLLISION_REASON`, `CLAIM_FRESH_DAYS`, `CONFLICT_ELIGIBLE_ASSET_TYPES`.
 
 **Cross-service deps:** `prisma`, `logEvent` + `buildChanges` (eventLogService), `UNMONITORABLE_STATUSES` (utils/assetInvariants), `isValidIpAddress` (utils/cidr), `resolvePendingIpOverrideConflicts` (ipOverrideService), `mergeAssets` (assetMergeService — the merge verb delegates rather than re-implementing an absorb).
 
@@ -5121,6 +5121,9 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Only statuses NOT in `UNMONITORABLE_STATUSES` participate (`active` + `maintenance`) — derived from that constant, never a hardcoded status list.
 - A member counts only while its claim is CURRENT: operator-owned (pin == address, or `ipSource="manual"`) never expires; a discovered claim needs the `(asset, ip)` `AssetIpHistory.lastSeen` (or `Asset.lastSeen` when there is no history row) within `CLAIM_FRESH_DAYS`.
 - Members sharing one non-null MAC are ONE device (`distinctDeviceCount`); a null MAC counts as its own.
+- A group needs at least ONE claimant whose `assetType` is in `CONFLICT_ELIGIBLE_ASSET_TYPES` (switch / access_point / firewall / server) — but every other claimant stays in `members[]`, since an endpoint that took an AP's address is what the card has to name. Tested on the CURRENT claims, so a stale switch record can't license an endpoint-only conflict.
+- The scan's SQL `bool_or` prefilter on that list is a SUPERSET (it cannot see the freshness verdict); `groupHasEligibleType` in JS is the decision. Keep the two in step — they read the same exported constant, so don't inline the list into the SQL.
+- Narrowing that list needs no migration: a pending conflict whose members stop qualifying is retired by the reconcile's own auto-close path.
 - Accept is REFUSED for this flavour (`acceptAssetConflict` throws 400) — nothing to adopt.
 - A REJECTED row with the SAME member set suppresses re-raise; a changed set raises again.
 - `reassignDuplicateIpAsset` writes `ipAddress` + `ipOverride` + `ipSource="manual"` in ONE update so the `db.ts` override guard defers, and refuses a target another network-present asset already records (409).
@@ -5135,6 +5138,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - The card's two action wirings (`[data-dupip-apply]` and `[data-dupip-merge]`) are bound in `loadConflicts` in events.js, not in the renderer — a new action needs both halves.
 - The scan's SQL names raw columns (`assets`, `asset_ip_history`); a rename in `prisma/schema.prisma` needs a matching edit here (it bypasses the Prisma client, and therefore also bypasses the secret-at-rest and override extensions — do not add asset WRITES to it).
 - Adding a status to `UNMONITORABLE_STATUSES` (business rule 10) automatically narrows this sweep — intended, but re-read rule 40(a) before assuming it.
+- Adding an asset type to `CONFLICT_ELIGIBLE_ASSET_TYPES` widens what raises (`hypervisor` and `router` are the two deliberately-omitted candidates — business rule 40(g)); operator-added custom types are outside it by design, per the `assetType`-branching convention in CLAUDE.md.
 - Keep the raise Event on `conflict.detected`: the baseline "IP conflict detected" automation subscribes to that action string, and a new action would silently un-alert the feature.
 - The JSON path filter (`proposedAssetFields.path ["collisionReason"]`) requires PostgreSQL; keep it in step with `DUPLICATE_IP_COLLISION_REASON`.
 

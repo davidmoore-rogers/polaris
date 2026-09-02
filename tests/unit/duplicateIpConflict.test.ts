@@ -3,6 +3,8 @@ import {
   claimIsOperatorOwned,
   claimIsCurrent,
   distinctDeviceCount,
+  groupHasEligibleType,
+  CONFLICT_ELIGIBLE_ASSET_TYPES,
   groupCurrentClaims,
   memberSetKey,
   pickPrimaryMemberId,
@@ -22,7 +24,7 @@ function row(over: Partial<IpClaimRow> = {}): IpClaimRow {
     id: "a1",
     ip: "10.1.1.50",
     hostname: "host-a",
-    assetType: "workstation",
+    assetType: "switch",
     status: "active",
     monitored: true,
     macAddress: "AA:BB:CC:00:00:01",
@@ -119,6 +121,34 @@ describe("distinctDeviceCount", () => {
   });
 });
 
+describe("groupHasEligibleType", () => {
+  it("accepts a set containing any of the four chosen-address types", () => {
+    for (const t of CONFLICT_ELIGIBLE_ASSET_TYPES) {
+      expect(groupHasEligibleType([{ assetType: "workstation" }, { assetType: t }])).toBe(true);
+    }
+  });
+
+  it("rejects a set of only pool-addressed equipment", () => {
+    expect(
+      groupHasEligibleType([{ assetType: "workstation" }, { assetType: "printer" }]),
+    ).toBe(false);
+  });
+
+  it("rejects unknown, blank and null types", () => {
+    expect(groupHasEligibleType([{ assetType: "other" }, { assetType: null }])).toBe(false);
+    expect(groupHasEligibleType([{ assetType: "" }, { assetType: "  " }])).toBe(false);
+  });
+
+  it("tolerates padding on a stored type", () => {
+    expect(groupHasEligibleType([{ assetType: " switch " }])).toBe(true);
+  });
+
+  it("does NOT include hypervisor or router — see business rule 40", () => {
+    // Stated as a test so widening the list is a deliberate edit here too.
+    expect(groupHasEligibleType([{ assetType: "hypervisor" }, { assetType: "router" }])).toBe(false);
+  });
+});
+
 describe("groupCurrentClaims", () => {
   it("groups two current claims on one address", () => {
     const groups = groupCurrentClaims(
@@ -170,6 +200,44 @@ describe("groupCurrentClaims", () => {
       CUTOFF,
     );
     expect(groups.map((g) => g.ip)).toEqual(["10.1.1.50", "10.1.1.60"]);
+  });
+
+  it("raises on a mix as long as one claimant is qualifying equipment", () => {
+    const groups = groupCurrentClaims(
+      [
+        row({ id: "a1", assetType: "access_point" }),
+        row({ id: "a2", assetType: "workstation", macAddress: "AA:BB:CC:00:00:02" }),
+      ],
+      CUTOFF,
+    );
+    expect(groups).toHaveLength(1);
+    // The endpoint still rides the card — it is what took the address.
+    expect(groups[0].members.map((m) => m.assetType)).toEqual(["access_point", "workstation"]);
+  });
+
+  it("ignores an endpoint-only collision — that is DHCP working", () => {
+    const groups = groupCurrentClaims(
+      [
+        row({ id: "a1", assetType: "workstation" }),
+        row({ id: "a2", assetType: "printer", macAddress: "AA:BB:CC:00:00:02" }),
+      ],
+      CUTOFF,
+    );
+    expect(groups).toEqual([]);
+  });
+
+  it("ignores a collision whose only qualifying claim is stale", () => {
+    // Eligibility is tested on CURRENT claims: a departed switch's leftover
+    // record must not license a conflict between two live endpoints.
+    const groups = groupCurrentClaims(
+      [
+        row({ id: "a1", assetType: "switch", ipLastSeen: STALE, lastSeen: STALE }),
+        row({ id: "a2", assetType: "workstation", macAddress: "AA:BB:CC:00:00:02" }),
+        row({ id: "a3", assetType: "workstation", macAddress: "AA:BB:CC:00:00:03" }),
+      ],
+      CUTOFF,
+    );
+    expect(groups).toEqual([]);
   });
 
   it("ignores rows with no address", () => {

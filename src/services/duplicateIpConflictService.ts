@@ -11,7 +11,13 @@
  * WHAT IT REPORTS
  * Two Assets whose `ipAddress` is the same address while both are in a status
  * that can be on the network (i.e. NOT one of UNMONITORABLE_STATUSES —
- * decommissioned / disabled / storage / quarantined; see business rule 10).
+ * decommissioned / disabled / storage / quarantined; see business rule 10),
+ * where AT LEAST ONE of them is a type whose address was CHOSEN rather than
+ * handed out by a pool (CONFLICT_ELIGIBLE_ASSET_TYPES — switch / access_point /
+ * firewall / server). Two endpoints trading a DHCP address is DHCP working; an
+ * endpoint sitting on an access point's address is an outage, so the endpoint
+ * still appears as a claimant on the card, it just cannot raise the conflict by
+ * itself.
  * One address answering for two devices breaks routing, monitoring and
  * quarantine alike, and nothing else in Polaris notices: the IPAM half has a
  * unique index per subnet (business rule 3) but inventory has no such
@@ -84,6 +90,29 @@ const DUPLICATE_IP_CONFLICT_WHERE = {
  * claims ignore this entirely.
  */
 export const CLAIM_FRESH_DAYS = 7;
+
+/**
+ * Which asset types make a shared address worth reporting. A conflict is raised
+ * when AT LEAST ONE claimant is one of these — the group still carries every
+ * other claimant (an endpoint that took an AP's address is exactly what the card
+ * needs to name), but two endpoints trading a DHCP address between them is not a
+ * fault, it is DHCP working.
+ *
+ * These four have addresses somebody CHOSE: a switch, an access point and a
+ * FortiGate are statically addressed or DHCP-reserved infrastructure, and a
+ * server is addressed on purpose whether it is physical or a vCenter VM (VMs are
+ * typed `server` — the `virtual_machine` type was retired). A workstation,
+ * printer or phone is handed whatever the pool has free, which is why a
+ * duplicate involving only those is noise.
+ *
+ * Deliberately a constant rather than a Setting: it is a claim about which
+ * equipment has deliberate addressing, not a per-install preference, and a
+ * settings surface for it would need an asset-type picker no other conflict
+ * behaviour has. Operator-added custom types fall outside it by design (the
+ * `assetType`-branching convention in CLAUDE.md) — add them here deliberately.
+ * `hypervisor` (an ESXi host) and `router` are NOT here; see business rule 40.
+ */
+export const CONFLICT_ELIGIBLE_ASSET_TYPES = ["switch", "access_point", "firewall", "server"];
 
 /** Safety cap on the duplicate scan's result set (rows, not groups). */
 const SCAN_ROW_CAP = 5000;
@@ -167,6 +196,16 @@ export function distinctDeviceCount(members: Pick<IpClaimRow, "macAddress">[]): 
   return macs.size + unknown;
 }
 
+/**
+ * Does this set of claimants include equipment whose address was CHOSEN? One
+ * qualifying member is enough — the conflict is about that device, and the
+ * endpoint sitting on its address is the other half of the story rather than a
+ * reason to stay quiet.
+ */
+export function groupHasEligibleType(members: Pick<IpClaimRow, "assetType">[]): boolean {
+  return members.some((m) => CONFLICT_ELIGIBLE_ASSET_TYPES.includes((m.assetType || "").trim()));
+}
+
 /** Group current claims by address and keep only the real collisions. */
 export function groupCurrentClaims(rows: IpClaimRow[], cutoff: Date): DuplicateIpGroup[] {
   const byIp = new Map<string, IpClaimRow[]>();
@@ -181,6 +220,10 @@ export function groupCurrentClaims(rows: IpClaimRow[], cutoff: Date): DuplicateI
   for (const [ip, members] of byIp) {
     if (members.length < 2) continue;
     if (distinctDeviceCount(members) < 2) continue;
+    // Eligibility is tested on the CURRENT claims, not on everything the scan
+    // returned: an address whose only qualifying claimant is a stale record is
+    // two endpoints trading a DHCP lease, which is not a fault.
+    if (!groupHasEligibleType(members)) continue;
     groups.push({ ip, members: [...members].sort((a, b) => a.id.localeCompare(b.id)) });
   }
   return groups.sort((a, b) => a.ip.localeCompare(b.ip));
@@ -273,7 +316,15 @@ export async function loadDuplicateIpClaims(): Promise<IpClaimRow[]> {
         AND a.status::text <> ALL(${UNMONITORABLE_STATUSES}::text[])
     ),
     dups AS (
-      SELECT ip FROM claims GROUP BY ip HAVING count(*) > 1
+      -- Addresses with at least two claims AND at least one claim from a type
+      -- worth reporting. A SUPERSET of what qualifies (this cannot see the
+      -- freshness verdict, so a stale switch row still passes bool_or here and
+      -- is dropped in JS) — the point is to keep endpoint-only duplicates,
+      -- which on a DHCP fleet are most of them, out of the result set entirely.
+      SELECT ip FROM claims
+      GROUP BY ip
+      HAVING count(*) > 1
+         AND bool_or("assetType" = ANY(${CONFLICT_ELIGIBLE_ASSET_TYPES}::text[]))
     )
     SELECT c.* FROM claims c JOIN dups d ON d.ip = c.ip
     ORDER BY c.ip, c.id
@@ -473,7 +524,7 @@ export async function reconcileDuplicateIpConflicts(): Promise<DuplicateIpReconc
       resourceId: row.assetId ?? undefined,
       resourceName: ip,
       actor: "system",
-      message: `Duplicate IP conflict on ${ip} auto-resolved — no two network-present assets claim the address any more`,
+      message: `Duplicate IP conflict on ${ip} auto-resolved — the address no longer has two current claims from equipment Polaris reports duplicates for`,
       details: { collisionReason: DUPLICATE_IP_COLLISION_REASON, ipAddress: ip },
     });
   }
