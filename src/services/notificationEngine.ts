@@ -926,6 +926,88 @@ function groupSeries<T>(rows: T[], keyOf: (r: T) => string): T[][] {
   return [...byKey.values()];
 }
 
+/** The `AssetInterfaceSample` column each interface STATE field reads. */
+const INTERFACE_STATE_COLUMN = {
+  ifOperStatus:  "operStatus",
+  ifAdminStatus: "adminStatus",
+  poeStatus:     "poeStatus",
+} as const;
+
+export type InterfaceStateField = keyof typeof INTERFACE_STATE_COLUMN;
+
+/** The three status columns of one interface sample row. */
+export interface InterfaceStateRow {
+  operStatus:  string | null;
+  adminStatus: string | null;
+  poeStatus:   string | null;
+}
+
+/**
+ * Does this sample row actually CARRY the field, or was it merely written by a
+ * tick that failed to collect it?
+ *
+ * One row is written per port per tick with every interface column on it, so a
+ * column can be null because the device has nothing to report there OR because
+ * that column's own collection failed while the rest of the row succeeded. PoE
+ * is the one most able to fail alone: it is a separate pair of walks
+ * (`collectPoePortsSnmp`) that can time out while the IF-MIB walk feeding the
+ * same row answers fine, and its ifIndex correlation is inference that drops
+ * any port it cannot resolve unambiguously (`utils/poePorts.ts`).
+ *
+ * Null therefore means "no reading", exactly as it does for `hwSensorAlarm`
+ * (business rule 24) — it is never mapped to a value. What it must NOT do is
+ * decide the question on the newest row alone; see `interfaceStateSeries`.
+ */
+export function interfaceSampleCarries(field: InterfaceStateField, r: InterfaceStateRow): boolean {
+  if (field === "poeStatus") return r.poeStatus != null;
+  // ifOperStatus is gated on adminStatus === "up" downstream, so a row missing
+  // THAT is no more usable here than one missing operStatus itself.
+  if (field === "ifOperStatus") return r.operStatus != null && r.adminStatus != null;
+  return r.adminStatus != null;
+}
+
+/**
+ * One port's rows (newest first) reduced to the reading the engine evaluates
+ * plus the run a poll-counted hold counts — skipping rows that carry no
+ * reading for this field.
+ *
+ * THE READING IS THE NEWEST ROW THAT CARRIES THE FIELD, NOT THE NEWEST ROW.
+ * Taking `group[0]` blindly made a single failed collection indistinguishable
+ * from a port that has no PSE at all: the dimension vanished, and because the
+ * switch was still reporting its OTHER pinned ports, `clearVanishedStates` took
+ * the "dimension is gone" branch and retired the live alert — which the next
+ * readable tick then raised again as a NEW alert, with a new delivery and a new
+ * email. A duplicate alert per collection gap, on a port whose state never
+ * changed. That is what a 30-minute `poeAbsentCache` entry written by a timed-out
+ * walk used to guarantee (see `collectPoePortsSnmp`, fixed alongside this).
+ *
+ * "Newest non-null wins" is also exactly what the hourly rollup already applies
+ * to these same columns (`sampleRollupService`'s `ARRAY_AGG(...) FILTER (WHERE
+ * ... IS NOT NULL)`), so this is the engine agreeing with the rollup rather
+ * than a new rule of its own.
+ *
+ * Returns null when NO row in the whole lookback window carries the field —
+ * the case the null gate was written for (a port with no PSE, or one that
+ * genuinely stopped reporting). Those still produce no reading, and their
+ * alerts still clear.
+ */
+export function interfaceStateSeries<T extends InterfaceStateRow>(
+  field: InterfaceStateField,
+  group: readonly T[],
+  cap: number = SERIES_CAP,
+): { row: T; series: (string | null)[] } | null {
+  const row = group.find((r) => interfaceSampleCarries(field, r));
+  if (!row) return null;
+  const col = INTERFACE_STATE_COLUMN[field];
+  return {
+    row,
+    // Readable rows only, for the same reason: an unreadable tick is a GAP in
+    // the series, not a reading — counting it would break a poll-counted hold
+    // (business rule 19) on exactly the ticks that measured nothing.
+    series: group.filter((r) => interfaceSampleCarries(field, r)).slice(0, cap).map((r) => r[col]),
+  };
+}
+
 async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asset_state" }>, assets: ScopeAssetRow[]): Promise<Reading[]> {
   const df = trigger.dimensionFilter ?? {};
   assets = applyDeviceFilters(assets, df); // same asset-set narrowing as the metric resolver
@@ -943,13 +1025,10 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
     case "dependencySuppressed": return assets.map((a) => ({ ...mk(a, "", "", a.dependencySuppressed), readingAt: probeAt(a) }));
     case "quarantined": return assets.map((a) => ({ ...mk(a, "", "", a.quarantinedAt !== null || a.status === "quarantined"), readingAt: probeAt(a) }));
     case "ifOperStatus": case "ifAdminStatus": case "poeStatus": {
-      const col = trigger.field === "ifOperStatus" ? "operStatus"
-        : trigger.field === "ifAdminStatus" ? "adminStatus"
-        : "poeStatus";
+      const col = INTERFACE_STATE_COLUMN[trigger.field];
       const since = new Date(Date.now() - lookbackMsFor(trigger));
       // No `distinct` any more: a poll-counted hold needs the RUN of readings
-      // per port, so the rows are grouped here (newest first) and the newest of
-      // each group is the current value the un-counted paths always used.
+      // per port, so the rows are grouped here (newest first).
       const rows = await prisma.assetInterfaceSample.findMany({ where: { assetId: { in: ids }, timestamp: { gte: since } }, orderBy: [{ assetId: "asc" }, { ifName: "asc" }, { timestamp: "desc" }], select: { assetId: true, ifName: true, alias: true, timestamp: true, operStatus: true, adminStatus: true, poeStatus: true } });
       // Only PINNED interfaces produce readings (Asset.monitoredInterfaces —
       // the same join the Down Interfaces widget uses): the interfaces stream
@@ -959,27 +1038,27 @@ async function resolveAssetStateReadings(trigger: Extract<Trigger, { type: "asse
       // port is deliberately down, not an outage — the widget's adminStatus
       // gate). An interface that leaves the pin set (or gets admin-downed)
       // stops producing readings; the vanished-state sweep clears its alert.
+      // The reading is the newest row that CARRIES the field, not the newest
+      // row — see interfaceStateSeries for why, and for what a duplicate alert
+      // email per collection gap used to look like.
       const byPort = groupSeries(rows, (r) => `${r.assetId}|${r.ifName}`);
-      return byPort.filter((g) => {
-        const r = g[0]!;
+      const out: Reading[] = [];
+      for (const g of byPort) {
+        const picked = interfaceStateSeries(trigger.field, g);
+        if (!picked) continue;
+        const { row: r, series } = picked;
         const a = index.get(r.assetId);
-        if (!interfaceIsPinned(a, r.ifName)) return false;
-        if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") return false;
-        // A port with no PSE reports nothing — a null is "not a PoE port",
-        // not "PoE is off", and a rule like `poeStatus is-not delivering`
-        // would otherwise fire on every uplink and SVI on the switch.
-        if (trigger.field === "poeStatus" && r.poeStatus == null) return false;
+        if (!interfaceIsPinned(a, r.ifName)) continue;
+        if (trigger.field === "ifOperStatus" && r.adminStatus !== "up") continue;
         // "disabled" is an operator's choice, the PoE analogue of the
         // admin-up gate above. Excluding it keeps a not-delivering rule from
         // alerting on ports PoE was deliberately turned off for. A fault rule
         // is unaffected: a disabled port reports "disabled", never "fault".
-        if (trigger.field === "poeStatus" && r.poeStatus === "disabled") return false;
-        return substringMatch(r.ifName, df.ifNamePattern);
-      }).map((g) => {
-        const r = g[0]!;
-        const a = index.get(r.assetId)!;
-        return { ...mk(a, r.ifName, interfaceDimLabel(r.ifName, r.alias), (r as any)[col]), series: g.slice(0, SERIES_CAP).map((x) => (x as any)[col] ?? null), readingAt: r.timestamp };
-      });
+        if (trigger.field === "poeStatus" && r.poeStatus === "disabled") continue;
+        if (!substringMatch(r.ifName, df.ifNamePattern)) continue;
+        out.push({ ...mk(a!, r.ifName, interfaceDimLabel(r.ifName, r.alias), r[col]), series, readingAt: r.timestamp });
+      }
+      return out;
     }
     case "ipsecStatus": {
       const since = new Date(Date.now() - lookbackMsFor(trigger));

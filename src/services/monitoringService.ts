@@ -165,7 +165,7 @@ import {
   entityTypeColumnTrusted,
   pseOperStatusToAlarm,
 } from "../utils/hardwareSensors.js";
-import { poeClassLabel, poeIfNameByIndex, poeStatusLabel } from "../utils/poePorts.js";
+import { poeClassLabel, poeIfNameByIndex, poeStatusLabel, poeWalkOutcome } from "../utils/poePorts.js";
 import { entityPhysicalClassLabel, entityPhysicalIsInventory } from "../utils/hardwareSensors.js";
 import { ifStatusLabel, snmpIfTypeLabel } from "../utils/ifMib.js";
 import { basePortToIfName, fdbStatusIsUsable, fdbStatusLabel, resolveFdbIdentity, type FdbEntry } from "../utils/macForwarding.js";
@@ -7625,12 +7625,24 @@ async function collectPoePortsSnmp(
     if (absentAt != null && now - absentAt < POE_ABSENT_TTL_MS) return out;
   }
 
+  // A walk that ERRORED and a walk that answered with NO ROWS mean opposite
+  // things. Collapsing both into an empty Map (the old `.catch(() => new Map())`
+  // on the status column) is what let ONE timed-out walk write the absent-cache
+  // and blank PoE on a healthy switch for the next POE_ABSENT_TTL_MS — half an
+  // hour of `poeStatus: null` on every sample it writes, which is long enough
+  // for a live PoE alert to be retired as a vanished dimension and re-raised as
+  // a new one. Only an ANSWER with no rows is evidence the device has no PSE.
   const [statuses, classes] = await Promise.all([
-    snmpWalk(session, OID.pethPsePortDetectionStatus).catch(() => new Map()),
+    snmpWalk(session, OID.pethPsePortDetectionStatus).then((m) => m, () => null),
     snmpWalk(session, OID.pethPsePortPowerClassifications).catch(() => new Map()),
   ]);
 
-  if (statuses.size === 0) {
+  // Unreadable this tick: no rows, and deliberately NO cache write — the next
+  // tick asks again rather than assuming the PSE went away. Written as a bare
+  // null test rather than only through poeWalkOutcome so `statuses` narrows for
+  // the `.get()` calls below.
+  if (statuses === null) return out;
+  if (poeWalkOutcome(statuses) === "no-pse") {
     if (cacheKey) {
       if (poeAbsentCache.size >= POE_ABSENT_MAX) poeAbsentCache.clear();
       poeAbsentCache.set(cacheKey, now);

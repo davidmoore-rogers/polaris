@@ -87,6 +87,38 @@ export function poeClassLabel(raw: number | null | undefined): string | null {
 /** Every value `poeClassLabel` can produce. */
 export const POE_CLASS_VALUES = ["class0", "class1", "class2", "class3", "class4"] as const;
 
+/**
+ * What a `pethPsePortDetectionStatus` walk told us — the three-way answer the
+ * caller's negative cache depends on.
+ *
+ * `null` means the walk ERRORED (timed out, refused, transport gone); an empty
+ * map means it ANSWERED with no rows. Those are opposite claims and only the
+ * second is evidence about the device: a switch with no PSE answers, an
+ * unreachable one does not. Collapsing both into "empty" is what let a single
+ * timed-out walk write the 30-minute absent-cache on a healthy PoE switch,
+ * blanking `poeStatus` on every sample it wrote for half an hour — long enough
+ * for a live PoE alert to be retired as a vanished dimension and re-raised as a
+ * new one, i.e. a duplicate alert email caused entirely by one dropped packet.
+ *
+ * Only `"no-pse"` may be cached. `"unreadable"` must be retried next tick.
+ *
+ * The negative cache keeps its point, because the shape that matters is the
+ * common one: a device with no PSE ANSWERS the subtree walk (net-snmp feeds
+ * back an out-of-prefix OID or an error varbind, both of which `snmpWalk`
+ * filters, then resolves) and is cached exactly as before. A rejection means
+ * the host stopped answering mid-scrape, in which case the rest of the
+ * collector is failing too. The cost of not caching those is two extra walks
+ * per tick on a device that is already unreachable — paid deliberately, so
+ * that a transient failure cannot masquerade as a fact about the hardware for
+ * the next half hour.
+ */
+export type PoeWalkOutcome = "unreadable" | "no-pse" | "rows";
+
+export function poeWalkOutcome(statuses: ReadonlyMap<string, unknown> | null | undefined): PoeWalkOutcome {
+  if (statuses == null) return "unreadable";
+  return statuses.size === 0 ? "no-pse" : "rows";
+}
+
 /** Trailing integer in an interface name — "port5" → 5, "GigabitEthernet1/0/7" → 7. */
 function trailingPortNumber(ifName: string): number | null {
   const m = /(\d+)\s*$/.exec(ifName.trim());

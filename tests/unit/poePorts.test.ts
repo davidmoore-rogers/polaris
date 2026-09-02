@@ -6,6 +6,7 @@ import {
   poeIsDelivering,
   poeIsFault,
   poeStatusLabel,
+  poeWalkOutcome,
   POE_CLASS_VALUES,
   POE_STATUS_VALUES,
 } from "../../src/utils/poePorts.js";
@@ -151,5 +152,20 @@ describe("poeIfNameByIndex", () => {
       ["9", "port5"],
     ]);
     expect(poeIfNameByIndex(["1.5"], byIndex).get("1.5")).toBe("port5");
+  });
+});
+
+describe("poeWalkOutcome", () => {
+  it("distinguishes an errored walk from one that answered empty", () => {
+    // null = the walk threw (timeout / refused / transport gone). Not evidence
+    // about the device, so the caller must NOT cache it as "no PSE".
+    expect(poeWalkOutcome(null)).toBe("unreadable");
+    expect(poeWalkOutcome(undefined)).toBe("unreadable");
+    // An answer with no rows IS evidence: this device has no PSE.
+    expect(poeWalkOutcome(new Map())).toBe("no-pse");
+  });
+
+  it("reports rows when the table has any", () => {
+    expect(poeWalkOutcome(new Map([["1.5", 4]]))).toBe("rows");
   });
 });
