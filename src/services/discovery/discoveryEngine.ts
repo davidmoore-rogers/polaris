@@ -1796,7 +1796,12 @@ export function isVouchedManagedDevice(
   return !!(asset.hostname && sightings.seenHostnamesByController.get(ctlKey)?.has(asset.hostname));
 }
 
-async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal, adoptionBudget?: AdoptionBudget) {
+// Exported for tests: Phase 7's device-inventory pass defers its asset writes
+// to a flush at the end of the phase while keeping every in-memory effect
+// inline, and the hazard that shape has to survive — two sightings of ONE
+// asset in a single run — is only observable through the real function against
+// a real database.
+export async function syncDhcpSubnets(integrationId: string, integrationName: string, integrationType: string, result: DiscoveryResult, actor?: string, mode: SyncMode = "full", signal?: AbortSignal, adoptionBudget?: AdoptionBudget) {
   const syncLog = (level: "info" | "warning" | "error", message: string) => {
     logEvent({ action: "integration.sync", resourceType: "integration", resourceId: integrationId, resourceName: integrationName, actor, level, message: `[${integrationName}] ${message}` });
   };
@@ -5390,6 +5395,22 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
     // per-client last_seen is freshest speaks for the address.
     const bestInvIpSeenByAsset = new Map<string, number>();
 
+    // Deferred I/O for the update path (see the note at the write site).
+    // deviceInventory is every DHCP client across every gate — routinely the
+    // largest row set in a run — and this loop paid an asset.update plus a
+    // two-query MAC reconcile per sighting, serially. CREATES stay inline:
+    // assetIdx.add needs the row's real id so a later sighting of the same
+    // device updates it instead of minting a duplicate.
+    // Keyed by asset, NOT a list: several gates routinely sight one client, and
+    // the flush runs through batchSettled, which is CONCURRENT — two updates
+    // for the same row would race and the older sighting could land last.
+    // Merging in accumulation order is also exactly right, because each row's
+    // updateData was computed from the in-memory object the previous row had
+    // already assigned onto: later keys win, and the result is one write per
+    // asset instead of one per sighting.
+    const pendingInvUpdates = new Map<string, { data: Record<string, unknown>; label: string }>();
+    const pendingInvMacs = new Map<string, MacJsonEntry[]>();
+
     for (const inv of result.deviceInventory) {
       if (!inv.macAddress && !inv.ipAddress) continue;
       const normalizedMac = inv.macAddress ? inv.macAddress.toUpperCase().replace(/-/g, ":") : "";
@@ -5554,15 +5575,36 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             clampAcquiredToLastSeen(updateData, existingAsset);
             if (Object.keys(updateData).length > 0) {
-              await prisma.asset.update({ where: { id: existingAsset.id }, data: updateData });
+              // The WRITE is deferred to the flush below; every in-memory
+              // effect stays right here, in order. That split is the whole
+              // trick: identity resolution for later rows runs off assetIdx
+              // and off this same object, so it must see the change now —
+              // but the round trip does not have to happen now, and
+              // deviceInventory is the largest row set in a run.
+              //
+              // Two rows can land on one asset (several gates sighting the
+              // same client). The second's updateData is computed from this
+              // object AFTER the first's Object.assign, so merging in order
+              // gives the same final row the inline writes did.
+              const priorPending = pendingInvUpdates.get(existingAsset.id);
+              pendingInvUpdates.set(existingAsset.id, {
+                data: { ...(priorPending?.data ?? {}), ...updateData },
+                label: priorPending?.label ?? `${existingAsset.hostname || normalizedMac} (updated)`,
+              });
               // Update in-memory
               Object.assign(existingAsset, updateData);
               assetIdx.reindex(existingAsset);
+            } else if (macListForReconcile) {
+              // MAC-only change still counts as a touch for the run summary.
+              inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
             }
             if (macListForReconcile) {
-              await reconcileMacAddresses(existingAsset.id, macListForReconcile);
+              // Last list per asset wins — reconcileMacAddresses is a
+              // whole-list sync, so replaying an earlier row's list would
+              // undo a later one. One reconcile per asset instead of one per
+              // sighting (it is two queries each).
+              pendingInvMacs.set(existingAsset.id, macListForReconcile);
             }
-            inventoryAssets.push(`${existingAsset.hostname || normalizedMac} (updated)`);
             if (existingAsset.assetType !== "firewall" && existingAsset.assetType !== "switch" && existingAsset.assetType !== "access_point") {
               fortigateEndpointAssetIds.add(existingAsset.id);
               // Name the endpoint gate only from a LOCAL sighting, and only
@@ -5644,6 +5686,30 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           syncLog("error", `Failed to create inventory asset ${inv.hostname || normalizedMac || inv.ipAddress}: ${err.message || "Unknown error"}`);
         }
       }
+    }
+
+    // ── Flush Phase 7's deferred writes ──────────────────────────────────────
+    // One write per asset (already merged in accumulation order), through
+    // batchSettled rather than a transaction so one bad row costs its own
+    // update and logs individually — the isolation the per-row try/catch gave.
+    // Everything downstream (7.5 / 7.6 / 8 …) reads the DB after this point,
+    // so it must land before the phase ends.
+    if (pendingInvUpdates.size > 0) {
+      const flush = [...pendingInvUpdates];
+      const results = await batchSettled(flush, ([id, u]) =>
+        prisma.asset.update({ where: { id }, data: u.data as any }),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const u = flush[i]![1];
+        if (results[i].status === "rejected") {
+          syncLog("error", `Failed to update inventory asset ${u.label.replace(" (updated)", "")}: ${(results[i] as PromiseRejectedResult).reason?.message || "Unknown error"}`);
+        } else {
+          inventoryAssets.push(u.label);
+        }
+      }
+    }
+    if (pendingInvMacs.size > 0) {
+      await batchSettled([...pendingInvMacs], ([assetId, macs]) => reconcileMacAddresses(assetId, macs));
     }
   }
 
