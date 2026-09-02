@@ -1535,7 +1535,10 @@ function buildDeviceDescriptionStamp(
 // Generic upsert for the fortiswitch/fortiap source kinds. Same shape as the
 // firewall helper — best-effort, sweeps any phantom "manual" source row that
 // the phase-1 backfill may have produced before this sourceKind was wired.
-async function upsertFortinetInfraAssetSource(
+// Exported for tests: the `priorObserved` fast path must produce the same row
+// as the DB-read path it replaces, and the field it guards (osVersion) is the
+// one the 2026-07-14 fortiap incident blanked.
+export async function upsertFortinetInfraAssetSource(
   sourceKind: "fortiswitch" | "fortiap",
   assetId: string,
   integrationId: string,
@@ -1544,6 +1547,10 @@ async function upsertFortinetInfraAssetSource(
   syncedAt: Date,
   lastSeen: Date,
   integrationName?: string | null,
+  /** The row's CURRENT observed blob, when the caller already has it from a
+   *  preload — lets the absent-osVersion carry-forward below skip its read.
+   *  `undefined` means "not supplied"; `null` means "no such row". */
+  priorObserved?: Record<string, unknown> | null,
 ): Promise<void> {
   // Which FMG / FortiGate integration manages the controller. Only consumed by
   // the optional `<integration name>:<fortigate name>` rendering of the Sources
@@ -1556,11 +1563,13 @@ async function upsertFortinetInfraAssetSource(
   // AP LLDP persist. The read only fires on the empty-version case, so the
   // steady-state cost at fleet scale is zero extra queries.
   if (!observed.osVersion) {
-    const existing = await prisma.assetSource.findUnique({
-      where: { sourceKind_externalId: { sourceKind, externalId: serial } },
-      select: { observed: true },
-    });
-    const prevVersion = (existing?.observed as Record<string, unknown> | null)?.osVersion;
+    const prior = priorObserved !== undefined
+      ? priorObserved
+      : (await prisma.assetSource.findUnique({
+          where: { sourceKind_externalId: { sourceKind, externalId: serial } },
+          select: { observed: true },
+        }))?.observed as Record<string, unknown> | null ?? null;
+    const prevVersion = prior?.osVersion;
     if (typeof prevVersion === "string" && prevVersion) observed.osVersion = prevVersion;
   }
   await prisma.assetSource.upsert({
@@ -2010,18 +2019,80 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
   const switchInventoriedDevices = new Set<string>(result.switchInventoriedDevices || []);
   const apInventoriedDevices     = new Set<string>(result.apInventoriedDevices     || []);
 
-  // ── Pre-load all data in parallel (4 queries total) ──
+  // ── Pre-load all data in parallel (5 queries total) ──
   // Asset rows are hydrated with their macAddressRows so the in-memory MAC
   // pipeline (AssetIndex, MAC merges in DHCP / device-inventory / Intune
   // syncs) can keep working with the legacy `asset.macAddresses` JSON
   // shape. Each asset write site writes back through reconcileMacAddresses
   // at end of asset.update.
-  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRawWithRows] = await Promise.all([
+  //
+  // The source rows come along for the same reason the Entra / AD / vCenter
+  // syncs preload theirs: the firewall / FortiSwitch / FortiAP loops below
+  // each upsert their own source row and then re-read EVERY source row on
+  // that asset to project it, which was one round trip per device per run —
+  // hundreds on a Fortinet estate. `infraSources` is that projection input,
+  // kept in step with the loops' own writes by applyInfraSourceInMemory.
+  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRawWithRows, allInfraSourceRows] = await Promise.all([
     prisma.ipBlock.findMany(),
     prisma.subnet.findMany(),
     prisma.reservation.findMany({ where: { status: "active" } }),
     prisma.asset.findMany({ include: { macAddressRows: { select: MAC_ROW_SELECT } } }),
+    prisma.assetSource.findMany({
+      select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true, lastSeen: true },
+    }),
   ]);
+  const infraSources = new Map<string, EntraSourceEntry[]>();
+  for (const r of allInfraSourceRows) {
+    const entry: EntraSourceEntry = {
+      sourceKind: r.sourceKind, externalId: r.externalId, inferred: r.inferred,
+      observed: (r.observed as Record<string, unknown> | null) || {}, lastSeen: r.lastSeen,
+    };
+    const list = infraSources.get(r.assetId);
+    if (list) list.push(entry); else infraSources.set(r.assetId, [entry]);
+  }
+  /** The source rows for one asset, as the projection takes them. */
+  const infraSourcesOf = (assetId: string): EntraSourceEntry[] => infraSources.get(assetId) ?? [];
+  /** The prior `observed` blob for one (kind, externalId), for the
+   *  absent-osVersion carry-forward in upsertFortinetInfraAssetSource — which
+   *  read it back from the DB per device rather than from a preload. */
+  const infraPriorObserved = (assetId: string, sourceKind: string, externalId: string): Record<string, unknown> | null =>
+    infraSourcesOf(assetId).find((s) => s.sourceKind === sourceKind && s.externalId === externalId)?.observed ?? null;
+  /**
+   * Mirror of what the infra upsert helpers do to the DB, so the projection
+   * below can read the map instead of re-querying: replace-or-insert the row
+   * at (sourceKind, externalId), and drop the phantom `manual|<assetId>` row
+   * the helpers clear (see the note on that delete — it is live, not a spent
+   * migration).
+   */
+  const applyInfraSourceInMemory = (
+    assetId: string,
+    sourceKind: string,
+    externalId: string,
+    observed: Record<string, unknown>,
+    /** null = "do not advance" (an offline HA member), matching the helpers'
+     *  `...(lastSeen ? { lastSeen } : {})` on the UPDATE half. */
+    lastSeen: Date | null,
+    syncedAt: Date,
+  ): void => {
+    let list = infraSources.get(assetId);
+    if (!list) { list = []; infraSources.set(assetId, list); }
+    const row = list.find((s) => s.sourceKind === sourceKind && s.externalId === externalId);
+    if (row) {
+      row.observed = observed;
+      row.inferred = false;
+      if (lastSeen) row.lastSeen = lastSeen;
+    } else {
+      // On CREATE the helpers stamp both firstSeen and lastSeen from
+      // `lastSeen ?? syncedAt`.
+      list.push({ sourceKind, externalId, inferred: false, observed, lastSeen: lastSeen ?? syncedAt });
+    }
+    infraSources.set(assetId, list.filter((s) => !(s.sourceKind === "manual" && s.externalId === assetId)));
+  };
+  /** Mirror of the firewall loop's stale-endpoint sweep. */
+  const dropInfraSourceKindInMemory = (assetId: string, sourceKind: string): void => {
+    const list = infraSources.get(assetId);
+    if (list) infraSources.set(assetId, list.filter((s) => s.sourceKind !== sourceKind));
+  };
   // Hydrate asset.macAddresses from the side-table rows (sorted lastSeen
   // desc) so existing code paths can keep building macList in memory.
   const allAssetsRaw = allAssetsRawWithRows.map((a: any) => ({
@@ -2904,14 +2975,12 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             const syncedAt = new Date(now);
             const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
             await upsertFortigateFirewallAssetSource(existingAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
+            applyInfraSourceInMemory(existingAsset.id, "fortigate-firewall", member.serial, observed, memberDevice.offline ? null : syncedAt, syncedAt);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortigate-firewall AssetSource for ${memberDevice.hostname || device.name}: ${err?.message || "Unknown error"}`);
           }
         }
-        const fwSourceRows = await prisma.assetSource.findMany({
-          where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-        });
+        const fwSourceRows = infraSourcesOf(existingAsset.id);
         // Sweep any stale fortigate-endpoint source — a newly-deployed
         // FortiGate is often first sighted as a DHCP client of an existing
         // gate (endpoint source with the leased IP) before being adopted
@@ -2928,16 +2997,10 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
             await prisma.assetSource.deleteMany({
               where: { assetId: existingAsset.id, sourceKind: "fortigate-endpoint" },
             });
+            dropInfraSourceKindInMemory(existingAsset.id, "fortigate-endpoint");
           } catch { /* best-effort */ }
         }
-        const { projected: fwProjected } = projectAssetFromSources(
-          fwSourcesForProjection.map((s) => ({
-            sourceKind: s.sourceKind,
-            inferred: s.inferred,
-            observed: s.observed as Record<string, unknown> | null,
-            lastSeen: s.lastSeen,
-          })),
-        );
+        const { projected: fwProjected } = projectAssetFromSources(fwSourcesForProjection);
 
         const updateData: Record<string, unknown> = {
           // learnedLocation for firewalls: always the firewall's own
@@ -3182,6 +3245,9 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           const syncedAt = new Date(now);
           const observed = buildFortigateFirewallObservedBlob(memberDevice, integrationType as "fortimanager" | "fortigate", syncedAt, memberHaCtx);
           await upsertFortigateFirewallAssetSource(newAsset.id, integrationId, member.serial, observed, syncedAt, memberDevice.offline ? null : syncedAt);
+          // Seed the mirror: a roster that lists the same device twice would
+          // otherwise project the second visit from a map missing this row.
+          applyInfraSourceInMemory(newAsset.id, "fortigate-firewall", member.serial, observed, memberDevice.offline ? null : syncedAt, syncedAt);
         } catch (err: any) {
           syncLog("error", `Created FortiGate asset ${memberDevice.hostname || device.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
         }
@@ -3486,23 +3552,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiswitchObservedBlob(sw, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt, integrationName);
+            await upsertFortinetInfraAssetSource("fortiswitch", existingAsset.id, integrationId, sw.serial, observed, syncedAt, syncedAt, integrationName, infraPriorObserved(existingAsset.id, "fortiswitch", sw.serial));
+            applyInfraSourceInMemory(existingAsset.id, "fortiswitch", sw.serial, observed, syncedAt, syncedAt);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiswitch AssetSource for ${sw.name}: ${err?.message || "Unknown error"}`);
           }
         }
-        const swSourceRows = await prisma.assetSource.findMany({
-          where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-        });
-        const { projected: swProjected } = projectAssetFromSources(
-          swSourceRows.map((s) => ({
-            sourceKind: s.sourceKind,
-            inferred: s.inferred,
-            observed: s.observed as Record<string, unknown> | null,
-            lastSeen: s.lastSeen,
-          })),
-        );
+        const { projected: swProjected } = projectAssetFromSources(infraSourcesOf(existingAsset.id));
 
         const updateData: Record<string, unknown> = {
           // Resurrection of a decommissioned switch requires it to be
@@ -3646,6 +3702,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (sw.serial) {
           try {
             await upsertFortinetInfraAssetSource("fortiswitch", newAsset.id, integrationId, sw.serial, swObserved, swSyncedAt, swSyncedAt, integrationName);
+            applyInfraSourceInMemory(newAsset.id, "fortiswitch", sw.serial, swObserved, swSyncedAt, swSyncedAt);
           } catch (err: any) {
             syncLog("error", `Created FortiSwitch asset ${sw.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
@@ -3803,23 +3860,13 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
           try {
             const syncedAt = new Date(now);
             const observed = buildFortiapObservedBlob(ap, syncedAt);
-            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt, integrationName);
+            await upsertFortinetInfraAssetSource("fortiap", existingAsset.id, integrationId, ap.serial, observed, syncedAt, syncedAt, integrationName, infraPriorObserved(existingAsset.id, "fortiap", ap.serial));
+            applyInfraSourceInMemory(existingAsset.id, "fortiap", ap.serial, observed, syncedAt, syncedAt);
           } catch (err: any) {
             syncLog("error", `Failed to upsert fortiap AssetSource for ${ap.name}: ${err?.message || "Unknown error"}`);
           }
         }
-        const apSourceRows = await prisma.assetSource.findMany({
-          where: { assetId: existingAsset.id },
-          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-        });
-        const { projected: apProjected } = projectAssetFromSources(
-          apSourceRows.map((s) => ({
-            sourceKind: s.sourceKind,
-            inferred: s.inferred,
-            observed: s.observed as Record<string, unknown> | null,
-            lastSeen: s.lastSeen,
-          })),
-        );
+        const { projected: apProjected } = projectAssetFromSources(infraSourcesOf(existingAsset.id));
 
         const updateData: Record<string, unknown> = {
           fortinetTopology: apTopology,
@@ -3925,6 +3972,7 @@ async function syncDhcpSubnets(integrationId: string, integrationName: string, i
         if (ap.serial) {
           try {
             await upsertFortinetInfraAssetSource("fortiap", newAsset.id, integrationId, ap.serial, apObserved, apSyncedAt, apSyncedAt, integrationName);
+            applyInfraSourceInMemory(newAsset.id, "fortiap", ap.serial, apObserved, apSyncedAt, apSyncedAt);
           } catch (err: any) {
             syncLog("error", `Created FortiAP asset ${ap.name} but failed to upsert AssetSource row: ${err?.message || "Unknown error"}`);
           }
