@@ -653,7 +653,7 @@ column of numbers to compare by eye.
 
 ## Mobile bottom sheet
 
-**What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, topology node detail, and the full asset detail screen.
+**What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, topology node detail, the per-asset alerts sheet, and the full asset detail screen.
 
 **Canonical implementation:** `openSiteSheet()` in [public/js/mobile/map-tab.js](public/js/mobile/map-tab.js) + matching `closeSiteSheet()` — use this for the common two-state (open/dismiss) sheet.
 
@@ -666,6 +666,7 @@ column of numbers to compare by eye.
 - Three close paths, all calling the same close function: `scrim.addEventListener("click", closeXxx)`, the close button click, and `PolarisTabs.attachSwipeToDismiss(sheet, closeXxx)`. The swipe helper lives in [public/js/mobile/tabs.js](public/js/mobile/tabs.js).
 - CSS comes from [public/css/mobile.css](public/css/mobile.css) — the `.scrim`, `.sheet`, `.sheet-handle`, `.sheet-title` rules. Don't invent new container classes; reuse these so the swipe helper's transform composes correctly with the `sheet-in` open keyframe.
 - Forms inside the sheet keep their native gesture handling — the swipe helper opts out of `input`, `textarea`, `select`, and `[contenteditable=true]` so iOS text-cursor drag and selection handles work.
+- **A sheet is also how the phone asks a question.** `window.prompt` / `window.confirm` are unstyled and suppressed outright in some installed PWAs, which leaves an operator unable to finish an action with no visible reason why — so `promptAckNote` and `confirmClear` in [public/js/mobile/alerts.js](public/js/mobile/alerts.js) are `.sheet`s stacked at z-index 1010/1011 over whatever opened them, and they follow `showPrompt`'s null-vs-empty contract (dismissed resolves `null`, a blank REQUIRED field is refused with a stated reason rather than a bare red border). Reuse those two rather than reaching for the native dialogs; the More tab's fleet-wide alerts list delegates to the same note prompt, which is what keeps the `requireAckNote` rule in one place.
 - **Mobile SD-WAN charts are intentionally simplified.** The asset detail sheet's stacked SD-WAN sheet (`openSdwanSheet` in [public/js/mobile/asset-detail.js](public/js/mobile/asset-detail.js)) renders the per-member **Latency / Jitter / Packet-loss** numeric charts (driven by `loadSdwanPerfSla`), but it deliberately omits the desktop SD-WAN tab's **rule member-selection categorical timeline** — the mobile chart helper is numeric-only, so the sheet shows each rule's *current* selected member instead of its failover history (see the "Out of scope for v1" header comment in `asset-detail.js`). When porting a categorical/timeline chart to mobile, expect to fall back to a current-state list rather than reusing the numeric chart helper.
 
 **When adding a new instance:**

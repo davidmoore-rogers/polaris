@@ -13,6 +13,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const SRC = readFileSync(join(process.cwd(), "public", "js", "mobile", "more-tab.js"), "utf-8");
+// The note prompt this page opens lives in mobile/alerts.js (shared with the
+// per-asset alerts sheet), so the harness loads both files the way mobile.html
+// does — more-tab delegates to it rather than carrying a second copy.
+const ALERTS_SRC = readFileSync(join(process.cwd(), "public", "js", "mobile", "alerts.js"), "utf-8");
 
 const g = globalThis as any;
 
@@ -48,6 +52,8 @@ async function render(opts?: { perm?: string; ackFails?: boolean; alerts?: any[]
   g.PolarisInstall = { isIos: () => false, isFirefox: () => false, isStandalone: () => false, canPrompt: () => false, prompt: vi.fn(), onChange: vi.fn() };
   g.polarisPush = { isSupported: () => false, status: vi.fn(async () => ({ supported: false, enabledOnServer: false, permission: "default", subscribed: false })), enable: vi.fn(), disable: vi.fn() };
 
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  new Function(ALERTS_SRC)();
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   new Function(SRC)();
   const body = document.getElementById("app-body")!;

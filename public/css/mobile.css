@@ -47,6 +47,22 @@
   --md-success:                 #5ed87b;
   --md-warning:                 #ffd54a;
 
+  /* Alert severity. The same vocabulary the desktop carries in its
+     --color-sev-* tokens, expressed in mobile's own palette so an alert
+     agrees with the card it sits on: `critical`/`error` take the very red
+     the monitor dot spends on Down, `warning` the amber it spends on
+     Missed. Read ONLY by PolarisMobileAlerts.sevColor
+     (public/js/mobile/alerts.js) — the Assets-list alert flag and the
+     alerts sheet's pills — so the map lives in one place per surface.
+     Three are aliases, which is what keeps them in step through a theme
+     flip; only `notice` and `serious` have no existing counterpart and are
+     re-toned per theme below. */
+  --md-sev-notice:              #94a3b8;
+  --md-sev-info:                var(--md-primary);
+  --md-sev-warning:             var(--md-warning);
+  --md-sev-serious:             #ff8a00;
+  --md-sev-critical:            var(--md-error);
+
   /* GPS pin stroke — flips per theme so the stick figure stays legible
      against either basemap. Light mode override lives in the daylight
      block below. */
@@ -115,6 +131,14 @@
 
   --md-success:                 #1f7a3a;
   --md-warning:                 #b86e00;
+
+  /* Daylight re-tone of the two severity colours with no token to alias:
+     the dark values are picked to carry on a near-black surface and go
+     illegible on white. The three aliases above need no restatement —
+     --md-primary / --md-warning / --md-error are already redefined in this
+     block, and a var() alias resolves against the element it lands on. */
+  --md-sev-notice:              #5b6675;
+  --md-sev-serious:             #b35c00;
 
   --user-pin-stroke:            #1f2937;
 }
@@ -1127,6 +1151,107 @@ button, .list-item, .chip { touch-action: manipulation; }
 }
 .asset-card .meta .mono { color: var(--md-on-surface); }
 .asset-card .meta span { white-space: nowrap; }
+
+/* ─── Active-alert flag ───────────────────────────────────────────────────
+   "Alerts" beside the hostname on an asset card, in the colour of the worst
+   active alert on that device — the phone's counterpart to the desktop list's
+   .alert-strobe-dot and the asset slide-over's strobing Alerts tab
+   (styles.css), and it carries the same two states for the same reason. It
+   STROBES only while something on the device is unacknowledged: an
+   acknowledged alert is still active and still flagged, it has simply stopped
+   asking, and a list of pulsing words nobody can quiet is a list people stop
+   reading.
+
+   The colour arrives inline as --alert-flag-color from
+   PolarisMobileAlerts.sevColor; the fallback is the critical token rather
+   than something neutral, because a flag is Polaris asserting that something
+   is wrong and a colourless one understates it (the posture business rule 36
+   takes on an unresolved severity).
+
+   Motion is an accessibility hazard and this list is scrolled one-handed at
+   3am, so prefers-reduced-motion drops to the same steady rendering the
+   handled state uses — the colour carries the whole meaning either way. */
+@keyframes polaris-alert-flag-strobe {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: .25; }
+}
+.alert-flag {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 2px;
+  padding: 5px 10px;
+  border-radius: var(--shape-full);
+  border: 1px solid currentColor;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  line-height: 14px;
+  text-transform: uppercase;
+  color: var(--alert-flag-color, var(--md-sev-critical));
+  animation: polaris-alert-flag-strobe 1.4s ease-in-out infinite;
+  cursor: pointer;
+}
+.alert-flag .count {
+  font-weight: 500;
+  letter-spacing: 0;
+  opacity: .85;
+}
+.alert-flag.is-handled { animation: none; opacity: .75; }
+@media (prefers-reduced-motion: reduce) {
+  .alert-flag { animation: none; }
+}
+
+/* ─── Alerts sheet (per asset) ────────────────────────────────────────────
+   The sheet the flag above opens: one card per active alert, each carrying
+   its own Acknowledge / Clear depending on what the operator's role allows.
+   Severity is a left edge rather than a filled pill so a screen of alerts
+   still reads as a list of messages, with the colour running down the side. */
+.alert-item {
+  border-left: 3px solid var(--alert-flag-color, var(--md-sev-critical));
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.alert-item .alert-sev {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  text-transform: uppercase;
+  color: var(--alert-flag-color, var(--md-sev-critical));
+}
+.alert-item .alert-msg {
+  font-size: 15px;
+  line-height: 20px;
+  color: var(--md-on-surface);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.alert-item .alert-meta {
+  font-size: 12px;
+  color: var(--md-on-surface-variant);
+  margin-top: 6px;
+}
+.alert-item .alert-ack-note {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--md-on-surface);
+  background: var(--md-surface-cont-low);
+  border-radius: var(--shape-sm);
+  padding: 8px 10px;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.alert-item .alert-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.alert-item .alert-actions .btn { height: 36px; padding: 0 16px; }
 
 /* Asset-type avatar palettes. Keep the type → class mapping in sync with
    TYPE_META in /js/mobile/assets-tab.js. */

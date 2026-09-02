@@ -389,6 +389,7 @@ Vanilla JavaScript SPA served from `/public/`. **No build step** — plain ES mo
 | `public/js/alert-ack-view.js` | `PolarisAlertAckView` | the presentation of ONE alert about to be acknowledged — shared by `/alert-ack.html` and the in-app modal so the two cards cannot drift |
 | `public/js/alert-ack-modal.js` | `PolarisAlertAckModal` | that card in a modal: the in-app acknowledge dialog, opened from the Down Assets widget's row menu |
 | `public/js/brand-logo.js` | `PolarisBrandLogo` | which logo variant a theme gets (business rule 27) |
+| `public/js/mobile/alerts.js` | `PolarisMobileAlerts` | the phone's alert severity vocabulary (the third mirror of `ALERT_SEVERITY_RANK`), the Assets-list alert flag, the per-asset alerts sheet (acknowledge / clear), and the sheet-based acknowledge-note prompt the More tab shares |
 | `public/js/region-pills.js` | `PolarisRegionPills` | the only browser-side reader of the region catalogue |
 | `public/js/region-tree.js` | `PolarisRegionTree` | region containment tree + overlay styling |
 | `public/js/totp-self.js` | `PolarisTotpSelf` | self-service TOTP enroll/confirm/disable modals |

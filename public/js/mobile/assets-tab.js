@@ -4,6 +4,13 @@
 // top. Tapping a card navigates to the asset detail route (real renderer
 // arrives in Phase 5; Phase 4 lands on the placeholder).
 //
+// A card with live alerts additionally carries a strobing "Alerts" flag next
+// to the hostname, coloured by the worst one — tapping it opens the alerts
+// sheet for that device (acknowledge / clear, per the operator's role) rather
+// than the device itself. Both the flag's markup and the sheet live in
+// mobile/alerts.js; this file supplies the summary that rides the list
+// payload and repaints the flag when the sheet hands back a new one.
+//
 // State management: filter + asset list are kept on the module so a
 // re-render (e.g. snapping back from a detail screen) can repopulate
 // without re-fetching. Re-fetch on filter change.
@@ -211,12 +218,33 @@
         if (!more.disabled) loadPage(false);
         return;
       }
+      // The alert flag is checked BEFORE the card: it lives inside the card,
+      // so a tap on it matches both and the more specific one has to win, or
+      // "show me what is wrong with this device" would open the device.
+      var flag = t.closest(".alert-flag");
+      if (flag) {
+        var fcard = flag.closest(".asset-card");
+        if (fcard) openAlertsFor(fcard.dataset.id);
+        return;
+      }
       var card = t.closest(".asset-card");
       if (!card) return;
       var id = card.dataset.id;
       if (!id) return;
       if (window.PolarisAssetDetail && PolarisAssetDetail.open) PolarisAssetDetail.open(id);
       else PolarisRouter.go("asset/" + id);
+    });
+    // The card stopped being a <button> when the alert flag (a real button)
+    // moved inside it, so Enter/Space activation is supplied here. A key
+    // pressed on the flag itself is left alone — it is still a button and
+    // fires its own click, which the listener above already handles.
+    host.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " " && ev.key !== "Spacebar") return;
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      if (!t.classList || !t.classList.contains("asset-card")) return;
+      ev.preventDefault();
+      t.click();
     });
   }
 
@@ -258,15 +286,69 @@
     if (a.location || a.learnedLocation) bits.push(escapeHtml(a.location || a.learnedLocation));
     if (!bits.length) bits.push(escapeHtml(a.assetType || "asset"));
 
+    // A DIV, not a BUTTON, since the alert flag inside it is itself a button
+    // and a nested <button> swallows the tap that opens the device (the same
+    // trap the More tab's alert rows hit). Role + tabindex keep the keyboard
+    // affordance the element used to carry for free; the host's keydown
+    // handler supplies the Enter/Space activation a real button gave.
     return ''
-      + '<button class="asset-card" data-id="' + escapeHtml(a.id) + '">'
+      + '<div class="asset-card" role="button" tabindex="0" data-id="' + escapeHtml(a.id) + '">'
       + '  <div class="top">'
       + '    <div class="ico ' + meta.cls + '"><svg viewBox="0 0 24 24"><use href="' + meta.icon + '"/></svg></div>'
       + '    <div class="name">' + escapeHtml(a.hostname || a.assetTag || "(unnamed)") + '</div>'
+      + alertFlagHTML(a)
       + (dotCls ? '    <span class="dot ' + dotCls + '" title="' + escapeHtml(monitorTitle(a)) + '"></span>' : '')
       + '  </div>'
       + '  <div class="meta">' + bits.join('<span class="muted">·</span>') + '</div>'
-      + '</button>';
+      + '</div>';
+  }
+
+  // ─── Active-alert flag ──────────────────────────────────────────────────
+  // "Alerts" beside the hostname, strobing in the colour of the worst live
+  // alert on the device — the phone's counterpart to the desktop list's dot
+  // and the asset slide-over's strobing Alerts tab. The summary rides the
+  // list payload already (`activeAlert`, one query per PAGE — see
+  // activeAlertSummaryByAsset), so the flag costs no extra request; the
+  // markup and the severity colour come from PolarisMobileAlerts so the flag
+  // and the sheet it opens can't disagree about how bad this device is.
+  function alertFlagHTML(a) {
+    if (!window.PolarisMobileAlerts) return "";
+    return PolarisMobileAlerts.flagHTML(a && a.activeAlert);
+  }
+
+  /**
+   * Repaint one card's flag from a summary the sheet just recomputed, so an
+   * acknowledge or a clear settles the list behind it without a re-fetch. The
+   * accumulated row is updated too — a Load more re-renders from `_state`, and
+   * a card rebuilt from a stale row would start strobing again.
+   */
+  function paintAlertFlag(assetId, summary) {
+    var row = _state.assets.find(function (x) { return x.id === assetId; });
+    if (row) row.activeAlert = summary || null;
+    var card = null;
+    document.querySelectorAll(".asset-card").forEach(function (c) {
+      if (c.dataset.id === assetId) card = c;
+    });
+    if (!card) return;
+    var top = card.querySelector(".top");
+    if (!top) return;
+    var existing = top.querySelector(".alert-flag");
+    var html = window.PolarisMobileAlerts ? PolarisMobileAlerts.flagHTML(summary) : "";
+    if (!html) { if (existing) existing.remove(); return; }
+    var holder = document.createElement("div");
+    holder.innerHTML = html;
+    var flag = holder.firstChild;
+    if (existing) top.replaceChild(flag, existing);
+    else top.insertBefore(flag, top.querySelector(".dot"));   // before the status dot, or last
+  }
+
+  function openAlertsFor(assetId) {
+    if (!assetId || !window.PolarisMobileAlerts) return;
+    var row = _state.assets.find(function (x) { return x.id === assetId; });
+    PolarisMobileAlerts.openForAsset(assetId, {
+      hostname: (row && (row.hostname || row.assetTag)) || "",
+      onSummary: function (summary) { paintAlertFlag(assetId, summary); },
+    });
   }
 
   function monitorDotCls(a) {
