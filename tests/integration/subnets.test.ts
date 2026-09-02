@@ -196,6 +196,68 @@ d("GET /api/v1/subnets", () => {
   });
 });
 
+// ─── GET /api/v1/subnets/:id/ips ──────────────────────────────────────────────
+
+d("GET /api/v1/subnets/:id/ips", () => {
+  // The panel loads ONE page of addresses, so it fetches only that page's
+  // reservations — an actively-leased /21 carries thousands. What must not
+  // regress with that narrowing: the page still shows its own reservations,
+  // and `hasConflict` still means "anywhere in this subnet", not "on this
+  // page" (it warns about the subnet, and the conflicting row is usually
+  // nowhere near page 1).
+  async function seed(agent: any, csrf: string) {
+    const block = await createBlock(agent, csrf, "IPs", "10.70.0.0/16");
+    const sub = await agent.post("/api/v1/subnets").set("X-CSRF-Token", csrf)
+      .send({ blockId: block.id, cidr: "10.70.0.0/24", name: "Panel" });
+    return sub.body.id as string;
+  }
+
+  it("returns the page's own reservations and omits ones outside the window", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const subnetId = await seed(agent, csrf);
+    // .5 lands on page 1 at pageSize 4 (.0 network, .1, .2, .3 …); .200 does not.
+    await prisma.reservation.createMany({
+      data: [
+        { subnetId, ipAddress: "10.70.0.2", hostname: "ON-PAGE", status: "active", sourceType: "manual", createdBy: "t" },
+        { subnetId, ipAddress: "10.70.0.200", hostname: "OFF-PAGE", status: "active", sourceType: "manual", createdBy: "t" },
+      ],
+    });
+    const resp = await agent.get(`/api/v1/subnets/${subnetId}/ips?page=1&pageSize=4`);
+    expect(resp.status).toBe(200);
+    const named = resp.body.ips
+      .filter((i: any) => i.reservation)
+      .map((i: any) => i.reservation.hostname);
+    expect(named).toEqual(["ON-PAGE"]);
+    // Paging metadata still describes the whole subnet.
+    expect(resp.body.totalIps).toBeGreaterThan(4);
+  });
+
+  it("flags hasConflict from a conflict on a row the current page cannot show", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const subnetId = await seed(agent, csrf);
+    await prisma.reservation.create({
+      data: {
+        subnetId, ipAddress: "10.70.0.240", hostname: "FAR-AWAY", status: "active",
+        sourceType: "manual", createdBy: "t", conflictMessage: "discovery disagrees",
+      },
+    });
+    const resp = await agent.get(`/api/v1/subnets/${subnetId}/ips?page=1&pageSize=4`);
+    expect(resp.status).toBe(200);
+    // Nothing on page 1 carries the conflict, but the subnet does.
+    expect(resp.body.ips.some((i: any) => i.reservation)).toBe(false);
+    expect(resp.body.subnet.hasConflict).toBe(true);
+    expect(resp.body.subnet.conflictMessage).toBe("One or more IPs have conflicts");
+  });
+
+  it("reports no conflict when the subnet has none", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const subnetId = await seed(agent, csrf);
+    const resp = await agent.get(`/api/v1/subnets/${subnetId}/ips?page=1&pageSize=4`);
+    expect(resp.body.subnet.hasConflict).toBe(false);
+    expect(resp.body.subnet.conflictMessage).toBeNull();
+  });
+});
+
 // ─── GET /api/v1/subnets/:id ──────────────────────────────────────────────────
 
 d("GET /api/v1/subnets/:id", () => {

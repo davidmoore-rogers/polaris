@@ -724,7 +724,17 @@ export async function updateSubnet(id: string, input: UpdateSubnetInput) {
 
 // ─── IP Enumeration ──────────────────────────────────────────────────────────
 
+/** One full Reservation row, as the IP panel's DTO builder takes it. */
+type SubnetIpReservationRow = Awaited<ReturnType<typeof prisma.reservation.findMany>>[number];
+
 export async function getSubnetIps(id: string, page: number, pageSize: number) {
+  // Reservations are NOT included here. This endpoint answers ONE page of
+  // addresses (50-256), and an actively-leased /20 or /21 carries thousands of
+  // reservations — every one of which used to be shipped from Postgres and
+  // walked in memory to build a map that only the page's addresses were ever
+  // looked up in. The IPv4 path below loads just the page's rows; only the
+  // IPv6 path, which returns every reservation as its result, still needs all
+  // of them. `hasConflict` keeps its whole-subnet meaning via a count.
   const subnet = await prisma.subnet.findUnique({
     where: { id },
     include: {
@@ -732,7 +742,6 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
       // reserve modals — the Reservation Push toggle on the integration
       // determines whether MAC becomes required at create time.
       integration: { select: { id: true, name: true, type: true, config: true } },
-      reservations: true,
     },
   });
   if (!subnet) throw new AppError(404, `Subnet ${id} not found`);
@@ -759,9 +768,12 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
 
   // Never fail the panel over a settings read — the generator falls back to the
   // compiled-in default client-side when this is absent.
-  const macPlaceholderPrefix = await getPlaceholderPrefix().catch(
-    () => DEFAULT_PLACEHOLDER_MAC_PREFIX,
-  );
+  // Conflict flag counts across the WHOLE subnet (it warns about the subnet,
+  // not the page), so it stays a count rather than riding the page's rows.
+  const [macPlaceholderPrefix, conflictCount] = await Promise.all([
+    getPlaceholderPrefix().catch(() => DEFAULT_PLACEHOLDER_MAC_PREFIX),
+    prisma.reservation.count({ where: { subnetId: id, conflictMessage: { not: null } } }),
+  ]);
 
   const subnetInfo = {
     name: subnet.name,
@@ -783,13 +795,13 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
     // Settings access, and the panel already fetches this.
     macPlaceholderPrefix,
     lastDiscoveredAt: subnet.lastDiscoveredAt,
-    hasConflict: subnet.reservations.some(r => r.conflictMessage),
-    conflictMessage: subnet.reservations.some(r => r.conflictMessage)
+    hasConflict: conflictCount > 0,
+    conflictMessage: conflictCount > 0
       ? "One or more IPs have conflicts"
       : null,
   };
 
-  const toReservationDto = (r: typeof subnet.reservations[0]) => ({
+  const toReservationDto = (r: SubnetIpReservationRow) => ({
     id: r.id,
     hostname: r.hostname,
     owner: r.owner,
@@ -817,9 +829,12 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   // asset. Fall back to hostname matching for the remaining rows so every
   // reservation that came from the same asset gets the Asset button.
   if (isIpv6) {
-    const ipv6Addrs = subnet.reservations.filter(r => r.ipAddress).map(r => r.ipAddress!);
+    // A v6 subnet is not enumerable, so the reservations ARE the result —
+    // every row is returned and there is nothing to narrow to.
+    const allReservations = await prisma.reservation.findMany({ where: { subnetId: id } });
+    const ipv6Addrs = allReservations.filter(r => r.ipAddress).map(r => r.ipAddress!);
     const ipv6Hostnames = Array.from(new Set(
-      subnet.reservations.map(r => r.hostname).filter((h): h is string => !!h),
+      allReservations.map(r => r.hostname).filter((h): h is string => !!h),
     ));
     const v6Assets = (ipv6Addrs.length > 0 || ipv6Hostnames.length > 0)
       ? await prisma.asset.findMany({
@@ -839,7 +854,7 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
       if (a.hostname && !assetByHostnameV6.has(a.hostname)) assetByHostnameV6.set(a.hostname, a.id);
     }
 
-    const ips = subnet.reservations
+    const ips = allReservations
       .filter(r => r.ipAddress)
       .map(r => ({
         address: r.ipAddress!,
@@ -860,9 +875,17 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
   }
 
   const { addresses, total } = enumerateSubnetIps(subnet.cidr, page, pageSize);
+  const pageAddrs = addresses.map(a => a.address);
 
-  const reservationMap = new Map<string, typeof subnet.reservations[0]>();
-  for (const r of subnet.reservations) {
+  // Only the rows this page can display. The dedupe below is unchanged —
+  // several reservations can share an IP across statuses (a released row
+  // beside the active one), and active still wins.
+  const pageReservations = pageAddrs.length > 0
+    ? await prisma.reservation.findMany({ where: { subnetId: id, ipAddress: { in: pageAddrs } } })
+    : [];
+
+  const reservationMap = new Map<string, SubnetIpReservationRow>();
+  for (const r of pageReservations) {
     if (r.ipAddress) {
       const existing = reservationMap.get(r.ipAddress);
       if (!existing || (r.status === "active" && existing.status !== "active")) {
@@ -870,8 +893,6 @@ export async function getSubnetIps(id: string, page: number, pageSize: number) {
       }
     }
   }
-
-  const pageAddrs = addresses.map(a => a.address);
   const pageHostnames = Array.from(new Set(
     pageAddrs
       .map(a => reservationMap.get(a)?.hostname)

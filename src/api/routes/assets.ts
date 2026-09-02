@@ -4170,15 +4170,40 @@ router.post("/import", requirePermission("assets", "write"), async (req, res, ne
     let updated = 0;
     let notFound = 0;
 
+    // Parse first, then resolve every serial in ONE read. The loop used to do
+    // a findFirst per row and an update per match — serialNumber is indexed,
+    // so the cost was pure round-trip latency, but a 2000-row import still
+    // meant ~4000 serialized queries and this is the request most likely to
+    // hit a proxy timeout. (The /import-pdf handler below already batches its
+    // audit events for the same reason; its DB writes just weren't given the
+    // same treatment.)
+    const parsed: Array<{ serial: string; importDate: Date }> = [];
     for (const row of rows as any[]) {
       const serial = String(row.serialNumber || "").trim();
       const rawDate = String(row.date || "").trim();
       if (!serial || !rawDate) continue;
-
       const importDate = new Date(rawDate);
       if (isNaN(importDate.getTime())) continue;
+      parsed.push({ serial, importDate });
+    }
 
-      const asset = await prisma.asset.findFirst({ where: { serialNumber: serial } });
+    // First row wins per serial, matching findFirst's behavior on a duplicate.
+    const bySerial = new Map<string, { id: string; hostname: string | null; createdAt: Date }>();
+    if (parsed.length > 0) {
+      const found = await prisma.asset.findMany({
+        where: { serialNumber: { in: [...new Set(parsed.map((p) => p.serial))] } },
+        select: { id: true, serialNumber: true, hostname: true, createdAt: true },
+      });
+      for (const a of found) {
+        if (a.serialNumber && !bySerial.has(a.serialNumber)) {
+          bySerial.set(a.serialNumber, { id: a.id, hostname: a.hostname, createdAt: a.createdAt });
+        }
+      }
+    }
+
+    const backdates: Array<{ id: string; createdAt: Date }> = [];
+    for (const { serial, importDate } of parsed) {
+      const asset = bySerial.get(serial);
       if (!asset) { notFound++; continue; }
 
       const willUpdate = importDate < asset.createdAt;
@@ -4191,9 +4216,19 @@ router.post("/import", requirePermission("assets", "write"), async (req, res, ne
       });
 
       if (willUpdate && !dryRun) {
-        await prisma.asset.update({ where: { id: asset.id }, data: { createdAt: importDate } });
+        backdates.push({ id: asset.id, createdAt: importDate });
         updated++;
       }
+    }
+
+    // Chunked so one transaction never spans a whole spreadsheet.
+    const IMPORT_CHUNK = 200;
+    for (let i = 0; i < backdates.length; i += IMPORT_CHUNK) {
+      await prisma.$transaction(
+        backdates.slice(i, i + IMPORT_CHUNK).map((b) =>
+          prisma.asset.update({ where: { id: b.id }, data: { createdAt: b.createdAt } }),
+        ),
+      );
     }
 
     if (!dryRun && updated > 0) {
