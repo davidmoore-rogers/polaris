@@ -3524,71 +3524,11 @@ function assetMonitorBadge(asset) {
 // pin — a duplicate line would say nothing.
 // ─── Active-alert indicator ──────────────────────────────────────────────────
 //
-// A dot beside the hostname in the Assets list, and the slide-over's Alerts tab
-// itself, both saying "something is wrong with this device" in the colour of
-// the WORST active alert on it. The animation lives in styles.css
-// (.alert-strobe-* — including the prefers-reduced-motion opt-out); all these
-// decide is the colour and whether it should be moving.
-//
-// Two properties worth keeping:
-//   • THE COLOUR IS THE SAME VOCABULARY EVERYWHERE. assetAlertStrobeColor maps
-//     each severity onto the SAME --color-sev-* token the .badge-level-* pills
-//     and the acknowledge card read, so an alert looks the same severity in the
-//     list, in the tab, in the slide-over table and in the email. An unknown
-//     severity falls back to the danger token rather than to nothing: Polaris
-//     is still asserting something is wrong, and a colourless indicator
-//     understates that (business rule 36's posture on an unresolved severity).
-//   • IT STROBES ONLY WHILE SOMETHING IS UNACKNOWLEDGED. An acknowledged alert
-//     is still active and still marked — it has just stopped asking, which is
-//     what keeps a wallboard of pulsing dots from becoming background noise.
-
-/** Severity → the CSS colour the indicator takes. */
-function assetAlertStrobeColor(severity) {
-  var token = {
-    notice: "--color-sev-notice",
-    informational: "--color-accent",
-    info: "--color-accent",
-    warning: "--color-warning",
-    serious: "--color-sev-serious",
-    error: "--color-danger",
-    critical: "--color-danger",
-  }[severity];
-  return "var(" + (token || "--color-danger") + ")";
-}
-
-/**
- * Severity rank, mirroring ALERT_SEVERITY_RANK in src/utils/alertSeverity.ts.
- * The browser cannot import that, and the server-side copy is what picks the
- * colour of the LIST's indicator — so the two must agree that `serious`
- * outranks `warning` or a device would strobe one colour in the list and
- * another in its own slide-over.
- */
-function _alertSevRank(sev) {
-  return { notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5 }[sev] || 0;
-}
-
-/**
- * The Assets-list dot, from the row's `activeAlert` summary
- * ({severity, count, unacknowledged}, or null when nothing is firing).
- *
- * The title says which of the two states it is in, because the difference
- * between "moving" and "not moving" is not something to make anyone squint at
- * — and it is the only thing a reduced-motion viewer has, the animation being
- * off for them entirely.
- */
-function assetAlertDotHTML(asset) {
-  var a = asset && asset.activeAlert;
-  if (!a || !a.count) return "";
-  var handled = !a.unacknowledged;
-  var sev = a.severity || "critical";
-  var title = a.count === 1
-    ? "1 active " + sev + " alert" + (handled ? " — acknowledged" : "")
-    : a.count + " active alerts, worst " + sev +
-      (handled ? " — all acknowledged" : " — " + a.unacknowledged + " unacknowledged");
-  return '<span class="alert-strobe-dot' + (handled ? " is-handled" : "") +
-    '" style="--strobe-color:' + assetAlertStrobeColor(sev) + '"' +
-    ' role="img" aria-label="' + escapeHtml(title) + '" title="' + escapeHtml(title) + '"></span>';
-}
+// `assetAlertStrobeColor`, `_alertSevRank` and `assetAlertDotHTML` MOVED to
+// public/js/app.js — the global search dropdown needed the same dot, and it
+// renders on every page, half of which never load this file. They are globals
+// there and callable from here unchanged; `_paintAssetAlertsTabStrobe` below
+// stays, being about this file's own slide-over.
 
 /**
  * The slide-over's Alerts TAB, strobing in the same colour for the same reason.

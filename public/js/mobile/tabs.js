@@ -261,11 +261,18 @@
       hits.forEach(function (hit, idx) {
         var titleClass = (g === "ips" || g === "subnets" || g === "blocks") ? "headline mono" : "headline";
         var leadingCls = "leading" + (meta.leading ? " " + meta.leading : "");
+        // Asset + site hits carry the same active-alert summary the Assets
+        // list's flag reads (`hit.alert`, stamped by the search service in one
+        // query for the whole result set), drawn here as the strobing dot —
+        // so a device that looks alarmed in the list looks alarmed when you
+        // search for it. Not a tap target; the row still opens the device.
+        var alertDot = (window.PolarisMobileAlerts && hit.alert)
+          ? PolarisMobileAlerts.dotHTML(hit.alert) : "";
         html += ''
           + '<button class="list-item two-line" data-group="' + g + '" data-idx="' + idx + '">'
           + '  <span class="' + leadingCls + '"><svg viewBox="0 0 24 24"><use href="' + meta.icon + '"/></svg></span>'
           + '  <div class="content">'
-          + '    <div class="' + titleClass + '">' + escapeHtml(hit.title || "") + '</div>'
+          + '    <div class="' + titleClass + '">' + escapeHtml(hit.title || "") + alertDot + '</div>'
           + (hit.subtitle ? '    <div class="supporting">' + escapeHtml(hit.subtitle) + '</div>' : '')
           + '  </div>'
           + '  <div class="trailing"><svg viewBox="0 0 24 24"><use href="#i-chev-right"/></svg></div>'

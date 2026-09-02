@@ -40,21 +40,32 @@ import { APP_SHELL_STUBS } from "./_appShellStubs.js";
 
 const g = globalThis as Record<string, any>;
 
-const assetsLines = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8").split(/\r?\n/);
+const SPLIT = /\r?\n/;
+
+const assetsLines = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8").split(SPLIT);
+// Two of the functions the tab calls — the severity colour and the severity
+// rank behind its strobe — live in app.js, because the global search dropdown
+// draws the same dot on pages that never load assets.js. The slicer falls
+// through to app.js rather than pinning which file each name is in: this test
+// is about the tab's behaviour, not about where the source happens to sit.
+const appLines = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8").split(SPLIT);
 // The panel states the resulting wall-clock time using the SHARED helper the
 // settings cards and the wizard also read, so load the real module rather than
 // stub it — the point of the assertion is that the two halves agree.
 const DOWN_AFTER_SRC = readFileSync(resolve(__dirname, "../../public/js/monitor-down-after.js"), "utf8");
 
-/** Slice a top-level `[async ]function NAME(...) {` … `}` block out of assets.js. */
+/** Slice a top-level `[async ]function NAME(...) {` … `}` block out of assets.js, else app.js. */
 function fnSrc(name: string): string {
-  const start = assetsLines.findIndex(
-    (l) => l.startsWith(`function ${name}(`) || l.startsWith(`async function ${name}(`),
-  );
-  if (start < 0) throw new Error(`assets.js: function ${name} not found`);
-  const end = assetsLines.findIndex((l, i) => i > start && l === "}");
-  if (end < 0) throw new Error(`assets.js: no end of function ${name}`);
-  return assetsLines.slice(start, end + 1).join("\n");
+  for (const [file, lines] of [["assets.js", assetsLines], ["app.js", appLines]] as const) {
+    const start = lines.findIndex(
+      (l) => l.startsWith(`function ${name}(`) || l.startsWith(`async function ${name}(`),
+    );
+    if (start < 0) continue;
+    const end = lines.findIndex((l, i) => i > start && l === "}");
+    if (end < 0) throw new Error(`${file}: no end of function ${name}`);
+    return lines.slice(start, end + 1).join("\n");
+  }
+  throw new Error(`function ${name} not found in assets.js or app.js`);
 }
 
 const FN_NAMES = [

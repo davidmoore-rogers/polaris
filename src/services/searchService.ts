@@ -12,6 +12,7 @@ import { Prisma } from "../generated/prisma/client.js";
 import { isValidIpAddress, normalizeCidr, ipInCidr } from "../utils/cidr.js";
 import { macColonUpperOrNull } from "../utils/mac.js";
 import { MONITOR_STATUS_LABELS } from "../utils/monitorStatus.js";
+import { activeAlertSummaryByAsset, type AssetActiveAlertSummary } from "./notificationService.js";
 
 export interface SearchHit {
   type: "block" | "subnet" | "reservation" | "asset" | "ip" | "site";
@@ -22,6 +23,12 @@ export interface SearchHit {
   // shows (plus the Dep. Down / Dependency Test overlays). `kind` keys the
   // dropdown's badge-class map; `label` is the display text.
   status?: { kind: string; label: string };
+  // Asset/site hits only: the same active-alert summary the Assets list's
+  // indicator reads ({severity, count, unacknowledged}), absent when nothing
+  // is firing on that device. Both search surfaces draw it as the strobing
+  // dot beside the name, so a device that looks alarmed in the list looks
+  // alarmed when you search for it. Stamped by withAlertSummaries.
+  alert?: AssetActiveAlertSummary;
   // Type-specific context needed for client-side navigation
   context?: Record<string, unknown>;
 }
@@ -163,6 +170,38 @@ const ALLOW_ALL: SearchAllowed = {
 };
 
 export async function searchAll(
+  rawQuery: string,
+  allowed: SearchAllowed = ALLOW_ALL,
+): Promise<SearchResults> {
+  return withAlertSummaries(await runSearch(rawQuery, allowed));
+}
+
+/**
+ * Stamp every asset-backed hit with its active-alert summary.
+ *
+ * ONE indexed query for the whole result set, never one per hit — the same
+ * discipline `activeAlertSummaryByAsset` exists to enforce for the Assets
+ * list, and search is typed into a keystroke at a time. Both groups are
+ * covered because a `site` hit IS an asset (a pinned FortiGate), and a
+ * firewall that is down is exactly the one an operator is searching for.
+ *
+ * The hits are mutated in place, which is what carries the summary onto the
+ * mobile renderer's virtual Device Map rows: those are cloned from the asset
+ * hits AFTER this runs.
+ */
+async function withAlertSummaries(results: SearchResults): Promise<SearchResults> {
+  const hits = [...results.assets, ...results.sites];
+  if (hits.length === 0) return results;
+  const summaries = await activeAlertSummaryByAsset(hits.map((h) => h.id));
+  if (summaries.size === 0) return results;
+  for (const h of hits) {
+    const s = summaries.get(h.id);
+    if (s) h.alert = s;
+  }
+  return results;
+}
+
+async function runSearch(
   rawQuery: string,
   allowed: SearchAllowed = ALLOW_ALL,
 ): Promise<SearchResults> {

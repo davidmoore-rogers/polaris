@@ -974,6 +974,90 @@ async function _performSearch(q) {
   }
 }
 
+// ─── Active-alert indicator ──────────────────────────────────────────────────
+//
+// Lives here rather than in assets.js because THREE surfaces draw it and only
+// one of them is the assets page: the Assets list's Name column, the asset
+// slide-over's Alerts tab, and the global search dropdown — which renders on
+// every page, half of which never load assets.js. A guarded call from there
+// would have shown the dot on some pages and not others, which is worse than
+// not showing it at all.
+//
+// A dot beside the hostname in the Assets list, and the slide-over's Alerts tab
+// itself, both saying "something is wrong with this device" in the colour of
+// the WORST active alert on it. The animation lives in styles.css
+// (.alert-strobe-* — including the prefers-reduced-motion opt-out); all these
+// decide is the colour and whether it should be moving.
+//
+// Two properties worth keeping:
+//   • THE COLOUR IS THE SAME VOCABULARY EVERYWHERE. assetAlertStrobeColor maps
+//     each severity onto the SAME --color-sev-* token the .badge-level-* pills
+//     and the acknowledge card read, so an alert looks the same severity in the
+//     list, in the tab, in the slide-over table and in the email. An unknown
+//     severity falls back to the danger token rather than to nothing: Polaris
+//     is still asserting something is wrong, and a colourless indicator
+//     understates that (business rule 36's posture on an unresolved severity).
+//   • IT STROBES ONLY WHILE SOMETHING IS UNACKNOWLEDGED. An acknowledged alert
+//     is still active and still marked — it has just stopped asking, which is
+//     what keeps a wallboard of pulsing dots from becoming background noise.
+
+/** Severity → the CSS colour the indicator takes. */
+function assetAlertStrobeColor(severity) {
+  var token = {
+    notice: "--color-sev-notice",
+    informational: "--color-accent",
+    info: "--color-accent",
+    warning: "--color-warning",
+    serious: "--color-sev-serious",
+    error: "--color-danger",
+    critical: "--color-danger",
+  }[severity];
+  return "var(" + (token || "--color-danger") + ")";
+}
+
+/**
+ * Severity rank, mirroring ALERT_SEVERITY_RANK in src/utils/alertSeverity.ts.
+ * The browser cannot import that, and the server-side copy is what picks the
+ * colour of the LIST's indicator — so the two must agree that `serious`
+ * outranks `warning` or a device would strobe one colour in the list and
+ * another in its own slide-over.
+ */
+function _alertSevRank(sev) {
+  return { notice: 1, informational: 2, info: 2, warning: 3, serious: 4, error: 5, critical: 5 }[sev] || 0;
+}
+
+/**
+ * The Assets-list dot, from the row's `activeAlert` summary
+ * ({severity, count, unacknowledged}, or null when nothing is firing).
+ *
+ * The title says which of the two states it is in, because the difference
+ * between "moving" and "not moving" is not something to make anyone squint at
+ * — and it is the only thing a reduced-motion viewer has, the animation being
+ * off for them entirely.
+ */
+function assetAlertDotHTML(asset) {
+  return alertSummaryDotHTML(asset && asset.activeAlert);
+}
+
+/**
+ * The same dot from a bare summary, for the callers that hold one without an
+ * asset row around it — the search dropdown, whose hits carry `alert` (stamped
+ * by `withAlertSummaries` in searchService). Same markup, so a device looks
+ * equally alarmed whether it is found by scrolling or by typing its name.
+ */
+function alertSummaryDotHTML(a) {
+  if (!a || !a.count) return "";
+  var handled = !a.unacknowledged;
+  var sev = a.severity || "critical";
+  var title = a.count === 1
+    ? "1 active " + sev + " alert" + (handled ? " — acknowledged" : "")
+    : a.count + " active alerts, worst " + sev +
+      (handled ? " — all acknowledged" : " — " + a.unacknowledged + " unacknowledged");
+  return '<span class="alert-strobe-dot' + (handled ? " is-handled" : "") +
+    '" style="--strobe-color:' + assetAlertStrobeColor(sev) + '"' +
+    ' role="img" aria-label="' + escapeHtml(title) + '" title="' + escapeHtml(title) + '"></span>';
+}
+
 function _renderSearchDropdown(results) {
   var dropdown = document.getElementById("global-search-dropdown");
   var sites = results.sites || [];
@@ -1019,9 +1103,15 @@ function _renderSearchDropdown(results) {
       if (h.status && pillClassByKind[h.status.kind]) {
         pill = ' <span class="badge gs-item-pill ' + pillClassByKind[h.status.kind] + '">' + escapeHtml(h.status.label) + '</span>';
       }
+      // Asset + site hits carry the same active-alert summary the Assets
+      // list's dot reads (`h.alert`, one query for the whole result set), so a
+      // device that strobes in the list strobes when you search for it. Before
+      // the pill: the alert is the reason to look, the monitor state is the
+      // detail — and a hit can carry both (an alerting device is often Up).
+      var alertDot = h.alert ? alertSummaryDotHTML(h.alert) : "";
       return '<div class="gs-item" data-type="' + h.type + '" data-id="' + escapeHtml(h.id) + '"' +
         (h.context ? ' data-context="' + escapeHtml(JSON.stringify(h.context)) + '"' : '') + '>' +
-        '<div class="gs-item-title">' + escapeHtml(h.title) + pill + '</div>' +
+        '<div class="gs-item-title">' + escapeHtml(h.title) + alertDot + pill + '</div>' +
         (h.subtitle ? '<div class="gs-item-sub">' + escapeHtml(h.subtitle) + '</div>' : '') +
       '</div>';
     }).join("");

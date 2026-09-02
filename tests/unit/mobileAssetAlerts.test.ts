@@ -150,6 +150,40 @@ describe("mobile alert severity vocabulary", () => {
   });
 });
 
+describe("the search-row alert dot", () => {
+  // Search rows are one line with an icon, a name, a subtitle and a chevron —
+  // an "ALERTS" pill in there pushes the hostname into an ellipsis on a phone,
+  // so the same statement is reduced to a dot. It has to keep saying
+  // everything the flag says except the word.
+  it("carries the flag's colour, handled state and label", () => {
+    mount([asset(1)]);
+    const M = g.PolarisMobileAlerts;
+
+    expect(M.dotHTML(null)).toBe("");
+    expect(M.dotHTML({ severity: "critical", count: 0, unacknowledged: 0 })).toBe("");
+
+    const live = M.dotHTML({ severity: "serious", count: 2, unacknowledged: 1 });
+    expect(live).toContain("var(--md-sev-serious)");
+    expect(live).not.toContain("is-handled");
+    expect(live).toContain("2 active alerts, worst serious");
+    expect(live).toContain("1 unacknowledged");
+
+    const handled = M.dotHTML({ severity: "warning", count: 1, unacknowledged: 0 });
+    expect(handled).toContain("is-handled");
+    expect(handled).toContain("acknowledged");
+  });
+
+  it("is not a tap target — the row it sits in opens the device", () => {
+    mount([asset(1)]);
+    const html = g.PolarisMobileAlerts.dotHTML({ severity: "critical", count: 1, unacknowledged: 1 });
+    // A <button> here would be a second target two thumb-widths from the row's
+    // own, and (nested in the row button) would swallow the tap outright.
+    expect(html.startsWith("<span")).toBe(true);
+    expect(html).not.toContain("<button");
+    expect(html).toContain('role="img"');
+  });
+});
+
 describe("the Assets-list alert flag", () => {
   it("appears only on cards with active alerts, coloured by the worst one", async () => {
     mount([

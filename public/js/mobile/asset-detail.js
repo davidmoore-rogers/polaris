@@ -16,6 +16,12 @@
 //     assetsQuarantine read; degrades to a muted note otherwise)
 //   - IP history list
 //
+// Hero carries the strobing "Alerts" flag when the device has live alerts —
+// the same control the Assets list card shows, in the colour of the worst one,
+// tapping through to the shared alerts sheet (acknowledge / clear, per role;
+// PolarisMobileAlerts in mobile/alerts.js). It sits on the status pill's row
+// because the two together are how this device is doing.
+//
 // Hero also carries a Quarantine / Release Quarantine button, gated on the
 // assetsQuarantine:write permission and the same eligibility as the desktop
 // quarantine tab (non-infra + has a MAC to push, or already quarantined →
@@ -409,6 +415,7 @@
       loadSightings(id, st);
       loadIpHistory(id, st);
       loadSdwanGate(id, st, asset);
+      loadAlerts(id, asset);
     }).catch(function (err) {
       if (_openId !== id) return;
       var msg = (err && err.message) ? err.message : "Failed to load asset";
@@ -476,7 +483,15 @@
     host.innerHTML = ''
       + '<div class="asset-hero">'
       + (heroBits.length ? '  <div class="hero-sub">' + heroBits.join(" · ") + '</div>' : '')
-      + '  <div id="asset-hero-pill" style="margin-top:' + (heroBits.length ? '12px' : '0') + ';">' + monitorPillHtml + '</div>'
+      // Status pill and the alert flag share a row: they are the two things
+      // that say how this device is doing, and reading one without the other
+      // is how a device shows "Up" while three alerts are firing on it. The
+      // pill keeps its own id — the post-probe refresh re-renders into it, and
+      // it must not take the flag with it.
+      + '  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:' + (heroBits.length ? '12px' : '0') + ';">'
+      + '    <div id="asset-hero-pill">' + monitorPillHtml + '</div>'
+      + '    <span id="asset-hero-alerts"></span>'
+      + '  </div>'
       // SD-WAN entry button — hidden until loadSdwanGate confirms this
       // FortiGate firewall actually reported SD-WAN data, then revealed +
       // wired to openSdwanSheet.
@@ -1131,6 +1146,44 @@
     if (n >= 1e6) return (n / 1e6) + " Mbps";
     if (n >= 1e3) return (n / 1e3) + " Kbps";
     return n + " bps";
+  }
+
+  // ─── Alerts ──────────────────────────────────────────────────────────────
+  // The hero's alert flag — the same strobing "Alerts" control the Assets list
+  // card carries, for the same reason, on the screen an operator lands on
+  // after tapping that card. Tapping it opens the shared alerts sheet
+  // (acknowledge / clear, per role) stacked over this one.
+  //
+  // Its own fetch rather than a field on the asset row: `activeAlert` is
+  // enriched onto the LIST payload only, and the detail sheet can be opened
+  // from places that never went through the list (a search hit, a push deep
+  // link, a pasted #asset/<id> URL). One small request, alongside the six this
+  // sheet already fires in parallel.
+  function loadAlerts(id, asset) {
+    if (!window.PolarisMobileAlerts) return;
+    api.assets.alerts(id).then(function (data) {
+      if (_openId !== id) return;   // sheet moved on while we were fetching
+      paintAlertFlag(id, PolarisMobileAlerts.summarize((data && data.active) || []), asset);
+    }).catch(function () {
+      // A device with no readable alerts simply carries no flag — this is an
+      // ornament on a sheet full of real content, not something to error over.
+    });
+  }
+
+  function paintAlertFlag(id, summary, asset) {
+    var host = document.getElementById("asset-hero-alerts");
+    if (!host) return;
+    host.innerHTML = PolarisMobileAlerts.flagHTML(summary);
+    var btn = host.querySelector(".alert-flag");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      PolarisMobileAlerts.openForAsset(id, {
+        hostname: (asset && (asset.hostname || asset.assetTag)) || "",
+        // Settle the flag from what the sheet loaded, so acknowledging or
+        // clearing from up there stops the strobe down here without a reload.
+        onSummary: function (next) { paintAlertFlag(id, next, asset); },
+      });
+    });
   }
 
   // ─── SD-WAN ──────────────────────────────────────────────────────────────

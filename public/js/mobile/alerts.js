@@ -118,6 +118,32 @@
       '</button>';
   }
 
+  /**
+   * The same statement as `flagHTML`, reduced to a dot — for rows with no room
+   * for a word. Search results are the caller: a hit is one line carrying an
+   * icon, a name, a subtitle and a chevron, and an "ALERTS" pill in there
+   * would push the hostname into an ellipsis on a phone. Same colour, same
+   * strobe, same handled state, same label — only the shape differs.
+   *
+   * It is deliberately NOT tappable. A search row's job is to take you to the
+   * thing you searched for; a second target inside it, two thumb-widths from
+   * the row's own, is a mis-tap waiting to happen. The dot says "this one is
+   * alarmed" and the row it sits in opens the device, whose own Alerts control
+   * is the way in.
+   */
+  function dotHTML(summary) {
+    if (!summary || !summary.count) return "";
+    var handled = !summary.unacknowledged;
+    var sev = summary.severity || "critical";
+    var label = summary.count === 1
+      ? "1 active " + sev + " alert" + (handled ? " — acknowledged" : "")
+      : summary.count + " active alerts, worst " + sev +
+        (handled ? " — all acknowledged" : " — " + summary.unacknowledged + " unacknowledged");
+    return '<span class="alert-dot' + (handled ? " is-handled" : "") + '"' +
+      ' style="--alert-flag-color:' + sevColor(sev) + '"' +
+      ' role="img" aria-label="' + escapeHtml(label) + '" title="' + escapeHtml(label) + '"></span>';
+  }
+
   // ─── Acknowledge note prompt ────────────────────────────────────────────
   /**
    * A note field, only when an automation demands one.
@@ -427,6 +453,7 @@
     openForAsset: openForAsset,
     close: close,
     flagHTML: flagHTML,
+    dotHTML: dotHTML,
     summarize: summarize,
     sevColor: sevColor,
     sevRank: sevRank,

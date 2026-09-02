@@ -402,6 +402,7 @@ Vanilla JavaScript SPA served from `/public/`. **No build step** — plain ES mo
 | `public/js/push.js` + `public/sw.js` | — | Web Push enrollment + service worker (no fetch handler, no Cache Storage) |
 | `public/js/api.js` | — | fetch wrapper, CSRF handling, stale-Secure-cookie pre-check |
 | `public/js/app.js` | `THEMES` / `isLightTheme` / `_setTheme` | the theme list, the daylight-family test every palette switch reads, and the `themechange` event cached palettes repaint on |
+| `public/js/app.js` | `alertSummaryDotHTML` / `assetAlertDotHTML` / `assetAlertStrobeColor` | the active-alert indicator — the strobing severity-coloured dot on the Assets list, the search dropdown and (as a word) the phone. Here rather than in `assets.js` because the search dropdown renders on every page |
 | `public/js/app.js` | `tabbedBodyHTML` / `wireModalTabs` | the ONE modal tab-strip pair (assets.js and integrations.js each carried a byte-identical private copy) |
 | `public/js/app.js` | `openIntegrationModal` | the one shape all seven integration dialogs are built from — title, tab order, footer order, Test gating |
 | `public/js/app.js` | `sectionHeading` / `formDivider` / `infoBox` / `checkboxRow` / `calloutHTML` | config-modal form parts |

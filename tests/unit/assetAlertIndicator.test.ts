@@ -12,9 +12,11 @@
  * failure this file exists to catch, so the severity vocabulary and the rank
  * order are pinned on both sides.
  *
- * The client functions are sliced out of assets.js by name — the ~20k-line
- * browser script has no module boundary (the approach of
- * tests/unit/assetAlertsTabDom.test.ts).
+ * The client functions are sliced out of app.js by name — the browser scripts
+ * have no module boundary (the approach of tests/unit/assetAlertsTabDom.test.ts).
+ * They live in app.js rather than assets.js because the global search dropdown
+ * draws the same dot and renders on every page, including the many that never
+ * load assets.js.
  *
  * @vitest-environment happy-dom
  */
@@ -40,19 +42,19 @@ import { ALERT_SEVERITY_RANK, alertSeverityRank, higherAlertSeverity } from "../
 
 const g = globalThis as Record<string, any>;
 
-/* ─── The client half, sliced out of assets.js ─────────────────────────────── */
+/* ─── The client half, sliced out of app.js ───────────────────────────────── */
 
-const assetsLines = readFileSync(resolve(__dirname, "../../public/js/assets.js"), "utf8").split(/\r?\n/);
+const assetsLines = readFileSync(resolve(__dirname, "../../public/js/app.js"), "utf8").split(/\r?\n/);
 
 function fnSrc(name: string): string {
   const start = assetsLines.findIndex((l) => l.startsWith(`function ${name}(`));
-  if (start < 0) throw new Error(`assets.js: function ${name} not found`);
+  if (start < 0) throw new Error(`app.js: function ${name} not found`);
   const end = assetsLines.findIndex((l, i) => i > start && l === "}");
-  if (end < 0) throw new Error(`assets.js: no end of function ${name}`);
+  if (end < 0) throw new Error(`app.js: no end of function ${name}`);
   return assetsLines.slice(start, end + 1).join("\n");
 }
 
-const CLIENT_FNS = ["assetAlertStrobeColor", "_alertSevRank", "assetAlertDotHTML"];
+const CLIENT_FNS = ["assetAlertStrobeColor", "_alertSevRank", "assetAlertDotHTML", "alertSummaryDotHTML"];
 
 beforeAll(() => {
   g.escapeHtml = (s: unknown) =>

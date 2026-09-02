@@ -1201,8 +1201,26 @@ button, .list-item, .chip { touch-action: manipulation; }
   opacity: .85;
 }
 .alert-flag.is-handled { animation: none; opacity: .75; }
+
+/* The same statement as a dot, for rows with no room for a word — search
+   results, where an "ALERTS" pill would push the hostname into an ellipsis.
+   Filled rather than outlined so 8px of it still reads as a colour. */
+.alert-dot {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--alert-flag-color, var(--md-sev-critical));
+  animation: polaris-alert-flag-strobe 1.4s ease-in-out infinite;
+}
+.alert-dot.is-handled { animation: none; opacity: .6; }
+
 @media (prefers-reduced-motion: reduce) {
-  .alert-flag { animation: none; }
+  .alert-flag,
+  .alert-dot { animation: none; }
 }
 
 /* ─── Alerts sheet (per asset) ────────────────────────────────────────────

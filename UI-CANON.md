@@ -651,6 +651,20 @@ column of numbers to compare by eye.
 
 ---
 
+## Active-alert indicator
+
+**What it is:** "This device has something firing on it", in the colour of the worst active alert, on every surface that lists devices. Two shapes, one vocabulary: a **dot** where a row is tight (the desktop Assets list's Name column, the desktop search dropdown, the phone's search results) and a **word** where there is room to be explicit (the phone's asset cards and its asset-detail hero, both reading `Alerts` with a count). The desktop asset slide-over strobes its whole **Alerts tab** instead, which is the same statement in the shape that surface had available.
+
+**Canonical implementations:** `alertSummaryDotHTML(summary)` in [public/js/app.js](public/js/app.js) — with `assetAlertDotHTML(asset)` delegating to it for callers holding a row, and `assetAlertStrobeColor` / `_alertSevRank` beside them. On the phone: `flagHTML` / `dotHTML` in [public/js/mobile/alerts.js](public/js/mobile/alerts.js). CSS is `.alert-strobe-dot` + `.page-tab.alert-strobe` in [public/css/styles.css](public/css/styles.css) and `.alert-flag` + `.alert-dot` in [public/css/mobile.css](public/css/mobile.css).
+
+**Key conventions:**
+- **It lives in `app.js`, not `assets.js`.** The search dropdown draws it and renders on every page, half of which never load `assets.js`. Anything new that needs it should call the `app.js` copy rather than guarding on `typeof`.
+- **It strobes only while something is UNACKNOWLEDGED.** An acknowledged alert is still active and still marked — `.is-handled` — it has just stopped asking. A wallboard of pulsing dots nobody can quiet is a wallboard people stop looking at.
+- **The colour is one vocabulary in three copies**, and they are pinned to each other: `ALERT_SEVERITY_RANK` in [src/utils/alertSeverity.ts](src/utils/alertSeverity.ts) (which also picks WHICH alert a multi-alert device is marked for, via `activeAlertSummaryByAsset`), `_alertSevRank` + the `--color-sev-*` tokens on the desktop, and `sevRank` + the `--md-sev-*` tokens on the phone. Changing the ladder is a three-file change; [tests/unit/assetAlertIndicator.test.ts](tests/unit/assetAlertIndicator.test.ts) and [tests/unit/mobileAssetAlerts.test.ts](tests/unit/mobileAssetAlerts.test.ts) exist to catch a device that reads amber on one surface and red on another.
+- **An unknown severity falls back to the DANGER colour, never to none.** Polaris is still asserting something is wrong, and a colourless indicator understates it — the posture business rule 36 takes on an unresolved severity.
+- **`prefers-reduced-motion` drops the animation on every copy** and keeps the colour, which carries the whole meaning. Both the desktop and mobile stylesheets do this; a new copy must too.
+- **The dot is never a tap target.** In a search row or a table cell it sits inside something already clickable, and a second target a few pixels from the first is a mis-tap. Only the phone's `Alerts` WORD is interactive, because it is placed with room around it and it opens the alerts sheet.
+
 ## Mobile bottom sheet
 
 **What it is:** A modal slide-up panel anchored to the bottom of the viewport on the mobile SPA. Dismissed by tapping the scrim, tapping the X button, or swiping the sheet down. Used for the Device Map site detail, asset interface drilldown, reservation edit + create-by-IP, subnet reserve, topology node detail, the per-asset alerts sheet, and the full asset detail screen.
