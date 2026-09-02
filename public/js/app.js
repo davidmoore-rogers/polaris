@@ -586,6 +586,21 @@ function renderNav() {
   // Wire up query status indicator
   _onQueriesChanged = renderQueryStatus;
 
+  // Every sidebar poller rides this instead of a bare setInterval: a
+  // backgrounded tab stops asking (appmap.js's `if (!document.hidden)` gate,
+  // generalized), and coming back re-reads immediately rather than waiting out
+  // up to a full interval on stale numbers. Six uncoordinated intervals here
+  // were ~39 requests/minute per open tab, indefinitely, whether or not anyone
+  // was looking — multiplied by tabs and operators, that was the largest
+  // server-side cost in the frontend audit.
+  function pollVisible(fn, ms) {
+    var timer = setInterval(function () { if (!document.hidden) fn(); }, ms);
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) fn();
+    });
+    return timer;
+  }
+
   // Poll server for background discoveries (e.g. integration discovery after navigation)
   var _serverDiscoveries = [];
   async function pollDiscoveries() {
@@ -599,7 +614,7 @@ function renderNav() {
     if (typeof window._onDiscoveriesChanged === "function") window._onDiscoveriesChanged(_serverDiscoveries);
   }
   pollDiscoveries();
-  setInterval(pollDiscoveries, 4000);
+  pollVisible(pollDiscoveries, 4000);
 
   // Expose for renderQueryStatus closure and for callers that need an immediate refresh
   window._getServerDiscoveries = function () { return _serverDiscoveries; };
@@ -623,7 +638,7 @@ function renderNav() {
   }
   if (isAdmin()) {
     pollRoleReviewNotifications();
-    setInterval(pollRoleReviewNotifications, 30000);
+    pollVisible(pollRoleReviewNotifications, 30000);
   }
   window._pollRoleReviewNotifications = pollRoleReviewNotifications;
   window._getRoleReviewUsers = function () { return _roleReviewUsers; };
@@ -652,7 +667,7 @@ function renderNav() {
     renderFmgProxyAdvice();
   }
   pollFailedIntegrations();
-  setInterval(pollFailedIntegrations, 30000);
+  pollVisible(pollFailedIntegrations, 30000);
   window._pollFailedIntegrations = pollFailedIntegrations;
   window._getFailedIntegrations = function () { return _failedIntegrations; };
   window._getFmgProxyAdvice = function () { return _fmgProxyAdvice; };
@@ -678,7 +693,7 @@ function renderNav() {
   }
   if (canManageAssets()) {
     pollSigningAlert();
-    setInterval(pollSigningAlert, 30000);
+    pollVisible(pollSigningAlert, 30000);
   }
   window._pollSigningAlert = pollSigningAlert;
   window._getSigningFailure = function () { return _signingFailure; };
@@ -707,13 +722,34 @@ function renderNav() {
     }
     renderUpdateStatus();
   }
-  if (isAdmin()) {
-    pollUpdateProgress();
-    // 5 s — responsive enough to track per-step progress; the status route
-    // just returns an in-memory object so the poll is cheap.
-    setInterval(pollUpdateProgress, 5000);
+  // Self-scheduling instead of a flat interval: 5 s while an update is
+  // actually mid-flight (responsive enough for per-step progress), 60 s
+  // otherwise. It was a flat 5 s for the whole session — 12 requests a
+  // minute, forever, to learn that no update is running — and server-settings.js
+  // already had the start/stop shape for its own card. A hidden tab stops
+  // asking unless an update IS in flight, where the operator may well switch
+  // away and back.
+  var _updateTimer = null;
+  function _updateApplying() {
+    return !!(_updateStatus && (_updateStatus.state === "applying" || _updateStatus.state === "restarting"));
   }
-  window._pollUpdateProgress = pollUpdateProgress;
+  function _scheduleUpdatePoll() {
+    if (_updateTimer) clearTimeout(_updateTimer);
+    _updateTimer = setTimeout(_runUpdatePoll, _updateApplying() ? 5000 : 60000);
+  }
+  function _runUpdatePoll() {
+    if (document.hidden && !_updateApplying()) { _scheduleUpdatePoll(); return; }
+    pollUpdateProgress().then(_scheduleUpdatePoll, _scheduleUpdatePoll);
+  }
+  if (isAdmin()) {
+    pollUpdateProgress().then(_scheduleUpdatePoll, _scheduleUpdatePoll);
+  }
+  // Callers that just kicked an update (or want the panel fresh now) get an
+  // immediate read AND a re-paced loop — without this an Apply click could
+  // sit up to a minute before the sidebar panel showed progress.
+  window._pollUpdateProgress = function () {
+    return pollUpdateProgress().then(function (r) { _scheduleUpdatePoll(); return r; }, function (e) { _scheduleUpdatePoll(); throw e; });
+  };
   window._getUpdateStatus = function () { return _updateStatus; };
 
   // Inject global search bar + user badge into page header
@@ -749,7 +785,7 @@ function renderNav() {
     } catch (_) {}
   }
   refreshConflictDot();
-  setInterval(refreshConflictDot, 30000);
+  pollVisible(refreshConflictDot, 30000);
   window.refreshConflictDot = refreshConflictDot;
   // Back-compat alias: events.js still calls window.refreshAlertsDot() after
   // Alerts-panel actions. With the dots consolidated, both point at the one

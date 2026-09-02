@@ -903,7 +903,13 @@ function _renderFmgActivity(r) {
 // Periodic refresher: re-poll every 2 s while the integrations tab is visible.
 // loadIntegrations() does the initial population (and re-runs whenever the
 // list changes); this interval keeps the rows live in between.
+//
+// The document.hidden gate is what makes the sentence above true — it wasn't
+// checked, so a backgrounded window kept issuing one request per FortiManager
+// every 2 seconds (30·N a minute) indefinitely. The row query is the other
+// half of the gate: no rendered activity cells, nothing to poll.
 setInterval(function () {
+  if (document.hidden) return;
   var rows = document.querySelectorAll('[id^="fmg-activity-val-"]');
   rows.forEach(function (el) {
     var id = el.id.substring("fmg-activity-val-".length);
