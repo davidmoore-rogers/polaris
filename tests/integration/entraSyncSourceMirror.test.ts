@@ -20,7 +20,7 @@
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { prisma } from "../../src/db.js";
 import { dbDescribe, dbReachable } from "./_helpers.js";
-import { syncEntraDevices, syncActiveDirectoryDevices } from "../../src/services/discovery/discoveryEngine.js";
+import { syncEntraDevices, syncActiveDirectoryDevices, syncVcenterDevices } from "../../src/services/discovery/discoveryEngine.js";
 
 const d = dbDescribe;
 const HOST = "ENTRA-MIRROR-T1";
@@ -43,7 +43,14 @@ async function cleanup(): Promise<void> {
   await prisma.assetSource.deleteMany({ where: { externalId: { in: [OLD_ID, NEW_ID] } } });
   // Conflicts on our assets cascade with the asset delete; tombstones keyed by
   // integration go with the integration delete below.
-  await prisma.asset.deleteMany({ where: { hostname: { startsWith: "ENTRA-MIRROR-" } } });
+  //
+  // `contains` + insensitive, NOT startsWith on the constant: the AD case
+  // renames its asset to the lowercase FQDN (hostname is projected from the
+  // device), and a case-sensitive prefix match left those rows behind every
+  // run. They then collided with HOST on the SHORT hostname, diverting the
+  // Entra cases into the untagged-collision branch — a leftover-state failure
+  // that looks exactly like a projection regression.
+  await prisma.asset.deleteMany({ where: { hostname: { contains: "entra-mirror", mode: "insensitive" } } });
   const intgs = await prisma.integration.findMany({ where: { name: "entra-mirror-test" }, select: { id: true } });
   if (intgs.length) {
     await prisma.conflict.deleteMany({ where: { integrationId: { in: intgs.map((i) => i.id) } } });
@@ -160,5 +167,62 @@ d("syncEntraDevices source mirror", () => {
     expect(after?.hostname).toBe(`${HOST.toLowerCase()}.corp.example.com`);
     expect(after?.learnedLocation).toBe("OU=Workstations");
     expect(after?.dnsName).toBe(`${HOST.toLowerCase()}.corp.example.com`);
+  });
+
+  const UUID = "5001abcd-0000-0000-0000-00000000dead";
+
+  function vcResult(over: Record<string, unknown> = {}) {
+    return {
+      clusters: [],
+      hosts: [],
+      vms: [{
+        moref: "vm-901", instanceUuid: UUID, biosUuid: null, name: HOST,
+        powerState: "POWERED_ON", hostMoref: "host-1",
+        guestHostname: null, guestIp: null, guestOsFullName: "Ubuntu Linux (64-bit)",
+        toolsRunState: "RUNNING", toolsVersionStatus: null,
+        cpuCount: 2, memoryMiB: 4096,
+        cpuUsageMhz: null, cpuMaxMhz: null, memUsedBytes: null,
+        nicMacs: [], disks: [],
+        ...over,
+      }],
+      datastores: [],
+      presentVmMorefs: ["vm-901"],
+      inventoryComplete: true,
+    } as any;
+  }
+
+  it("vCenter sync, steady state: the map-fed projection lands and the hint skips the sweep", async () => {
+    const asset = await seedAsset([{ sourceKind: "vcenter-vm", externalId: UUID }]);
+    const r = await syncVcenterDevices(integrationId, "entra-mirror-test", {}, vcResult());
+    expect(r.updated).toContain(HOST);
+    const rows = (await prisma.assetSource.findMany({ where: { assetId: asset.id } })).filter((s) => s.sourceKind === "vcenter-vm");
+    expect(rows.map((s) => s.externalId)).toEqual([UUID]);
+    const after = await prisma.asset.findUnique({ where: { id: asset.id }, select: { os: true, virtualization: true } });
+    // Projection came off the in-memory map's refreshed vcenter-vm row.
+    expect(after?.os).toBe("Ubuntu Linux (64-bit)");
+    expect((after?.virtualization as any)?.role).toBe("vm");
+    await prisma.assetSource.deleteMany({ where: { externalId: UUID } });
+  });
+
+  it("vCenter sync, id change on a MAC-matched takeover: the sweep drops the old row", async () => {
+    // The realistic path to a changed externalId: the asset is found by vNIC
+    // MAC (not by externalId — pickVmExternalId now prefers the instanceUuid
+    // that only just became readable), so the moref-scoped row it already
+    // carries is stale and the cleanup delete has something to match. The
+    // mirror must drop it too, or the projection would carry both rows.
+    const OLD_EXT = `${integrationId}:vm-901`;
+    const MAC = "00:50:56:AA:BB:CC";
+    const asset = await prisma.asset.create({
+      data: {
+        hostname: HOST, assetType: "server", status: "active", tags: ["vcenter"],
+        macAddress: MAC,
+        sources: { create: [{ sourceKind: "vcenter-vm", externalId: OLD_EXT, integrationId, observed: { hostname: HOST }, inferred: false, lastSeen: new Date("2026-01-01T00:00:00Z") }] },
+      },
+    });
+    const r = await syncVcenterDevices(integrationId, "entra-mirror-test", {}, vcResult({ nicMacs: [{ mac: MAC, connected: true }] }));
+    expect(r.updated).toContain(HOST);
+    const rows = (await prisma.assetSource.findMany({ where: { assetId: asset.id } })).filter((s) => s.sourceKind === "vcenter-vm");
+    expect(rows.map((s) => s.externalId)).toEqual([UUID]);
+    await prisma.assetSource.deleteMany({ where: { externalId: { in: [OLD_EXT, UUID] } } });
   });
 });

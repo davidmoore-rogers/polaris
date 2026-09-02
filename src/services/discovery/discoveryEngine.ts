@@ -7480,7 +7480,18 @@ export async function syncEntraDevices(
   // Entra sync's MAC index builder + mergeIntuneMacs pipeline keep
   // working with the legacy JSON shape.
   const allAssetsWithRows = await prisma.asset.findMany({
-    include: { macAddressRows: { select: MAC_ROW_SELECT } },
+    // Tight select (the AD/vCenter/Arc shape): every column this sync's loop,
+    // the material-field snapshot, the conflict snapshot, buildMonitoredSweep
+    // and clampAcquiredToLastSeen read. The unprojected load pulled every
+    // column of every asset — the big JSON blobs included — for the fleet.
+    select: {
+      id: true, hostname: true, hostnameOverride: true, assetTag: true, assetType: true, status: true,
+      monitored: true, monitorOverride: true, acquiredAt: true, lastSeen: true,
+      tags: true, discoveredByIntegrationId: true, dnsName: true, ipAddress: true,
+      os: true, osVersion: true, serialNumber: true, manufacturer: true, model: true,
+      learnedLocation: true, learnedAddress: true, notes: true, assignedTo: true, macAddress: true,
+      macAddressRows: { select: MAC_ROW_SELECT },
+    },
   });
   const allAssets = allAssetsWithRows.map((a: any) => ({
     ...a,
@@ -8780,6 +8791,15 @@ function buildVcenterVmObservedBlob(
 // of the same kind on the same asset whose externalId changed (a VM
 // re-registered under a new instanceUuid must not leave the prior identity
 // linked — the Entra deviceId-sweep pattern).
+/**
+ * Upsert a vcenter-vm / vcenter-host source row.
+ *
+ * `hasStaleExternalId` (from the caller's preloaded source map) gates the
+ * cleanup delete: a VM's externalId only changes when its instanceUuid first
+ * becomes readable (pickVmExternalId prefers it over the moref fallback), so
+ * on a steady inventory the delete was one no-op round trip per VM per run.
+ * Undefined keeps the unconditional behavior.
+ */
 async function upsertVcenterAssetSource(
   assetId: string,
   integrationId: string,
@@ -8788,18 +8808,23 @@ async function upsertVcenterAssetSource(
   observed: Record<string, unknown>,
   syncedAt: Date,
   lastSeen: Date,
+  hasStaleExternalId?: boolean,
 ): Promise<void> {
   await prisma.assetSource.upsert({
     where: { sourceKind_externalId: { sourceKind, externalId } },
     create: { assetId, sourceKind, externalId, integrationId, observed: observed as any, inferred: false, syncedAt, firstSeen: lastSeen, lastSeen },
     update: { assetId, integrationId, observed: observed as any, inferred: false, syncedAt, lastSeen },
   });
-  await prisma.assetSource.deleteMany({
-    where: { assetId, sourceKind, externalId: { not: externalId } },
-  });
+  if (hasStaleExternalId !== false) {
+    await prisma.assetSource.deleteMany({
+      where: { assetId, sourceKind, externalId: { not: externalId } },
+    });
+  }
 }
 
-async function syncVcenterDevices(
+// Exported for tests, like the Entra/AD syncs: the map-fed projection must
+// stay faithful to the DB rows, and only a real round trip proves it.
+export async function syncVcenterDevices(
   integrationId: string,
   integrationName: string,
   integrationConfig: Record<string, unknown> | null,
@@ -8820,10 +8845,21 @@ async function syncVcenterDevices(
   const vmAddAs   = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "server");
   const hostAddAs = getAddAsMonitoredFromConfig("vcenter", integrationConfig, "hypervisor");
 
-  // Load the full asset table (MAC rows hydrated for the vNIC identity join)
-  // plus the vcenter AssetSource index.
+  // Load the asset table (tight select — every column this sync's loops, the
+  // material-field snapshot, the conflict snapshot, buildMonitoredSweep and
+  // bumpLastSeen read; the unprojected load pulled every column of every
+  // asset, JSON blobs included) with MAC rows hydrated for the vNIC identity
+  // join, plus the AssetSource index.
   const allAssetsWithRows = await prisma.asset.findMany({
-    include: { macAddressRows: { select: MAC_ROW_SELECT } },
+    select: {
+      id: true, hostname: true, hostnameOverride: true, assetType: true, status: true,
+      monitored: true, monitorOverride: true, acquiredAt: true, lastSeen: true,
+      tags: true, discoveredByIntegrationId: true, dnsName: true, ipAddress: true,
+      os: true, osVersion: true, serialNumber: true, manufacturer: true, model: true,
+      learnedLocation: true, learnedAddress: true, notes: true, assignedTo: true,
+      macAddress: true, dependencyLayer: true,
+      macAddressRows: { select: MAC_ROW_SELECT },
+    },
   });
   const allAssets = allAssetsWithRows.map((a: any) => ({
     ...a,
@@ -8832,17 +8868,27 @@ async function syncVcenterDevices(
   const assetById = new Map<string, any>();
   for (const a of allAssets) assetById.set(a.id, a);
 
+  // ALL kinds, tight select: the vcenter kinds feed the identity indexes
+  // below, and every kind feeds sourcesByAssetId — the projection input, which
+  // this sync mirrors its own upserts into rather than re-reading per device
+  // (the Entra/AD pattern; a VM merged onto a directory asset projects from
+  // its ad/entra/agent rows too).
   const vcenterSources = await prisma.assetSource.findMany({
-    where: { sourceKind: { in: ["vcenter-vm", "vcenter-host"] } },
+    select: { assetId: true, sourceKind: true, externalId: true, integrationId: true, inferred: true, observed: true, lastSeen: true },
   });
   const assetByVmExternalId = new Map<string, any>();
   const assetByHostExternalId = new Map<string, any>();
   const assetIdsWithVcenterSource = new Set<string>();
+  const sourcesByAssetId = new Map<string, EntraSourceEntry[]>();
   // Asset ids that carried a vcenter-vm source from THIS integration before
   // this run — captured pre-sweep so the dependency-edge delete-replace can
   // clear edges off VMs that vanished from the inventory.
   const priorVmAssetIds = new Set<string>();
   for (const src of vcenterSources) {
+    const list = sourcesByAssetId.get(src.assetId);
+    const entry: EntraSourceEntry = { sourceKind: src.sourceKind, externalId: src.externalId, inferred: src.inferred, observed: (src.observed as Record<string, unknown> | null) || {}, lastSeen: src.lastSeen };
+    if (list) list.push(entry); else sourcesByAssetId.set(src.assetId, [entry]);
+    if (src.sourceKind !== "vcenter-vm" && src.sourceKind !== "vcenter-host") continue;
     assetIdsWithVcenterSource.add(src.assetId);
     const a = assetById.get(src.assetId);
     if (src.sourceKind === "vcenter-vm") {
@@ -8852,6 +8898,28 @@ async function syncVcenterDevices(
       assetByHostExternalId.set(src.externalId, a);
     }
   }
+
+  // Mirror of upsertVcenterAssetSource's DB effects into the preloaded map,
+  // plus the hint that tells it whether its cleanup delete can match anything.
+  // Unlike Entra this cannot move a row between assets: a vcenter externalId
+  // already in the fleet-wide index resolves to its own asset in the cascade.
+  const vcenterStaleHint = (assetId: string, kind: "vcenter-vm" | "vcenter-host", externalId: string): boolean =>
+    (sourcesByAssetId.get(assetId) ?? []).some((s) => s.sourceKind === kind && s.externalId !== externalId);
+  const applyVcenterSourceInMemory = (
+    assetId: string,
+    kind: "vcenter-vm" | "vcenter-host",
+    externalId: string,
+    observed: Record<string, unknown>,
+    lastSeenVal: Date,
+  ): void => {
+    let list = sourcesByAssetId.get(assetId);
+    if (!list) { list = []; sourcesByAssetId.set(assetId, list); }
+    const row = list.find((s) => s.sourceKind === kind && s.externalId === externalId);
+    if (row) { row.observed = observed; row.inferred = false; row.lastSeen = lastSeenVal; }
+    else list.push({ sourceKind: kind, externalId, inferred: false, observed, lastSeen: lastSeenVal });
+    // The helper's cleanup delete: same kind on this asset at any other id.
+    sourcesByAssetId.set(assetId, list.filter((s) => !(s.sourceKind === kind && s.externalId !== externalId)));
+  };
 
   // Hostname-collision map (assets with no vcenter source — directory /
   // Fortinet / manual) and the all-assets MAC index for the vNIC join.
@@ -8977,6 +9045,7 @@ async function syncVcenterDevices(
         const newAsset = await prisma.asset.create({ data: createData as any });
         try {
           await upsertVcenterAssetSource(newAsset.id, integrationId, "vcenter-host", externalId, observed, now, connected ? now : now);
+          applyVcenterSourceInMemory(newAsset.id, "vcenter-host", externalId, observed, now);
         } catch (err: any) {
           syncLog("warning", `Created asset for ESXi host ${host.name} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
         }
@@ -8995,19 +9064,15 @@ async function syncVcenterDevices(
     }
 
     // Update the existing host asset (source-first, then projection, single write).
+    const hostSeen = connected ? now : (existing.lastSeen ?? now);
     try {
-      await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-host", externalId, observed, now, connected ? now : (existing.lastSeen ?? now));
+      await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-host", externalId, observed, now, hostSeen, vcenterStaleHint(existing.id, "vcenter-host", externalId));
+      applyVcenterSourceInMemory(existing.id, "vcenter-host", externalId, observed, hostSeen);
     } catch (err: any) {
       syncLog("warning", `Failed to upsert vcenter-host AssetSource row for ${host.name || host.moref}: ${err.message || "Unknown error"}`);
     }
     try {
-      const sourceRows = await prisma.assetSource.findMany({
-        where: { assetId: existing.id },
-        select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-      });
-      const { projected } = projectAssetFromSources(
-        sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null, lastSeen: s.lastSeen })),
-      );
+      const { projected } = projectAssetFromSources(sourcesByAssetId.get(existing.id) ?? []);
       const hostBefore = snapshotMaterialAssetFields(existing);
       const updateData: Record<string, unknown> = {
         virtualization: virtualization as any,
@@ -9157,19 +9222,15 @@ async function syncVcenterDevices(
     }
 
     if (existing) {
+      const vmSeen = poweredOn ? now : (existing.lastSeen ?? now);
       try {
-        await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-vm", externalId, observed, now, poweredOn ? now : (existing.lastSeen ?? now));
+        await upsertVcenterAssetSource(existing.id, integrationId, "vcenter-vm", externalId, observed, now, vmSeen, vcenterStaleHint(existing.id, "vcenter-vm", externalId));
+        applyVcenterSourceInMemory(existing.id, "vcenter-vm", externalId, observed, vmSeen);
       } catch (err: any) {
         syncLog("warning", `Failed to upsert vcenter-vm AssetSource row for ${displayName}: ${err.message || "Unknown error"}`);
       }
       try {
-        const sourceRows = await prisma.assetSource.findMany({
-          where: { assetId: existing.id },
-          select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
-        });
-        const { projected } = projectAssetFromSources(
-          sourceRows.map((s) => ({ sourceKind: s.sourceKind, inferred: s.inferred, observed: s.observed as Record<string, unknown> | null, lastSeen: s.lastSeen })),
-        );
+        const { projected } = projectAssetFromSources(sourcesByAssetId.get(existing.id) ?? []);
         const vmBefore = snapshotMaterialAssetFields(existing);
         const updateData: Record<string, unknown> = {
           virtualization: virtualization as any,
@@ -9330,6 +9391,7 @@ async function syncVcenterDevices(
       const newAsset = await prisma.asset.create({ data: createData as any });
       try {
         await upsertVcenterAssetSource(newAsset.id, integrationId, "vcenter-vm", externalId, observed, now, poweredOn ? now : now);
+        applyVcenterSourceInMemory(newAsset.id, "vcenter-vm", externalId, observed, now);
       } catch (err: any) {
         syncLog("warning", `Created asset for vCenter VM ${displayName} but failed to upsert AssetSource row: ${err.message || "Unknown error"}`);
       }
