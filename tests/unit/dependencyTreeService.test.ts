@@ -15,10 +15,12 @@ import {
   evaluateSuppression,
   buildEndpointDependencyEdges,
   switchNameFromLastSeenSwitch,
+  filterFreshLldpRows,
   type DepAsset,
   type DepEndpoint,
   type DepInterfaceEdge,
   type DepLldpEdge,
+  type DepLldpRow,
   type SuppressionAssetState,
 } from "../../src/services/dependencyTreeService.js";
 
@@ -973,5 +975,79 @@ describe("evaluateSuppression — endpoint leaves", () => {
       new Map([["cam", ["fg"]]]),
     );
     expect(out.get("cam")).toBe(true);
+  });
+});
+
+describe("filterFreshLldpRows", () => {
+  const HOUR = 60 * 60 * 1000;
+  const now = new Date("2026-09-03T12:00:00.000Z");
+  const at = (msAgo: number) => new Date(now.getTime() - msAgo);
+
+  function row(over: Partial<DepLldpRow> = {}): DepLldpRow {
+    return {
+      assetId: "sw1",
+      matchedAssetId: "fg-right",
+      lastSeen: at(0),
+      source: "snmp",
+      ...over,
+    };
+  }
+
+  it("keeps rows refreshed inside the grace window", () => {
+    const rows = [row({ lastSeen: at(HOUR) }), row({ lastSeen: at(5 * HOUR) })];
+    expect(filterFreshLldpRows(rows, now)).toHaveLength(2);
+  });
+
+  it("drops a stale row while keeping the fresh row for the same asset", () => {
+    // The prod 2026-09-03 shape: an orphaned row under an old local-port label
+    // still naming the wrong gate, alongside the current row for the same link.
+    const stale = row({ matchedAssetId: "fg-wrong", lastSeen: at(28 * HOUR) });
+    const fresh = row({ matchedAssetId: "fg-right", lastSeen: at(0) });
+    const kept = filterFreshLldpRows([stale, fresh], now);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].matchedAssetId).toBe("fg-right");
+  });
+
+  it("keeps an old row that the newest scrape for its source did refresh", () => {
+    // Slow-cadence install: lldpIntervalSeconds is settable to 24h, so every
+    // row can be older than the grace window and still be current.
+    const rows = [
+      row({ lastSeen: at(20 * HOUR) }),
+      row({ matchedAssetId: "fg-other", lastSeen: at(20 * HOUR) }),
+    ];
+    expect(filterFreshLldpRows(rows, now)).toHaveLength(2);
+  });
+
+  it("ages each source independently so one writer does not retire another's rows", () => {
+    // persistLldpNeighbors (snmp) and persistManagedApLldpNeighbors both write
+    // this asset. A fresh snmp write must not age out a current fortios row.
+    const snmpFresh = row({ source: "snmp", lastSeen: at(0) });
+    const fortiosOld = row({ source: "fortios", matchedAssetId: "fg-b", lastSeen: at(30 * HOUR) });
+    const kept = filterFreshLldpRows([snmpFresh, fortiosOld], now);
+    expect(kept).toHaveLength(2);
+  });
+
+  it("drops a stale row for a source whose newest write is newer still", () => {
+    const rows = [
+      row({ source: "snmp", matchedAssetId: "fg-wrong", lastSeen: at(30 * HOUR) }),
+      row({ source: "snmp", matchedAssetId: "fg-right", lastSeen: at(25 * HOUR) }),
+    ];
+    const kept = filterFreshLldpRows(rows, now);
+    expect(kept).toHaveLength(1);
+    expect(kept[0].matchedAssetId).toBe("fg-right");
+  });
+
+  it("scopes freshness per asset", () => {
+    // sw2's only row is old, but it is sw2's newest — it must survive sw1's
+    // fresher scrape.
+    const rows = [
+      row({ assetId: "sw1", lastSeen: at(0) }),
+      row({ assetId: "sw2", lastSeen: at(30 * HOUR) }),
+    ];
+    expect(filterFreshLldpRows(rows, now)).toHaveLength(2);
+  });
+
+  it("returns an empty list unchanged", () => {
+    expect(filterFreshLldpRows([], now)).toEqual([]);
   });
 });

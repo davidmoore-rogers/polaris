@@ -259,6 +259,84 @@ export function buildDependencyEdgesFromInputs(
   return [...edges.values()];
 }
 
+/**
+ * Staleness bound for LLDP-derived dependency edges.
+ *
+ * `AssetLldpNeighbor` rows are kept for 48h after a neighbor stops being
+ * advertised (LLDP_STICKY_WINDOW_MS in monitoringService) so the System tab's
+ * Neighbor column doesn't flap empty on a missed advertisement. That grace is
+ * a DISPLAY contract. A dependency edge is a different claim: it decides
+ * whether an alert is suppressed, so it needs the freshness discipline
+ * `inferInterfaceTopology` already applies to its own inputs ("an edge drawn
+ * from a stale reading is wrong data").
+ *
+ * The failure directions are asymmetric, which is why this bound is
+ * deliberately tight rather than generous:
+ *
+ *   - A SPURIOUS parent actively breaks suppression. Multi-parent semantics
+ *     are all-down, so an extra parent that is up keeps the child alerting as
+ *     plain Down when its real upstream dies — the opposite of what the
+ *     dependency tree is for.
+ *   - A MISSING LLDP parent is usually harmless: a FortiSwitch reaches the
+ *     same gate via its `controller` edge and often an `interface` edge too,
+ *     both of which are unaffected by this bound.
+ *
+ * Prod 2026-09-03: a switch carried a stale `port-30` row — orphaned when the
+ * local port label changed, so no fresh scrape could supersede it and it rode
+ * out the full 48h — whose `matchedAssetId` still named the wrong FortiGate
+ * from a period when two gates shared a management address. The current row
+ * for the same link (keyed by the FortiLink trunk name) had already matched
+ * correctly, but the recompute read both and gave the switch two parents.
+ */
+const LLDP_EDGE_STALE_MS = 6 * 60 * 60 * 1000;
+
+/** One LLDP neighbor row, as far as edge freshness is concerned. */
+export interface DepLldpRow {
+  assetId: string;
+  matchedAssetId: string | null;
+  lastSeen: Date;
+  source: string | null;
+}
+
+/**
+ * Drop LLDP rows too stale to justify a dependency edge.
+ *
+ * A row is kept when EITHER:
+ *
+ *   1. it was refreshed within `LLDP_EDGE_STALE_MS` — ordinary grace, so a
+ *      single missed advertisement doesn't drop an edge until the next
+ *      recompute (which only runs per discovery cycle, 4h by default), or
+ *   2. it carries the newest `lastSeen` of any row for its (asset, source) —
+ *      i.e. the most recent scrape by that writer DID refresh it.
+ *
+ * Arm 2 is what makes this cadence-agnostic: `lldpIntervalSeconds` is
+ * operator-settable up to 24h, so a fixed window alone would drop every edge
+ * on a slow-cadence install. Keying it per SOURCE rather than per asset
+ * matters because two writers cover one asset — `persistLldpNeighbors`
+ * (snmp / fortios) and `persistManagedApLldpNeighbors` — and a write by one
+ * must not age out the other's rows.
+ *
+ * Pure; `now` is injected for testability.
+ */
+export function filterFreshLldpRows(rows: DepLldpRow[], now: Date = new Date()): DepLldpRow[] {
+  if (rows.length === 0) return [];
+  // Newest lastSeen per (asset, source). One scrape stamps one `now` across
+  // every row it writes, so "equals the max" is exactly "this scrape saw it".
+  const newestBySourceKey = new Map<string, number>();
+  for (const r of rows) {
+    const key = `${r.assetId}\u0001${r.source ?? ""}`;
+    const t = r.lastSeen.getTime();
+    const prev = newestBySourceKey.get(key);
+    if (prev === undefined || t > prev) newestBySourceKey.set(key, t);
+  }
+  const cutoff = now.getTime() - LLDP_EDGE_STALE_MS;
+  return rows.filter(r => {
+    const t = r.lastSeen.getTime();
+    if (t >= cutoff) return true;
+    return t === newestBySourceKey.get(`${r.assetId}\u0001${r.source ?? ""}`);
+  });
+}
+
 /** Rank the physical-ness of a detectedVia signal. Higher is more
  *  "physical-cabling" and wins the prune-step tiebreak when multiple signals
  *  describe the same (child, parent) pair. interface > lldp > controller
@@ -821,17 +899,26 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
     targetAssetId: e.targetAssetId,
   }));
 
-  // LLDP edges — only neighbors that resolved to a Polaris asset count
-  // for dependency purposes.
-  const lldpRows = await prisma.assetLldpNeighbor.findMany({
+  // LLDP edges — only neighbors that resolved to a Polaris asset count for
+  // dependency purposes, and only rows fresh enough to still describe the
+  // cabling (see filterFreshLldpRows: the table's 48h stickiness is a display
+  // grace, not a topology one).
+  const lldpRowsRaw = await prisma.assetLldpNeighbor.findMany({
     where: {
       assetId: { in: inventory.map(a => a.id) },
       matchedAssetId: { not: null },
     },
-    select: { assetId: true, matchedAssetId: true },
+    select: { assetId: true, matchedAssetId: true, lastSeen: true, source: true },
   });
+  const lldpRows = filterFreshLldpRows(lldpRowsRaw);
+  if (lldpRows.length < lldpRowsRaw.length) {
+    logger.debug(
+      { event: "dependency.lldp.stale_dropped", dropped: lldpRowsRaw.length - lldpRows.length },
+      "Ignored stale LLDP neighbor rows when building dependency edges",
+    );
+  }
   const lldpEdges: DepLldpEdge[] = lldpRows
-    .filter((r): r is { assetId: string; matchedAssetId: string } => !!r.matchedAssetId)
+    .filter((r): r is typeof r & { matchedAssetId: string } => !!r.matchedAssetId)
     .map(r => ({ assetId: r.assetId, matchedAssetId: r.matchedAssetId }));
 
   // Mesh edges — a leaf AP appears as a matched wireless station on its root
