@@ -252,3 +252,58 @@ describe("showRowMenu — dismissal", () => {
     expect(menu()).toBeFalsy();
   });
 });
+
+describe("showRowMenu — stacking layer", () => {
+  /**
+   * The menu is body-mounted and fixed, so its z-index is compared against the
+   * other BODY-level layers rather than against the surface the row is on. At
+   * the stylesheet's 900 that is right for a list page and wrong inside an
+   * overlay: the asset details General tab's upstream rows shipped with their
+   * menu opening BEHIND the slide-over that owns them (2026-09).
+   *
+   * happy-dom has no stylesheet here, so these set the layer inline — which is
+   * exactly what the helper reads (computed z-index up the ancestor chain).
+   */
+  function anchorInside(zIndexes: string[]) {
+    let host = doc.body as unknown as HTMLElement;
+    for (const z of zIndexes) {
+      const el = doc.createElement("div") as unknown as HTMLElement;
+      el.style.position = "fixed";
+      el.style.zIndex = z;
+      host.appendChild(el as never);
+      host = el;
+    }
+    const btn = doc.createElement("button") as unknown as HTMLElement;
+    btn.id = "nested-anchor";
+    host.appendChild(btn as never);
+    return btn;
+  }
+
+  it("lifts the menu one above a slide-over overlay", () => {
+    // .slideover-overlay is 1050 and the .slideover inside it 1000.
+    const btn = anchorInside(["1050", "1000"]);
+    showRowMenu(btn, [{ label: "Open asset", onSelect: () => {} }]);
+    expect((menu() as unknown as HTMLElement).style.zIndex).toBe("1051");
+  });
+
+  it("clears the deepest layer, not the nearest ancestor", () => {
+    // A control inside the slide-over's own nested panel: the ANCESTOR with the
+    // greatest z-index is what the menu has to beat.
+    const btn = anchorInside(["1050", "1200", "5"]);
+    showRowMenu(btn, [{ label: "Open asset", onSelect: () => {} }]);
+    expect((menu() as unknown as HTMLElement).style.zIndex).toBe("1201");
+  });
+
+  it("leaves a plain list-page menu on the stylesheet's base", () => {
+    // Nothing above 900 in play — no inline z-index, so the menu keeps 900 and
+    // stays UNDER the modal overlay a verb typically opens.
+    showRowMenu(anchor, [{ label: "Open", onSelect: () => {} }]);
+    expect((menu() as unknown as HTMLElement).style.zIndex).toBe("");
+  });
+
+  it("never demotes: an ancestor below the base is ignored", () => {
+    const btn = anchorInside(["10"]);
+    showRowMenu(btn, [{ label: "Open", onSelect: () => {} }]);
+    expect((menu() as unknown as HTMLElement).style.zIndex).toBe("");
+  });
+});

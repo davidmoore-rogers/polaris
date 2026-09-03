@@ -2786,6 +2786,31 @@ function closeRowMenu(opts) {
   if (_rowMenuTeardown) _rowMenuTeardown(opts || {});
 }
 
+// `.row-context-menu`'s z-index in styles.css. Duplicated here because the
+// lift below has to know when it would be a DEMOTION; keep the two in step.
+var ROW_MENU_BASE_Z = 900;
+
+/**
+ * The z-index a row menu needs to clear the layer its ANCHOR sits in: the
+ * greatest z-index on the anchor's ancestors, plus one. Returns 0 when nothing
+ * above the CSS base (900) is in play, so a plain list-page menu keeps the
+ * stylesheet's value and stays under the modal overlay it usually opens.
+ *
+ * Reads computed style rather than a list of known overlay classes: the layers
+ * a menu can be opened from already number half a dozen (modal 1000,
+ * slide-over 1050, above-slideover modal 1075, monitor-confirm 1100,
+ * sf-multi-popover 1200, address-book picker 1300 / its editor 1320) and a
+ * hardcoded bump would be wrong for the next one either way.
+ */
+function _rowMenuLayer(anchor) {
+  var max = 0;
+  for (var el = anchor; el && el !== document.body; el = el.parentElement) {
+    var z = parseInt(window.getComputedStyle(el).zIndex, 10);
+    if (!isNaN(z) && z > max) max = z;
+  }
+  return max >= ROW_MENU_BASE_Z ? max + 1 : 0;
+}
+
 function showRowMenu(anchor, items, opts) {
   if (!anchor || !items || !items.length) return;
   // A second click on the same anchor toggles rather than stacking menus.
@@ -2844,6 +2869,17 @@ function showRowMenu(anchor, items, opts) {
     menu.appendChild(b);
   });
   if (!buttons.length && !menu.childNodes.length) return;
+
+  // The menu is body-mounted and `position: fixed`, so its stacking is decided
+  // against the other BODY-level layers — not against the surface the row is
+  // on. At the CSS base (900) that is right for a list page (above the sticky
+  // header, below the modal a verb opens) and wrong everywhere else: a menu
+  // opened from INSIDE a slide-over (overlay 1050) or a modal (1000 / 1075)
+  // rendered behind the very panel that owns the row, which is how the asset
+  // details General tab's upstream rows shipped in 2026-09. Lift it to just
+  // above its anchor's own layer.
+  var layer = _rowMenuLayer(anchor);
+  if (layer) menu.style.zIndex = String(layer);
 
   document.body.appendChild(menu);
 
