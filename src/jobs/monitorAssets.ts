@@ -46,7 +46,14 @@ import {
   type MonitorCadence,
 } from "../services/monitoringService.js";
 import { getBootTimeMode, publishMonitorJobsBulk, publishMonitorSweepJob, publishProbeBatchJob } from "../services/queueService.js";
-import { lossSweepIncludes, lossSweepIsDue, chunkForSweep } from "../utils/lossSweep.js";
+import {
+  lossSweepIncludes,
+  lossSweepIsDue,
+  chunkForSweep,
+  configuredSweepIntervalSec,
+  resolveSweepIntervalSec,
+} from "../utils/lossSweep.js";
+import { detectFping } from "../utils/burstPing.js";
 import { responseTimeProbeShouldQueue } from "../utils/pollingCompatibility.js";
 import { runsHeavyCadences } from "../utils/monitorStatus.js";
 import { setMonitoredAssets, setMonitorWorkers } from "../metrics.js";
@@ -211,6 +218,19 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
   // published as chunks afterwards — the sweep measures a batch in one process
   // (utils/burstPing.ts), so it must not be enqueued one asset at a time.
   const sweepDue: string[] = [];
+  // THE SWEEP CADENCE, resolved once per tick: the operator's interval, floored
+  // at what the installed pinger can actually finish for a fleet this size.
+  // Without fping the fallback forks per host, so a large fleet genuinely cannot
+  // hold 60s and publishing at 60s anyway would just rely on the chunk jobs'
+  // singleton keys to coalesce — graceful, but it wastes a tick every cycle and
+  // hides the real cadence from the operator. `candidates.length` is the fleet
+  // rather than the sweep-eligible subset, which errs toward the wider interval:
+  // the eligible set is not known until the loop below has run.
+  const sweepIntervalSec = resolveSweepIntervalSec(
+    configuredSweepIntervalSec(),
+    candidates.length,
+    await detectFping(),
+  );
   // ICMP assets due a status probe this tick, published as chunks after the
   // loop. Each carries its RESOLVED timeout so the worker does not re-walk the
   // settings hierarchy per asset (and so a batch can never hand one asset
@@ -383,7 +403,7 @@ async function publishDueWork(cadences: MonitorCadence[]): Promise<void> {
     // a minute that batching exists to remove. Keep in sync with computeDueWork.
     if (enabled.has("lossSample") &&
         lossSweepIncludes(a, eff) &&
-        lossSweepIsDue(a.lastLossSampleAt, now)) {
+        lossSweepIsDue(a.lastLossSampleAt, now, sweepIntervalSec)) {
       sweepDue.push(a.id);
     }
   }

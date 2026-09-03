@@ -82,8 +82,10 @@ import {
   lossSweepTarget,
   lossSweepIsDue,
   chunkForSweep,
+  configuredSweepIntervalSec,
+  resolveSweepIntervalSec,
 } from "../utils/lossSweep.js";
-import { burstPing, pingTargets } from "../utils/burstPing.js";
+import { burstPing, pingTargets, detectFping } from "../utils/burstPing.js";
 import { stampsRecoveryAnchor } from "../utils/probeLossAnchor.js";
 import {
   fortiosBool,
@@ -12889,6 +12891,14 @@ export async function computeDueWork(
   const eventLogWork: MonitorWork[] = [];
   const lossSamples: MonitorWork[] = [];
   const probeBatch: ProbeBatchItem[] = [];
+  // Same cadence resolution the pg-boss publisher makes — the operator's
+  // interval floored at what the installed pinger can finish for this fleet
+  // size. Keep the two in lockstep like every other cadence decision.
+  const sweepIntervalSec = resolveSweepIntervalSec(
+    configuredSweepIntervalSec(),
+    candidates.length,
+    await detectFping(),
+  );
   for (const a of candidates) {
     // Resolve effective settings through the four-tier hierarchy. Internally
     // memoized — first asset in a (integration|manual, assetType) bucket
@@ -13069,7 +13079,7 @@ export async function computeDueWork(
     // fleet-wide window is affordable.
     if (enabled.has("lossSample") &&
         lossSweepIncludes(a, eff) &&
-        lossSweepIsDue(a.lastLossSampleAt, now)) {
+        lossSweepIsDue(a.lastLossSampleAt, now, sweepIntervalSec)) {
       lossSamples.push({ id: a.id, kind: "lossSample" });
     }
   }

@@ -67,6 +67,30 @@ export const LOSS_SWEEP_ENABLED = true;
  *  cannot sustain it — see `resolveSweepIntervalSec`. */
 export const LOSS_SWEEP_DEFAULT_INTERVAL_SEC = 60;
 
+/**
+ * The operator's configured sweep interval, from POLARIS_LOSS_SWEEP_INTERVAL_SEC.
+ *
+ * An env var rather than a Setting because this is a host-capacity knob, not a
+ * monitoring policy: the reason to change it is that this host forks a process
+ * per asset without fping, which is a property of the box rather than of any
+ * asset. It sits with the worker-pool sizes for that reason.
+ *
+ * RAISING it is the cheap answer to a fleet the fallback pinger cannot serve at
+ * 60s: LibreNMS polls loss every 5 minutes for exactly this reason, and at 300s
+ * a 2000-asset fleet costs a fifth of the processes. The ratio itself does not
+ * get coarser — it still sums packets over the automation's own History window
+ * — only how quickly it reacts.
+ *
+ * Invalid or absent falls back to the default rather than to 0: a 0 here would
+ * disable loss measurement fleet-wide through a typo.
+ */
+export function configuredSweepIntervalSec(
+  raw: string | undefined = process.env.POLARIS_LOSS_SWEEP_INTERVAL_SEC,
+): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : LOSS_SWEEP_DEFAULT_INTERVAL_SEC;
+}
+
 /** Assets per queued chunk job. Matches burstPing's own fping chunk so one
  *  queued job is one fping process; a larger job would just re-chunk inside
  *  the worker and hold a worker slot for longer with no gain. */

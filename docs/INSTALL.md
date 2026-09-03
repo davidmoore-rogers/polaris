@@ -496,6 +496,14 @@ sudo dnf install -y fping
 sudo apt install -y fping
 ```
 
+**If your estate cannot publish EPEL**, raise the sweep interval instead of
+chasing the package. `POLARIS_LOSS_SWEEP_INTERVAL_SEC=300` cuts the sweep's
+process count fivefold, and the reading itself is unchanged — the ratio still
+sums packets over each automation's own History window, so only how quickly it
+reacts moves. fping is not in RHEL BaseOS or AppStream, so on a Satellite-managed
+host with no EPEL content view this is the practical answer rather than a
+workaround.
+
 **Windows Server has no fping build**, so those installs always use the per-host
 fallback. It is slower there than on Linux for a reason worth knowing: Windows
 `ping` paces at a fixed ~1s per echo and has no interval flag, where POSIX

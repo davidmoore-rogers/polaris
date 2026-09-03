@@ -448,6 +448,7 @@ DATABASE_POOL_SIZE=25
 #   POLARIS_MONITOR_PROCESSES_WORKERS (default 12) — agentless ssh/winrm processes
 #   POLARIS_MONITOR_EVENTLOG_WORKERS  (default 8)  — agentless ssh/winrm OS event log
 #   POLARIS_MONITOR_LOSS_SAMPLE_WORKERS  (default 24) — ICMP loss sweep (a uniform 5-echo burst at every eligible asset each cycle; business rule 30). One job is one CHUNK of up to 500 assets measured in ONE fping process, not one job per asset, so this pool sizes concurrent CHUNKS — a 2000-asset fleet needs four. Name kept from the retired per-asset sampler so an operator-set value survives the cutover
+#   POLARIS_LOSS_SWEEP_INTERVAL_SEC   (default 60) — seconds between ICMP packet-loss sweeps. RAISE IT WHERE fping IS ABSENT: batched, one process serves 500 targets and 60s is affordable at any size; on the per-host fallback 300s cuts the process count fivefold with no loss of accuracy (the ratio still sums packets over each automation's own History window — only reaction time changes). Whatever is set, `resolveSweepIntervalSec` floors it at what the installed pinger can finish for the fleet size, so Polaris never publishes sweeps faster than they drain
 #   POLARIS_PROBE_CONCURRENCY         (cursor mode probe + fastFiltered cap)
 #   POLARIS_HEAVY_CONCURRENCY         (cursor mode telemetry + systemInfo + processes cap)
 
