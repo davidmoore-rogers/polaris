@@ -145,3 +145,76 @@ export function parseVendorSysDescr(sysDescr: string | undefined): SysDescrDetai
   }
   return undefined;
 }
+
+// ─── Adopting what the format said onto a stored asset ──────────────────────
+
+/** The stored fields an adoption decision compares against. */
+export interface StoredDescrIdentity {
+  manufacturer: string | null;
+  model: string | null;
+  osVersion: string | null;
+  /** The device's own self-description, i.e. the last sysDescr we stored. */
+  os: string | null;
+}
+
+/** Fields to write. Only ever the ones that should actually move. */
+export interface DescrPatch {
+  manufacturer?: string;
+  model?: string;
+  osVersion?: string;
+  os?: string;
+}
+
+/**
+ * Decide what a fresh reading should change on a stored asset.
+ *
+ * A Discovery reads sysDescr once, at adoption, so a camera upgraded a year
+ * later still showed the firmware it shipped with. The monitor pass re-reads
+ * it, which makes this the question: of the fields the format states, which
+ * may a later reading overwrite?
+ *
+ * Three answers, and they differ on purpose:
+ *
+ *  - **Firmware is REFRESHED.** It is the field that legitimately changes
+ *    under fixed hardware, and the device is the authority on what it is
+ *    running — the same posture business rule 12 takes for presence and rule
+ *    28 takes for the Windows build. A stale version string is worse than
+ *    useless: it is the field an operator checks before deciding whether a
+ *    known CVE applies to that camera.
+ *  - **Manufacturer and model are FILL-ONLY.** They identify hardware, which
+ *    does not change while the address stays put, so a stored value that
+ *    disagrees is either operator-typed or a device that was swapped — and
+ *    those two are indistinguishable from here. The precedent is
+ *    `adoptDetectedModel`, which overwrites only a value it recognizes as its
+ *    own generic placeholder. The cost is that a camera swapped for a
+ *    different model behind the same IP keeps the old model until someone
+ *    clears the field; that is the trade, and it is the safe direction.
+ *  - **`os` follows the firmware.** It holds the whole sysDescr, in which the
+ *    firmware is one token, so leaving it behind while `osVersion` moves would
+ *    publish two different answers about the same device on the same page.
+ *
+ * Returns `null` when nothing should move — which is the steady state on every
+ * pass after the first, and is what keeps this free at fleet scale: an
+ * unchanged camera costs a comparison, not a write.
+ */
+export function decideDescrAdoption(
+  stored: StoredDescrIdentity,
+  detail: SysDescrDetail | undefined,
+  descrText?: string | null,
+): DescrPatch | null {
+  // No readable layout ⇒ no opinion. Most devices land here, and they must be
+  // left exactly as they were.
+  if (!detail) return null;
+
+  const patch: DescrPatch = {};
+  const held = (v: string | null | undefined): string => (v ?? "").trim();
+
+  if (detail.manufacturer && !held(stored.manufacturer)) patch.manufacturer = detail.manufacturer;
+  if (detail.model && !held(stored.model)) patch.model = detail.model;
+  if (detail.osVersion && detail.osVersion !== held(stored.osVersion)) patch.osVersion = detail.osVersion;
+
+  const descr = (descrText ?? "").trim();
+  if (descr && descr !== held(stored.os)) patch.os = descr;
+
+  return Object.keys(patch).length ? patch : null;
+}

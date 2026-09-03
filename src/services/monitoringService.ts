@@ -106,7 +106,13 @@ import {
   type FortiManagerConfig,
   type RosterDeviceStatus,
 } from "./fortimanagerService.js";
-import { logEvent, logEventsBatch, buildConnectionChangedEvent } from "./eventLogService.js";
+import { logEvent, logEventsBatch, buildConnectionChangedEvent, buildFirmwareChangedEvent } from "./eventLogService.js";
+import { SYS_OIDS } from "../utils/snmpIdentity.js";
+import {
+  parseVendorSysDescr,
+  decideDescrAdoption,
+  type SysDescrDetail,
+} from "../utils/snmpDescrIdentity.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
 import { isChangeActionSubscribed } from "./notificationRuleService.js";
 import { logger } from "../utils/logger.js";
@@ -1580,7 +1586,7 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
     // token is precisely what makes a FortiOS call possible where the
     // integration fleet-wide one is absent, so discarding the method here
     // would throw away the operator fix for the very condition being
-    // detected � and do it silently, which is what this skip was added to
+    // detected — and do it silently, which is what this skip was added to
     // stop happening. The credential type is not known without a DB read
     // (the resolver is on the hot path and takes none), so a wrongly-typed
     // credential surfaces as a collection error naming the missing token
@@ -4522,6 +4528,15 @@ export interface SystemInfoSample {
    * operator-typed model is never overwritten.
    */
   detectedModel?: string | null;
+  /**
+   * What the vendor's OWN sysDescr format stated, when the vendor publishes
+   * one Polaris can read (utils/snmpDescrIdentity.ts). `undefined` for every
+   * other device, which is most of them — and the reason this is safe to
+   * collect fleet-wide: no readable layout, no opinion, no write.
+   */
+  descrIdentity?: SysDescrDetail;
+  /** The raw sysDescr behind it, so Asset.os can follow the firmware. */
+  sysDescr?: string | null;
 }
 
 export interface CollectionResult<T> {
@@ -5460,10 +5475,10 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
  *
  * Two token sources, in this order:
  *
- *   1. `credential` � a `restapi`-typed Credential the operator selected on
+ *   1. `credential` — a `restapi`-typed Credential the operator selected on
  *      THIS asset's stream. Per-gate by nature, and the only way to poll a
  *      fleet where every gate carries its own api-user.
- *   2. the integration's own stored token � fleet-wide by construction (the
+ *   2. the integration's own stored token — fleet-wide by construction (the
  *      FMG Monitoring tab says so in as many words), which is why (1) exists.
  *
  * The credential supplies auth + port + TLS verification only; `host` is
@@ -8320,18 +8335,38 @@ async function collectSystemInfoSnmp(
     // the only path to the real hardware model). Best-effort; a null parse
     // (firmware-only string, empty value) leaves detectedModel unset so the
     // persist layer doesn't touch Asset.model.
+    //
+    // sysDescr rides along in the SAME multi-GET. A Discovery reads it once,
+    // at adoption, so a camera upgraded a year later still reported the
+    // firmware it shipped with (utils/snmpDescrIdentity.ts) — re-reading it
+    // here is what keeps model + firmware current. Batched rather than a
+    // second scalar GET so a device WITH a model profile pays exactly the one
+    // round trip it already paid, and every other SNMP device pays one: at
+    // 2000 assets on the ~10-minute system-info cadence that is ~3 varbinds a
+    // second across the fleet, inside the session and the per-host gate this
+    // pass already holds.
     let detectedModel: string | null = null;
-    if (vendorProfile?.model) {
-      try {
+    let descrIdentity: SysDescrDetail | undefined;
+    let sysDescrText: string | null = null;
+    try {
+      // Registry load stays behind the model profile that needs it — sysDescr
+      // is a fixed OID and every device without a profile is the common case.
+      let modelOid: string | null = null;
+      if (vendorProfile?.model) {
         await ensureRegistryLoaded();
-        const modelOid = resolveOidSync(vendorProfile.model.symbol, vendorScope);
-        if (modelOid) {
-          const vb  = await snmpGetScalar(session, modelOid).catch(() => null);
-          const raw = snmpVbToString(vb);
-          if (raw) detectedModel = vendorProfile.model.parse(raw);
-        }
-      } catch { /* best-effort — model stays undetected */ }
-    }
+        modelOid = resolveOidSync(vendorProfile.model.symbol, vendorScope);
+      }
+      const oids = [SYS_OIDS.sysDescr, ...(modelOid ? [modelOid] : [])];
+      const vbs = await snmpMultiGet(session, oids).catch(() => new Map<string, unknown>());
+
+      sysDescrText = snmpVbToString(vbs.get(SYS_OIDS.sysDescr)) || null;
+      descrIdentity = parseVendorSysDescr(sysDescrText ?? undefined);
+
+      if (modelOid && vendorProfile?.model) {
+        const raw = snmpVbToString(vbs.get(modelOid));
+        if (raw) detectedModel = vendorProfile.model.parse(raw);
+      }
+    } catch { /* best-effort — identity stays undetected */ }
 
     // Interfaces: build a map keyed by ifIndex from IF-MIB columns. Prefer
     // ifName / ifHC*Octets / ifHighSpeed when present; otherwise fall back
@@ -8558,6 +8593,8 @@ async function collectSystemInfoSnmp(
       wirelessStations,
       apRadios,
       detectedModel,
+      descrIdentity,
+      sysDescr: sysDescrText,
     };
   }, opts.timeoutMs);
 }
@@ -9298,6 +9335,9 @@ type SystemInfoPins = {
   ipAddress: string | null;
   model: string | null;
   hostname: string | null;
+  manufacturer: string | null;
+  osVersion: string | null;
+  os: string | null;
 } | null;
 
 /**
@@ -9536,6 +9576,72 @@ async function adoptDetectedModel(
   });
 }
 
+/**
+ * Adopt what the device's own sysDescr format stated (model / firmware /
+ * manufacturer), for the vendors whose layout `utils/snmpDescrIdentity.ts`
+ * can read. Which fields may move, and why each differs, is the pure
+ * `decideDescrAdoption` — this is only the I/O around it.
+ *
+ * Two guards live here rather than in the decision, because both are facts
+ * about the row rather than about the reading:
+ *
+ *  - **Only an asset no discovery source claims.** These three columns are
+ *    PROJECTED from `AssetSource` rows for anything a controller, directory,
+ *    vCenter or agent knows about (`utils/assetProjection.ts`), and `manual`
+ *    appears in none of those ladders — so writing here is safe exactly while
+ *    `manual` is all there is, and would otherwise be a write the next
+ *    projection silently reverts. That population IS the one this exists for:
+ *    equipment belonging to no controller and no directory (business rule 34).
+ *  - **The Event comes from the existing builder.** `computeFirmwareChange`
+ *    already rules that a first learn is not an upgrade, so a camera whose
+ *    firmware Polaris never knew fills the field silently and only a real move
+ *    writes `asset.firmware.changed` — the same event discovery emits, which
+ *    is what the firmware_changed automation trigger watches.
+ *
+ * Edge-triggered by construction: `decideDescrAdoption` returns null when
+ * nothing should move, so an unchanged device costs one comparison and no
+ * query at all.
+ */
+async function adoptSysDescrIdentity(
+  assetId: string,
+  d: SystemInfoSample,
+  pinned: SystemInfoPins,
+): Promise<void> {
+  if (!pinned || !d.descrIdentity) return;
+
+  const patch = decideDescrAdoption(
+    {
+      manufacturer: pinned.manufacturer,
+      model: pinned.model,
+      osVersion: pinned.osVersion,
+      os: pinned.os,
+    },
+    d.descrIdentity,
+    d.sysDescr,
+  );
+  if (!patch) return;
+
+  // Ownership check, paid only by a device that actually publishes a readable
+  // format and has something to change.
+  const sources = await prisma.assetSource.findMany({
+    where: { assetId },
+    select: { sourceKind: true },
+  });
+  if (sources.some((s) => s.sourceKind !== "manual")) return;
+
+  await prisma.asset.update({ where: { id: assetId }, data: patch });
+
+  const ev = buildFirmwareChangedEvent(
+    { assetId, assetName: pinned.hostname, actor: "system:monitor", source: "snmp-sysdescr" },
+    { osVersion: pinned.osVersion },
+    // Only osVersion is offered to the differ: `os` here is the whole
+    // sysDescr, in which the firmware is one token, so reporting both would
+    // state the same upgrade twice in one sentence.
+    { osVersion: patch.osVersion ?? pinned.osVersion },
+  );
+  if (ev) logEvent(ev);
+}
+
 export async function recordSystemInfoResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {
   if (!result.supported) return;
   const now = new Date();
@@ -9546,7 +9652,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   // history fold and the model adoption.
   const pinned: SystemInfoPins = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true },
+    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true, manufacturer: true, osVersion: true, os: true },
   });
 
   // Reconcile the collected names against the identity of record BEFORE
@@ -9698,6 +9804,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   }
 
   await adoptDetectedModel(assetId, d.detectedModel, pinned);
+  await adoptSysDescrIdentity(assetId, d, pinned);
 
   // Only bump lastSystemInfoAt when the scrape returned interfaces. The
   // /system-info GET endpoint anchors its interface query to this

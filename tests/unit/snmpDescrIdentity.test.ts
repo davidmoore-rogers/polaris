@@ -24,7 +24,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parseVendorSysDescr } from "../../src/utils/snmpDescrIdentity.js";
+import {
+  parseVendorSysDescr,
+  decideDescrAdoption,
+  type StoredDescrIdentity,
+} from "../../src/utils/snmpDescrIdentity.js";
 
 /**
  * The real reading off a prod camera, verbatim — leading empty name field and
@@ -129,5 +133,83 @@ describe("parseVendorSysDescr — everything else", () => {
     for (const descr of [";;;;;;;;", ";".repeat(5000), "\u0000; AXIS ;", "; AXIS \n\n ;"]) {
       expect(() => parseVendorSysDescr(descr)).not.toThrow();
     }
+  });
+});
+
+describe("decideDescrAdoption", () => {
+  const AXIS = {
+    manufacturer: "Axis Communications",
+    model: "M2036-LE",
+    productType: "Bullet Camera",
+    osVersion: "10.12.114",
+  };
+  const DESCR = "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1";
+  const empty: StoredDescrIdentity = { manufacturer: null, model: null, osVersion: null, os: null };
+  const adopted: StoredDescrIdentity = {
+    manufacturer: "Axis Communications", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
+  };
+
+  it("fills every empty field on the first reading", () => {
+    expect(decideDescrAdoption(empty, AXIS, DESCR)).toEqual({
+      manufacturer: "Axis Communications",
+      model: "M2036-LE",
+      osVersion: "10.12.114",
+      os: DESCR,
+    });
+  });
+
+  it("writes NOTHING once the asset already agrees", () => {
+    // The fleet-scale property: every pass after the first costs a comparison,
+    // not a write. A null here is what keeps this free at 2000 assets.
+    expect(decideDescrAdoption(adopted, AXIS, DESCR)).toBeNull();
+  });
+
+  it("refreshes the firmware after an upgrade, and drags os along with it", () => {
+    const upgraded = "; AXIS M2036-LE; Bullet Camera; 11.11.61; Mar 14 2026 09:02; 7EC.1; 1";
+    const patch = decideDescrAdoption(adopted, { ...AXIS, osVersion: "11.11.61" }, upgraded);
+    expect(patch).toEqual({ osVersion: "11.11.61", os: upgraded });
+    // Hardware identity is NOT restated on an upgrade.
+    expect(patch).not.toHaveProperty("model");
+    expect(patch).not.toHaveProperty("manufacturer");
+  });
+
+  it("never overwrites a model or manufacturer someone else already set", () => {
+    const typed: StoredDescrIdentity = {
+      manufacturer: "Axis", model: "M2036-LE-BLK", osVersion: "10.12.114", os: DESCR,
+    };
+    // Hardware does not change under a fixed address, so a disagreement is
+    // either operator-typed or a swap — indistinguishable from here, and the
+    // safe direction is to leave it (adoptDetectedModel's posture).
+    expect(decideDescrAdoption(typed, AXIS, DESCR)).toBeNull();
+  });
+
+  it("treats whitespace as empty rather than as a held value", () => {
+    const blank: StoredDescrIdentity = { manufacturer: "  ", model: "	", osVersion: " ", os: "" };
+    expect(decideDescrAdoption(blank, AXIS, DESCR)).toEqual({
+      manufacturer: "Axis Communications",
+      model: "M2036-LE",
+      osVersion: "10.12.114",
+      os: DESCR,
+    });
+  });
+
+  it("has no opinion at all when the vendor layout was unreadable", () => {
+    // The whole fleet outside the vendor table lands here: no detail, no
+    // patch, so a Cisco switch's stored fields are never touched by this path.
+    expect(decideDescrAdoption(empty, undefined, "Cisco IOS Software, Version 15.0")).toBeNull();
+    expect(decideDescrAdoption(adopted, undefined, DESCR)).toBeNull();
+  });
+
+  it("does not move a field the format did not state", () => {
+    // A reading that yielded only a model must not blank the firmware.
+    const patch = decideDescrAdoption(adopted, { manufacturer: "Axis Communications", model: "M2036-LE" }, DESCR);
+    expect(patch).toBeNull();
+  });
+
+  it("fills the firmware silently when it was never known", () => {
+    // Deliberately paired with the service-side comment: computeFirmwareChange
+    // rules a first learn is not an upgrade, so this patch fires no Event.
+    const neverKnown: StoredDescrIdentity = { ...adopted, osVersion: null };
+    expect(decideDescrAdoption(neverKnown, AXIS, DESCR)).toEqual({ osVersion: "10.12.114" });
   });
 });
