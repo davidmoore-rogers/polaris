@@ -843,6 +843,20 @@ async function startBackgroundJobs(cfg: RoleConfig): Promise<void> {
     logger.warn({ err: err?.message }, "asset source priority refresh failed; using default order");
   }
 
+  // Warm the asset-type registry + its inference rules on EVERY role, for the
+  // same reason the priority refresh above is every-role: `seedAssetTypes`
+  // runs only where `runsMigrations` is true (web / all), so in the split-role
+  // layout the DISCOVERY process — the one that actually types devices — would
+  // otherwise never load an operator's rules, and every run would fall back to
+  // the shipped defaults with nothing saying so. Discovery re-reads it per run
+  // as well, so an edit lands without a restart. Never throws.
+  try {
+    const { refreshCache } = await import("./services/assetTypeService.js");
+    await refreshCache();
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "asset type registry refresh failed; using shipped matching rules");
+  }
+
   if (cfg.runsMigrations) {
     // One-shot startup migrations / seeds / backfills — idempotent, marker-keyed.
     for (const p of [

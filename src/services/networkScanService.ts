@@ -23,6 +23,7 @@ import { logger } from "../utils/logger.js";
 import { logEvent } from "./eventLogService.js";
 import { publishScanJob } from "./queueService.js";
 import { expandScanTargets, type ScanTarget, SCAN_MAX_TARGETS } from "../utils/cidr.js";
+import { resolveAssetTypeCached } from "../utils/assetTypeMatch.js";
 import {
   runScan,
   parseStoredMethods,
@@ -457,21 +458,26 @@ export interface AdoptResult {
 /**
  * Map a hit's identity onto an asset type.
  *
- * Deliberately shallow. `inferAssetTypeFromOs` in discoveryEngine answers
- * workstation/server/other from an OS string, which is the wrong question for a
- * PDU — and guessing "switch" from a vendor name is exactly the kind of
- * inference that is right often enough to look correct and wrong the rest of
- * the time. Everything lands as `other` unless the device's own description
- * says otherwise in as many words, and the operator retypes it once.
+ * Still deliberately shallow, and still `other` unless the device's own
+ * description says otherwise in as many words — guessing "switch" from a
+ * vendor name is exactly the kind of inference that is right often enough to
+ * look correct and wrong the rest of the time. What changed is WHERE the
+ * words live: the keyword ladder moved onto the AssetTypeDef registry as
+ * operator-editable rules in the `scan` context (`utils/assetTypeMatch.ts`),
+ * seeded to reproduce this function exactly. A site that scans a floor full of
+ * badge readers can now name them once instead of retyping each adoption.
+ *
+ * The context split matters here: these patterns match a scanned device's own
+ * self-description, so they stay off the directory path, where the same words
+ * appearing in an AD computer's OS string would mean nothing.
  */
 export function assetTypeForHit(hit: ScanHit): string {
-  const text = `${hit.identity?.os ?? ""} ${hit.identity?.hostname ?? ""}`.toLowerCase();
-  if (/\bfortigate\b|\bfirewall\b|\bpalo alto\b|\bsonicwall\b/.test(text)) return "firewall";
-  if (/\bfortiswitch\b|\bswitch\b|\bcatalyst\b|\bnexus\b/.test(text)) return "switch";
-  if (/\bfortiap\b|access point|\bwlan\b|\bwireless\b/.test(text)) return "access_point";
-  if (/\brouter\b|\bios\b.*\brouter\b/.test(text)) return "router";
-  if (/\bprinter\b|laserjet|officejet/.test(text)) return "printer";
-  return "other";
+  return (
+    resolveAssetTypeCached(
+      { os: hit.identity?.os ?? null, hostname: hit.identity?.hostname ?? null },
+      "scan",
+    ) ?? "other"
+  );
 }
 
 /** Which polling method a hit's monitoring selection should be read from. */

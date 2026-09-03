@@ -3254,6 +3254,22 @@ model AssetTypeDef {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
+  // Operator-editable inference rules: which discovery-time facts land a
+  // device in THIS bucket. Shape is validated by src/utils/assetTypeMatch.ts
+  // (`{ clauses: [{ field, op, value }] }`). Null / empty = this type is
+  // never inferred, only assigned by an authoritative source or by hand.
+  // Editable on built-in rows too — `isProtected` locks identity (name +
+  // label), which code branches on, not the matching that fills the bucket.
+  matchRules    Json?    @map("match_rules")
+  // Which inference contexts the rules run in: "directory" (AD / Entra /
+  // Intune / Arc / FortiGate endpoint OS inference) and "scan" (Network
+  // Discovery). Seeded to reproduce the pre-registry hardcoded behavior
+  // exactly, which is why it is per-type rather than global.
+  matchContexts String[] @default([]) @map("match_contexts")
+  // Evaluation order, ascending. Ties break on `name` so the resolver is
+  // deterministic across installs.
+  matchPriority Int      @default(100) @map("match_priority")
+
   @@map("asset_type_defs")
 }
 

@@ -516,7 +516,15 @@ const api = {
     disable:    (body) => request("DELETE", "/auth/totp", body),
   },
   assetTypes: {
-    list:      ()       => request("GET", "/asset-types"),
+    list:      (params) => request("GET", "/asset-types" + toQuery(params)),
+    create:    (body)   => request("POST",   "/asset-types", body),
+    update:    (id, b)  => request("PUT",    `/asset-types/${id}`, b),
+    delete:    (id)     => request("DELETE", `/asset-types/${id}`),
+    // The matching vocabulary + the discovery paths rules cannot reach.
+    matchSchema:  ()      => request("GET",  "/asset-types/match-schema"),
+    // Dry-run. `draft` (optional) previews an unsaved edit.
+    matchPreview: (draft) => request("POST", "/asset-types/match-preview", draft ? { draft } : {}),
+    matchApply:   ()      => request("POST", "/asset-types/match-apply", {}),
   },
   // Saved table filters (list-page presets). `scope` names the table the
   // preset belongs to ("assets"); the server gates each scope on the function

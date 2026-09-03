@@ -19,22 +19,55 @@
 import { Router } from "express";
 import { z } from "zod";
 import * as assetTypeService from "../../services/assetTypeService.js";
+import {
+  MATCH_FIELDS,
+  MATCH_OPS,
+  MATCH_CONTEXTS,
+  AUTHORITATIVE_TYPE_SOURCES,
+} from "../../utils/assetTypeMatch.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
 
+// Shape only. The semantic rules — regex compiles, clause count, value
+// length — live in `utils/assetTypeMatch.validateMatchRules`, because the
+// service is also reached by the seed path and by preview, and a rule that
+// only the route rejected would still be storable.
+const ClauseSchema = z.object({
+  field:  z.enum(MATCH_FIELDS),
+  op:     z.enum(MATCH_OPS),
+  value:  z.string().min(1).max(200),
+  negate: z.boolean().optional(),
+});
+const MatchRulesSchema = z.object({ clauses: z.array(ClauseSchema).max(64) }).nullable();
+const MatchContextsSchema = z.array(z.enum(MATCH_CONTEXTS)).max(MATCH_CONTEXTS.length);
+const MatchPrioritySchema = z.number().int().min(0).max(1000);
+
 const CreateSchema = z.object({
-  name:        z.string().min(2).max(32),
-  label:       z.string().min(1).max(64),
-  description: z.string().max(500).nullable().optional(),
+  name:          z.string().min(2).max(32),
+  label:         z.string().min(1).max(64),
+  description:   z.string().max(500).nullable().optional(),
+  matchRules:    MatchRulesSchema.optional(),
+  matchContexts: MatchContextsSchema.optional(),
+  matchPriority: MatchPrioritySchema.optional(),
 });
 
 const UpdateSchema = z.object({
-  name:        z.string().min(2).max(32).optional(),
-  label:       z.string().min(1).max(64).optional(),
-  description: z.string().max(500).nullable().optional(),
+  name:          z.string().min(2).max(32).optional(),
+  label:         z.string().min(1).max(64).optional(),
+  description:   z.string().max(500).nullable().optional(),
+  matchRules:    MatchRulesSchema.optional(),
+  matchContexts: MatchContextsSchema.optional(),
+  matchPriority: MatchPrioritySchema.optional(),
 });
+
+const PreviewSchema = z.object({
+  name:          z.string().min(1).max(32),
+  matchRules:    MatchRulesSchema,
+  matchContexts: MatchContextsSchema,
+  matchPriority: MatchPrioritySchema,
+}).optional();
 
 // ─── Reads ─────────────────────────────────────────────────────────────────
 
@@ -42,6 +75,52 @@ router.get("/", requirePermission("assets", "read"), async (req, res, next) => {
   try {
     const withUsage = req.query.withUsage === "1" || req.query.withUsage === "true";
     res.json({ types: await assetTypeService.listAssetTypes({ withUsage }) });
+  } catch (err) { next(err); }
+});
+
+/**
+ * The matching vocabulary + the paths rules cannot reach.
+ *
+ * Its own route, declared before `/:id`, so the Device Types card renders the
+ * server's field/operator list and the authoritative-source catalogue rather
+ * than each carrying a copy that drifts. Same reasoning as
+ * `/assets/pin-filter-schema`.
+ */
+router.get("/match-schema", requirePermission("assets", "read"), (_req, res) => {
+  res.json({
+    fields: MATCH_FIELDS,
+    ops: MATCH_OPS,
+    contexts: MATCH_CONTEXTS,
+    authoritativeSources: AUTHORITATIVE_TYPE_SOURCES,
+  });
+});
+
+/**
+ * Dry-run: which assets currently sitting in "Other" a rule set would claim.
+ * Read-level — it writes nothing. An optional draft body previews an unsaved
+ * edit by substituting it into the live registry.
+ */
+router.post("/match-preview", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const draft = PreviewSchema.parse(req.body?.draft ?? undefined);
+    res.json(await assetTypeService.previewMatchRules(draft ?? undefined));
+  } catch (err) { next(err); }
+});
+
+/** Re-type the assets the saved rules claim. Explicit, audited, `other`-only. */
+router.post("/match-apply", requirePermission("assets", "write"), async (req, res, next) => {
+  try {
+    const result = await assetTypeService.applyMatchRules();
+    if (result.updated > 0) {
+      logEvent({
+        action: "asset_type.rules_applied",
+        resourceType: "asset_type",
+        actor: req.session?.username,
+        message: `Device-type rules re-typed ${result.updated} asset(s) out of "Other"`,
+        details: { byType: result.byType },
+      });
+    }
+    res.json(result);
   } catch (err) { next(err); }
 });
 

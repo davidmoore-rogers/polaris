@@ -35,6 +35,7 @@ import { projectAssetFromSources } from "../../utils/assetProjection.js";
 import { scoreDhcpClaim, claimBeats, type DhcpClaimScore } from "../../utils/dhcpClaimFreshness.js";
 import { bareFortinetDeviceName } from "../../utils/assetSourceLocation.js";
 import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
+import { refreshCache as refreshAssetTypeCache } from "../assetTypeService.js";
 import { normalizeManufacturer } from "../../utils/manufacturerNormalize.js";
 import {
   logEvent,
@@ -49,6 +50,7 @@ import {
 import { getConfiguredResolver } from "../dnsService.js";
 import { lookupOui, lookupOuiOverride } from "../ouiService.js";
 import { clampAcquiredToLastSeen, bumpLastSeen } from "../../utils/assetInvariants.js";
+import { resolveAssetTypeCached, type AssetTypeFacts } from "../../utils/assetTypeMatch.js";
 import { normalizeHardwareSerial, indexUniqueBy } from "../../utils/hardwareIdentity.js";
 import { recordSample, getBaselines, type Baseline } from "../discoveryDurationService.js";
 import { evaluateAutoAbort, clearAutoAbortState } from "../discoveryAutoAbortService.js";
@@ -174,39 +176,25 @@ export async function expireVerboseLogging(): Promise<void> {
 // the run. The discovery worker mutates a local RunAccumulator and flushes it to
 // the row; abort is signaled via the row's cancelRequested flag.
 
-function inferAssetTypeFromOs(os: string | null | undefined): "workstation" | "server" | "other" {
-  if (!os) return "other";
-  const lower = os.toLowerCase();
-  if (
-    lower.includes("server") ||
-    lower.includes("centos") ||
-    lower.includes("red hat") ||
-    lower.includes("rhel") ||
-    lower.includes("rocky linux") ||
-    lower.includes("almalinux") ||
-    lower.includes("oracle linux") ||
-    lower.includes("freebsd") ||
-    lower.includes("openbsd") ||
-    lower.includes("netbsd") ||
-    lower.includes("esxi") ||
-    lower.includes("vmware")
-  ) return "server";
-  if (
-    /windows\s+(10|11|7|8|xp|vista)/i.test(os) ||
-    lower.includes("macos") ||
-    lower.includes("mac os x") ||
-    lower.includes("os x") ||
-    lower.includes("linux mint") ||
-    lower.includes("ubuntu") ||
-    lower.includes("fedora") ||
-    lower.includes("debian") ||
-    lower.includes("arch linux") ||
-    lower.includes("manjaro") ||
-    lower.includes("pop!_os") ||
-    lower.includes("elementary os") ||
-    lower.includes("zorin os")
-  ) return "workstation";
-  return "other";
+/**
+ * Directory-source type inference.
+ *
+ * The OS-string ladder this used to hardcode now lives on the AssetTypeDef
+ * registry as operator-editable rules (`utils/assetTypeMatch.ts`), seeded to
+ * reproduce it exactly — so an install that never opens the Device Types card
+ * behaves as it always did, and one that does can teach Polaris about its own
+ * fleet without a code change. The return type widened from the three literals
+ * to `string` for the same reason: a custom type can now claim a device.
+ *
+ * `extra` carries whatever else the caller happens to know. The seeded rules
+ * read `os` alone, so passing more facts is inert for them and reachable only
+ * by a rule an operator wrote.
+ */
+function inferAssetTypeFromOs(
+  os: string | null | undefined,
+  extra?: Omit<AssetTypeFacts, "os">,
+): string {
+  return resolveAssetTypeCached({ os: os ?? null, ...(extra ?? {}) }, "directory") ?? "other";
 }
 
 // ─── Shared discovery trigger (used by route handler + scheduler) ─────────────
@@ -611,6 +599,18 @@ export async function runDiscovery(integrationId: string, actor: string, scopeDe
   // so this per-run refresh is how a settings edit made in the web role reaches
   // the code that actually writes Asset.learnedLocation. Never throws.
   await refreshProjectionPriority();
+
+  // Same story for the device-type inference rules: the operator edits them in
+  // the web role, this process is the one that types devices, and a stale copy
+  // would file a whole run under the previous rules with nothing saying so.
+  // A failed read leaves the last-known (or shipped) rules in force rather
+  // than failing the run — typing devices by yesterday's rules beats not
+  // discovering them.
+  try {
+    await refreshAssetTypeCache();
+  } catch (err) {
+    logger.warn({ err: (err as Error)?.message }, "asset type rule refresh failed; using cached matching rules");
+  }
 
   const runStartedAt = Date.now();
   await markRunStarted(integrationId, new Date(runStartedAt));
@@ -6705,17 +6705,22 @@ function isEntraManagedTag(t: string): boolean {
 function inferAssetTypeFromChassis(
   chassisType: string | undefined,
   operatingSystem: string | undefined,
-): "workstation" | "server" | "other" {
+): string {
   const chassis = (chassisType || "").toLowerCase();
   if (["desktop", "laptop", "convertible", "detachable"].includes(chassis)) return "workstation";
   if (["tablet", "phone"].includes(chassis)) return "other";
 
   // Fall back to OS inference (Entra-only devices have no chassisType).
   // Intune doesn't report servers in practice, but a future change could.
+  //
+  // The chassis pre-checks and the workstation default stay hardcoded rather
+  // than becoming rules: they state what Entra and Intune ENUMERATE (endpoint
+  // management inventories, not server estates), which is not a guess an
+  // operator would want to retune. Only the OS half is rule-driven — so a
+  // custom type can claim one of these devices while the "unrecognized Entra
+  // record is an endpoint" default still holds behind it.
   const inferred = inferAssetTypeFromOs(operatingSystem);
-  if (inferred === "server") return "server";
-  if (inferred === "workstation") return "workstation";
-  return "workstation"; // Entra/Intune devices default to workstation
+  return inferred !== "other" ? inferred : "workstation";
 }
 
 // Build the source-shaped observed blob for the "entra" AssetSource row.

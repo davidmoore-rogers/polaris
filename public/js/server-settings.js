@@ -3868,6 +3868,11 @@ var _mibsData = [];
 var _mibFacets = { manufacturers: [], modelsByManufacturer: {} };
 var _manufacturerAliases = [];
 var _deviceIcons = [];
+// Device Types card: the AssetTypeDef registry with its usage counts, plus the
+// matching vocabulary + authoritative-source catalogue the server publishes so
+// this file doesn't carry a second copy that drifts from the resolver.
+var _assetTypes = [];
+var _assetTypeMatchSchema = { fields: [], ops: [], contexts: [], authoritativeSources: [] };
 var _mibFilter = { manufacturer: "", model: "", scope: "all" };
 // Slice 6b — editable Manufacturer Profile (DB-backed) state.
 // _mfgProfiles is the summary list shown in the card; _mfgProfileTransforms
@@ -4061,6 +4066,8 @@ async function loadIdentificationTab() {
       api.deviceIcons.list().catch(function () { return []; }),
       api.serverSettings.listManufacturerProfiles().catch(function () { return { profiles: [], transforms: [] }; }),
       api.serverSettings.getPlaceholderMac().catch(function () { return null; }),
+      api.assetTypes.list({ withUsage: 1 }).catch(function () { return { types: [] }; }),
+      api.assetTypes.matchSchema().catch(function () { return null; }),
     ]);
     _tagsData = results[0];
     _tagSettings = results[1] || { enforce: false };
@@ -4080,6 +4087,8 @@ async function loadIdentificationTab() {
     _mfgProfileTransforms = profilePayload.transforms || [];
     _mfgProfileCombiners = profilePayload.combiners || [];
     _placeholderMac = results[9] || null;
+    _assetTypes = (results[10] || {}).types || [];
+    if (results[11]) _assetTypeMatchSchema = results[11];
     _tagsLoaded = true;
     renderIdentificationTab();
   } catch (err) {
@@ -4303,6 +4312,9 @@ function renderIdentificationTab() {
   // ── 4b. Device Icons ──
   html += deviceIconsCardHTML();
 
+  // ── 4c. Device Types ──
+  html += deviceTypesCardHTML();
+
   // ── 5. Tags (bottom) ──
   // Group tags by category
   var categories = {};
@@ -4386,6 +4398,7 @@ function renderIdentificationTab() {
   loadOuiStatus();
   // MIB + manufacturer-profile wiring lives on the Credentials tab now.
   wireDeviceIconHandlers();
+  wireDeviceTypeHandlers();
 
   // Placeholder MAC prefix
   var phBtn = document.getElementById("btn-save-placeholder-mac");
@@ -5445,6 +5458,514 @@ var _deviceIconAssetTypes = [
   "firewall", "switch", "access_point", "router",
   "server", "workstation", "printer", "other",
 ];
+
+// ─── Device Types ──────────────────────────────────────────────────────────
+//
+// The AssetTypeDef registry, plus the inference rules that decide which
+// discovery-time facts land a device in each bucket. Two halves, because a
+// device's type comes from two different kinds of place: an authoritative
+// source that STATES it (a FortiGate's controller, vCenter's inventory), and
+// a guess off a text field. Only the second is editable, and the card says so
+// rather than leaving an operator to discover it by writing a rule that never
+// fires.
+
+var _DT_FIELD_LABELS = {
+  any: "Any field",
+  os: "OS",
+  osVersion: "OS version",
+  hostname: "Hostname",
+  manufacturer: "Manufacturer",
+  model: "Model",
+  chassis: "Chassis (Entra / Intune)",
+};
+var _DT_OP_LABELS = {
+  contains: "contains",
+  equals: "equals",
+  starts_with: "starts with",
+  ends_with: "ends with",
+  regex: "matches regex",
+};
+var _DT_CONTEXT_LABELS = {
+  directory: "Directory discovery (AD / Entra / Intune / Azure Arc)",
+  scan: "Network Discovery scans",
+};
+var _DT_CONTEXT_SHORT = { directory: "Directory", scan: "Scans" };
+
+function _dtLabelFor(name) {
+  var t = (_assetTypes || []).find(function (x) { return x.name === name; });
+  return t ? t.label : name;
+}
+
+/** One-line summary of a type's matching, for the table's Matching column. */
+function _dtMatchSummary(t) {
+  var clauses = (t.matchRules && t.matchRules.clauses) || [];
+  var contexts = t.matchContexts || [];
+  if (!clauses.length || !contexts.length) {
+    return '<span style="color:var(--color-text-tertiary)">Assigned only</span>';
+  }
+  var where = contexts.map(function (c) { return _DT_CONTEXT_SHORT[c] || c; }).join(" + ");
+  var first = clauses[0];
+  var lead = (_DT_FIELD_LABELS[first.field] || first.field) + " " +
+    (first.negate ? "does not " : "") + (_DT_OP_LABELS[first.op] || first.op) +
+    ' "' + first.value + '"';
+  var more = clauses.length > 1 ? ' <span style="color:var(--color-text-tertiary)">+' + (clauses.length - 1) + " more</span>" : "";
+  return '<span style="color:var(--color-text-tertiary)">' + escapeHtml(where) + ':</span> ' +
+    escapeHtml(lead) + more;
+}
+
+function deviceTypesCardHTML() {
+  var types = (_assetTypes || []).slice().sort(function (a, b) {
+    // Built-ins first (they are the buckets code branches on), then by the
+    // order the resolver actually walks, so the table reads as the ladder.
+    if (a.isBuiltIn !== b.isBuiltIn) return a.isBuiltIn ? -1 : 1;
+    if ((a.matchPriority || 0) !== (b.matchPriority || 0)) return (a.matchPriority || 0) - (b.matchPriority || 0);
+    return (a.label || "").localeCompare(b.label || "");
+  });
+
+  var html = '<div class="settings-card">' +
+    '<h4>Device Types</h4>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin-bottom:1rem">' +
+      'The buckets every asset is filed under, and the rules that decide which one a newly discovered device lands in. ' +
+      'Built-in types cannot be renamed or removed — dashboards, filters and monitoring behaviour key on their names — but ' +
+      'their <strong>matching rules are yours to edit</strong>, and you can add types of your own.' +
+    '</p>' +
+    '<div style="display:flex;gap:8px;margin-bottom:1rem;flex-wrap:wrap">' +
+      '<button class="btn btn-primary" id="btn-add-device-type">+ Add Type</button>' +
+      '<button class="btn btn-secondary" id="btn-dt-apply-rules">Apply rules to existing “Other” assets…</button>' +
+    '</div>';
+
+  if (!types.length) {
+    html += '<p class="empty-state">No device types loaded.</p>';
+  } else {
+    html += '<div class="table-wrapper" style="overflow-x:auto">' +
+      '<table class="data-table"><thead><tr>' +
+        '<th>Type</th><th>Name</th><th>Matching</th>' +
+        '<th style="text-align:right">Assets</th><th style="width:96px"></th>' +
+      '</tr></thead><tbody>';
+    types.forEach(function (t) {
+      html += '<tr>' +
+        '<td><strong>' + escapeHtml(t.label) + '</strong>' +
+          (t.isBuiltIn
+            ? ' <span style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.04em;color:var(--color-text-tertiary);border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:1px 5px;margin-left:4px;vertical-align:middle"' +
+              ' title="Shipped with Polaris; name and label are fixed">built-in</span>'
+            : '') +
+          (t.description ? '<div style="font-size:0.76rem;color:var(--color-text-tertiary);margin-top:2px">' + escapeHtml(t.description) + '</div>' : '') +
+        '</td>' +
+        '<td><code style="font-size:0.78rem">' + escapeHtml(t.name) + '</code></td>' +
+        '<td style="font-size:0.8rem">' + _dtMatchSummary(t) + '</td>' +
+        '<td style="text-align:right">' + (t.usageCount != null ? t.usageCount : "—") + '</td>' +
+        '<td style="text-align:right;white-space:nowrap">' +
+          '<button class="btn-icon device-type-edit" data-id="' + escapeHtml(t.id) + '" title="Edit">&#9998;</button>' +
+          (t.isProtected
+            ? ''
+            : '<button class="btn-icon device-type-delete" data-id="' + escapeHtml(t.id) + '" title="Delete">&times;</button>') +
+        '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  // ── The half rules cannot reach ──
+  // Rendered from the server's own catalogue (GET /asset-types/match-schema)
+  // rather than a copy here, so it cannot quietly stop describing the code.
+  var sources = _assetTypeMatchSchema.authoritativeSources || [];
+  if (sources.length) {
+    html += '<details style="margin-top:1.25rem">' +
+      '<summary style="cursor:pointer;font-size:0.85rem;font-weight:600">How a device gets its type</summary>' +
+      '<div style="font-size:0.82rem;color:var(--color-text-secondary);margin-top:0.75rem;line-height:1.55">' +
+        '<p style="margin:0 0 0.75rem">Polaris takes the first answer it can get, in this order:</p>' +
+        '<ol style="margin:0 0 1rem;padding-left:1.25rem">';
+    sources.forEach(function (s) {
+      html += '<li style="margin-bottom:0.5rem"><strong>' + escapeHtml(s.source) + '</strong>' +
+        (s.assigns && s.assigns.length
+          ? ' → ' + s.assigns.map(function (n) {
+              return '<code style="font-size:0.76rem">' + escapeHtml(_dtLabelFor(n)) + '</code>';
+            }).join(", ")
+          : '') +
+        '<div style="color:var(--color-text-tertiary)">' + escapeHtml(s.reason) + '</div></li>';
+    });
+    html += '</ol>' +
+      '<p style="margin:0 0 0.75rem"><strong>Then the matching rules above</strong>, walked in priority order — ' +
+      'the first type whose rules claim the device wins. Rules run in two separate places, and each type ' +
+      'declares which of them it takes part in:</p>' +
+      '<ul style="margin:0 0 1rem;padding-left:1.25rem">' +
+        '<li><strong>Directory discovery</strong> reads a directory record’s OS string. Out of the box only ' +
+        '<em>Server</em> and <em>Workstation</em> run here.</li>' +
+        '<li><strong>Network Discovery scans</strong> read a scanned device’s own self-description. Out of the box ' +
+        '<em>Firewall</em>, <em>Switch</em>, <em>Access Point</em>, <em>Router</em> and <em>Printer</em> run here.</li>' +
+      '</ul>' +
+      '<p style="margin:0"><strong>Otherwise the device lands in “Other.”</strong> ' +
+      'Editing a rule changes what discovery does the next time it sees a device — it does not re-type anything ' +
+      'already in inventory. Use <em>Apply rules to existing “Other” assets</em> for that; it only ever moves ' +
+      'assets <em>out of</em> “Other”, so a type you set by hand is never overwritten.</p>' +
+    '</div></details>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function wireDeviceTypeHandlers() {
+  var addBtn = document.getElementById("btn-add-device-type");
+  if (addBtn) addBtn.addEventListener("click", function () { openDeviceTypeModal(null); });
+
+  var applyBtn = document.getElementById("btn-dt-apply-rules");
+  if (applyBtn) applyBtn.addEventListener("click", openDeviceTypeApplyModal);
+
+  document.querySelectorAll(".device-type-edit").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      openDeviceTypeModal(btn.getAttribute("data-id"));
+    });
+  });
+  document.querySelectorAll(".device-type-delete").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      deleteDeviceTypeUI(btn.getAttribute("data-id"));
+    });
+  });
+}
+
+async function deleteDeviceTypeUI(id) {
+  var t = (_assetTypes || []).find(function (x) { return x.id === id; });
+  if (!t) return;
+  var ok = await showConfirm(
+    'Delete device type "' + t.label + '"?' +
+    (t.usageCount ? " " + t.usageCount + " asset(s) still use it — the delete will be refused." : ""),
+  );
+  if (!ok) return;
+  try {
+    await api.assetTypes.delete(id);
+    showToast("Device type deleted", "success");
+    await loadIdentificationTab();
+  } catch (err) {
+    showToast(err.message || "Failed to delete device type", "error");
+  }
+}
+
+// ─── Editor ────────────────────────────────────────────────────────────────
+
+var _dtClauseSeq = 0;
+
+function _dtClauseRowHTML(clause) {
+  var id = "dtc-" + (++_dtClauseSeq);
+  var c = clause || { field: "os", op: "contains", value: "", negate: false };
+  var fields = _assetTypeMatchSchema.fields || Object.keys(_DT_FIELD_LABELS);
+  var ops = _assetTypeMatchSchema.ops || Object.keys(_DT_OP_LABELS);
+
+  var fieldSel = '<select class="dt-clause-field" style="flex:0 0 150px">';
+  fields.forEach(function (f) {
+    fieldSel += '<option value="' + escapeHtml(f) + '"' + (f === c.field ? ' selected' : '') + '>' +
+      escapeHtml(_DT_FIELD_LABELS[f] || f) + '</option>';
+  });
+  fieldSel += '</select>';
+
+  var opSel = '<select class="dt-clause-op" style="flex:0 0 130px">';
+  ops.forEach(function (o) {
+    opSel += '<option value="' + escapeHtml(o) + '"' + (o === c.op ? ' selected' : '') + '>' +
+      escapeHtml(_DT_OP_LABELS[o] || o) + '</option>';
+  });
+  opSel += '</select>';
+
+  return '<div class="dt-clause-row" id="' + id + '" style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
+    '<label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;color:var(--color-text-secondary);flex:0 0 auto" ' +
+      'title="Match devices where this condition is NOT true. A device that reported nothing for the field never matches either way.">' +
+      '<input type="checkbox" class="dt-clause-negate"' + (c.negate ? ' checked' : '') + '> not' +
+    '</label>' +
+    fieldSel + opSel +
+    '<input type="text" class="dt-clause-value" style="flex:1 1 180px;min-width:140px" ' +
+      'value="' + escapeHtml(c.value || "") + '" placeholder="value">' +
+    '<button type="button" class="btn-icon dt-clause-remove" title="Remove condition">&times;</button>' +
+  '</div>';
+}
+
+function _dtWireClauseRow(row) {
+  var rm = row.querySelector(".dt-clause-remove");
+  if (rm) rm.addEventListener("click", function () { row.remove(); });
+}
+
+/** Read the editor form back into the payload shape the API expects. */
+function _dtReadForm() {
+  var clauses = [];
+  document.querySelectorAll("#dt-clause-list .dt-clause-row").forEach(function (row) {
+    var value = (row.querySelector(".dt-clause-value").value || "").trim();
+    if (!value) return; // a blank row is an unfinished thought, not a clause
+    var clause = {
+      field: row.querySelector(".dt-clause-field").value,
+      op: row.querySelector(".dt-clause-op").value,
+      value: value,
+    };
+    if (row.querySelector(".dt-clause-negate").checked) clause.negate = true;
+    clauses.push(clause);
+  });
+  var contexts = [];
+  document.querySelectorAll("#dt-context-list input[type=checkbox]").forEach(function (cb) {
+    if (cb.checked) contexts.push(cb.getAttribute("data-ctx"));
+  });
+  var priorityRaw = parseInt(document.getElementById("f-dt-priority").value, 10);
+  return {
+    label: (document.getElementById("f-dt-label").value || "").trim(),
+    name: (document.getElementById("f-dt-name").value || "").trim().toLowerCase(),
+    description: (document.getElementById("f-dt-description").value || "").trim(),
+    matchRules: clauses.length ? { clauses: clauses } : null,
+    matchContexts: contexts,
+    matchPriority: isNaN(priorityRaw) ? 100 : priorityRaw,
+  };
+}
+
+function openDeviceTypeModal(id) {
+  var t = id ? (_assetTypes || []).find(function (x) { return x.id === id; }) : null;
+  var isNew = !t;
+  var locked = !!(t && t.isProtected);
+  var clauses = (t && t.matchRules && t.matchRules.clauses) || [];
+  var contexts = (t && t.matchContexts) || [];
+  var ctxList = _assetTypeMatchSchema.contexts || ["directory", "scan"];
+
+  var body =
+    '<div class="form-group"><label>Label *</label>' +
+      '<input type="text" id="f-dt-label" value="' + escapeHtml(t ? t.label : "") + '"' + (locked ? " disabled" : "") + ' placeholder="Rack PDU">' +
+      '<div class="hint">What operators see in lists, filters and charts.</div>' +
+    '</div>' +
+    '<div class="form-group"><label>Name *</label>' +
+      '<input type="text" id="f-dt-name" value="' + escapeHtml(t ? t.name : "") + '"' + (locked ? " disabled" : "") + ' placeholder="rack_pdu">' +
+      '<div class="hint">' +
+        (locked
+          ? 'Built-in. Monitoring, topology and dashboard behaviour key on this name, so it is fixed.'
+          : (isNew
+            ? 'Lowercase letters, digits, dash and underscore. Stored on every asset of this type — renaming later rewrites them all.'
+            : 'Renaming rewrites every asset currently using this type, in one transaction.')) +
+      '</div>' +
+    '</div>' +
+    '<div class="form-group"><label>Description</label>' +
+      '<textarea id="f-dt-description" rows="2"' + (locked ? " disabled" : "") + '>' + escapeHtml((t && t.description) || "") + '</textarea>' +
+    '</div>';
+
+  if (locked) {
+    body += infoBox(
+      'This is a <strong>built-in</strong> type, so its name and label are fixed — but the matching below is ' +
+      'yours. Editing it changes which devices Polaris files here.',
+    );
+  }
+
+  body += formDivider() + sectionHeading("Matching rules");
+
+  body +=
+    '<p style="font-size:0.8rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
+      'A device is filed here when <strong>any one</strong> condition below is true. ' +
+      'Leave the list empty and this type is only ever assigned by an authoritative discovery source or by hand.' +
+    '</p>';
+
+  body += '<div class="form-group"><label>Applies to</label><div id="dt-context-list">';
+  ctxList.forEach(function (c) {
+    body += '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:4px">' +
+      '<input type="checkbox" data-ctx="' + escapeHtml(c) + '"' + (contexts.indexOf(c) >= 0 ? " checked" : "") + '>' +
+      '<span style="font-size:0.85rem">' + escapeHtml(_DT_CONTEXT_LABELS[c] || c) + '</span>' +
+    '</label>';
+  });
+  body += '</div><div class="hint">Where these rules run. A rule set with nothing ticked never fires.</div></div>';
+
+  body += '<div class="form-group"><label>Conditions</label><div id="dt-clause-list">';
+  clauses.forEach(function (c) { body += _dtClauseRowHTML(c); });
+  body += '</div>' +
+    '<button type="button" class="btn btn-secondary btn-sm" id="btn-dt-add-clause" style="margin-top:4px">+ Add condition</button>' +
+  '</div>';
+
+  body += '<div class="form-group"><label>Priority</label>' +
+    '<input type="number" id="f-dt-priority" min="0" max="1000" style="max-width:120px" value="' +
+      escapeHtml(String(t && t.matchPriority != null ? t.matchPriority : 100)) + '">' +
+    '<div class="hint">Lower wins. When two types both claim a device, the smaller number decides ' +
+      '(Firewall 10 → Switch 12 → Access Point 14 → Router 16 → Printer 18 → Server 20 → Workstation 30).</div>' +
+  '</div>';
+
+  body += '<div id="dt-preview-out" style="margin-top:0.5rem"></div>';
+
+  var footer =
+    '<button class="btn btn-secondary" id="btn-dt-preview">Preview matches</button>' +
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-dt-save">' + (isNew ? "Create Type" : "Save Changes") + '</button>';
+
+  openModal(isNew ? "Add Device Type" : "Edit Device Type — " + t.label, body, footer, { wide: true });
+
+  // Wire the clause rows rendered above, then each one added afterwards.
+  document.querySelectorAll("#dt-clause-list .dt-clause-row").forEach(_dtWireClauseRow);
+  document.getElementById("btn-dt-add-clause").addEventListener("click", function () {
+    var list = document.getElementById("dt-clause-list");
+    var wrap = document.createElement("div");
+    wrap.innerHTML = _dtClauseRowHTML(null);
+    var row = wrap.firstChild;
+    list.appendChild(row);
+    _dtWireClauseRow(row);
+    var input = row.querySelector(".dt-clause-value");
+    if (input) input.focus();
+  });
+
+  // Auto-fill the machine name from the label while it is still untouched, so
+  // the common case is one field, not two.
+  if (isNew) {
+    var nameEl = document.getElementById("f-dt-name");
+    var nameTouched = false;
+    nameEl.addEventListener("input", function () { nameTouched = true; });
+    document.getElementById("f-dt-label").addEventListener("input", function () {
+      if (nameTouched) return;
+      nameEl.value = this.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 32);
+    });
+  }
+
+  document.getElementById("btn-dt-preview").addEventListener("click", async function () {
+    var btn = this;
+    var out = document.getElementById("dt-preview-out");
+    var form = _dtReadForm();
+    if (!form.name) { showToast("Give the type a name before previewing", "error"); return; }
+    btn.disabled = true;
+    out.innerHTML = '<p class="empty-state" style="margin:0">Checking…</p>';
+    try {
+      // Preview the DRAFT, not the stored row — the point is to see what the
+      // edit on screen would do before committing it.
+      var res = await api.assetTypes.matchPreview({
+        name: form.name,
+        matchRules: form.matchRules,
+        matchContexts: form.matchContexts,
+        matchPriority: form.matchPriority,
+      });
+      out.innerHTML = _dtPreviewHTML(res, form.name);
+    } catch (err) {
+      out.innerHTML = '<p style="color:var(--color-danger);font-size:0.82rem;margin:0">' +
+        escapeHtml(err.message || "Preview failed") + '</p>';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  document.getElementById("btn-dt-save").addEventListener("click", async function () {
+    var btn = this;
+    var form = _dtReadForm();
+    if (!locked && !form.label) { showToast("Label is required", "error"); return; }
+    if (isNew && !form.name) { showToast("Name is required", "error"); return; }
+    if (form.matchRules && !form.matchContexts.length) {
+      showToast('Tick at least one "Applies to" box, or the rules will never run', "error");
+      return;
+    }
+    btn.disabled = true;
+    try {
+      var payload = {
+        matchRules: form.matchRules,
+        matchContexts: form.matchContexts,
+        matchPriority: form.matchPriority,
+      };
+      // A protected row rejects identity edits outright, so don't send fields
+      // the form rendered disabled — an unchanged value would still read as an
+      // attempted edit if the server compared loosely.
+      if (!locked) {
+        payload.label = form.label;
+        payload.description = form.description || null;
+      }
+      if (isNew) {
+        payload.name = form.name;
+        await api.assetTypes.create(payload);
+        showToast("Device type created", "success");
+      } else {
+        if (!locked && form.name && form.name !== t.name) payload.name = form.name;
+        await api.assetTypes.update(t.id, payload);
+        showToast("Device type saved", "success");
+      }
+      closeModal();
+      await loadIdentificationTab();
+    } catch (err) {
+      showToast(err.message || "Failed to save device type", "error");
+      btn.disabled = false;
+    }
+  });
+}
+
+/** Render a preview result. Shared by the editor and the apply dialog. */
+function _dtPreviewHTML(res, onlyType) {
+  if (!res.examined) {
+    return '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0">' +
+      'No assets are currently filed under “Other”, so there is nothing for a rule to reclaim.</p>';
+  }
+  var rows = (res.sample || []).filter(function (r) {
+    return !onlyType || r.matchedType === onlyType;
+  });
+  var mine = onlyType
+    ? (res.byType || []).filter(function (b) { return b.type === onlyType; })
+    : (res.byType || []);
+  var total = mine.reduce(function (sum, b) { return sum + b.count; }, 0);
+
+  if (!total) {
+    return '<p style="font-size:0.82rem;color:var(--color-text-tertiary);margin:0">' +
+      'Matches <strong>0</strong> of the ' + res.examined + ' asset(s) currently filed under “Other”.</p>';
+  }
+
+  var html = '<p style="font-size:0.82rem;margin:0 0 0.5rem">Matches <strong>' + total + '</strong> of the ' +
+    res.examined + ' asset(s) currently filed under “Other”' +
+    (onlyType ? '' : ': ' + mine.map(function (b) {
+      return escapeHtml(_dtLabelFor(b.type)) + " " + b.count;
+    }).join(", ")) + '.</p>';
+
+  if (rows.length) {
+    html += '<div class="table-wrapper" style="max-height:240px;overflow:auto">' +
+      '<table class="data-table"><thead><tr><th>Hostname</th><th>OS</th>' +
+      (onlyType ? '' : '<th>Would become</th>') + '<th>Matched on</th></tr></thead><tbody>';
+    rows.slice(0, 25).forEach(function (r) {
+      var c = r.matchedClause;
+      html += '<tr>' +
+        '<td>' + escapeHtml(r.hostname || "—") + '</td>' +
+        '<td style="font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(r.os || "—") + '</td>' +
+        (onlyType ? '' : '<td>' + escapeHtml(_dtLabelFor(r.matchedType)) + '</td>') +
+        '<td style="font-size:0.78rem;color:var(--color-text-tertiary)">' +
+          (c ? escapeHtml((_DT_FIELD_LABELS[c.field] || c.field) + " " + (c.negate ? "not " : "") +
+            (_DT_OP_LABELS[c.op] || c.op) + ' "' + c.value + '"') : "—") +
+        '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table></div>';
+    if (total > rows.slice(0, 25).length) {
+      html += '<p style="font-size:0.76rem;color:var(--color-text-tertiary);margin:0.35rem 0 0">' +
+        'Showing the first ' + rows.slice(0, 25).length + '.</p>';
+    }
+  }
+  return html;
+}
+
+/**
+ * The retroactive half, as its own explicit step.
+ *
+ * Kept out of the editor's Save deliberately: a rule edit is cheap to undo, a
+ * fleet-wide re-type is not, and an operator experimenting with a pattern
+ * should not be moving inventory on every keystroke of trial and error.
+ */
+function openDeviceTypeApplyModal() {
+  var body = '<p style="font-size:0.85rem;margin:0 0 0.75rem">' +
+    'Re-file the assets currently sitting under <strong>“Other”</strong> using the saved matching rules.</p>' +
+    '<p style="font-size:0.82rem;color:var(--color-text-secondary);margin:0 0 1rem">' +
+      'Only assets in “Other” are considered, so a type set by an authoritative discovery source — or by hand — ' +
+      'is never overwritten. Nothing is moved back <em>into</em> “Other”.</p>' +
+    '<div id="dt-apply-out"><p class="empty-state" style="margin:0">Checking…</p></div>';
+  var footer =
+    '<button class="btn btn-secondary" onclick="closeModal()">Cancel</button>' +
+    '<button class="btn btn-primary" id="btn-dt-apply-confirm" disabled>Apply</button>';
+  openModal("Apply Rules to Existing Assets", body, footer, { wide: true });
+
+  var confirmBtn = document.getElementById("btn-dt-apply-confirm");
+  api.assetTypes.matchPreview().then(function (res) {
+    document.getElementById("dt-apply-out").innerHTML = _dtPreviewHTML(res, null);
+    if (res.matched > 0) confirmBtn.disabled = false;
+  }).catch(function (err) {
+    document.getElementById("dt-apply-out").innerHTML =
+      '<p style="color:var(--color-danger);font-size:0.82rem;margin:0">' + escapeHtml(err.message || "Preview failed") + '</p>';
+  });
+
+  confirmBtn.addEventListener("click", async function () {
+    this.disabled = true;
+    try {
+      var res = await api.assetTypes.matchApply();
+      showToast(res.updated ? "Re-typed " + res.updated + " asset(s)" : "Nothing to re-type", "success");
+      closeModal();
+      await loadIdentificationTab();
+    } catch (err) {
+      showToast(err.message || "Failed to apply rules", "error");
+      this.disabled = false;
+    }
+  });
+}
 
 function deviceIconsCardHTML() {
   var byScope = { "manufacturer-type": [], "manufacturer-model": [] };
