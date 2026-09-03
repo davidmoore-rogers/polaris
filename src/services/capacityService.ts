@@ -50,6 +50,8 @@ import { BACKUP_DIR, STATE_DIR } from "../utils/paths.js";
 import { logger } from "../utils/logger.js";
 import { getDirectDatabaseUrl, isPgbouncerMode } from "../utils/dbConnections.js";
 import { logEvent } from "./eventLogService.js";
+import { detectFping } from "../utils/burstPing.js";
+import { configuredSweepIntervalSec, resolveSweepIntervalSec } from "../utils/lossSweep.js";
 import {
   deriveDbIoVerdict,
   IO_VERDICT_STALE_MS,
@@ -253,6 +255,13 @@ export interface CapacitySnapshot {
      * STIG-style RHEL with separate /var and /opt LVs shows two, etc.
      */
     volumes: VolumeStat[];
+    /**
+     * Is fping on PATH? A HOST fact, not a workload one, and it changes how
+     * much the ICMP cadences cost: with it, one process serves up to 500
+     * targets; without it Polaris forks per host. Probed once per process and
+     * cached, so this is free after the first snapshot.
+     */
+    hasFping: boolean;
     dbColocated: boolean;
   };
   database: {
@@ -1075,6 +1084,14 @@ export function isStaleVacuumTable(
 //          line already carries them
 // Action:  imperative one-sentence remediation, ending with a period
 
+/**
+ * Below this many monitored assets, fping's absence is not worth a warning.
+ * 500 is where the fallback's per-host forking starts to be a measurable share
+ * of a core rather than noise, and it is comfortably under the point where the
+ * throughput floor begins widening the sweep cadence.
+ */
+const FPING_ADVISORY_ASSET_FLOOR = 500;
+
 function computeReasons(
   snap: CapacitySnapshot,
   pgTuningNeeded: boolean,
@@ -1452,6 +1469,39 @@ function computeReasons(
     });
   }
 
+  // fping absent. Not a fault and never amber: the per-host fallback produces
+  // IDENTICAL loss figures and identical up/down verdicts, and the status probe
+  // sends exactly one echo per asset per cycle either way. What changes is
+  // process count — one spawn per monitored asset per sweep instead of one per
+  // 500 — so this is only worth saying when the fleet is big enough for that to
+  // matter. Below the threshold an operator would just be reading a warning
+  // about nothing.
+  //
+  // Watch-severity deliberately: an operator whose estate cannot publish EPEL
+  // (fping is not in RHEL BaseOS/AppStream) has no action available, and a
+  // banner they cannot clear is worse than a line they can read and accept.
+  const sweepAssets = snap.workload.monitoredAssetCount;
+  if (!snap.appHost.hasFping && sweepAssets >= FPING_ADVISORY_ASSET_FLOOR) {
+    const cadence = resolveSweepIntervalSec(configuredSweepIntervalSec(), sweepAssets, false);
+    reasons.push({
+      severity: "watch",
+      code: "fping_absent",
+      family: "fping",
+      message:
+        `fping is not installed, so both ICMP cadences fork one process per host: ` +
+        `about ${sweepAssets} processes per packet-loss sweep across ${sweepAssets} ` +
+        `monitored assets, plus one per ICMP-polled asset per response-time poll. ` +
+        `Loss figures and up/down verdicts are unaffected — this is process cost, ` +
+        `not correctness. The sweep is running on a ${cadence}s cadence.`,
+      suggestion:
+        "Install fping to batch both (one process per 500 targets): on RHEL it lives in " +
+        "EPEL (`dnf install -y epel-release fping`), on Debian/Ubuntu the standard archive " +
+        "(`apt install -y fping`), then restart Polaris — the probe is cached per process. " +
+        "If your estate cannot publish EPEL, raise POLARIS_LOSS_SWEEP_INTERVAL_SEC instead: " +
+        "300 cuts the sweep's process count fivefold and leaves the reading itself unchanged.",
+    });
+  }
+
   // ── Disk-read pressure (replaces the old size-based ram_insufficient) ─────
   // Only meaningful once the DB can't fully fit in RAM — below that, disk
   // pressure can't come from the working set spilling out of cache. We never
@@ -1743,11 +1793,17 @@ export async function getCapacitySnapshot(opts: {
     pinnedInterfaceCount: monitoredInterfaceCount,
   });
 
+  // One cached spawn; the web role never runs a sweep so its own probe is cold
+  // until something asks. Asking here is what makes the fallback VISIBLE on the
+  // Maintenance tab instead of only in a monitor-role log line.
+  const hasFping = await detectFping();
+
   const snap: CapacitySnapshot = {
     computedAt: new Date().toISOString(),
     severity: "ok",
     reasons: [],
     appHost: {
+      hasFping,
       cpuCount: cpus().length,
       totalMemoryBytes: totalmem(),
       freeMemoryBytes: freemem(),
