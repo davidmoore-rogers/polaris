@@ -678,6 +678,12 @@ async function loadIntegrations() {
       var config = intg.config || {};
       var statusDot = intg.lastTestOk === true ? "dot-ok" : intg.lastTestOk === false ? "dot-fail" : "dot-unknown";
       var statusText = intg.lastTestOk === true ? "Connected" : intg.lastTestOk === false ? "Failed" : "Not tested";
+      // A capability the header states outright rather than making an operator
+      // read the detail rows for it. Only rendered when ON — the detail row
+      // below already says so when it is off.
+      var flagBadges = intg.type === "entraid" && config.enableIntune
+        ? '<span class="integration-flag-badge">Intune Enabled</span>'
+        : '';
       var typeBadge =
         intg.type === "windowsserver" ? "Windows Server" :
         intg.type === "fortigate" ? "FortiGate" :
@@ -822,6 +828,7 @@ async function loadIntegrations() {
               '<span class="integration-type-badge">' + typeBadge + '</span>' +
               '<strong>' + escapeHtml(intg.name) + '</strong>' +
               '<span class="integration-status ' + statusDot + '">' + statusText + '</span>' +
+              flagBadges +
             '</div>' +
             '<div id="discover-wrap-' + intg.id + '" data-disabled="' + (intg.lastTestOk !== true ? '1' : '0') + '">' +
               _discoverBtnHTML(intg.id, intg.name, activeDiscoveries.find(function(d){ return d.id === intg.id; }) || null, intg.lastTestOk !== true) +
