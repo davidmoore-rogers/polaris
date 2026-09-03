@@ -192,6 +192,94 @@ export function buildDependencyEdgesFromInputs(
     }
   }
 
+  // ── Controller authority ──────────────────────────────────────────────
+  //
+  // Every discovery cycle asks each gate for its OWN managed inventory —
+  // `/api/v2/monitor/switch-controller/managed-switch/status` and
+  // `/api/v2/monitor/wifi/managed_ap`, on both the standalone and FMG-proxied
+  // paths — and stamps the querying gate's serial onto each child as
+  // `fortinetTopology.controllerSerial`. A managed FortiSwitch or FortiAP has
+  // exactly ONE controller, so that stamp is not a guess: it is the gate
+  // naming its own children.
+  //
+  // An INFERRED adjacency (interface / LLDP) between such a child and a
+  // DIFFERENT firewall therefore contradicts the controller's own inventory,
+  // and is dropped rather than added as a second parent. Prod 2026-09-03: a
+  // FortiSwitch correctly bound to its gate by `controller` AND `interface`
+  // edges also carried an `lldp` edge to an unrelated gate — the neighbour
+  // row named the RIGHT gate in `systemName`, but `matchedAssetId` had been
+  // resolved to the wrong asset at scrape time and frozen there. Under
+  // all-down semantics that spurious second parent doesn't just look wrong,
+  // it BREAKS suppression: the extra parent is up, so the switch keeps
+  // alerting as plain Down when its real gate dies.
+  //
+  // Authority requires the STAMPED SERIAL, deliberately — not
+  // `resolveInfraParentAsset`, which falls back to matching the
+  // `controllerFortigate` NAME against hostnames. Name resolution is itself a
+  // guess, and using one guess to veto another is not sound; the whole failure
+  // class this addresses is a name resolving to the wrong asset. A child whose
+  // stamp predates `controllerSerial` (pre-2026-08) simply gets no authority
+  // and keeps the previous behavior until its next discovery re-stamps it.
+  const controllerFirewallOf = new Map<string, string>();
+  for (const a of assets) {
+    if (a.assetType !== "switch" && a.assetType !== "access_point") continue;
+    const top = a.fortinetTopology as Record<string, unknown> | null;
+    if (!top) continue;
+    const serialKey = normalizeSerialKey(readControllerStamp(top).serial);
+    if (!serialKey) continue;
+    const fw = parentIndex.bySerial.get(serialKey);
+    if (fw && fw.assetType === "firewall") controllerFirewallOf.set(a.id, fw.id);
+  }
+
+  // An HA pair is TWO Asset rows but ONE logical controller, and the switch is
+  // cabled to both members while `controllerSerial` names only whichever member
+  // answered. An inferred edge to the controller's HA peer is a real cable, not
+  // a contradiction, so the peer is admitted alongside the controller itself.
+  const haGroupOf = new Map<string, Set<string>>();
+  {
+    const firewallIdBySerial = new Map<string, string>();
+    for (const a of assets) {
+      if (a.assetType !== "firewall") continue;
+      const key = normalizeSerialKey(a.serialNumber);
+      if (key && !firewallIdBySerial.has(key)) firewallIdBySerial.set(key, a.id);
+    }
+    for (const a of assets) {
+      if (a.assetType !== "firewall") continue;
+      const group = new Set<string>([a.id]);
+      const top = a.fortinetTopology as Record<string, unknown> | null;
+      const peerKey = normalizeSerialKey(
+        typeof top?.haPeerSerial === "string" ? top.haPeerSerial : null,
+      );
+      const peerId = peerKey ? firewallIdBySerial.get(peerKey) : undefined;
+      if (peerId) group.add(peerId);
+      haGroupOf.set(a.id, group);
+    }
+    // Make membership symmetric: only the member that answered may carry the
+    // stamp, and a standby whose own topology is thin would otherwise not know
+    // it belongs to the pair.
+    for (const [id, group] of [...haGroupOf]) {
+      for (const member of group) {
+        if (member === id) continue;
+        haGroupOf.get(member)?.add(id);
+      }
+    }
+  }
+
+  /**
+   * Does an inferred adjacency between `childId` and `peerId` contradict the
+   * controller inventory? Only a FIREWALL peer can contradict — a switch or AP
+   * on the other end says nothing about which gate manages this device.
+   * Answers false whenever there is no authoritative stamp to contradict.
+   */
+  function contradictsController(childId: string, peerId: string): boolean {
+    const peer = byId.get(peerId);
+    if (!peer || peer.assetType !== "firewall") return false;
+    const controllerId = controllerFirewallOf.get(childId);
+    if (!controllerId) return false;
+    if (controllerId === peerId) return false;
+    return !haGroupOf.get(controllerId)?.has(peerId);
+  }
+
   // 1) Controller-derived edges (directed, authoritative).
   for (const a of assets) {
     const top = a.fortinetTopology as Record<string, unknown> | null;
@@ -239,10 +327,14 @@ export function buildDependencyEdgesFromInputs(
 
   // 2) Interface-derived edges (bidirectional — emit both directions and
   // let assignLayers pick the parent direction via BFS layer pruning).
+  // Both directions are dropped together for a contradicted pair: assignLayers
+  // builds UNDIRECTED adjacency from this list, so removing one direction would
+  // leave the adjacency (and therefore the layering) intact.
   for (const e of interfaceEdges) {
     const a = byId.get(e.sourceAssetId);
     const b = byId.get(e.targetAssetId);
     if (!a || !b) continue;
+    if (contradictsController(a.id, b.id) || contradictsController(b.id, a.id)) continue;
     add(a.id, b.id, "interface");
     add(b.id, a.id, "interface");
   }
@@ -252,6 +344,7 @@ export function buildDependencyEdgesFromInputs(
     const a = byId.get(e.assetId);
     const b = byId.get(e.matchedAssetId);
     if (!a || !b) continue;
+    if (contradictsController(a.id, b.id) || contradictsController(b.id, a.id)) continue;
     add(a.id, b.id, "lldp");
     add(b.id, a.id, "lldp");
   }

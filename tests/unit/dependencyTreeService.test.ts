@@ -1051,3 +1051,143 @@ describe("filterFreshLldpRows", () => {
     expect(filterFreshLldpRows([], now)).toEqual([]);
   });
 });
+
+// ─── controller authority over inferred edges ───────────────────────────────
+//
+// The gate publishes its own managed-switch / managed-AP inventory, and
+// discovery stamps the querying gate's serial as `controllerSerial` on each
+// child. An inferred (interface / LLDP) adjacency to a DIFFERENT firewall
+// contradicts that inventory and must not become a second parent — under
+// all-down semantics a spurious up parent BREAKS suppression.
+
+describe("buildDependencyEdgesFromInputs — controller authority", () => {
+  const RIGHT = "FG101F0001";
+  const WRONG = "FG101F9999";
+
+  function gate(id: string, hostname: string, serial: string, haPeerSerial?: string): DepAsset {
+    return {
+      id,
+      hostname,
+      serialNumber: serial,
+      assetType: "firewall",
+      fortinetTopology: haPeerSerial ? { haPeerSerial } : null,
+    };
+  }
+  function managedSwitch(id: string, hostname: string, controllerSerial: string | null): DepAsset {
+    return {
+      id,
+      hostname,
+      serialNumber: "S248EPTF0001",
+      assetType: "switch",
+      fortinetTopology: {
+        role: "fortiswitch",
+        controllerFortigate: "SITE-GATE",
+        ...(controllerSerial ? { controllerSerial } : {}),
+      },
+    };
+  }
+  const lldp = (assetId: string, matchedAssetId: string): DepLldpEdge => ({ assetId, matchedAssetId });
+
+  it("drops an LLDP edge to a firewall that is not the stamped controller", () => {
+    // The prod 2026-09-03 shape: the neighbour row named the right gate but
+    // matchedAssetId had been resolved to the wrong asset and frozen there.
+    const assets = [
+      gate("fg-right", "CARMOBILE-101F-1", RIGHT),
+      gate("fg-wrong", "CROSSVILLE-61F-1", WRONG),
+      managedSwitch("sw1", "CARMOBILE-124F-1", RIGHT),
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-wrong")]);
+    expect(edges.some(e => e.parentAssetId === "fg-wrong")).toBe(false);
+    expect(edges.some(e => e.childAssetId === "fg-wrong")).toBe(false);
+    // The authoritative controller edge survives untouched.
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-right", detectedVia: "controller" });
+  });
+
+  it("end-to-end: the contradicted gate is not a parent after layering", () => {
+    const assets = [
+      gate("fg-right", "CARMOBILE-101F-1", RIGHT),
+      gate("fg-wrong", "CROSSVILLE-61F-1", WRONG),
+      managedSwitch("sw1", "CARMOBILE-124F-1", RIGHT),
+    ];
+    const edges = buildDependencyEdgesFromInputs(
+      assets,
+      [{ sourceAssetId: "sw1", targetAssetId: "fg-right" }],
+      [lldp("sw1", "fg-wrong")],
+    );
+    const { keptEdges } = assignLayers(assets, edges);
+    const parents = keptEdges.filter(e => e.childAssetId === "sw1").map(e => e.parentAssetId);
+    expect([...new Set(parents)]).toEqual(["fg-right"]);
+  });
+
+  it("keeps an LLDP edge to the stamped controller itself", () => {
+    const assets = [gate("fg-right", "GATE", RIGHT), managedSwitch("sw1", "SW", RIGHT)];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-right")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-right", detectedVia: "lldp" });
+  });
+
+  it("keeps an edge to the controller's HA peer — one logical controller, two rows", () => {
+    // The switch is cabled to both members; controllerSerial names only the
+    // one that answered, so the peer is a real cable, not a contradiction.
+    const assets = [
+      gate("fg-a", "GATE-A", RIGHT, "FG101F0002"),
+      gate("fg-b", "GATE-B", "FG101F0002", RIGHT),
+      managedSwitch("sw1", "SW", RIGHT),
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-b")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-b", detectedVia: "lldp" });
+  });
+
+  it("admits the HA peer even when only the other member carries the stamp", () => {
+    // A standby whose own topology is thin still belongs to the pair.
+    const assets = [
+      gate("fg-a", "GATE-A", RIGHT, "FG101F0002"),
+      gate("fg-b", "GATE-B", "FG101F0002"),
+      managedSwitch("sw1", "SW", RIGHT),
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-b")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-b", detectedVia: "lldp" });
+  });
+
+  it("filters interface edges by the same rule", () => {
+    const assets = [
+      gate("fg-right", "GATE", RIGHT),
+      gate("fg-wrong", "OTHER", WRONG),
+      managedSwitch("sw1", "SW", RIGHT),
+    ];
+    const edges = buildDependencyEdgesFromInputs(
+      assets,
+      [{ sourceAssetId: "sw1", targetAssetId: "fg-wrong" }],
+      [],
+    );
+    expect(edges.some(e => e.detectedVia === "interface")).toBe(false);
+  });
+
+  it("never contradicts a non-firewall peer — a switch says nothing about which gate manages this one", () => {
+    const assets = [
+      gate("fg-right", "GATE", RIGHT),
+      managedSwitch("sw1", "SW-1", RIGHT),
+      { id: "sw2", hostname: "SW-2", serialNumber: "S248EPTF0002", assetType: "switch",
+        fortinetTopology: { role: "fortiswitch", controllerSerial: RIGHT } } as DepAsset,
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "sw2")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "sw2", detectedVia: "lldp" });
+  });
+
+  it("grants no authority without a stamped serial, preserving pre-2026-08 behavior", () => {
+    // A name-resolved controller is itself a guess; one guess must not veto
+    // another. Such a child keeps the previous behavior until re-discovery.
+    const assets = [
+      gate("fg-right", "SITE-GATE", RIGHT),
+      gate("fg-wrong", "OTHER", WRONG),
+      managedSwitch("sw1", "SW", null),
+    ];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-wrong")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-wrong", detectedVia: "lldp" });
+  });
+
+  it("grants no authority when the stamped serial matches no known firewall", () => {
+    const assets = [gate("fg-wrong", "OTHER", WRONG), managedSwitch("sw1", "SW", "FG101FMISSING")];
+    const edges = buildDependencyEdgesFromInputs(assets, [], [lldp("sw1", "fg-wrong")]);
+    expect(edges).toContainEqual({ childAssetId: "sw1", parentAssetId: "fg-wrong", detectedVia: "lldp" });
+  });
+});
