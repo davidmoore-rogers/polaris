@@ -9640,6 +9640,40 @@ async function adoptSysDescrIdentity(
     { osVersion: patch.osVersion ?? pinned.osVersion },
   );
   if (ev) logEvent(ev);
+
+  // Hardware identity MOVING is its own finding, and a different one from
+  // firmware: a model that changes behind a fixed address means the device was
+  // replaced, and a manufacturer that changes usually means Polaris had it
+  // wrong (every camera adopted before the enterprise-arc-368 fix says
+  // "ServerTech"). Audited on a MOVE only — a first learn fills the column
+  // silently, the same rule `computeFirmwareChange` applies to firmware, or
+  // the first pass over a camera fleet would write one row per device saying
+  // nothing changed. Reuses `asset.model_detected`, the action
+  // `adoptDetectedModel` already writes, so no new event vocabulary appears.
+  const moved: string[] = [];
+  if (patch.model && (pinned.model ?? "").trim()) {
+    moved.push(`model "${pinned.model}" → "${patch.model}"`);
+  }
+  if (patch.manufacturer && (pinned.manufacturer ?? "").trim()) {
+    moved.push(`manufacturer "${pinned.manufacturer}" → "${patch.manufacturer}"`);
+  }
+  if (moved.length) {
+    logEvent({
+      action: "asset.model_detected",
+      resourceType: "asset",
+      resourceId: assetId,
+      resourceName: pinned.hostname || undefined,
+      level: "info",
+      message: `Identity restated by the device: ${pinned.hostname || assetId} ${moved.join("; ")}`,
+      details: {
+        source: "snmp:sysDescr",
+        previousModel: pinned.model || null,
+        model: patch.model ?? pinned.model ?? null,
+        previousManufacturer: pinned.manufacturer || null,
+        manufacturer: patch.manufacturer ?? pinned.manufacturer ?? null,
+      },
+    });
+  }
 }
 
 export async function recordSystemInfoResult(assetId: string, result: CollectionResult<SystemInfoSample>): Promise<void> {

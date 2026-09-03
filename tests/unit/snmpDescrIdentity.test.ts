@@ -29,6 +29,7 @@ import {
   decideDescrAdoption,
   type StoredDescrIdentity,
 } from "../../src/utils/snmpDescrIdentity.js";
+import { setAliasMap, _resetAliasMap } from "../../src/utils/manufacturerNormalize.js";
 
 /**
  * The real reading off a prod camera, verbatim — leading empty name field and
@@ -173,14 +174,46 @@ describe("decideDescrAdoption", () => {
     expect(patch).not.toHaveProperty("manufacturer");
   });
 
-  it("never overwrites a model or manufacturer someone else already set", () => {
-    const typed: StoredDescrIdentity = {
-      manufacturer: "Axis", model: "M2036-LE-BLK", osVersion: "10.12.114", os: DESCR,
+  it("corrects a model that disagrees with what the device states", () => {
+    // Refreshed rather than fill-only, so a camera SWAPPED behind the same
+    // address reports its real model within one pass instead of carrying its
+    // predecessor's. The accepted cost is that an operator-typed model on a
+    // readable-format device does not survive — there is no pin column for it.
+    const swapped: StoredDescrIdentity = {
+      manufacturer: "Axis Communications", model: "M2036-LE-BLK", osVersion: "10.12.114", os: DESCR,
     };
-    // Hardware does not change under a fixed address, so a disagreement is
-    // either operator-typed or a swap — indistinguishable from here, and the
-    // safe direction is to leave it (adoptDetectedModel's posture).
-    expect(decideDescrAdoption(typed, AXIS, DESCR)).toBeNull();
+    expect(decideDescrAdoption(swapped, AXIS, DESCR)).toEqual({ model: "M2036-LE" });
+  });
+
+  it("self-heals a manufacturer Polaris had wrong", () => {
+    // Every AXIS camera adopted before the enterprise-arc-368 fix carries
+    // "ServerTech" (368 was mis-mapped; Axis is 368, Server Technology 1718).
+    // Refreshing manufacturer is what corrects those rows with no migration.
+    const wrongVendor: StoredDescrIdentity = {
+      manufacturer: "ServerTech", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
+    };
+    expect(decideDescrAdoption(wrongVendor, AXIS, DESCR)).toEqual({
+      manufacturer: "Axis Communications",
+    });
+  });
+
+  it("does not thrash when an alias canonicalizes the vendor name", () => {
+    // db.ts runs every staged manufacturer through normalizeManufacturer, so
+    // comparing the raw parse against an alias-canonicalized stored value
+    // would differ FOREVER: a write and an audit row every pass, never
+    // converging. Both sides are normalized, so this is a no-op.
+    try {
+      setAliasMap([["axis communications", "Axis"]]);
+      const canonical: StoredDescrIdentity = {
+        manufacturer: "Axis", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
+      };
+      expect(decideDescrAdoption(canonical, AXIS, DESCR)).toBeNull();
+      // And an empty column is filled with the canonical form, not the parse.
+      expect(decideDescrAdoption({ ...canonical, manufacturer: null }, AXIS, DESCR))
+        .toEqual({ manufacturer: "Axis" });
+    } finally {
+      _resetAliasMap();
+    }
   });
 
   it("treats whitespace as empty rather than as a held value", () => {

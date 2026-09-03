@@ -40,6 +40,8 @@
  *    whose only consumer is this comment.
  */
 
+import { normalizeManufacturer } from "./manufacturerNormalize.js";
+
 /** What a vendor's own sysDescr format can tell us, beyond the raw text. */
 export interface SysDescrDetail {
   /** The vendor, spelled the way this file's parser owns it. */
@@ -173,25 +175,36 @@ export interface DescrPatch {
  * it, which makes this the question: of the fields the format states, which
  * may a later reading overwrite?
  *
- * Three answers, and they differ on purpose:
+ * One answer for all four: **what the device states about itself wins.** The
+ * device is the authority on its own identity — the posture business rule 12
+ * takes for presence and rule 28 takes for the Windows build — and a reading
+ * parsed out of the vendor's own documented format is the device stating it,
+ * not Polaris guessing. So a value that disagrees is corrected on the next
+ * pass, whichever field it is.
  *
- *  - **Firmware is REFRESHED.** It is the field that legitimately changes
- *    under fixed hardware, and the device is the authority on what it is
- *    running — the same posture business rule 12 takes for presence and rule
- *    28 takes for the Windows build. A stale version string is worse than
- *    useless: it is the field an operator checks before deciding whether a
- *    known CVE applies to that camera.
- *  - **Manufacturer and model are FILL-ONLY.** They identify hardware, which
- *    does not change while the address stays put, so a stored value that
- *    disagrees is either operator-typed or a device that was swapped — and
- *    those two are indistinguishable from here. The precedent is
- *    `adoptDetectedModel`, which overwrites only a value it recognizes as its
- *    own generic placeholder. The cost is that a camera swapped for a
- *    different model behind the same IP keeps the old model until someone
- *    clears the field; that is the trade, and it is the safe direction.
- *  - **`os` follows the firmware.** It holds the whole sysDescr, in which the
- *    firmware is one token, so leaving it behind while `osVersion` moves would
- *    publish two different answers about the same device on the same page.
+ * Model and manufacturer were fill-only when this shipped, on the reasoning
+ * that hardware does not change while the address stays put, so a
+ * disagreement had to be either operator-typed or a swap — indistinguishable
+ * from here. Refreshing them was chosen instead, deliberately, because both
+ * of those cases are better served by it:
+ *
+ *  - **A swapped device self-heals.** A camera replaced behind the same
+ *    address reports its real model within one system-info pass instead of
+ *    carrying its predecessor's forever.
+ *  - **A bad stored value self-heals too.** Every AXIS camera adopted before
+ *    the enterprise arc 368 fix carries the manufacturer "ServerTech"; with
+ *    manufacturer refreshed, those rows correct themselves on the next pass
+ *    rather than needing a migration or a hand edit.
+ *
+ * The cost, stated plainly: there is no operator-pin column for these two
+ * (unlike `Asset.hostnameOverride` / `ipOverride`), so a hand-typed model on a
+ * device whose format Polaris can read is overwritten on the next pass. An
+ * operator who needs a different model on such a device has to clear the
+ * vendor's entry from the parser table, not edit the row.
+ *
+ * `os` follows the firmware for its own reason: it holds the whole sysDescr,
+ * in which the firmware is one token, so leaving it behind while `osVersion`
+ * moves would publish two different answers about one device on one page.
  *
  * Returns `null` when nothing should move — which is the steady state on every
  * pass after the first, and is what keeps this free at fleet scale: an
@@ -209,8 +222,16 @@ export function decideDescrAdoption(
   const patch: DescrPatch = {};
   const held = (v: string | null | undefined): string => (v ?? "").trim();
 
-  if (detail.manufacturer && !held(stored.manufacturer)) patch.manufacturer = detail.manufacturer;
-  if (detail.model && !held(stored.model)) patch.model = detail.model;
+  // Manufacturer is compared and written in its CANONICAL form, because the
+  // `db.ts` extension runs every staged value through `normalizeManufacturer`
+  // on the way to the column. Comparing the raw parse against an
+  // alias-canonicalized stored value ("Axis Communications" vs an install's
+  // "Axis") would differ forever: a write every pass, an audit row every pass,
+  // and the row never converging. Normalizing both sides is what makes
+  // refreshing this field idempotent.
+  const vendor = detail.manufacturer ? normalizeManufacturer(detail.manufacturer) : null;
+  if (vendor && vendor !== held(stored.manufacturer)) patch.manufacturer = vendor;
+  if (detail.model && detail.model !== held(stored.model)) patch.model = detail.model;
   if (detail.osVersion && detail.osVersion !== held(stored.osVersion)) patch.osVersion = detail.osVersion;
 
   const descr = (descrText ?? "").trim();
