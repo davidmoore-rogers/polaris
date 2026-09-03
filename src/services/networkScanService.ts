@@ -474,7 +474,22 @@ export interface AdoptResult {
 export function assetTypeForHit(hit: ScanHit): string {
   return (
     resolveAssetTypeCached(
-      { os: hit.identity?.os ?? null, hostname: hit.identity?.hostname ?? null },
+      {
+        os: hit.identity?.os ?? null,
+        hostname: hit.identity?.hostname ?? null,
+        // Manufacturer and model are passed as their own facts, not folded
+        // into the description, because a rule wants to say "Axis
+        // Communications" without also matching a device that merely
+        // mentions Axis in its sysDescr. `MATCH_FIELDS` has carried both
+        // since the registry cutover; a scan only recently had values to put
+        // in them (`utils/snmpDescrIdentity.ts`), which is why they were
+        // omitted here. The seeded `any` clauses widen with them — none of
+        // the words they look for (fortigate / switch / router / printer)
+        // appear in a vendor name or an AXIS model, so no existing hit
+        // re-types.
+        manufacturer: hit.identity?.manufacturer ?? null,
+        model: hit.identity?.model ?? null,
+      },
       "scan",
     ) ?? "other"
   );
@@ -564,6 +579,11 @@ export async function adoptHits(
           assetType: assetTypeForHit(hit),
           status: "active",
           manufacturer: hit.identity?.manufacturer ?? null,
+          // Only set where the vendor's own sysDescr format stated them, so a
+          // device that published no readable layout keeps these empty rather
+          // than carrying a slice of its description as a model number.
+          model: hit.identity?.model ?? null,
+          osVersion: hit.identity?.osVersion ?? null,
           os: hit.identity?.os ?? null,
           snmpLocation: hit.identity?.snmpLocation ?? null,
           notes: `Found by Polaris Discovery "${run.scan.name}" at ${address}` +

@@ -25,8 +25,12 @@
  *    utils/hardwareIdentity.ts placeholder-serial precedent).
  *  - **A partial answer yields a partial identity.** A device that responds to
  *    half the group must show up on the Results step, not fail the hit.
- *  - **No `model`.** The system group has no model object, and deriving one
- *    from sysDescr works per-vendor and fails silently across vendors.
+ *  - **A model only where the vendor's sysDescr is a FORMAT.** The system
+ *    group has no model object and a cross-vendor pattern over sysDescr fails
+ *    silently, so `model` / `osVersion` / `productType` are filled in only by
+ *    `utils/snmpDescrIdentity.ts`, from the layouts that are documented. A
+ *    device whose vendor isn't in that table reads exactly as it did before
+ *    those fields existed.
  */
 
 import { describe, it, expect } from "vitest";
@@ -152,6 +156,56 @@ describe("parseSnmpIdentity — vendor precedence", () => {
       sysDescr: "embedded controller v2",
     }));
     expect(id.manufacturer).toBeUndefined();
+  });
+});
+
+describe("parseSnmpIdentity — vendor sysDescr formats", () => {
+  /** The real reading off a prod AXIS camera, verbatim. */
+  const AXIS_DESCR =
+    "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1";
+
+  it("fills model, firmware and product type from an AXIS camera", () => {
+    const id = parseSnmpIdentity(walk({
+      sysObjectID: "1.3.6.1.4.1.368.4.1.1.1",
+      sysDescr: AXIS_DESCR,
+      sysName: "cam-lot-14",
+    }));
+    expect(id.manufacturer).toBe("Axis Communications");
+    expect(id.model).toBe("M2036-LE");
+    expect(id.osVersion).toBe("10.12.114");
+    expect(id.productType).toBe("Bullet Camera");
+    // os stays the whole description: it is what the device said, and the
+    // parsed fields are an addition to it rather than a replacement.
+    expect(id.os).toBe(AXIS_DESCR);
+  });
+
+  it("names 368 as Axis, not as the PDU vendor it used to read as", () => {
+    // Server Technology is 1718. While 368 was mis-mapped, the arc branch —
+    // which outranks the description — put "ServerTech" on every AXIS camera
+    // a Discovery adopted, past a sysDescr that says AXIS twice over.
+    expect(vendorFromSysObjectId("1.3.6.1.4.1.368.4.1.1.1")).toBe("Axis Communications");
+    expect(vendorFromSysObjectId("1.3.6.1.4.1.1718.3")).toBe("Server Technology");
+  });
+
+  it("reads the format even when the arc is one we do not name", () => {
+    // The layout is the evidence, so an OEM/reseller arc costs nothing.
+    const id = parseSnmpIdentity(walk({
+      sysObjectID: "1.3.6.1.4.1.99999999.1",
+      sysDescr: AXIS_DESCR,
+    }));
+    expect(id.manufacturer).toBe("Axis Communications");
+    expect(id.model).toBe("M2036-LE");
+  });
+
+  it("leaves the three fields unset for a vendor with no known layout", () => {
+    const id = parseSnmpIdentity(walk({
+      sysObjectID: "1.3.6.1.4.1.9.1.1208",
+      sysDescr: "Cisco IOS Software, C2960 Software, Version 15.0(2)SE11",
+    })) as Record<string, unknown>;
+    expect(id.manufacturer).toBe("Cisco");
+    expect("model" in id).toBe(false);
+    expect("osVersion" in id).toBe(false);
+    expect("productType" in id).toBe(false);
   });
 });
 

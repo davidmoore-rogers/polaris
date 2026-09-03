@@ -128,12 +128,28 @@
     return (hit.respondedTo || []).indexOf("icmp") !== -1 ? "icmp" : "unknown";
   }
 
-  /** One line naming what a responder is, for the results + summary tables. */
+  /**
+   * One line naming what a responder is, for the results + summary tables.
+   *
+   * A device whose vendor publishes a readable sysDescr format is named by its
+   * parsed fields; everything else falls back to the raw description, which is
+   * all there is. The fallback is deliberately not additive — an AXIS camera's
+   * sysDescr already contains the model, type and firmware, so printing both
+   * would say each of them twice in a cell an operator scans down a column of.
+   */
   function hitIdentityLine(hit) {
     var id = hit.identity || {};
     var bits = [];
     if (id.manufacturer) bits.push(id.manufacturer);
-    if (id.os) bits.push(id.os);
+    if (id.model || id.productType) {
+      var named = [];
+      if (id.model) named.push(id.model);
+      if (id.productType) named.push(id.productType);
+      bits.push(named.join(" "));
+      if (id.osVersion) bits.push("fw " + id.osVersion);
+    } else if (id.os) {
+      bits.push(id.os);
+    }
     return bits.join(" · ");
   }
 

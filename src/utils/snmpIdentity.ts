@@ -24,13 +24,21 @@
  *    `normalizeManufacturer` is applied at the DB layer by the `db.ts`
  *    extension, so a name here only has to be close.
  *
- *  - **No `model`.** The system group has no model object. Deriving one from
- *    sysDescr works per-vendor and fails silently across vendors — the same
- *    equivalence the FortiSwitch sensor annotation was reverted for. The
- *    honest source is a vendor-specific scalar (the `modelIdentity` shape in
- *    vendorTelemetryProfiles, e.g. FortiSwitch `fsSysVersion`), which needs
- *    the vendor resolved first — so it belongs to a later pass, not here.
+ *  - **A model comes from a FORMAT, never from a pattern.** The system group
+ *    has no model object, and a cross-vendor regex over sysDescr ("the token
+ *    after the vendor word") fails silently on the vendors it wasn't written
+ *    for. But some vendors publish a fixed delimited sysDescr whose fields are
+ *    positional by specification — an AXIS camera states its model, product
+ *    type and firmware in known slots — and reading that is parsing, not
+ *    guessing. Those layouts live in `utils/snmpDescrIdentity.ts`, one entry
+ *    per vendor whose format is documented, and a string that doesn't match
+ *    its vendor's layout yields nothing. A vendor-specific scalar (the
+ *    `modelIdentity` shape in vendorTelemetryProfiles, e.g. FortiSwitch
+ *    `fsSysVersion`) is still the better source where one exists; this covers
+ *    the equipment that publishes no private MIB worth walking.
  */
+
+import { parseVendorSysDescr } from "./snmpDescrIdentity.js";
 
 /** The system-group objects worth reading. Scalars, hence the trailing .0. */
 export const SYS_OIDS = {
@@ -42,7 +50,7 @@ export const SYS_OIDS = {
   sysLocation: "1.3.6.1.2.1.1.6.0",
 } as const;
 
-/** Shape of one `snmpWalkRaw` row (kept local so this file imports nothing). */
+/** Shape of one `snmpWalkRaw` row (kept local — no import back into services). */
 export interface SnmpIdentityRow {
   oid: string;
   value: string;
@@ -56,6 +64,12 @@ export interface SnmpIdentity {
   os?: string;
   /** Resolved from sysObjectID's enterprise arc, else sysDescr's vendor word. */
   manufacturer?: string;
+  /** Model, only when the vendor publishes a sysDescr format we can read. */
+  model?: string;
+  /** Firmware version, from that same format. Asset.osVersion's other name. */
+  osVersion?: string;
+  /** The vendor's own words for what the device is ("Bullet Camera"). */
+  productType?: string;
   /** sysLocation, unless it is a vendor placeholder. */
   snmpLocation?: string;
   /** sysContact, unless it is a vendor placeholder. */
@@ -86,13 +100,20 @@ export const SNMP_ENTERPRISE_VENDORS: Record<number, string> = {
   253:   "Xerox",
   311:   "Microsoft",
   318:   "APC",
-  368:   "ServerTech",
+  // 368 is Axis Communications AB (IANA PEN registry). It read "ServerTech"
+  // here until 2026-09 — Server Technology is 1718, below — which put the
+  // wrong manufacturer on every AXIS camera a Discovery found, and did it
+  // via the branch that is hardest to notice: the arc outranks the vendor
+  // word in sysDescr, so a camera plainly describing itself as AXIS was
+  // still adopted as a PDU vendor's device.
+  368:   "Axis Communications",
   534:   "Eaton",
   664:   "Adtran",
   674:   "Dell",
   789:   "NetApp",
   1588:  "Brocade",
   1602:  "Canon",
+  1718:  "Server Technology",
   1872:  "Arista",
   1916:  "Extreme Networks",
   1991:  "Foundry",
@@ -263,8 +284,18 @@ export function parseSnmpIdentity(rows: SnmpIdentityRow[]): SnmpIdentity {
   // OEM/reseller arcs we don't name — but Net-SNMP's own arc is deliberately
   // NOT trusted over the description for the same reason, so when the arc
   // resolves to Net-SNMP we still prefer a real vendor word if the descr has one.
+  // A vendor whose own sysDescr FORMAT we can read (utils/snmpDescrIdentity)
+  // supplies the model and firmware the system group has no object for, and
+  // names itself while it is at it — so it takes the description's side of the
+  // precedence rule below, ahead of the bare word match, having proved the
+  // vendor by parsing the layout rather than by spotting a word.
+  const detail = parseVendorSysDescr(descr);
+  if (detail?.model) out.model = detail.model;
+  if (detail?.osVersion) out.osVersion = detail.osVersion;
+  if (detail?.productType) out.productType = detail.productType;
+
   const arcVendor = vendorFromSysObjectId(sysObjectId);
-  const descrVendor = vendorFromSysDescr(descr);
+  const descrVendor = detail?.manufacturer ?? vendorFromSysDescr(descr);
   const arcIsGenericAgent = arcVendor === "Net-SNMP";
   const manufacturer = arcIsGenericAgent ? (descrVendor ?? arcVendor) : (arcVendor ?? descrVendor);
   if (manufacturer) out.manufacturer = manufacturer;
