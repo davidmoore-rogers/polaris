@@ -721,16 +721,15 @@ async function resolveAssetMetricReadings(trigger: Extract<Trigger, { type: "ass
       const lossWindowSec = probeLossWindowSec(trigger.windowSec);
       const sinceMinutes = lossWindowSec / 60;
       const rows = await queryProbeLossRatios({ sinceMinutes, assetIds: answering });
-      // Emit the true ratio for every asset with at least one successful probe,
+      // Emit the true ratio for every asset the query returns a row for,
       // INCLUDING 0% (no failures) so an auto-clear/hysteresis rule recovers.
-      // Fully-down assets (0 successes) are dropped by the shared query —
-      // asset-down owns them, matching the widget. The ratio is measured from
-      // the later of that asset's FIRST SUCCESSFUL probe in the window and the
-      // end of its last outage (Asset.recoveryStartedAt) rather than the
-      // window's edge (see probeLossQuery's header), so a device recovering
-      // from an outage reads 0% on its first clean probe instead of reading the
-      // outage back as loss for a whole window's worth of ticks — whether the
-      // outage was still running at the window's edge or started inside it.
+      // The ratio covers the WHOLE window with one exclusion: probes taken
+      // while the device was already `down` are the outage rather than the
+      // link, so they are stamped `assetDown` at write time and stepped over
+      // (business rule 29h, and see probeLossQuery's header). That is what
+      // stops a device reading the outage back as loss for a whole window's
+      // worth of ticks AFTER it recovered — the case the answering gate above
+      // cannot see, because by then the device is answering again.
       return rows.map((r): Reading | null => {
         const a = index.get(r.assetId);
         if (!a) return null;

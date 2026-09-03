@@ -487,9 +487,10 @@ export interface ProbeLossSeries {
   /** Per-bucket loss ratio, for the plotted line. */
   points: SparkPoint[];
   /**
-   * failed / total over the WHOLE window — the same quantity the engine's
-   * `probeLossPct` metric reports, so the caption states the number the alert
-   * fired on. Null when the window held no probes at all.
+   * failed / total over the window — the same quantity the engine's
+   * `probeLossPct` metric reports, made of the same probes (rows stamped
+   * `assetDown` are out of both), so the caption states the number the alert
+   * fired on. Null when the window held no countable probes at all.
    */
   ratioPct: number | null;
 }
@@ -517,6 +518,24 @@ export interface ProbeLossSeries {
  * a little under the engine's reading on a mixed asset, which is the honest
  * trade — the line has to be continuous, the number has to be comparable.
  *
+ * IT STEPS OVER THE SAME OUTAGE THE QUERY DOES (business rule 29h), by the same
+ * rule: a maximal run of consecutive failures containing any row stamped
+ * `assetDown` is an outage entire — ONSET INCLUDED — and its failures are not
+ * loss. `outageRunFailures` below is the JS mirror of the query's `runId` /
+ * `runOutage` window functions, and it must stay one: the two are what make the
+ * caption and the engine's reading the same number.
+ *
+ * Dropped from BOTH halves of this, the line and the caption. Dropping it from
+ * only one is the failure this chart exists to avoid — an alert reading 0.0 %
+ * over a chart captioned "avg 40 %" tells an operator the number is made up.
+ * The stretch leaves a GAP in the line rather than a zero, which is the same
+ * treatment an unpolled stretch already gets: nothing was measured about this
+ * link while the device was dark, and drawing 0 % there would claim it was
+ * perfect at the one moment it was unreachable. A window that was ENTIRELY one
+ * outage therefore draws nothing and captions null, and `pruneEmptyChartSection`
+ * removes it — which is right: an empty chart is not a claim, where a flat 0 %
+ * line under an alert about an outage would be.
+ *
  * THE ANCHOR IS GONE (2026-09-01), and with it `measuredFromMs` and the marker
  * the chart drew for it. `ratioPct` used to discard everything before the
  * window's first successful probe and before `Asset.recoveryStartedAt`, so the
@@ -527,19 +546,62 @@ export interface ProbeLossSeries {
  * Empty buckets are skipped rather than plotted as 0 %: a gap in polling is not
  * a period of perfect health.
  */
+/**
+ * The row indices to leave out of a loss reading: the FAILURES of every maximal
+ * run of consecutive failures that contains a row stamped `assetDown`.
+ *
+ * The JS mirror of `probeLossQuery`'s `runId` / `runOutage` window functions,
+ * and the reason the chart's caption and the engine's reading are the same
+ * number (business rule 29h). `assetDown` is only stampable from the probe that
+ * DECLARES an outage onward — at the first missed poll nobody knows yet which
+ * it is — so the run is what recovers the onset. Bounded by successes rather
+ * than by counting back `missedPolls - 1` rows, because that count belongs to
+ * whichever automation covers the device and changes when an operator edits it.
+ *
+ * `rows` must be ascending by timestamp, which is `loadProbeLoss`'s contract.
+ * Exported for the parity test against the SQL.
+ */
+export function outageRunFailures(rows: Array<{ success: boolean; assetDown?: boolean | null }>): Set<number> {
+  const out = new Set<number>();
+  let run: number[] = [];
+  let sawOutage = false;
+  const flush = () => {
+    if (sawOutage) for (const i of run) out.add(i);
+    run = [];
+    sawOutage = false;
+  };
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+    if (r.success) { flush(); continue; }
+    run.push(i);
+    // NULL/undefined reads as false, never as unknown — the exclusion is not
+    // retroactive, so a run of pre-column rows is loss like any other.
+    if (r.assetDown === true) sawOutage = true;
+  }
+  flush();
+  return out;
+}
+
 export function probeLossSeriesFrom(
   rows: Array<{
     timestamp: Date;
     success: boolean;
     packetsSent?: number | null;
     packetsReceived?: number | null;
+    assetDown?: boolean | null;
   }>,
   bucketMs: number = LOSS_BUCKET_MS,
 ): ProbeLossSeries {
   const buckets = new Map<number, { sent: number; recv: number }>();
+  const skip = outageRunFailures(rows);
   let sent = 0;
   let recv = 0;
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+    // The failures of a run that reached DOWN are the outage, not the link
+    // (business rule 29h). Skipped entirely rather than counted as received,
+    // so they leave a gap in the line instead of a stretch of implausible 0 %.
+    if (skip.has(i)) continue;
     // NULL is the single-probe equivalent, never zero — reading it as zero
     // would drop the response-time poll's own rows out of the denominator.
     const s = typeof r.packetsSent === "number" && r.packetsSent > 0 ? r.packetsSent : 1;
@@ -577,7 +639,7 @@ async function loadProbeLoss(assetId: string, since: Date, bucketMs: number = LO
     // probeLossQuery); everything else is response-time-poll only.
     where: { assetId, timestamp: { gte: since } },
     orderBy: { timestamp: "asc" },
-    select: { timestamp: true, success: true, packetsSent: true, packetsReceived: true },
+    select: { timestamp: true, success: true, packetsSent: true, packetsReceived: true, assetDown: true },
   });
   return probeLossSeriesFrom(rows, bucketMs);
 }

@@ -76,6 +76,17 @@ export interface MonitorSampleRow {
    */
   dependencyDown?: boolean | null;
   /**
+   * TRUE on a FAILED probe taken while the asset ITSELF was `down` — the
+   * sibling of `dependencyDown`, and the marker every packet-loss reader steps
+   * over (business rule 29h): a miss taken during a declared outage IS that
+   * outage, and counting it as loss raises a second alert about what the down
+   * automation already owns. Set from the status the probe RESULTS in on the
+   * probe path, and from the asset's current status on the ICMP sweep (which
+   * reaches no verdict of its own). Never set on a success; omitted/null reads
+   * as false. Flushed straight through by createMany.
+   */
+  assetDown?: boolean | null;
+  /**
    * PACKET ACCOUNTING for a burst row (the ICMP loss sweep — utils/burstPing.ts).
    * `packetsSent` is the burst size and `packetsReceived` how many came back;
    * `success` must be maintained as `packetsReceived > 0` so every reader that

@@ -1,0 +1,39 @@
+-- Packet loss is not measured while the device is DOWN.
+--
+-- Business rule 29 deliberately made the measurement plainly failed/total over
+-- the whole window (2026-09-01), moving the "don't alert about an outage twice"
+-- problem out of the arithmetic and onto two alert-time gates: only an
+-- ANSWERING device produces a reading, and a reading at or above the
+-- automation's `ignoreAtOrAbove` ceiling is discarded.
+--
+-- Neither gate covers the case an operator actually sees. A switch that was
+-- dark for twelve minutes comes back, starts answering, and its 30-minute
+-- window still carries the outage -- so it reads 40 %, which is under every
+-- sensible ceiling, and a "High packet loss" warning arrives minutes after the
+-- device recovered, about the outage the down alert already reported. Lowering
+-- the ceiling to catch it would also throw away every genuine 40 % reading,
+-- which is the reading the metric exists for.
+--
+-- The distinction the ceiling cannot draw is not "how big is this number" but
+-- "which probes produced it". A miss taken while the device was DOWN is that
+-- outage; a miss taken while it was answering is packet loss. So the marker
+-- goes on the sample, exactly like `dependencyDown` before it (business rule
+-- 38b), and every loss reader -- the engine's probeLossPct query, the NOC
+-- widget behind it, and the alert email's own loss chart -- steps over the
+-- marked rows. One definition, so the number and the picture of it agree.
+--
+-- Stamped from the status the probe RESULTS in, so the misses below the
+-- threshold (drawn amber, "Missed") still count and only the ones drawn as Down
+-- do not. That is what keeps a lossy-but-alive link measurable: at 40 % loss a
+-- device reaches three consecutive misses ~6 % of the time, so nearly all of
+-- its misses are still counted -- unlike the retired recovery anchor, which
+-- discarded the whole window before the last recovery and reported ~0 % loss
+-- forever for a flapping device.
+--
+-- Nullable with no default, so the add is metadata-only on the TimescaleDB
+-- hypertable -- no chunk rewrite, no decompression -- the same shape as the
+-- uptimeSec / dependencyDown / packetsSent adds before it. Not retroactive:
+-- rows written before this migration carry NULL and are read as false, so an
+-- outage already in the window keeps counting until it ages out of it.
+
+ALTER TABLE "asset_monitor_samples" ADD COLUMN "assetDown" BOOLEAN;

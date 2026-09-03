@@ -3,32 +3,31 @@
  *
  * Integration tests for src/services/probeLossQuery.ts —
  * `queryProbeLossRatios`. The whole function IS one raw SQL statement (a
- * partitioned min() anchoring the ratio to each asset's first successful probe,
- * then a grouped aggregate), so it's exercised against a live Postgres rather
- * than mocked.
+ * grouped aggregate over the window), so it's exercised against a live Postgres
+ * rather than mocked.
  *
  * Skips cleanly when DATABASE_URL isn't reachable; see _helpers.ts.
  *
  * Coverage:
- *   - ANCHOR: samples before the first successful probe are excluded, so a
- *     device recovering from an outage reads 0% instead of the outage's ratio.
- *   - Loss that starts AFTER the first success is counted in full.
- *   - 0-success assets are dropped in both modes (asset-down owns them).
+ *   - EVERY MISS COUNTS: the anchor that used to trim the window is gone, and
+ *     Asset.recoveryStartedAt must be ignored — including for the flapping
+ *     device the anchor reported as ~0% lossy forever.
+ *   - EXCEPT the misses taken while the device was DOWN (`assetDown`, business
+ *     rule 29h): those are the outage, and the down automation owns it. The
+ *     misses below the threshold still count, and an unstamped row still
+ *     counts — the exclusion is not retroactive.
  *   - Engine mode keeps 0%-loss assets (hysteresis recovery); widget mode
  *     (onlyLossy) hides them and orders lossiest-first.
  *   - assetIds scoping + the window bound.
- *   - includeFullyDown (DISPLAY only): a 0-success asset reads 100% instead of
- *     dropping off the widget, while the engine path still drops it.
  *   - probeKind: this query counts EVERY kind, which is the entire reason the
- *     ICMP loss sampler exists.
- *   - RECOVERY ANCHOR: an outage that STARTED mid-window is excluded via
- *     Asset.recoveryStartedAt, the case the first-success anchor cannot see.
+ *     ICMP loss sweep exists — and a burst row is weighed by its PACKETS.
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import { prisma } from "../../src/db.js";
 import { dbDescribe, dbReachable } from "./_helpers.js";
 import { queryProbeLossRatios } from "../../src/services/probeLossQuery.js";
+import { probeLossSeriesFrom } from "../../src/services/alertChartService.js";
 
 const d = dbDescribe;
 
@@ -65,6 +64,31 @@ async function seedProbes(assetId: string, pattern: boolean[], probeKind?: strin
 }
 
 const F = false, S = true;
+
+/**
+ * Seed ONE OUTAGE as the probe path actually writes it: `onset` failures that
+ * could not yet be stamped (nobody knows the first missed poll begins an
+ * outage) followed by `declared` failures stamped `assetDown`, oldest first,
+ * ending `endMinutesAgo` before now. The onset is what makes the RUN the unit
+ * of exclusion rather than the marker (business rule 29h).
+ */
+async function seedOutage(
+  assetId: string,
+  onset: number,
+  declared: number,
+  endMinutesAgo: number,
+): Promise<void> {
+  const total = onset + declared;
+  await prisma.assetMonitorSample.createMany({
+    data: Array.from({ length: total }, (_, i) => ({
+      assetId,
+      timestamp: ago(endMinutesAgo + total - i),
+      success: false,
+      responseTimeMs: null,
+      ...(i >= onset ? { assetDown: true } : {}),
+    })),
+  });
+}
 
 /**
  * Seed ICMP BURST rows: one row per entry carrying packetsSent/packetsReceived,
@@ -186,6 +210,171 @@ d("queryProbeLossRatios — every miss in the window counts", () => {
     const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
     expect(Number(rows[0]!.total)).toBe(6);
     expect(Number(rows[0]!.failed)).toBe(4);
+  });
+});
+
+d("queryProbeLossRatios — a miss taken while DOWN is the outage, not loss", () => {
+  it("drops the whole outage run a recovered device is still carrying", async () => {
+    // PROD, 2026-09-03. A FortiSwitch dark for twelve minutes came back, and
+    // its 30-minute window still read 40% — under any sensible
+    // ignoreAtOrAbove ceiling — so a "High packet loss" WARNING landed minutes
+    // AFTER the recovery, about the outage its down alert had already reported.
+    // The answering gate cannot see this case: by the time it fires, the
+    // device is answering again.
+    await seedOutage(A, 2, 10, 3);          // 12 dark minutes, ending 3 min ago
+    await seedProbes(A, [S, S, S]);         // then answering again
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(3);
+    expect(Number(rows[0]!.failed)).toBe(0);
+  });
+
+  it("drops the ONSET too — the misses that could not yet be stamped", async () => {
+    // The marker can only go on from the probe that DECLARES the outage. Had
+    // only the stamped rows been dropped, the 2 onset misses would sit in a
+    // denominator the exclusion had already shrunk and read 40% here — still
+    // over the seeded rule's 10% threshold, a full window after recovery.
+    await seedOutage(A, 2, 10, 3);
+    await seedProbes(A, [S, S, S]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    // Three answered probes and nothing else: the run went whole.
+    expect(Number(rows[0]!.total)).toBe(3);
+  });
+
+  it("keeps a failure run that never reached DOWN", async () => {
+    // The narrowness. Two misses in a row on a device whose automation declares
+    // down at three is loss, and nothing in that run is stamped to say
+    // otherwise. Also the flapping case: an alternating device never reaches
+    // `down` at all and is measured exactly as it was.
+    await seedProbes(A, [S, F, F, S, S, F, S, S]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(8);
+    expect(Number(rows[0]!.failed)).toBe(3);
+  });
+
+  it("keeps the loss on either side of an outage, and the probe that opens it", async () => {
+    await seedOutage(A, 1, 2, 6);           // outage ending 6 minutes ago
+    await seedAt(A, [
+      { secondsAgo: 700, success: false },  // isolated loss, before the outage
+      { secondsAgo: 660, success: true },
+      { secondsAgo: 240, success: true },   // recovery
+      { secondsAgo: 180, success: false },  // isolated loss, after
+      { secondsAgo: 120, success: true },
+    ]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(5);
+    expect(Number(rows[0]!.failed)).toBe(2);
+  });
+
+  it("keeps the misses BELOW the threshold — only the ones drawn as Down are dropped", async () => {
+    // The narrowness IS the design. An alternating device never reaches three
+    // consecutive misses, so nothing about it is ever stamped and it stays as
+    // measurable as it was — unlike under the retired recovery anchor, which
+    // trimmed the whole window before the last recovery and reported ~0%.
+    await seedProbes(A, [S, F, S, F, S, F, S, F]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(8);
+    expect(Number(rows[0]!.failed)).toBe(4);
+  });
+
+  it("counts an unstamped miss — the exclusion is not retroactive", async () => {
+    // Rows written before the column carry NULL, and `IS NOT TRUE` keeps them.
+    // NULL is not the same claim as false.
+    await seedProbes(A, [F, F, F, F, S, S]);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.failed)).toBe(4);
+  });
+
+  it("drops the outage's BURST rows whole, packets and all", async () => {
+    // A sweep burst fired into an outage measures the outage, not the link —
+    // and it carries five echoes, so counting it would dominate the ratio it is
+    // excluded from. The unstamped onset burst goes with the run.
+    await prisma.assetMonitorSample.createMany({
+      data: [
+        { assetId: A, timestamp: ago(8), success: false, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 0 },
+        { assetId: A, timestamp: ago(6), success: false, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 0, assetDown: true },
+        { assetId: A, timestamp: ago(4), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 5 },
+        { assetId: A, timestamp: ago(2), success: true, responseTimeMs: null, probeKind: "icmp", packetsSent: 5, packetsReceived: 4 },
+      ],
+    });
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(Number(rows[0]!.total)).toBe(10);
+    expect(Number(rows[0]!.failed)).toBe(1);
+  });
+
+  it("drops an asset out of the result entirely when its whole window was the outage", async () => {
+    // No countable probes is no reading — which is right: a device still down
+    // is the answering gate's business (rule 29a), and it clears the loss alert
+    // rather than leaving one to freeze.
+    await seedOutage(A, 2, 6, 1);
+    const rows = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("hides the recovered device from the widget too — one definition, both readers", async () => {
+    await seedOutage(A, 2, 10, 3);
+    await seedProbes(A, [S, S, S]);
+    const rows = await queryProbeLossRatios({
+      sinceMinutes: 60, assetIds: [A], onlyLossy: true, limit: 10,
+    });
+    expect(rows).toHaveLength(0);
+  });
+});
+
+d("queryProbeLossRatios — SQL/JS parity on the outage run", () => {
+  it("agrees with alertChartService's mirror on the same probes", async () => {
+    // The exclusion is implemented twice by necessity — two window functions
+    // in this query, and `outageRunFailures` in the browser-free JS the alert
+    // email's loss chart uses. They are what make the number in an alert and
+    // the caption under its chart the same number, so they are pinned against
+    // each other rather than each against its own expectation.
+    //
+    // Primary rows only: the chart deliberately keeps poll rows once burst rows
+    // exist (a picture of the window has to be continuous) while the query
+    // drops them, which is a documented divergence in the PACKET weighting, not
+    // in the run rule.
+    const pattern = [S, F, S, F, F, F, F, S, S, F, S, S];
+    // The outage is the run at indices 3..6, declared from the third miss.
+    const rows = pattern.map((success, i) => ({
+      assetId: A,
+      timestamp: ago(pattern.length - i),
+      success,
+      responseTimeMs: success ? 10 : null,
+      // Stamped from the probe that DECLARES the outage (the third consecutive
+      // miss) to its end. Indices 3 and 4 are the onset the marker cannot
+      // reach; index 9 is an isolated miss and stays loss.
+      ...(i === 5 || i === 6 ? { assetDown: true } : {}),
+    }));
+    await prisma.assetMonitorSample.createMany({ data: rows });
+
+    const sql = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    const sqlPct = Math.round((Number(sql[0]!.failed) / Number(sql[0]!.total)) * 1000) / 10;
+    const js = probeLossSeriesFrom(
+      rows.map((r) => ({ timestamp: r.timestamp, success: r.success, assetDown: (r as { assetDown?: boolean }).assetDown ?? null })),
+      2 * 60 * 1000,
+    );
+
+    // Eight countable probes (12 less the four-failure outage run), two lost.
+    expect(Number(sql[0]!.total)).toBe(8);
+    expect(sqlPct).toBe(25);
+    expect(js.ratioPct).toBe(sqlPct);
+  });
+
+  it("agrees when nothing is stamped, which is most of the fleet", async () => {
+    const pattern = [S, F, S, F, F, S, S, F, S, S];
+    const rows = pattern.map((success, i) => ({
+      assetId: A,
+      timestamp: ago(pattern.length - i),
+      success,
+      responseTimeMs: success ? 10 : null,
+    }));
+    await prisma.assetMonitorSample.createMany({ data: rows });
+
+    const sql = await queryProbeLossRatios({ sinceMinutes: 60, assetIds: [A] });
+    const sqlPct = Math.round((Number(sql[0]!.failed) / Number(sql[0]!.total)) * 1000) / 10;
+    const js = probeLossSeriesFrom(rows.map((r) => ({ timestamp: r.timestamp, success: r.success })), 2 * 60 * 1000);
+
+    expect(Number(sql[0]!.total)).toBe(10);
+    expect(js.ratioPct).toBe(sqlPct);
   });
 });
 

@@ -11131,6 +11131,16 @@ export async function recordProbeResult(
     // the probe path would give two answers to one question. Only ever set on a
     // failure — a suppressed device that ANSWERS is a plain success.
     dependencyDown: !result.success && asset.dependencySuppressed === true ? true : null,
+    // And mark the miss as being THE OUTAGE when this probe is what declares
+    // (or continues) one. Packet loss steps over these rows, because a miss
+    // taken while the device is down is the outage the down automation already
+    // alerts on — counting it as loss trails a second alert behind every
+    // recovery, for a window's worth of ticks after the device came back
+    // (business rule 29h). Read off `nextStatus`, the status this probe RESULTS
+    // in, so the misses below the threshold — amber on the strip, "Missed" on
+    // the pill — still count as loss and only the ones the operator's own
+    // automation calls Down do not. Only ever set on a failure.
+    assetDown: !result.success && nextStatus === "down" ? true : null,
   });
 
   // Buffer the state write — the periodic flush in probePatchBuffer collapses
@@ -12429,6 +12439,7 @@ export async function runLossSweepFor(assetIds: string[], labels: WorkItemLabels
       where: { id: { in: assetIds } },
       select: {
         id: true, monitored: true, status: true, dependencySuppressed: true,
+        monitorStatus: true,
         ipAddress: true, dnsName: true, hostname: true,
       },
     });
@@ -12456,6 +12467,14 @@ export async function runLossSweepFor(assetIds: string[], labels: WorkItemLabels
     const suppressed = new Set(
       eligible.filter((a) => a.dependencySuppressed === true).map((a) => a.id),
     );
+    // The sweep reaches no verdict of its own (it never calls
+    // recordProbeResult), so unlike the probe path it has no `nextStatus` to
+    // read — it marks its misses against the verdict the operator's configured
+    // transport has ALREADY reached. Same marker, same reason: a burst fired
+    // into a declared outage measures the outage, not the link (rule 29h).
+    const declaredDown = new Set(
+      eligible.filter((a) => a.monitorStatus === "down").map((a) => a.id),
+    );
 
     const now = new Date();
     const results = await burstPing(Array.from(byTarget.keys()));
@@ -12478,6 +12497,7 @@ export async function runLossSweepFor(assetIds: string[], labels: WorkItemLabels
           // The same marking the probe path applies (business rule 38b): a miss
           // the upstream explains is drawn grey, not as an accusation.
           dependencyDown: !success && suppressed.has(id) ? true : undefined,
+          assetDown: !success && declaredDown.has(id) ? true : undefined,
         });
         attempted.push(id);
       }

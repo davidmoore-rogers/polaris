@@ -1213,6 +1213,20 @@ model AssetMonitorSample {
   // defaulted so the add is free on the hypertable (the uptimeSec precedent);
   // readers must treat NULL as false, never as unknown.
   dependencyDown  Boolean?
+  // TRUE on a FAILED probe recorded while the asset ITSELF was `down` — the
+  // sibling of `dependencyDown`, and the one marker packet loss is measured
+  // AROUND. A miss taken during a declared outage IS that outage; counting it
+  // as packet loss raises a second alert about the thing the down automation
+  // already owns, which is what trailed a "40 % loss" warning behind every
+  // recovery (business rule 29h). Stamped from the status the probe RESULTS in
+  // (monitorStatusFor), so the misses drawn amber — below the threshold, not an
+  // outage yet — still count as loss and only the ones drawn as Down do not.
+  // The ICMP burst sweep stamps it from the asset's CURRENT status instead: it
+  // never calls recordProbeResult, so it has no verdict of its own to read.
+  // NULL/false = an ordinary probe; never set on a success. Nullable rather than
+  // defaulted so the add is free on the hypertable (the uptimeSec precedent);
+  // readers must treat NULL as false, never as unknown.
+  assetDown       Boolean?
 
   // Composite PK (id, timestamp) — required by TimescaleDB hypertables to
   // include the partitioning column. Works fine on plain Postgres too;

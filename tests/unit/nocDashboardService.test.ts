@@ -373,6 +373,28 @@ describe("getPacketLoss", () => {
     expect(sql).not.toContain("LEFT JOIN");
   });
 
+  it("steps over the failures of a run that reached DOWN", async () => {
+    // Business rule 29h. The two ENGINE gates cannot see the case an operator
+    // reports — a device dark for twelve minutes comes back, starts answering,
+    // and its window still reads 40 % — so the outage's own probes are excluded
+    // here, in the ONE query both the engine and this widget read. The unit is
+    // the RUN, not the marked row: `assetDown` is only stampable from the probe
+    // that DECLARES the outage, so the onset would otherwise survive.
+    //
+    // Asserted as SQL shape because the widget path is mocked; the behaviour
+    // is pinned against real Postgres in tests/integration/probeLossQuery.test.ts.
+    rawUnsafe.mockResolvedValueOnce([]);
+    await noc.getPacketLoss();
+    const sql = rawUnsafe.mock.calls[0][0] as string;
+    expect(sql).toContain(`"runOutage"`);
+    expect(sql).toContain(`WHERE NOT ("runOutage" AND NOT "success")`);
+    // coalesce is load-bearing: bool_or over a run of pre-column NULL rows is
+    // NULL, and `NOT (NULL AND NOT success)` is NULL, which WHERE reads as
+    // false — dropping every failure in an UNSTAMPED run, i.e. all loss
+    // everywhere. Without this assertion that regression is silent.
+    expect(sql).toContain(`coalesce(bool_or("assetDown")`);
+  });
+
   it("reports a fully-dark asset at 100% with no opt-in flag", async () => {
     // What includeFullyDown used to buy. With every row in the window counted,
     // an asset that answered nothing reads 100% naturally — and vanishing from

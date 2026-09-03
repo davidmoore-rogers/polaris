@@ -136,6 +136,123 @@ describe("probeLossSeriesFrom", () => {
     expect(s.points[0]!.t).toBe(min(0).getTime());
   });
 
+  /** An outage: `onset` unstamped misses (the run before the verdict), then
+   *  `declared` stamped ones, then clean probes to the end of the window. */
+  const outageThen = (onset: number, declared: number, clean: number) => [
+    ...Array.from({ length: onset }, (_, i) => ({ timestamp: min(i), success: false })),
+    ...Array.from({ length: declared }, (_, i) => ({ timestamp: min(onset + i), success: false, assetDown: true })),
+    ...Array.from({ length: clean }, (_, i) => ({ timestamp: min(onset + declared + i), success: true })),
+  ];
+
+  it("drops the whole outage RUN — the caption an operator saw as a false alert", () => {
+    // PROD, 2026-09-03. A FortiSwitch was dark for twelve minutes, came back,
+    // and its 30-minute window still read 40 % — under any sensible
+    // ignoreAtOrAbove ceiling — so a "High packet loss" WARNING arrived
+    // minutes AFTER the recovery, about the outage the down alert had already
+    // reported. Twelve dark minutes at missedPolls=3 is 2 unstamped onset
+    // misses and 10 stamped ones; the run is what recovers the onset.
+    expect(probeLossSeriesFrom(outageThen(2, 10, 18), 2 * 60_000).ratioPct).toBe(0);
+  });
+
+  it("would still have read over 10 % if only the STAMPED rows were dropped", () => {
+    // Why the run, and not the marker alone. The onset can never be stamped —
+    // at the first missed poll nobody knows yet whether it begins an outage —
+    // and dropping only the stamped rows leaves those fully-lost probes in a
+    // denominator the exclusion has already shrunk: 2 lost of 20 counted, which
+    // still trips the seeded rule's 10 % threshold a full window after the
+    // device came back.
+    const rows = outageThen(2, 10, 18).filter((r) => r.assetDown !== true);
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(10);
+  });
+
+  it("leaves the outage as a GAP in the line, never as a stretch of 0 %", () => {
+    // Nothing was measured about the LINK while the device was dark, so the
+    // line says nothing there — the same treatment a polling gap gets. Drawing
+    // 0 % would claim the link was perfect at the one moment it was unreachable.
+    const s = probeLossSeriesFrom(outageThen(2, 10, 18), 2 * 60_000);
+    expect(s.points.every((p) => p.t >= min(12).getTime())).toBe(true);
+  });
+
+  it("keeps a failure run that never reached DOWN — nothing in it is stamped", () => {
+    // The narrowness. Two misses in a row on a device whose automation declares
+    // down at three is loss, not an outage, and the run carries no marker to
+    // make it one.
+    const rows = [
+      { timestamp: min(0), success: true },
+      { timestamp: min(1), success: false },
+      { timestamp: min(2), success: false },
+      ...Array.from({ length: 7 }, (_, i) => ({ timestamp: min(3 + i), success: true })),
+    ];
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(20);
+  });
+
+  it("drops only the run that reached DOWN, never the loss on either side of it", () => {
+    // A device that is genuinely lossy AND had an outage keeps its lossiness.
+    const rows = [
+      { timestamp: min(0), success: false },                      // isolated loss
+      { timestamp: min(1), success: true },
+      { timestamp: min(2), success: false },                      // outage onset
+      { timestamp: min(3), success: false, assetDown: true },     // declared
+      { timestamp: min(4), success: false, assetDown: true },
+      { timestamp: min(5), success: true },
+      { timestamp: min(6), success: false },                      // isolated loss
+      { timestamp: min(7), success: true },
+    ];
+    // Five countable probes, two of them lost.
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(40);
+  });
+
+  it("keeps the answered probe that opens an outage run — it answered", () => {
+    const rows = [
+      { timestamp: min(0), success: true },
+      { timestamp: min(1), success: false, assetDown: true },
+      { timestamp: min(2), success: true },
+    ];
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(0);
+  });
+
+  it("keeps the misses BELOW the threshold — only the ones drawn as Down are dropped", () => {
+    // The narrowness is the whole design. A link losing packets without ever
+    // reaching three consecutive misses never gets stamped, so it stays exactly
+    // as measurable as it was — which is what the retired recovery anchor,
+    // trimming the whole window before the last recovery, destroyed.
+    const rows = Array.from({ length: 20 }, (_, i) => ({ timestamp: min(i), success: i % 2 === 1 }));
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(50);
+  });
+
+  it("counts an unstamped run — the exclusion is not retroactive", () => {
+    // Rows written before the column carry NULL/undefined, and NULL is not the
+    // same claim as false. An outage already inside the window keeps counting
+    // until it ages out of it.
+    const rows = [
+      ...Array.from({ length: 12 }, (_, i) => ({ timestamp: min(i), success: false, assetDown: null })),
+      ...Array.from({ length: 18 }, (_, i) => ({ timestamp: min(12 + i), success: true })),
+    ];
+    expect(probeLossSeriesFrom(rows, 2 * 60_000).ratioPct).toBe(40);
+  });
+
+  it("captions null for a window that was entirely one outage", () => {
+    // Nothing countable is not 0 % — an empty chart is not a claim, where a
+    // flat 0 % line under an alert about an outage would be.
+    const dark = Array.from({ length: 10 }, (_, i) => ({ timestamp: min(i), success: false, assetDown: i > 1 || undefined }));
+    const s0 = probeLossSeriesFrom(dark, 2 * 60_000);
+    expect(s0.ratioPct).toBeNull();
+    expect(s0.points).toHaveLength(0);
+  });
+
+  it("drops the outage's BURST rows whole, packets and all", () => {
+    // A sweep burst fired into an outage measures the outage, not the link —
+    // and it carries five echoes, so counting it would dominate the ratio it is
+    // excluded from.
+    const rows = [
+      { timestamp: min(0), success: false, packetsSent: 5, packetsReceived: 0, assetDown: true },
+      { timestamp: min(2), success: true, packetsSent: 5, packetsReceived: 5 },
+      { timestamp: min(4), success: true, packetsSent: 5, packetsReceived: 4 },
+    ];
+    const s = probeLossSeriesFrom(rows, 2 * 60_000);
+    expect(s.ratioPct).toBe(10); // 1 lost of 10 counted echoes, not 6 of 15
+  });
+
   it("counts an outage that started mid-window", () => {
     // 10 clean, 30 dark, 20 clean. The old recovery anchor read this as 0%
     // about a device that had lost half its probes in the last hour.
