@@ -757,6 +757,9 @@ const api = {
     },
     sdwanRules:           (id) => request("GET", `/assets/${id}/sdwan-rules`),
     mclagPeers:           (id) => request("GET", `/assets/${id}/mclag-peers`),
+    // The upstream switch / AP / firewall the General tab names, resolved to
+    // asset rows so those values can carry verbs.
+    upstream:             (id) => request("GET", `/assets/${id}/upstream`),
     virtualization:       (id) => request("GET", `/assets/${id}/virtualization`),
     // Polaris Agent — operator-facing endpoints (see CLAUDE.md "Polaris
     // Agent API surface"). `agent.get` returns 404 when no agent is

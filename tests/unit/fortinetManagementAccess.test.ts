@@ -16,6 +16,10 @@ import {
   parseWtpToProfile,
   buildApSummary,
   buildSwitchSummary,
+  parseLocalAccessPolicies,
+  localAccessHalfFor,
+  pickLocalAccessPolicy,
+  shapeManagementAccessForClient,
 } from "../../src/services/fortinetManagementAccessService.js";
 
 const TS = "2026-06-19T00:00:00.000Z";
@@ -132,5 +136,131 @@ describe("buildSwitchSummary", () => {
   });
   it("null row → unknown", () => {
     expect(buildSwitchSummary(null, "internal", null, TS).protocols).toBeNull();
+  });
+});
+
+describe("parseLocalAccessPolicies", () => {
+  // The operator's own config, as FortiOS returns it over REST.
+  const RES = {
+    results: [
+      { name: "default", "mgmt-allowaccess": "https ping ssh snmp", "internal-allowaccess": "https ping ssh snmp" },
+      { name: "Locked", "mgmt-allowaccess": "ping", "internal-allowaccess": "ping snmp" },
+    ],
+  };
+  it("keys by lowercased name and normalizes both halves", () => {
+    const m = parseLocalAccessPolicies(RES);
+    expect([...m.keys()]).toEqual(["default", "locked"]);
+    expect(m.get("default")!.internal).toEqual(["https", "ping", "ssh", "snmp"]);
+    expect(m.get("locked")!.mgmt).toEqual(["ping"]);
+    // The display name keeps its original casing.
+    expect(m.get("locked")!.name).toBe("Locked");
+  });
+  it("accepts a bare array and the underscore field spelling", () => {
+    const m = parseLocalAccessPolicies([{ name: "d", mgmt_allowaccess: "ssh", internal_allowaccess: ["https"] }]);
+    expect(m.get("d")!.mgmt).toEqual(["ssh"]);
+    expect(m.get("d")!.internal).toEqual(["https"]);
+  });
+  it("leaves an unstated half NULL rather than an empty allowaccess", () => {
+    // [] would read as "no protocol permitted" — a positive claim the payload
+    // never made, and one that would hide both verbs on the asset page.
+    const m = parseLocalAccessPolicies([{ name: "d", "internal-allowaccess": "https" }]);
+    expect(m.get("d")!.mgmt).toBeNull();
+    expect(m.get("d")!.internal).toEqual(["https"]);
+  });
+  it("skips unnamed / malformed rows and never throws", () => {
+    expect(parseLocalAccessPolicies(null).size).toBe(0);
+    expect(parseLocalAccessPolicies({ results: [null, 7, { name: "  " }] }).size).toBe(0);
+  });
+});
+
+describe("localAccessHalfFor", () => {
+  it("reads the mgmt half only for the dedicated MGMT port", () => {
+    expect(localAccessHalfFor("mgmt")).toBe("mgmt");
+    expect(localAccessHalfFor("MGMT1")).toBe("mgmt");
+  });
+  it("treats internal and any operator-named SVI as in-band", () => {
+    expect(localAccessHalfFor("internal")).toBe("internal");
+    expect(localAccessHalfFor("fortilink-mgmt-svi")).toBe("internal");
+    expect(localAccessHalfFor("")).toBe("internal");
+  });
+});
+
+describe("pickLocalAccessPolicy", () => {
+  const policies = parseLocalAccessPolicies([
+    { name: "default", "internal-allowaccess": "https ssh" },
+    { name: "Locked", "internal-allowaccess": "ping" },
+  ]);
+  it("falls back to the default policy when the switch names none", () => {
+    expect(pickLocalAccessPolicy(policies, { "switch-id": "S1" })!.name).toBe("default");
+  });
+  it("honors an assignment on any key that mentions local-access", () => {
+    // The exact FortiOS field name is unverified, so the match is on the key's
+    // shape rather than a guessed literal.
+    expect(pickLocalAccessPolicy(policies, { "local-access-policy": "Locked" })!.name).toBe("Locked");
+    expect(pickLocalAccessPolicy(policies, { "security-policy-local-access": { name: "Locked" } })!.name).toBe("Locked");
+  });
+  it("ignores an assignment naming a policy that doesn't exist", () => {
+    expect(pickLocalAccessPolicy(policies, { "local-access-policy": "Ghost" })!.name).toBe("default");
+  });
+  it("uses the only policy when it isn't called default", () => {
+    const one = parseLocalAccessPolicies([{ name: "RGI-Switches", "internal-allowaccess": "ssh" }]);
+    expect(pickLocalAccessPolicy(one, {})!.name).toBe("RGI-Switches");
+  });
+  it("returns null with no policies at all", () => {
+    expect(pickLocalAccessPolicy(new Map(), {})).toBeNull();
+    expect(pickLocalAccessPolicy(null, {})).toBeNull();
+  });
+});
+
+describe("buildSwitchSummary + local-access policy", () => {
+  const policies = parseLocalAccessPolicies([
+    { name: "default", "mgmt-allowaccess": "https ping ssh snmp", "internal-allowaccess": "https ping snmp" },
+  ]);
+  it("reads the internal half for a FortiLink-managed switch", () => {
+    const s = buildSwitchSummary({ "switch-id": "S1" }, "internal", "10.2.2.2", TS, policies);
+    expect(s.protocols).toEqual(["https", "ping", "snmp"]);
+    expect(s.https).toBe(true);
+    // SSH is permitted on the out-of-band port only — the verb must not show.
+    expect(s.ssh).toBe(false);
+    expect(s.profileName).toBe("default");
+  });
+  it("reads the mgmt half when the operator polls the MGMT port", () => {
+    const s = buildSwitchSummary({ "switch-id": "S1" }, "mgmt", null, TS, policies);
+    expect(s.ssh).toBe(true);
+    expect(s.interfaceName).toBe("mgmt");
+  });
+  it("a per-switch interface allowaccess still wins over the policy", () => {
+    const row = { "switch-id": "S1", "switch-interface": [{ name: "internal", allowaccess: "ssh" }] };
+    const s = buildSwitchSummary(row, "internal", null, TS, policies);
+    expect(s.protocols).toEqual(["ssh"]);
+    // The device spoke for itself, so no policy is credited.
+    expect(s.profileName).toBeNull();
+  });
+  it("stays unknown when the policy read failed", () => {
+    const s = buildSwitchSummary({ "switch-id": "S1" }, "internal", null, TS, new Map());
+    expect(s.protocols).toBeNull();
+    expect(s.profileName).toBeNull();
+  });
+  it("stays unknown when the policy states no list for the half in use", () => {
+    const half = parseLocalAccessPolicies([{ name: "default", "mgmt-allowaccess": "https" }]);
+    expect(buildSwitchSummary({}, "internal", null, TS, half).protocols).toBeNull();
+  });
+});
+
+describe("shapeManagementAccessForClient", () => {
+  it("keeps protocols null so the client stays optimistic", () => {
+    const out = shapeManagementAccessForClient({ mgmtIp: "10.0.0.1", protocols: null, https: false, ssh: false });
+    expect(out).toEqual({ mgmtIp: "10.0.0.1", protocols: null, https: false, ssh: false });
+  });
+  it("drops the fields only the slide-over reads", () => {
+    const out = shapeManagementAccessForClient({
+      source: "fortiswitch", interfaceName: "internal", profileName: "default", snmp: true,
+      checkedAt: TS, mgmtIp: "10.0.0.2", protocols: ["https"], https: true, ssh: false,
+    });
+    expect(out).toEqual({ mgmtIp: "10.0.0.2", protocols: ["https"], https: true, ssh: false });
+  });
+  it("null for a missing / non-object blob", () => {
+    expect(shapeManagementAccessForClient(null)).toBeNull();
+    expect(shapeManagementAccessForClient("nope")).toBeNull();
   });
 });

@@ -13,11 +13,25 @@
  *   - Access point (FortiAP) — the AP's `wtp-profile` `allowaccess` on the
  *     controller FortiGate (`/api/v2/cmdb/wireless-controller/wtp-profile`,
  *     joined to the AP via `/api/v2/cmdb/wireless-controller/wtp`).
- *   - Switch (FortiSwitch) — the switch's `internal` (or custom) interface
- *     `allowaccess`. ⚠️ The exact REST source for a managed FortiSwitch's own
- *     interface allowaccess is NOT yet verified on a live FortiOS 7.x device;
- *     the parser is best-effort and yields `protocols: null` (unknown) when it
- *     cannot read it, so the UI renders buttons optimistically with a note.
+ *   - Switch (FortiSwitch) — a managed switch has no per-device profile the
+ *     way an AP does; its management access is a POLICY on the controller
+ *     FortiGate (`config switch-controller security-policy local-access`,
+ *     REST `/api/v2/cmdb/switch-controller.security-policy/local-access`),
+ *     which states two lists: `mgmt-allowaccess` (the dedicated out-of-band
+ *     MGMT port) and `internal-allowaccess` (the in-band `internal` SVI, which
+ *     is what a FortiLink-managed switch answers on and therefore what Polaris
+ *     polls). The half is chosen from the integration's
+ *     `switchManagementInterface`: a `mgmt`-named interface reads the mgmt
+ *     list, anything else the internal list. A per-switch interface
+ *     `allowaccess` on the managed-switch object still wins when the firmware
+ *     exposes one. The policy is FLEET-WIDE, not per switch — FortiOS offers
+ *     no way to attach a different local-access policy to an individual
+ *     managed switch (confirmed against prod, 2026-09-03) — so
+ *     `pickLocalAccessPolicy` resolves the `default` policy every managed
+ *     switch answers to, and keeps a shape-matched assignment lookup only as a
+ *     defensive first pass. When nothing can be read at all, `protocols` stays
+ *     null (unknown) and the UI renders the buttons optimistically with a
+ *     note.
  *
  * The summary drives the asset slide-over's Open HTTPS / Open SSH buttons and
  * the FortiAP "SNMP not enabled in profile" warning. It is read-only — nothing
@@ -37,7 +51,10 @@ export interface ManagementAccessSummary {
   source: ManagementAccessSource;
   /** Interface name the access was read from (firewall/switch), else null. */
   interfaceName: string | null;
-  /** AP profile name (AP only), else null. */
+  /** The named config object the access list came from: an AP's `wtp-profile`,
+   *  or a switch's `switch-controller security-policy local-access` policy.
+   *  Null on a firewall (its access is on the interface) and on a switch whose
+   *  list could not be read. */
   profileName: string | null;
   /** IP the slide-over buttons should target. Falls back upstream to Asset.ipAddress. */
   mgmtIp: string | null;
@@ -204,22 +221,118 @@ export function buildApSummary(
   );
 }
 
+/** The FortiGate CMDB path holding the managed-switch management-access ACL. */
+export const LOCAL_ACCESS_CMDB_PATH = "/api/v2/cmdb/switch-controller.security-policy/local-access";
+
+/** One `switch-controller security-policy local-access` policy. Either list is
+ *  null when the policy doesn't state it (never `[]`, which would read as "no
+ *  protocol permitted" — a positive claim this cannot make). */
+export interface LocalAccessPolicy {
+  name: string;
+  /** `mgmt-allowaccess` — the dedicated out-of-band MGMT port. */
+  mgmt: string[] | null;
+  /** `internal-allowaccess` — the in-band `internal` SVI. */
+  internal: string[] | null;
+}
+
 /**
- * Switch summary. ⚠️ Best-effort: the managed-switch CMDB object does not
- * reliably expose the FortiSwitch's own interface `allowaccess` over the
- * controller's REST API (needs verification on a live FortiOS 7.x device).
- * When the access list can't be read, `protocols` is null (unknown) and the UI
- * renders buttons optimistically with an "unverified" note rather than hiding
- * them. We still attempt to read a per-switch interface allowaccess if the
- * firmware exposes one.
+ * Parse the local-access policies off a
+ * `/api/v2/cmdb/switch-controller.security-policy/local-access` response into
+ * a name(lowercased) -> policy map. An absent list stays null rather than
+ * becoming an empty allowaccess (see LocalAccessPolicy).
+ */
+export function parseLocalAccessPolicies(res: unknown): Map<string, LocalAccessPolicy> {
+  const map = new Map<string, LocalAccessPolicy>();
+  for (const row of normalizeCmdbArray(res)) {
+    if (!row || typeof row !== "object") continue;
+    const name = typeof row.name === "string" ? row.name.trim() : "";
+    if (!name) continue;
+    const half = (v: unknown) => (v === undefined || v === null ? null : parseAllowaccess(v));
+    map.set(name.toLowerCase(), {
+      name,
+      mgmt: half(row["mgmt-allowaccess"] ?? row.mgmt_allowaccess),
+      internal: half(row["internal-allowaccess"] ?? row.internal_allowaccess),
+    });
+  }
+  return map;
+}
+
+/**
+ * Which half of a local-access policy a switch's management interface reads.
+ * `mgmt` is the dedicated out-of-band port; everything else — `internal` and
+ * any operator-named SVI — is in-band, which is what a FortiLink-managed
+ * switch answers on and what Polaris polls.
+ */
+export function localAccessHalfFor(switchIfaceName: string): "mgmt" | "internal" {
+  const n = (switchIfaceName ?? "").trim().toLowerCase();
+  return n.startsWith("mgmt") ? "mgmt" : "internal";
+}
+
+/**
+ * Pick the policy that governs ONE managed switch.
+ *
+ * **The policy is fleet-wide.** FortiOS has no per-switch attachment for a
+ * local-access policy — the `default` policy governs every managed switch a
+ * controller has (confirmed against prod, 2026-09-03) — so that is the answer
+ * this returns, and a site that renamed its only policy still resolves, since
+ * one policy can only be the one in force.
+ *
+ * The assignment lookup ahead of it is a defensive first pass, kept for the
+ * firmware that might grow one: it matches any key on the managed-switch row
+ * whose NAME mentions `local-access` rather than guessing a literal field name,
+ * because a wrong literal key resolves to nothing SILENTLY (the failure mode
+ * utils/fortinetParentKey.ts exists to document) — and an unassigned switch,
+ * which today is every switch, falls straight through it.
+ */
+export function pickLocalAccessPolicy(
+  policies: Map<string, LocalAccessPolicy> | null | undefined,
+  managedSwitchRow: unknown,
+): LocalAccessPolicy | null {
+  if (!policies || policies.size === 0) return null;
+  if (managedSwitchRow && typeof managedSwitchRow === "object") {
+    for (const [key, value] of Object.entries(managedSwitchRow as Record<string, unknown>)) {
+      if (!key.toLowerCase().includes("local-access")) continue;
+      const named =
+        typeof value === "string"
+          ? value
+          : value && typeof value === "object"
+            ? ((value as any).q_origin_key ?? (value as any).name)
+            : null;
+      if (typeof named !== "string" || !named.trim()) continue;
+      const hit = policies.get(named.trim().toLowerCase());
+      if (hit) return hit;
+    }
+  }
+  const dflt = policies.get("default");
+  if (dflt) return dflt;
+  if (policies.size === 1) return [...policies.values()][0]!;
+  return null;
+}
+
+/**
+ * Switch summary — the protocols a managed FortiSwitch permits on the interface
+ * Polaris reaches it by, most specific source first:
+ *
+ *   1. a per-switch interface `allowaccess` on the managed-switch object, on
+ *      firmware that exposes one (never yet seen in the wild here, kept because
+ *      it is the device's own statement about itself);
+ *   2. the controller's `security-policy local-access` policy for this switch,
+ *      reading the mgmt or internal half per `localAccessHalfFor`. This is the
+ *      real answer on FortiOS 7.x — a managed switch has no per-device profile
+ *      the way a FortiAP does.
+ *
+ * Neither available => `protocols: null` (unknown, NOT "nothing permitted"), and
+ * the UI renders both verbs optimistically with an "unverified" note.
  */
 export function buildSwitchSummary(
   managedSwitchRow: unknown,
   switchIfaceName: string,
   switchIp: string | null | undefined,
   checkedAt: string,
+  policies?: Map<string, LocalAccessPolicy> | null,
 ): ManagementAccessSummary {
   let protocols: string[] | null = null;
+  let profileName: string | null = null;
   if (managedSwitchRow && typeof managedSwitchRow === "object") {
     const row = managedSwitchRow as Record<string, any>;
     // Some firmware exposes a `switch-interface` / `interface` array on the
@@ -233,11 +346,45 @@ export function buildSwitchSummary(
       }
     }
   }
+  if (protocols == null) {
+    const policy = pickLocalAccessPolicy(policies, managedSwitchRow);
+    if (policy) {
+      const list = localAccessHalfFor(switchIfaceName) === "mgmt" ? policy.mgmt : policy.internal;
+      if (list) {
+        protocols = list;
+        profileName = policy.name;
+      }
+    }
+  }
   return buildSummary(
     "fortiswitch",
-    { interfaceName: switchIfaceName, mgmtIp: switchIp || null, protocols },
+    { interfaceName: switchIfaceName, profileName, mgmtIp: switchIp || null, protocols },
     checkedAt,
   );
+}
+
+/**
+ * Reduce a stored `Asset.managementAccess` blob to the four fields a client
+ * needs in order to decide whether to offer Open HTTPS / Open SSH
+ * (`_assetMgmtAccess` in public/js/assets.js). Shared by the Assets list
+ * shaping and the upstream-device resolver so the two surfaces cannot disagree
+ * about what a device permits.
+ *
+ * `protocols` passes through as a NULL-vs-not signal: null means the list could
+ * not be read, and the client then offers both verbs optimistically — so
+ * collapsing it to a boolean would collapse the distinction it branches on.
+ */
+export function shapeManagementAccessForClient(
+  ma: unknown,
+): { mgmtIp: string | null; protocols: string[] | null; https: boolean; ssh: boolean } | null {
+  const m = ma as Record<string, unknown> | null;
+  if (!m || typeof m !== "object") return null;
+  return {
+    mgmtIp: typeof m.mgmtIp === "string" ? m.mgmtIp : null,
+    protocols: Array.isArray(m.protocols) ? (m.protocols as string[]) : null,
+    https: m.https === true,
+    ssh: m.ssh === true,
+  };
 }
 
 // ─── Live collection ──────────────────────────────────────────────────────────
@@ -288,11 +435,15 @@ export async function collectManagementAccess(
         return null;
       });
 
-    const [cmdbInterfaces, wtpProfilesRes, wtpRes, managedSwitchRes] = await Promise.all([
+    const [cmdbInterfaces, wtpProfilesRes, wtpRes, managedSwitchRes, localAccessRes] = await Promise.all([
       group.firewall ? get("/api/v2/cmdb/system/interface") : Promise.resolve(null),
       needsWireless ? get("/api/v2/cmdb/wireless-controller/wtp-profile") : Promise.resolve(null),
       needsWireless ? get("/api/v2/cmdb/wireless-controller/wtp") : Promise.resolve(null),
       needsSwitch ? get("/api/v2/cmdb/switch-controller/managed-switch") : Promise.resolve(null),
+      // One read per controller serves every switch it manages — the ACL is a
+      // policy on the gate, not a per-device profile. Skipped entirely when the
+      // gate manages no switches.
+      needsSwitch ? get(LOCAL_ACCESS_CMDB_PATH) : Promise.resolve(null),
     ]);
 
     // Firewall
@@ -311,7 +462,9 @@ export async function collectManagementAccess(
       }
     }
 
-    // Switches (best-effort; protocols may be null/unknown)
+    // Switches: the controller's local-access policy, with a per-switch
+    // interface allowaccess taking precedence where the firmware exposes one.
+    // Still best-effort — protocols stays null when neither can be read.
     if (needsSwitch) {
       const switchRows = normalizeCmdbArray(managedSwitchRes);
       const bySerial = new Map<string, any>();
@@ -319,9 +472,16 @@ export async function collectManagementAccess(
         const sn = row?.["switch-id"] ?? row?.serial ?? row?.name;
         if (typeof sn === "string") bySerial.set(sn.trim().toUpperCase(), row);
       }
+      const policies = parseLocalAccessPolicies(localAccessRes);
+      if (policies.size === 0) {
+        logger.debug(
+          { device: group.deviceName },
+          "managementAccess: no switch-controller local-access policy readable; switch access stays unknown",
+        );
+      }
       for (const sw of group.switches) {
         const row = bySerial.get((sw.serial ?? "").trim().toUpperCase()) ?? null;
-        result.set(sw.serial, buildSwitchSummary(row, switchIfaceName, sw.ipAddress, checkedAt));
+        result.set(sw.serial, buildSwitchSummary(row, switchIfaceName, sw.ipAddress, checkedAt, policies));
       }
     }
   });

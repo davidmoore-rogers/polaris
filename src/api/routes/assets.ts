@@ -61,6 +61,8 @@ import { describeDownDetectionFor, recoveryPollsFor } from "../../services/downD
 import { getArpEntryRetentionDays } from "../../services/sampleRetentionService.js";
 import { getCredential } from "../../services/credentialService.js";
 import { resolveConnectionPath } from "../../services/connectionPathService.js";
+import { resolveAssetUpstream } from "../../services/assetUpstreamService.js";
+import { shapeManagementAccessForClient } from "../../services/fortinetManagementAccessService.js";
 import { propagateAfterStatusChange, FORTINET_INFRA_ASSET_TYPES } from "../../services/dependencyTreeService.js";
 import { pickSampleTierForAsset } from "../../services/sampleQueryRouter.js";
 import {
@@ -701,14 +703,7 @@ function shapeHaInfo(topo: unknown): { mode: string; role: string; memberStatus?
  * would be collapsing the very distinction the client branches on.
  */
 function shapeManagementAccess(ma: unknown): { mgmtIp: string | null; protocols: string[] | null; https: boolean; ssh: boolean } | null {
-  const m = ma as Record<string, unknown> | null;
-  if (!m || typeof m !== "object") return null;
-  return {
-    mgmtIp: typeof m.mgmtIp === "string" ? m.mgmtIp : null,
-    protocols: Array.isArray(m.protocols) ? (m.protocols as string[]) : null,
-    https: m.https === true,
-    ssh: m.ssh === true,
-  };
+  return shapeManagementAccessForClient(ma);
 }
 
 // Reduce an asset's monitoring transports to the compact array the
@@ -3077,6 +3072,30 @@ router.get("/:id/mclag-peers", requirePermission("assets", "read"), async (req, 
       },
     });
     res.json({ peers: rows });
+  } catch (err) { next(err); }
+});
+
+// GET /assets/:id/upstream — the three upstream devices the General tab names
+// (Last Seen Switch / AP / Firewall) resolved from display strings to the Asset
+// rows behind them, so those rows can carry verbs (open the device, open its
+// HTTPS UI, SSH to it) instead of being text an operator re-finds by hand.
+//
+// Resolution rides utils/fortinetParentKey.ts — never a hostname match (see
+// assetUpstreamService). An unresolved name comes back with `asset: null` and
+// is NOT an error: an unadopted switch and a gate another integration hasn't
+// discovered yet both land there legitimately.
+//
+// The firewall half reads AssetFortigateSighting, which its own endpoint gates
+// `assetsQuarantine:read` — so it is gated a second time here and the answer
+// says which halves were consulted (`visibility`), the /ip-context precedent.
+router.get("/:id/upstream", requirePermission("assets", "read"), async (req, res, next) => {
+  try {
+    const id = req.params.id as string;
+    const result = await resolveAssetUpstream(id, {
+      includeFirewall: hasPermission(req, "assetsQuarantine", "read"),
+    });
+    if (!result) throw new AppError(404, "Asset not found");
+    res.json(result);
   } catch (err) { next(err); }
 });
 

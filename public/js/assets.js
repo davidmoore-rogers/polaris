@@ -5756,9 +5756,9 @@ function _assetGeneralTabHTML(a) {
       // "firewall" rather than left showing three "-" rows.
       (a.assetType === "firewall"
         ? ""
-        : viewRow("Last Seen Switch", a.lastSeenSwitch) +
-          viewRow("Last Seen AP", a.lastSeenAp) +
-          '<div class="detail-row"><span class="detail-label">Last Seen Firewall</span><span class="detail-value" id="asset-last-fw-' + escapeHtml(a.id) + '">-</span></div>') +
+        : _upstreamRowHTML("Last Seen Switch", "asset-last-sw-" + a.id, a.lastSeenSwitch) +
+          _upstreamRowHTML("Last Seen AP", "asset-last-ap-" + a.id, a.lastSeenAp) +
+          _upstreamRowHTML("Last Seen Firewall", "asset-last-fw-" + a.id, null)) +
       '<div id="asset-mclag-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       '<div id="asset-contacts-mount-' + escapeHtml(a.id) + '" style="display:contents"></div>' +
       associatedUsersViewHTML(a.associatedUsers) +
@@ -5829,6 +5829,20 @@ function _mountAssetViewAsyncSections(a, dependencies, sources, sightings, manag
         if (t >= bestMs) { bestMs = t; bestFw = s.fortigateDevice; }
       });
       if (bestFw) fwCell.textContent = bestFw;
+    }
+    // Upstream verbs (General tab) — the three rows above name a device by
+    // string; this resolves each to the asset behind it (server-side, through
+    // the same serial/FMG-device-name/hostname precedence dependency
+    // suppression uses) and upgrades the value into a row menu carrying Open
+    // asset + the device's own Open HTTPS / Open SSH. Progressive: the plain
+    // text painted above is the fallback, so a 403, a failure or a name that
+    // resolves to nothing all leave the row exactly as it was.
+    if (a.assetType !== "firewall") {
+      api.assets.upstream(a.id).then(function (res) {
+        _upgradeUpstreamRow("asset-last-sw-" + a.id, res && res.switch, "switch");
+        _upgradeUpstreamRow("asset-last-ap-" + a.id, res && res.ap, "access point");
+        _upgradeUpstreamRow("asset-last-fw-" + a.id, res && res.firewall, "firewall");
+      }).catch(function (err) { console.warn("Failed to resolve upstream devices", err); });
     }
     // MCLAG Peer row (General tab) — FortiSwitch ICL peers, current-state from
     // the switch-controller CMDB. Switch-only, async-fetched, and the row is
@@ -16048,6 +16062,92 @@ function _wireManagementAccessButtons(asset) {
       });
     });
   }
+}
+
+// ─── Upstream devices (Last Seen Switch / AP / Firewall) ─────────────────────
+// These three General-tab rows name the device an asset is connected BEHIND.
+// They were dead text until 2026-09: an operator who wanted the switch an
+// endpoint hangs off had to read the name, go back to the Assets list and find
+// it again — and the switch's own Open HTTPS / Open SSH lived two clicks
+// further on. Each row now carries the same row menu the Assets list puts
+// behind a hostname (UI-CANON.md → "Row context menu"): Open asset, then the
+// device's remote-access verbs from the ONE shared gate `_assetMgmtAccess`, so
+// a FortiSwitch offers exactly what its controller's local-access policy
+// permits and never a verb that would land on a closed port.
+//
+// Rendered in two passes on purpose. The value paints as plain text from the
+// asset row itself, then GET /assets/:id/upstream upgrades the ones that
+// resolved to an asset. A name that resolves to nothing (an unadopted switch, a
+// gate another integration hasn't discovered yet, a decommissioned AP) is a
+// legitimate state, not an error — it just stays text.
+
+/** A detail row whose VALUE cell is addressable, so the async pass can upgrade
+ *  it in place. Same markup as viewRow, minus the copy/mono options none of
+ *  the three upstream rows use. */
+function _upstreamRowHTML(label, cellId, value) {
+  return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span>' +
+    '<span class="detail-value" id="' + escapeHtml(cellId) + '">' + escapeHtml(value || "-") + '</span></div>';
+}
+
+/**
+ * The menu behind one upstream row. "Open asset" first (the reason the row is
+ * clickable at all), then the resolved device's own remote-access verbs —
+ * reused wholesale from `_managementAccessMenuItems`, which reads only
+ * assetType / ipAddress / managementAccess and therefore takes the endpoint's
+ * stub as happily as a full asset row. Nothing to offer ⇒ no menu, and the
+ * caller leaves the row as text.
+ */
+function _upstreamMenuItems(ref) {
+  if (!ref || !ref.id) return [];
+  var items = [{
+    label: "Open asset",
+    title: "Open this device's details",
+    onSelect: function () { openViewModal(ref.id); },
+  }];
+  var mgmt = _managementAccessMenuItems(ref);
+  if (mgmt.length) {
+    items.push({ separator: true });
+    mgmt.forEach(function (m) { items.push(m); });
+  }
+  return items;
+}
+
+/**
+ * Upgrade one already-painted upstream row into a row-menu trigger.
+ *
+ * The device NAME is the trigger; a switch's port half stays outside it as
+ * plain text ("port15" is not a thing you can open), which also keeps the
+ * trigger's accessible name the device rather than "SW-01/port15".
+ */
+function _upgradeUpstreamRow(cellId, entry, kindLabel) {
+  var cell = document.getElementById(cellId);
+  if (!cell || !entry || !entry.name) return;
+  var items = _upstreamMenuItems(entry.asset);
+  // Keep the name the server reports even when nothing resolved — for the
+  // firewall row that IS the fill (the sightings pass above may not have run
+  // for a caller without assetsQuarantine:read).
+  if (!items.length) {
+    cell.textContent = entry.name + (entry.port ? "/" + entry.port : "");
+    return;
+  }
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "row-menu-trigger";
+  btn.setAttribute("aria-haspopup", "menu");
+  btn.setAttribute("aria-expanded", "false");
+  // A switch is often STORED as its serial, so the tooltip carries the
+  // resolved hostname when it differs — the operator gets to know which switch
+  // "S248EPTF9000123" is without the displayed value changing under them.
+  var alt = entry.asset && entry.asset.hostname && entry.asset.hostname !== entry.name
+    ? " (" + entry.asset.hostname + ")" : "";
+  btn.title = "Actions for this " + kindLabel + alt;
+  btn.textContent = entry.name;
+  btn.addEventListener("click", function () {
+    showRowMenu(btn, _upstreamMenuItems(entry.asset), { label: "Actions for " + entry.name });
+  });
+  cell.textContent = "";
+  cell.appendChild(btn);
+  if (entry.port) cell.appendChild(document.createTextNode("/" + entry.port));
 }
 
 // Operator-facing labels for Asset.lastSeenSource — the evidence that
