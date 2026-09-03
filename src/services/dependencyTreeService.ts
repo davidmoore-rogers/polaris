@@ -967,17 +967,51 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
       hostname: true,
       serialNumber: true,
       assetType: true,
+      status: true,
       fortinetTopology: true,
       discoveredByIntegrationId: true,
     },
   });
   if (inventory.length === 0) return { scoped: 0, edgesWritten: 0, unresolved: 0, endpointEdges: 0 };
 
+  // Scope is deliberately computed over the FULL inventory while the GRAPH is
+  // built only from retired-status-free assets. Keeping a decommissioned asset
+  // in scope is what lets the transaction below DELETE its computed rows and
+  // null its layer; dropping it from the graph is what stops it being anyone's
+  // parent. Filtering the read itself would do only the second, leaving a
+  // retired switch's own stale parent rows behind forever, since nothing would
+  // ever bring it back into scope.
   const inScope = integrationId
     ? new Set(inventory.filter(a => a.discoveredByIntegrationId === integrationId).map(a => a.id))
     : new Set(inventory.map(a => a.id));
 
-  const depAssets: DepAsset[] = inventory.map(a => ({
+  // A decommissioned or disabled device is GONE — it must not be a parent.
+  // Rule 10 forces `monitored=false` on both statuses, and `evaluateSuppression`
+  // treats an unmonitored parent as TRANSPARENT: it walks up to the
+  // grandparents and, finding none, returns "ok". A firewall is layer 1 and has
+  // no parents, so a decommissioned gate is a permanent ok vote that vetoes
+  // suppression for every child still pointing at it — and unlike a live gate
+  // it can never go down again, so the veto never lifts. A switch behind a
+  // replaced gate would sit at plain Down forever instead of Dep. Down.
+  // Same statuses the endpoint half already excludes, via the same constant.
+  //
+  // Note `storage` and `quarantined` are deliberately NOT dropped: rule 10 made
+  // them unmonitorable too, but they describe a device that is still present
+  // and still the controller, and quarantine is reversible — retiring the
+  // subtree on a quarantine would rebuild it on release. They inherit the same
+  // transparent-parent "ok" vote, which is a real gap, but the answer there is
+  // in evaluateSuppression rather than in what the graph contains.
+  const active = inventory.filter(
+    a => !(EXCLUDED_LIFECYCLE_STATUSES as readonly string[]).includes(a.status),
+  );
+  if (active.length < inventory.length) {
+    logger.debug(
+      { event: "dependency.retired_excluded", excluded: inventory.length - active.length },
+      "Excluded retired-status infra assets from the dependency graph",
+    );
+  }
+
+  const depAssets: DepAsset[] = active.map(a => ({
     id:               a.id,
     hostname:         a.hostname,
     serialNumber:     a.serialNumber,
@@ -986,7 +1020,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   }));
 
   // Interface edges via the existing inferrer (operates on latest interface samples).
-  const ifResult = await inferInterfaceTopology(inventory.map(a => a.id));
+  const ifResult = await inferInterfaceTopology(active.map(a => a.id));
   const interfaceEdges: DepInterfaceEdge[] = ifResult.edges.map(e => ({
     sourceAssetId: e.sourceAssetId,
     targetAssetId: e.targetAssetId,
@@ -998,7 +1032,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   // grace, not a topology one).
   const lldpRowsRaw = await prisma.assetLldpNeighbor.findMany({
     where: {
-      assetId: { in: inventory.map(a => a.id) },
+      assetId: { in: active.map(a => a.id) },
       matchedAssetId: { not: null },
     },
     select: { assetId: true, matchedAssetId: true, lastSeen: true, source: true },
@@ -1034,7 +1068,7 @@ export async function recomputeDependencyTree(integrationId?: string): Promise<{
   // switch on either side of an AP↔switch LLDP adjacency, where the switch is
   // NOT that AP's controller parent, is bridged behind the AP → its FortiLink
   // edge is suppressed so it depends on the AP via LLDP.
-  const invById = new Map(inventory.map(a => [a.id, a]));
+  const invById = new Map(active.map(a => [a.id, a]));
   const apParentSwitchOf = (a: typeof inventory[number]) =>
     readParentSwitchStamp(a.fortinetTopology).name ?? null;
   /**
