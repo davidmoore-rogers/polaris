@@ -420,6 +420,36 @@ describe("resolveMonitorSettings — tier-3 fallback", () => {
     expect(out.cpuMemoryPolling).toBe("rest_api");
   });
 
+  it("a per-asset REST API credential makes rest_api reachable with no integration token", async () => {
+    // The escape hatch for a fleet where each gate carries its OWN api-user:
+    // the integration token field is fleet-wide by construction ("must be the
+    // same across all managed FortiGates"), so a per-gate token can only live
+    // on a Credential the operator selects on the asset. Discarding the method
+    // here would throw away the fix for the very condition being detected.
+    (prisma.integration.findUnique as any).mockResolvedValue({
+      config: { monitorSettings: TUNED_TIER },   // proxy transport, NO token
+      type: "fortimanager",
+    });
+    (prisma.monitorClassOverride.findFirst as any).mockResolvedValue(null);
+
+    const base = {
+      assetType: "firewall", discoveredByIntegrationId: "fmg-cred", discoveredByIntegrationType: "fortimanager",
+      monitorIntervalSec: null, cpuMemoryIntervalSec: null, temperatureIntervalSec: null, systemInfoIntervalSec: null, probeTimeoutMs: null,
+      cpuMemoryPolling: "rest_api", interfacesPolling: "rest_api",
+    } as const;
+
+    // Without a credential the stored method is skipped, as before.
+    const bare = await resolveMonitorSettings({ ...base });
+    expect(bare.cpuMemoryPolling).toBe("disabled");
+    expect(bare.interfacesPolling).toBe("disabled");
+
+    // With one it stands — and only for the stream carrying it, since a
+    // per-gate token is selected per stream.
+    const withCred = await resolveMonitorSettings({ ...base, cpuMemoryCredentialId: "cred-1" });
+    expect(withCred.cpuMemoryPolling).toBe("rest_api");
+    expect(withCred.interfacesPolling).toBe("disabled");
+  });
+
   it("a managed switch keeps its controller-table probe with no token", async () => {
     // The one FortiOS read the proxy serves on FMG's own credential: a managed
     // switch/AP's up/down comes off the PARENT gate's controller table via

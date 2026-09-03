@@ -198,6 +198,7 @@ import { propagateAfterStatusChange } from "./dependencyTreeService.js";
 import { triggerRetryAfterStatusChange } from "./reservationService.js";
 import { recordIpHistoryEntries } from "./assetIpHistoryService.js";
 import { snmpTicksToSeconds, formatUptimeLong } from "../utils/uptime.js";
+import { pickRestApiCredential, restApiCredentialAuth, type CredentialLike } from "../utils/fortinetRestCredential.js";
 
 export interface ProbeResult {
   success: boolean;
@@ -1321,6 +1322,15 @@ export interface AssetMonitorContext {
   interfacesMibId?:          string | null;
   lldpMibId?:                string | null;
   processesMibId?:           string | null;
+  // Per-stream credential ids on the asset itself. The resolver reads these
+  // for ONE decision: whether a `rest_api` it would otherwise discard as
+  // unreachable has its own token to authenticate with. Which credential the
+  // collectors actually USE is resolved from the loaded relations, not here.
+  responseTimeCredentialId?: string | null;
+  cpuMemoryCredentialId?:    string | null;
+  temperatureCredentialId?:  string | null;
+  interfacesCredentialId?:   string | null;
+  lldpCredentialId?:         string | null;
 }
 
 /**
@@ -1399,6 +1409,22 @@ type PollingField =
   | "responseTimePolling" | "cpuMemoryPolling" | "temperaturePolling"
   | "interfacesPolling" | "lldpPolling" | "storagePolling"
   | "processesPolling" | "eventLogPolling";
+
+/**
+ * The per-asset credential id belonging to one polling field, if that stream
+ * has one. Explicit switch rather than string surgery on the field name so a
+ * renamed column fails the type check instead of silently resolving to null.
+ */
+function assetStreamCredentialId(asset: AssetMonitorContext, field: PollingField): string | null {
+  switch (field) {
+    case "responseTimePolling": return asset.responseTimeCredentialId ?? null;
+    case "cpuMemoryPolling":    return asset.cpuMemoryCredentialId    ?? null;
+    case "temperaturePolling":  return asset.temperatureCredentialId  ?? null;
+    case "interfacesPolling":   return asset.interfacesCredentialId   ?? null;
+    case "lldpPolling":         return asset.lldpCredentialId         ?? null;
+    default:                    return null;
+  }
+}
 
 const POLLING_FIELDS: PollingField[] = [
   "responseTimePolling", "cpuMemoryPolling", "temperaturePolling",
@@ -1550,10 +1576,20 @@ async function resolveMonitorSettingsCore(asset: AssetMonitorContext): Promise<R
     // default and keeps throwing 409 on every tick, invisibly. Non-destructive:
     // the stored value is untouched and returns the moment REST is reachable
     // again.
+    // ...unless the stream carries its OWN REST API credential. A per-asset
+    // token is precisely what makes a FortiOS call possible where the
+    // integration fleet-wide one is absent, so discarding the method here
+    // would throw away the operator fix for the very condition being
+    // detected — and do it silently, which is what this skip was added to
+    // stop happening. The credential type is not known without a DB read
+    // (the resolver is on the hot path and takes none), so a wrongly-typed
+    // credential surfaces as a collection error naming the missing token
+    // rather than as a stream that quietly resolves elsewhere.
+    const ownRestToken = assetStreamCredentialId(asset, field) != null;
     const ok = (m: PollingMethod) => {
       if (!isPollingMethodCompatible(sourceKind, m)) return false;
       if (!isMethodValidForStream(stream, m)) return false;
-      if (m === "rest_api" && fortiosRestUnavailable && !fortiosRestUsable(stream, asset.assetType)) return false;
+      if (m === "rest_api" && fortiosRestUnavailable && !ownRestToken && !fortiosRestUsable(stream, asset.assetType)) return false;
       return true;
     };
     let resolved: PollingMethod | null = defaultPollingForSource(sourceKind, stream, {
@@ -1846,9 +1882,10 @@ async function collectIpsecOnlyFortinetSafe(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
   timeoutMs?: number,
+  credential?: CredentialLike | null,
 ): Promise<IpsecTunnelSample[] | undefined> {
   try {
-    const fg = buildFortinetConfig(host, integration);
+    const fg = buildFortinetConfig(host, integration, credential);
     if ("error" in fg) return undefined;
     return await collectIpsecTunnelsFortinet(fg, timeoutMs);
   } catch {
@@ -1996,7 +2033,7 @@ export async function probeAsset(
       // they query the parent FortiGate rather than the asset's own IP.)
       // Manual REST API targets pull from a stored "restapi"-typed credential.
       if (isFortinetSrc && integration) {
-        const result = await probeFortinet(targetIp, integration as any, dispatchStart, timeoutMs);
+        const result = await probeFortinet(targetIp, integration as any, dispatchStart, timeoutMs, effectiveRTCred);
         // Proxy mode only: after a successful FortiGate probe, pre-warm the
         // switch + AP controller-inventory cache so children that fire within
         // the 30 s TTL window get a free cache hit instead of a separate FMG
@@ -2102,6 +2139,7 @@ async function probeFortinet(
   integration: { type: string; config: Record<string, unknown> },
   start: number,
   timeoutMs: number,
+  credential?: CredentialLike | null,
 ): Promise<ProbeResult> {
   // SNMP routing is handled by the dispatcher in probeAsset via the
   // resolved responseTimePolling field. By the time we get here the polling
@@ -2109,7 +2147,7 @@ async function probeFortinet(
   // firewalls hit this function.
 
   // Same credential/verifySsl assembly the FortiOS collectors use.
-  const fgConfig = buildFortinetConfig(host, integration);
+  const fgConfig = buildFortinetConfig(host, integration, credential);
   if ("error" in fgConfig) return finish(start, false, fgConfig.error);
 
   try {
@@ -4586,7 +4624,15 @@ export async function collectTelemetry(assetId: string, preloaded?: TelemetryAss
       if (asset.assetType === "access_point") {
         return await collectTelemetryFortiapRest(asset, integration as any, telemetryTimeout);
       }
-      const data = await collectTelemetryFortinet(targetIp, integration as any, telemetryTimeout);
+      // Per-gate token, when the operator selected one on this stream. The
+      // FortiAP branch above deliberately gets none: that read goes to the
+      // PARENT gate controller table, so it authenticates as the parent.
+      const data = await collectTelemetryFortinet(
+        targetIp,
+        integration as any,
+        telemetryTimeout,
+        pickRestApiCredential(asset.cpuMemoryCredential, asset.monitorCredential),
+      );
       return { supported: true, data };
     }
     if (polling === "snmp") {
@@ -4686,7 +4732,11 @@ export async function collectHardwareSensors(assetId: string, preloaded?: Teleme
       if (asset.assetType === "access_point") {
         return await collectHardwareSensorsFortiapRest(asset, integration as any, timeoutMs);
       }
-      const fg = buildFortinetConfig(targetIp, integration as any);
+      const fg = buildFortinetConfig(
+        targetIp,
+        integration as any,
+        pickRestApiCredential(asset.temperatureCredential, asset.monitorCredential),
+      );
       if ("error" in fg) throw new AppError(409, fg.error);
       const data = await collectHardwareSensorsFortinet(fg, timeoutMs);
       return { supported: true, data };
@@ -4844,7 +4894,7 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
         includeIpsec: wantedTunnels.length > 0,
         includeLldp:  false,
         timeoutMs:    sysInfoTimeout,
-      });
+      }, pickRestApiCredential(asset.interfacesCredential, asset.monitorCredential));
     } else if (polling === "snmp") {
       const effectiveIfacesCred = asset.interfacesCredential ?? asset.monitorCredential;
       const resolvedIfCfg = await resolveSnmpConfigForStream(effectiveIfacesCred, effective.interfacesCredentialId, isFortinetSrc, integration);
@@ -4876,7 +4926,7 @@ export async function collectFastFiltered(assetId: string): Promise<CollectionRe
         // Skip managed FortiSwitches / FortiAPs â€” not directly REST-able, no IPsec.
         // See the matching guard + rationale in collectSystemInfo.
         if (!isManagedSwitchOrAp && wantedTunnels.length > 0) {
-          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
+          const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout, pickRestApiCredential(asset.interfacesCredential, asset.monitorCredential));
           if (ipsec !== undefined) full.ipsecTunnels = ipsec;
         }
       }
@@ -5140,6 +5190,8 @@ async function overlayCrossTransportLldp(
     isFortinetSrc: boolean;
     isManagedSwitchOrAp: boolean;
     sysInfoTimeout: number;
+    /** The LLDP stream own per-gate REST token, when one is selected. */
+    restCredential?: CredentialLike | null;
   },
 ): Promise<void> {
   const { targetIp, integration, interfacesPolling, lldpPolling, lldpSnmpCfg, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout } = opts;
@@ -5153,7 +5205,7 @@ async function overlayCrossTransportLldp(
     }
   } else if (lldpPolling === "rest_api" && interfacesPolling === "snmp" && isFortinetSrc && integration && !isManagedSwitchOrAp) {
     const endOverlay = startPhase("systeminfo.lldp_overlay_rest");
-    const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, sysInfoTimeout).catch(() => undefined);
+    const neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, sysInfoTimeout, opts.restCredential).catch(() => undefined);
     endOverlay({ neighbors: neighbors?.length ?? null });
     if (neighbors !== undefined) {
       data.lldpNeighbors = neighbors;
@@ -5181,6 +5233,8 @@ async function applyFortilinkLldpExclusion(
     isFortinetSrc: boolean;
     isManagedSwitchOrAp: boolean;
     sysInfoTimeout: number;
+    /** The interfaces stream own per-gate REST token, when one is selected. */
+    restCredential?: CredentialLike | null;
   },
 ): Promise<void> {
   const { targetIp, integration, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout } = opts;
@@ -5195,7 +5249,7 @@ async function applyFortilinkLldpExclusion(
   let fortilinkSet: Set<string> | null =
     data.fortilinkInterfaces !== undefined ? new Set(data.fortilinkInterfaces) : null;
   if (fortilinkSet === null) {
-    const fg = buildFortinetConfig(targetIp, integration as any);
+    const fg = buildFortinetConfig(targetIp, integration as any, opts.restCredential);
     fortilinkSet = "error" in fg ? new Set() : await fetchFortilinkInterfaceSet(fg, sysInfoTimeout).catch(() => new Set<string>());
   }
   const before = data.lldpNeighbors.length;
@@ -5319,7 +5373,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           // guard the REST telemetry / system-info / fast-filtered paths already use.
           if (!isManagedSwitchOrAp) {
             const endIpsec = startPhase("systeminfo.snmp.ipsec_overlay_rest");
-            const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout);
+            const ipsec = await collectIpsecOnlyFortinetSafe(targetIp, integration as any, sysInfoTimeout, pickRestApiCredential(asset.interfacesCredential, asset.monitorCredential));
             endIpsec({ tunnels: ipsec?.length ?? null });
             if (ipsec !== undefined) data.ipsecTunnels = ipsec;
           }
@@ -5336,13 +5390,14 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
           // Firewall-class only, matching where the SNMP branch gates it.
           includeArp:   asset.assetType === "firewall",
           timeoutMs:    sysInfoTimeout,
-        });
+        }, pickRestApiCredential(asset.interfacesCredential, asset.monitorCredential));
         endRest({ interfaces: data.interfaces.length, ipsec: data.ipsecTunnels?.length ?? null, lldp: data.lldpNeighbors?.length ?? null, perfSla: data.perfSla?.length ?? null, sdwanRules: data.sdwanRules?.length ?? null });
       }
 
       await overlayCrossTransportLldp(data, {
         targetIp, integration, interfacesPolling, lldpPolling, lldpSnmpCfg,
         isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout,
+        restCredential: pickRestApiCredential(asset.lldpCredential, asset.monitorCredential),
       });
       // Storage stream is independent of interfaces. Storage rows only come
       // from the SNMP path (HOST-RESOURCES-MIB + vendor disk fallback); when
@@ -5354,6 +5409,7 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
       }
       await applyFortilinkLldpExclusion(data, {
         targetIp, integration, isFortinetSrc, isManagedSwitchOrAp, sysInfoTimeout,
+        restCredential: pickRestApiCredential(asset.interfacesCredential, asset.monitorCredential),
       });
       return { supported: true, data };
     }
@@ -5399,18 +5455,44 @@ export async function collectSystemInfo(assetId: string): Promise<CollectionResu
 // returns the cumulative tx/rx counters and link state. There's no real
 // notion of mountable storage on a FortiGate, so the storage list stays empty.
 
-function buildFortinetConfig(host: string, integration: { type: string; config: Record<string, unknown> }): FortiGateConfig | { error: string } {
+/**
+ * Assemble the auth for a direct FortiOS REST call against `host`.
+ *
+ * Two token sources, in this order:
+ *
+ *   1. `credential` — a `restapi`-typed Credential the operator selected on
+ *      THIS asset's stream. Per-gate by nature, and the only way to poll a
+ *      fleet where every gate carries its own api-user.
+ *   2. the integration's own stored token — fleet-wide by construction (the
+ *      FMG Monitoring tab says so in as many words), which is why (1) exists.
+ *
+ * The credential supplies auth + port + TLS verification only; `host` is
+ * always the caller's, i.e. the asset's own address. See
+ * utils/fortinetRestCredential.ts for why its baseUrl host is deliberately
+ * not honoured here.
+ */
+function buildFortinetConfig(
+  host: string,
+  integration: { type: string; config: Record<string, unknown> },
+  credential?: CredentialLike | null,
+): FortiGateConfig | { error: string } {
   const cfg = integration.config || {};
+  const cred = pickRestApiCredential(credential);
+  if (cred) {
+    const auth = restApiCredentialAuth(cred.config);
+    if ("error" in auth) return auth;
+    return { host, ...auth };
+  }
   let apiUser  = "";
   let apiToken = "";
   if (integration.type === "fortimanager") {
     apiUser  = String(cfg.fortigateApiUser  || "");
     apiToken = String(cfg.fortigateApiToken || "");
-    if (!apiToken) return { error: "FortiManager direct-mode API token not configured" };
+    if (!apiToken) return { error: "No FortiGate API token: this FortiManager integration has none configured (Monitoring tab), and this asset's stream has no REST API credential selected" };
   } else {
     apiUser  = String(cfg.apiUser  || "");
     apiToken = String(cfg.apiToken || "");
-    if (!apiToken) return { error: "FortiGate API token not configured" };
+    if (!apiToken) return { error: "No FortiGate API token: this integration has none configured, and this asset's stream has no REST API credential selected" };
   }
   return {
     host,
@@ -5420,8 +5502,8 @@ function buildFortinetConfig(host: string, integration: { type: string; config: 
   };
 }
 
-async function collectTelemetryFortinet(host: string, integration: { type: string; config: Record<string, unknown> }, timeoutMs?: number): Promise<TelemetrySample> {
-  const fg = buildFortinetConfig(host, integration);
+async function collectTelemetryFortinet(host: string, integration: { type: string; config: Record<string, unknown> }, timeoutMs?: number, credential?: CredentialLike | null): Promise<TelemetrySample> {
+  const fg = buildFortinetConfig(host, integration, credential);
   if ("error" in fg) throw new AppError(409, fg.error);
 
   // /api/v2/monitor/system/resource/usage returns a `results` object keyed by
@@ -5707,8 +5789,9 @@ async function collectSystemInfoFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
   opts: { includeIpsec?: boolean; includeLldp?: boolean; includeSdwan?: boolean; includeArp?: boolean; timeoutMs?: number } = {},
+  credential?: CredentialLike | null,
 ): Promise<SystemInfoSample> {
-  const fg = buildFortinetConfig(host, integration);
+  const fg = buildFortinetConfig(host, integration, credential);
   if ("error" in fg) throw new AppError(409, fg.error);
   const timeoutMs = opts.timeoutMs;
 
@@ -5835,8 +5918,9 @@ export async function collectLldpOnlyFortinet(
   host: string,
   integration: { type: string; config: Record<string, unknown> },
   timeoutMs?: number,
+  credential?: CredentialLike | null,
 ): Promise<LldpNeighborSample[] | undefined> {
-  const fg = buildFortinetConfig(host, integration);
+  const fg = buildFortinetConfig(host, integration, credential);
   if ("error" in fg) throw new AppError(409, fg.error);
   return await collectLldpNeighborsFortinet(fg, timeoutMs).catch(() => undefined);
 }
@@ -11865,7 +11949,7 @@ export async function runLldpFor(assetId: string, labels: WorkItemLabels): Promi
         return "failure";
       }
       sourceLabel = "fortios";
-      neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, lldpTimeout).catch(() => undefined);
+      neighbors = await collectLldpOnlyFortinet(targetIp, integration as any, lldpTimeout, pickRestApiCredential(asset.lldpCredential, asset.monitorCredential)).catch(() => undefined);
     } else if (lldpPolling === "snmp") {
       // Per-stream credential wins, then asset default, then integration fallback.
       const effectiveLldpCred = asset.lldpCredential ?? asset.monitorCredential;

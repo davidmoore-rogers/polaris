@@ -7173,7 +7173,7 @@ function credRestApiForm(cfg) {
   return (
     '<div class="form-group"><label>Base URL</label>' +
       '<input type="text" id="f-rest-baseurl" value="' + escapeHtml(cfg.baseUrl || "") + '" placeholder="https://device.example/">' +
-      '<p class="hint">Full URL the credential authenticates against, including scheme. Trailing slashes are normalized.</p>' +
+      '<p class="hint">Full URL the credential authenticates against, including scheme. Trailing slashes are normalized. ' + 'This is what <strong>Test</strong> dials. When this credential is selected on a monitored device stream, only the token, ' + 'the <em>port</em> and the TLS setting are used — the request goes to that device’s own address, not to this host.</p>' +
     '</div>' +
     '<div class="form-group"><label>API Token</label>' +
       '<input type="password" id="f-rest-token" value="' + escapeHtml(cfg.apiToken || "") + '">' +
