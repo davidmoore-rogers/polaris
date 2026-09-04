@@ -691,6 +691,32 @@
             <code>{ lastDiscoveredAt, created, updated, released, skipped }</code>.
             <code>400</code> for manually-created networks or non-Fortinet integrations.</p>
         </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-post">POST</span> /subnets/:id/archive
+            <span class="gate">subnets:fullwrite</span></div>
+          <p>Retire a network: its definition and every reservation it held are copied
+            into the archive, then the live row is deleted — which frees the CIDR so a
+            replacement FortiGate serving the same address space can be recorded.
+            Returns <code>{ archivedSubnetId, cidr, reservationCount }</code>. Unlike
+            <code>DELETE</code>, active reservations do not block it: nothing is
+            destroyed, only moved.</p>
+        </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-get">GET</span> /subnets/archived
+            <span class="gate">subnets:read</span></div>
+          <p>Retired networks, newest first:
+            <code>{ archivedSubnets, total, limit, offset }</code>. Filters
+            <code>?cidr=</code> (substring), <code>?blockId=</code>,
+            <code>?fortigateSerial=</code>. Read <code>total</code> for the
+            unpaged match count. Default <code>limit</code> 50, max 200.</p>
+        </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-get">GET</span> /subnets/archived/:id
+            <span class="gate">subnets:read</span></div>
+          <p>One retirement with every reservation it held, ordered by address.
+            Archived entries are read-only — they exist for review, and no write
+            path can reach them.</p>
+        </div>
       </section>
 
       <section id="ipam-reservations">

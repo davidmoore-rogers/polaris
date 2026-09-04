@@ -851,6 +851,9 @@ const api = {
     merge:  (id, body) => request("POST", `/conflicts/${id}/merge`, body),
     // duplicate-IP conflicts only — body { assetId, ipAddress }
     reassignIp: (id, body) => request("POST", `/conflicts/${id}/reassign-ip`, body),
+    // subnet chassis-replacement conflicts only (business rule 41)
+    chassisDiff: (id) => request("GET", `/conflicts/${id}/chassis-diff`),
+    migrateReservations: (id, body) => request("POST", `/conflicts/${id}/migrate-reservations`, body),
   },
   events: {
     list: (params) => request("GET", "/events" + toQuery(params)),

@@ -860,6 +860,30 @@ function getAlertsFormData() {
         });
       });
 
+      // Chassis-replacement: load the per-address diff on demand. It is a
+      // separate read because discovery syncs subnets in Phase 1 and
+      // reservations in Phases 3–5, so it cannot be snapshotted at raise time
+      // without comparing the old chassis against itself.
+      body.querySelectorAll("[data-chassis-diff]").forEach(function (el) {
+        el.addEventListener("click", async function () {
+          var id = el.getAttribute("data-chassis-diff");
+          var panel = body.querySelector('[data-chassis-diff-panel="' + id + '"]');
+          if (!panel) return;
+          if (panel.innerHTML) { panel.innerHTML = ""; el.textContent = "Review reservations"; return; }
+          el.disabled = true;
+          try {
+            var res = await api.conflicts.chassisDiff(id);
+            panel.innerHTML = renderChassisDiffPanel(id, res.lines || []);
+            el.textContent = "Hide reservations";
+            bindChassisMigrate(body, panel);
+          } catch (err) {
+            showToast(err.message, "error");
+          } finally {
+            el.disabled = false;
+          }
+        });
+      });
+
       // Bind accept/reject/merge buttons
       body.querySelectorAll("[data-conflict-action]").forEach(function (el) {
         el.addEventListener("click", async function () {
@@ -867,9 +891,12 @@ function getAlertsFormData() {
           var action = el.getAttribute("data-conflict-action");
           el.disabled = true;
           try {
+            var kind = el.getAttribute("data-conflict-kind");
             if (action === "accept") {
               await api.conflicts.accept(id);
-              showToast("Conflict accepted — discovered values applied");
+              showToast(kind === "subnet"
+                ? "New FortiGate chassis adopted for this network"
+                : "Conflict accepted — discovered values applied");
             } else if (action === "merge") {
               var card = el.closest(".conflict-card");
               var fieldWinners = {};
@@ -886,7 +913,9 @@ function getAlertsFormData() {
               showToast("Conflict merged with selected values");
             } else {
               await api.conflicts.reject(id);
-              showToast("Conflict rejected — existing values kept");
+              showToast(kind === "subnet"
+                ? "Dismissed — this chassis change won't be reported again"
+                : "Conflict rejected — existing values kept");
             }
             var scrollTop = body.scrollTop;
             await loadConflicts(true);
@@ -939,7 +968,141 @@ function getAlertsFormData() {
 
   function renderConflictCard(c) {
     if (c.entityType === "asset") return renderAssetConflictCard(c);
+    if (c.entityType === "subnet") return renderSubnetConflictCard(c);
     return renderReservationConflictCard(c);
+  }
+
+  // Copy the checked addresses onto the new gate. Deliberately does NOT close
+  // the conflict — an operator may copy a few, look again, and copy more — so
+  // the panel is reloaded rather than the whole list.
+  function bindChassisMigrate(body, panel) {
+    var btn = panel.querySelector("[data-chassis-migrate]");
+    if (!btn) return;
+    btn.addEventListener("click", async function () {
+      var id = btn.getAttribute("data-chassis-migrate");
+      var ips = Array.prototype.slice
+        .call(panel.querySelectorAll("[data-chassis-ip]"))
+        .filter(function (cb) { return cb.checked; })
+        .map(function (cb) { return cb.getAttribute("data-chassis-ip"); });
+      if (!ips.length) { showToast("Select at least one address to copy", "error"); return; }
+      btn.disabled = true;
+      try {
+        var out = await api.conflicts.migrateReservations(id, { ips: ips });
+        var msg = "Copied " + (out.created + out.updated) + " reservation(s) to the new gate";
+        if (out.queuedForPush) msg += " — " + out.queuedForPush + " queued for push";
+        if (out.skipped && out.skipped.length) msg += "; " + out.skipped.length + " skipped";
+        showToast(msg);
+        var res = await api.conflicts.chassisDiff(id);
+        panel.innerHTML = renderChassisDiffPanel(id, res.lines || []);
+        bindChassisMigrate(body, panel);
+      } catch (err) {
+        showToast(err.message, "error");
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // Subnet chassis-replacement conflict (business rule 41): the FortiGate
+  // serving this subnet answered with a serial that is neither the stored one
+  // nor any member of its HA cluster, so the physical box was swapped.
+  //
+  // This renderer exists because the dispatcher above falls through to the
+  // RESERVATION card for any non-asset entity type. A subnet conflict has no
+  // `c.reservation`, so it came out as a blank "(full subnet)" card with four
+  // dashes and two working buttons — an operator told nothing about what
+  // happened, but able to resolve it anyway.
+  //
+  // The per-address migration picker is loaded on demand (the diff is a
+  // separate read — see GET /conflicts/:id/chassis-diff), so the card starts
+  // as the identity summary and expands.
+  function renderSubnetConflictCard(c) {
+    var p = c.proposedSubnetFields || {};
+    var subnet = c.subnet || {};
+    var isResolved = c.status !== "pending";
+    var cidr = p.cidr || subnet.cidr || "(unknown subnet)";
+    var dash = '<span style="color:var(--color-text-tertiary);font-style:italic">—</span>';
+    var val = function (v) { return v ? escapeHtml(String(v)) : dash; };
+
+    var rows = [
+      ["Chassis serial", val(p.oldSerial), "<strong>" + val(p.newSerial) + "</strong>"],
+      ["FortiGate name", val(p.oldDeviceName), val(p.newDeviceName)],
+    ].map(function (r) {
+      return '<tr><td class="conflict-field">' + r[0] + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td></tr>';
+    }).join("");
+
+    var actions = isResolved
+      ? resolvedActionsHtml(c)
+      : '<button class="btn btn-secondary btn-sm" data-conflict-action="reject" data-conflict-id="' + c.id + '" data-conflict-kind="subnet">Dismiss</button>' +
+        '<button class="btn btn-secondary btn-sm" data-chassis-diff="' + c.id + '">Review reservations</button>' +
+        '<button class="btn btn-primary btn-sm" data-conflict-action="accept" data-conflict-id="' + c.id + '" data-conflict-kind="subnet">Adopt new chassis</button>';
+
+    return '<div class="conflict-card">' +
+      '<div class="conflict-card-header">' +
+        '<span class="badge badge-conflict">Chassis replaced</span>' +
+        '<strong>' + escapeHtml(cidr) + '</strong>' +
+        '<span class="conflict-card-subnet">' + escapeHtml(subnet.name || "") + '</span>' +
+      '</div>' +
+      '<div style="padding:0.5rem 0.75rem;color:var(--color-text-secondary);font-size:0.8125rem">' +
+        'A different FortiGate now serves this network. Its previous reservations are ' +
+        'archived — nothing was changed or removed.' +
+      '</div>' +
+      '<div class="conflict-table" style="padding:0">' +
+        '<table><thead><tr>' +
+          '<th class="conflict-field">Field</th>' +
+          '<th>Previous gate</th>' +
+          '<th>Now serving</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table>' +
+      '</div>' +
+      '<div data-chassis-diff-panel="' + c.id + '"></div>' +
+      '<div class="conflict-card-actions">' + actions + '</div>' +
+    '</div>';
+  }
+
+  // The archived old chassis's reservations against what the new gate reports.
+  // Only `manual` / `dhcp_reservation` lines can be carried forward; the rest
+  // are shown with why, because hiding one leaves an operator hunting for an
+  // address they remember.
+  var CHASSIS_REFUSAL_LABEL = {
+    "device-owned": "on the device",
+    "observed": "observed only",
+    "device-managed": "managed device",
+  };
+
+  function renderChassisDiffPanel(id, lines) {
+    if (!lines.length) {
+      return '<div style="padding:0.5rem 0.75rem;color:var(--color-text-tertiary);font-size:0.8125rem">' +
+        'Neither gate reports any reservations for this network.</div>';
+    }
+    var verdictLabel = {
+      "only-old": "Missing on the new gate",
+      "only-new": "New gate only",
+      "differs": "Differs",
+      "same": "Matches",
+    };
+    var rows = lines.map(function (l) {
+      var ip = l.ip || "(full subnet)";
+      var pick = l.migratable
+        ? '<input type="checkbox" data-chassis-ip="' + escapeHtml(ip) + '"' +
+          (l.verdict === "only-old" || l.verdict === "differs" ? " checked" : "") + ">"
+        : '<span style="color:var(--color-text-tertiary);font-size:0.75rem">' +
+          escapeHtml(CHASSIS_REFUSAL_LABEL[l.notMigratableReason] || "—") + "</span>";
+      var oldSide = l.old ? escapeHtml(l.old.hostname || l.old.ipAddress || "") : "—";
+      var newSide = l.new ? escapeHtml(l.new.hostname || l.new.ipAddress || "") : "—";
+      return "<tr><td>" + pick + "</td><td><strong>" + escapeHtml(ip) + "</strong></td>" +
+        "<td>" + oldSide + "</td><td>" + newSide + "</td>" +
+        '<td style="font-size:0.75rem;color:var(--color-text-secondary)">' +
+        escapeHtml(verdictLabel[l.verdict] || l.verdict) + "</td></tr>";
+    }).join("");
+
+    return '<div class="conflict-table" style="padding:0">' +
+      '<table><thead><tr><th style="width:34px"></th><th>Address</th>' +
+      "<th>Previous gate</th><th>Now serving</th><th>Status</th></tr></thead>" +
+      "<tbody>" + rows + "</tbody></table></div>" +
+      '<div style="padding:0.5rem 0.75rem;display:flex;gap:0.5rem;align-items:center">' +
+      '<button class="btn btn-primary btn-sm" data-chassis-migrate="' + id + '">Copy selected to the new gate</button>' +
+      '<span style="color:var(--color-text-tertiary);font-size:0.75rem">' +
+      "Copied reservations are queued for push when DHCP push is enabled." +
+      "</span></div>";
   }
 
   function renderReservationConflictCard(c) {
