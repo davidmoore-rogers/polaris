@@ -7,6 +7,7 @@ A network management tool. Auto-discovery from FortiManager / FortiGate / Window
 ### IP management
 - **Blocks, subnets, reservations** with conflict detection, VLAN tagging, next-available allocation, and per-block / per-subnet utilization.
 - **Bulk site allocation** — save a multi-subnet template (e.g. `Hardware /25`, `Users /25`, `Voice /26`, plus `skip` entries to leave gaps) and stamp it out for each site. Allocations are anchor-aligned (default `/24`, per-user) and all-or-nothing inside one transaction.
+- **Excluded address space** — some subnets are the same at every site (a management VLAN, an out-of-band range), and a Polaris network is one row per CIDR, so the first site discovered claims it and every other site collides with it. Naming such a CIDR on IPAM → Networks → **Exclusions** keeps it out of the networks list entirely: discovery never records it, auto-allocate steps over it, and it can no longer raise a replaced-chassis conflict every run because each site’s gate reports a different serial for it. Networks already in the list are reported, never deleted — the exclusion is a statement about what gets recorded from now on.
 - **Stale reservation alerts** — DHCP reservations whose target client hasn't actively held the IP within a configurable window surface in a sidebar badge with snooze / permanent-ignore controls.
 - **Global typeahead search** — the header search classifies IP / CIDR / MAC / text and returns blocks, subnets, reservations, assets, and individual IPs in one dropdown. Scope prefixes (`block:` / `b:`, `network:` / `n:`, `asset:` / `a:`, `reservation:` / `r:`, `map:` / `m:`) constrain the search to one group and lift the default 8-per-group cap to 200 results.
 
@@ -230,7 +231,7 @@ curl examples against the install's own base URL.
 | Resource | Base path |
 |---|---|
 | IP Blocks | `/blocks` |
-| Subnets | `/subnets` (incl. `/next-available`, `/bulk-allocate`) |
+| Subnets | `/subnets` (incl. `/next-available`, `/bulk-allocate`, `/exclusions`, `/archived`) |
 | Reservations | `/reservations` (incl. `/alerts`, `/stale-settings`) |
 | Allocation Templates | `/allocation-templates` |
 | Assets | `/assets` (incl. monitoring, quarantine, snmp-walk) |
