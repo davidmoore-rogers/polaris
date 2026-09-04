@@ -87,27 +87,27 @@ describe("_addAssetMenuItems — the two keys are independent", () => {
   it("offers everything to a caller holding both", () => {
     withPerms({ assets: true, scan: "write" });
     expect(labels(addAssetMenuItems())).toEqual([
-      "Single asset…",
-      "New discovery…",
-      "Saved discoveries…",
+      "Single asset",
+      "New discovery",
+      "Saved discoveries",
     ]);
   });
 
   it("offers only the asset form when networkScan is withheld", () => {
     withPerms({ assets: true, scan: "none" });
-    expect(labels(addAssetMenuItems())).toEqual(["Single asset…"]);
+    expect(labels(addAssetMenuItems())).toEqual(["Single asset"]);
   });
 
   it("offers only Discovery when assets:write is withheld", () => {
     // Not a hypothetical: adoption is chained on assets:write, so a role may
     // legitimately be allowed to scan and not to create.
     withPerms({ assets: false, scan: "write" });
-    expect(labels(addAssetMenuItems())).toEqual(["New discovery…", "Saved discoveries…"]);
+    expect(labels(addAssetMenuItems())).toEqual(["New discovery", "Saved discoveries"]);
   });
 
   it("gives a read-level scanner the list but not the builder", () => {
     withPerms({ assets: false, scan: "read" });
-    expect(labels(addAssetMenuItems())).toEqual(["Saved discoveries…"]);
+    expect(labels(addAssetMenuItems())).toEqual(["Saved discoveries"]);
   });
 
   it("returns nothing at all with no grants, so the menu is never popped empty", () => {
@@ -121,12 +121,12 @@ describe("_addAssetMenuItems — shape", () => {
     withPerms({ assets: true, scan: "none" });
     const items = addAssetMenuItems();
     expect(items.some((i) => i.disabled)).toBe(false);
-    expect(items.map((i) => i.label)).not.toContain("New discovery…");
+    expect(items.map((i) => i.label)).not.toContain("New discovery");
   });
 
   it("degrades to the asset form when the discovery module is not loaded", () => {
     withPerms({ assets: true, scan: "write", moduleLoaded: false });
-    expect(labels(addAssetMenuItems())).toEqual(["Single asset…"]);
+    expect(labels(addAssetMenuItems())).toEqual(["Single asset"]);
   });
 
   it("gives every row an onSelect and a title", () => {

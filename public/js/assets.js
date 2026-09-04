@@ -1952,7 +1952,7 @@ function _addAssetMenuItems() {
   var items = [];
   if (canManageAssets()) {
     items.push({
-      label: "Single asset…",
+      label: "Single asset",
       title: "Add one asset by hand",
       onSelect: function () { openCreateModal(); },
     });
@@ -1960,14 +1960,14 @@ function _addAssetMenuItems() {
   var D = window.PolarisAssetDiscovery;
   if (D && permAtLeast("networkScan", "write")) {
     items.push({
-      label: "New discovery…",
+      label: "New discovery",
       title: "Scan IP ranges for devices that answer, then choose what to add",
       onSelect: function () { D.open(); },
     });
   }
   if (D && permAtLeast("networkScan", "read")) {
     items.push({
-      label: "Saved discoveries…",
+      label: "Saved discoveries",
       title: "Re-run, edit or export a saved Discovery",
       onSelect: function () { D.openList(); },
     });

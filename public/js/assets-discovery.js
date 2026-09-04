@@ -1165,7 +1165,7 @@
     var body;
     if (!scans.length) {
       body = '<p class="hint" style="margin:0">No Discoveries saved yet. ' +
-        (permAtLeast("networkScan", "write") ? 'Use "+ Add Asset(s) → New discovery…" to create one.' : "") + '</p>';
+        (permAtLeast("networkScan", "write") ? 'Use "+ Add Asset(s) → New discovery" to create one.' : "") + '</p>';
     } else {
       body = '<div class="table-wrapper"><table class="data-table"><thead><tr>' +
         '<th>Name</th><th>Targets</th><th>Last run</th><th>Result</th>' +
