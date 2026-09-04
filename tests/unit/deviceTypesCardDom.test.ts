@@ -15,9 +15,19 @@
  *   - PREVIEW SENDS THE DRAFT, NOT THE STORED ROW. The whole point is seeing
  *     what the unsaved edit would do; posting the stored rules would report
  *     confidently on the wrong thing.
- *   - A BLANK CLAUSE ROW IS NOT A CLAUSE. "+ Add condition" renders an empty
+ *   - A BLANK CONDITION ROW IS NOT A CONDITION. "+ Condition" renders an empty
  *     row; an operator who adds one and thinks better of it must not save a
- *     clause with an empty value (the server would reject the whole payload).
+ *     condition with an empty value. `_dtPruneTree` drops it client-side,
+ *     mirroring the server's own fold, so the previewed draft and the stored
+ *     row cannot differ.
+ *   - AN EMPTIED TREE POSTS NULL, NEVER THE EMPTY GROUP. `and([])` is true by
+ *     identity, so shipping the collected tree would ask the server to claim
+ *     every device for this type.
+ *   - THE CONDITIONS ARE THE SHARED BUILDER. Since 2026-09 the editor renders
+ *     PolarisConditionBuilder — the same nested AND/OR widget as the
+ *     automations device filter — off the server-published vocabulary, so the
+ *     test asserts the builder's own markup (.scg-group / .scr-row) rather
+ *     than a private clause row, and that a nested group round-trips.
  *   - NO CONTEXTS TICKED IS REFUSED WHEN RULES EXIST. Rules that run nowhere
  *     are the one configuration that looks saved and does nothing.
  *   - DELETE IS WITHHELD ON PROTECTED ROWS, and the card says which types the
@@ -41,10 +51,39 @@ let updated: { id: string; body: Record<string, unknown> }[] = [];
 let previewBodies: unknown[] = [];
 let toasts: { msg: string; kind: string }[] = [];
 
+// `contains` leads, so the shared builder defaults a new row to it — an
+// `equals` default would silently match nothing against a vendor OS string.
+const MATCH_OPS = [
+  "contains", "notContains", "equals", "notEquals", "startsWith",
+  "notStartsWith", "endsWith", "notEndsWith", "regex", "notRegex",
+];
+
 const MATCH_SCHEMA = {
   fields: ["any", "os", "osVersion", "hostname", "manufacturer", "model", "chassis"],
-  ops: ["contains", "equals", "starts_with", "ends_with", "regex"],
+  ops: MATCH_OPS,
   contexts: ["directory", "scan"],
+  // The builder catalog, as GET /asset-types/match-schema publishes it — the
+  // same shape scopeConditionMeta hands the automations device filter.
+  condition: {
+    groupOps: ["and", "or", "none", "notAll"],
+    groupOpLabels: {
+      and: "All child conditions must be satisfied (AND)",
+      or: "At least one child condition must be satisfied (OR)",
+      none: "All child conditions must NOT be satisfied",
+      notAll: "At least one child condition must NOT be satisfied",
+    },
+    operatorLabels: {
+      equals: "is equal to", notEquals: "is not equal to",
+      contains: "contains", notContains: "does not contain",
+      startsWith: "starts with", notStartsWith: "does not start with",
+      endsWith: "ends with", notEndsWith: "does not end with",
+      regex: "matches regex", notRegex: "does not match regex",
+    },
+    fields: ["any", "os", "osVersion", "hostname", "manufacturer", "model", "chassis"]
+      .map((f) => ({ field: f, label: f, ops: MATCH_OPS })),
+    maxDepth: 5,
+    maxRules: 64,
+  },
   authoritativeSources: [
     {
       source: "FortiManager / FortiGate discovery",
@@ -60,6 +99,10 @@ const TYPES = [
     id: "t-server", name: "server", label: "Server", description: null,
     isBuiltIn: true, isProtected: true, usageCount: 42,
     matchPriority: 20, matchContexts: ["directory"],
+    // Deliberately the PRE-2026-09 flat shape: the API folds it forward on
+    // read, but a payload from a cached page or an older build still arrives
+    // like this and must open in the builder with its rule intact rather than
+    // reading as "Assigned only".
     matchRules: { clauses: [{ field: "os", op: "contains", value: "server" }] },
   },
   {
@@ -71,7 +114,7 @@ const TYPES = [
     id: "t-pdu", name: "pdu", label: "Rack PDU", description: "Metered rack PDUs.",
     isBuiltIn: false, isProtected: false, usageCount: 0,
     matchPriority: 40, matchContexts: ["scan"],
-    matchRules: { clauses: [{ field: "any", op: "contains", value: "eaton" }] },
+    matchRules: { op: "or", children: [{ field: "any", operator: "contains", value: "eaton" }] },
   },
 ];
 
@@ -90,6 +133,22 @@ function mountCard(): void {
 function openEditor(id: string | null): void {
   (g.openDeviceTypeModal as (i: string | null) => void)(id);
   fixSelects(doc.body as unknown as { querySelectorAll: (s: string) => Iterable<unknown> });
+}
+
+type TreeLeaf = { field: string; operator: string; value: string };
+type TreeBody = { op: string; children: (TreeLeaf | TreeBody)[] };
+
+/** Every leaf in a posted tree, in walk order. */
+function leavesOf(tree: TreeBody | null): TreeLeaf[] {
+  const out: TreeLeaf[] = [];
+  const walk = (g: TreeBody): void => {
+    for (const c of g.children || []) {
+      if (Array.isArray((c as TreeBody).children)) walk(c as TreeBody);
+      else out.push(c as TreeLeaf);
+    }
+  };
+  if (tree) walk(tree);
+  return out;
 }
 
 const byId = <T,>(id: string): T => doc.getElementById(id) as unknown as T;
@@ -181,9 +240,29 @@ describe("the card", () => {
   it("reads a type with no rules, or no contexts, as assigned-only", () => {
     const summary = (t: unknown) => (g._dtMatchSummary as (x: unknown) => string)(t);
     expect(summary(TYPES[1])).toContain("Assigned only");
-    expect(summary({ matchRules: { clauses: [{ field: "os", op: "contains", value: "x" }] }, matchContexts: [] }))
+    expect(summary({ matchRules: { op: "or", children: [{ field: "os", operator: "contains", value: "x" }] }, matchContexts: [] }))
       .toContain("Assigned only");
     expect(summary(TYPES[0])).toContain("Directory");
+  });
+
+  it("summarizes a tree, legacy shape included, and names the root operator only when it combines something", () => {
+    const summary = (t: unknown) => (g._dtMatchSummary as (x: unknown) => string)(t);
+    // The legacy flat row (TYPES[0]) must summarize as its rule, not as
+    // "Assigned only" — reading .children off it would do exactly that.
+    expect(summary(TYPES[0])).toContain("contains");
+    // One condition: no operator prose, which on the very common one-leaf OR
+    // would be actively misleading.
+    expect(summary(TYPES[2])).not.toContain("any of");
+    expect(summary({
+      matchContexts: ["scan"],
+      matchRules: {
+        op: "and",
+        children: [
+          { field: "os", operator: "contains", value: "windows" },
+          { op: "or", children: [{ field: "hostname", operator: "notStartsWith", value: "ws-" }] },
+        ],
+      },
+    })).toMatch(/all of:.*\+1 more/);
   });
 
   it("renders the authoritative sources the rules cannot reach", () => {
@@ -243,36 +322,74 @@ describe("the editor", () => {
 
   it("previews the DRAFT on screen, not the stored row", async () => {
     openEditor("t-pdu");
-    // Change the clause, then preview without saving.
-    (doc.querySelector(".dt-clause-value") as unknown as { value: string }).value = "vertiv";
+    // Change the condition, then preview without saving.
+    (doc.querySelector(".scr-value") as unknown as { value: string }).value = "vertiv";
     byId<{ value: string }>("f-dt-priority").value = "7";
 
     click(byId("btn-dt-preview"));
     await new Promise((r) => setTimeout(r, 0));
 
     expect(previewBodies).toHaveLength(1);
-    const draft = previewBodies[0] as { matchRules: { clauses: { value: string }[] }; matchPriority: number };
-    expect(draft.matchRules.clauses[0]!.value).toBe("vertiv");
+    const draft = previewBodies[0] as { matchRules: TreeBody; matchPriority: number };
+    expect(leavesOf(draft.matchRules)[0]!.value).toBe("vertiv");
     expect(draft.matchPriority).toBe(7);
   });
 
-  it("drops a blank clause row instead of saving an empty value", async () => {
+  it("edits the conditions in the shared builder, off the published vocabulary", async () => {
     openEditor("t-pdu");
-    click(byId("btn-dt-add-clause")); // renders an empty row
-    expect(doc.querySelectorAll(".dt-clause-row")).toHaveLength(2);
-
-    click(byId("btn-dt-save"));
-    await new Promise((r) => setTimeout(r, 0));
-    const rules = updated[0]!.body.matchRules as { clauses: unknown[] };
-    expect(rules.clauses).toHaveLength(1);
+    // The builder's own markup, not a private clause row: one root group, one
+    // rule row, and both group- and rule-level controls present.
+    expect(doc.querySelectorAll("#dt-cond-root > .scg-group")).toHaveLength(1);
+    expect(doc.querySelectorAll(".scr-row")).toHaveLength(1);
+    expect(doc.querySelector(".scg-add-rule")).toBeTruthy();
+    expect(doc.querySelector(".scg-add-group")).toBeTruthy();
+    // Field and operator dropdowns come from the server's catalog.
+    const ops = [...doc.querySelectorAll(".scr-op option")]
+      .map((o) => (o as unknown as Element).getAttribute("value"));
+    expect(ops).toEqual(MATCH_OPS);
   });
 
-  it("omits a falsy negate rather than storing it", async () => {
+  it("round-trips a nested group, so a tree an operator builds is what gets stored", async () => {
+    openEditor("t-pdu");
+    click(doc.querySelector(".scg-add-group"));
+    fixSelects(doc.body as unknown as { querySelectorAll: (s: string) => Iterable<unknown> });
+    // The new group renders with a starter row; give it a value so the prune
+    // keeps it.
+    const values = [...doc.querySelectorAll(".scr-value")] as unknown as { value: string }[];
+    values[values.length - 1]!.value = "vertiv";
+
+    click(byId("btn-dt-save"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const tree = updated[0]!.body.matchRules as TreeBody;
+    expect(tree.op).toBe("or");
+    expect(tree.children).toHaveLength(2);
+    const nested = tree.children.find((c) => Array.isArray((c as TreeBody).children)) as TreeBody;
+    expect(nested).toBeTruthy();
+    expect(leavesOf(nested).map((l) => l.value)).toEqual(["vertiv"]);
+  });
+
+  it("drops a blank condition row instead of saving an empty value", async () => {
+    openEditor("t-pdu");
+    click(doc.querySelector(".scg-add-rule")); // renders an empty row
+    expect(doc.querySelectorAll(".scr-row")).toHaveLength(2);
+
+    click(byId("btn-dt-save"));
+    await new Promise((r) => setTimeout(r, 0));
+    // Pruned to the one real condition — the same fold the server applies, so
+    // what was previewed is what gets stored.
+    expect(leavesOf(updated[0]!.body.matchRules as TreeBody)).toHaveLength(1);
+  });
+
+  it("stores a leaf as field/op/value, with no negate flag", async () => {
+    // Negation lives on the OPERATOR now (notContains, notStartsWith, …), not
+    // on a per-row flag: a `none` group around a leaf would let an absent fact
+    // satisfy the negation, which this layer refuses to do.
     openEditor("t-pdu");
     click(byId("btn-dt-save"));
     await new Promise((r) => setTimeout(r, 0));
-    const rules = updated[0]!.body.matchRules as { clauses: Record<string, unknown>[] };
-    expect(rules.clauses[0]).toEqual({ field: "any", op: "contains", value: "eaton" });
+    expect(leavesOf(updated[0]!.body.matchRules as TreeBody)[0])
+      .toEqual({ field: "any", operator: "contains", value: "eaton" });
   });
 
   it("refuses rules that would run nowhere", async () => {
@@ -287,13 +404,23 @@ describe("the editor", () => {
     expect(toasts.some((t) => /Applies to/.test(t.msg))).toBe(true);
   });
 
-  it("clears the rules to null when the last clause is removed", async () => {
+  it("clears the rules to null when the last condition is removed", async () => {
     openEditor("t-pdu");
-    click(doc.querySelector(".dt-clause-remove"));
+    click(doc.querySelector(".scr-remove"));
     click(byId("btn-dt-save"));
     await new Promise((r) => setTimeout(r, 0));
-    // No clauses ⇒ null, which is the shape meaning "only ever assigned".
+    // Nothing left => null, the shape meaning "only ever assigned". NOT the
+    // empty root group: and([]) is true by identity, so posting it would ask
+    // the server to claim every device for this type.
     expect(updated[0]!.body.matchRules).toBeNull();
+  });
+
+  it("opens a legacy flat rule set in the builder with its condition intact", () => {
+    // The fold-forward has to reach the EDITOR too. Rendering an empty builder
+    // here, then saving, would silently delete a built-in's matching.
+    openEditor("t-server");
+    expect(doc.querySelectorAll(".scr-row")).toHaveLength(1);
+    expect((doc.querySelector(".scr-value") as unknown as { value: string }).value).toBe("server");
   });
 
   it("derives the machine name from the label on a new type, until touched", async () => {

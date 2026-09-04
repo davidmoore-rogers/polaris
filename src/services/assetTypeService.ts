@@ -40,6 +40,7 @@ import {
   explainAssetType,
   DEFAULT_TYPE_MATCHING,
   type MatchRules,
+  type MatchRulesInput,
   type MatchableType,
   type MatchClause,
 } from "../utils/assetTypeMatch.js";
@@ -54,7 +55,12 @@ export interface AssetTypeRow {
   createdBy: string | null;
   createdAt: Date;
   updatedAt: Date;
-  /** Inference rules — see utils/assetTypeMatch.ts. Null = never inferred. */
+  /**
+   * Inference rules — a nested AND/OR condition tree; see
+   * utils/assetTypeMatch.ts. Null = never inferred. Always the CURRENT shape
+   * on the way out: `toRow` folds the legacy flat clause list forward, so no
+   * reader has to know which shape the row was written in.
+   */
   matchRules: MatchRules | null;
   /** Which inference contexts the rules run in ("directory" | "scan"). */
   matchContexts: string[];
@@ -119,7 +125,7 @@ export async function createAssetType(input: {
   name: string;
   label: string;
   description?: string | null;
-  matchRules?: MatchRules | null;
+  matchRules?: MatchRulesInput | null;
   matchContexts?: string[];
   matchPriority?: number;
   createdBy?: string | null;
@@ -155,7 +161,7 @@ export async function updateAssetType(
     name?: string;
     label?: string;
     description?: string | null;
-    matchRules?: MatchRules | null;
+    matchRules?: MatchRulesInput | null;
     matchContexts?: string[];
     matchPriority?: number;
   },
@@ -404,8 +410,27 @@ async function loadMatchableTypes(): Promise<MatchableType[]> {
 function eligibleAssets() {
   return prisma.asset.findMany({
     where: { assetType: "other" },
-    select: { id: true, hostname: true, os: true, manufacturer: true, model: true },
+    // Every FACT a stored asset can supply, so a rule on any offered field
+    // previews against the same input the resolver would get. `chassis` is
+    // the one match field with no Asset column — it exists only on an
+    // Entra/Intune record mid-sync — so a rule using it previews as no-match.
+    select: {
+      id: true, hostname: true, os: true, osVersion: true,
+      manufacturer: true, model: true,
+    },
   });
+}
+
+/** The facts a stored asset offers the resolver. One place, so preview and
+ *  apply cannot disagree about what a rule was tested against. */
+function factsOf(a: {
+  hostname: string | null; os: string | null; osVersion: string | null;
+  manufacturer: string | null; model: string | null;
+}) {
+  return {
+    os: a.os, osVersion: a.osVersion, hostname: a.hostname,
+    manufacturer: a.manufacturer, model: a.model,
+  };
 }
 
 /**
@@ -427,7 +452,7 @@ function eligibleAssets() {
  * five columns wide.
  */
 export async function previewMatchRules(
-  draft?: { name: string; matchRules: MatchRules | null; matchContexts: string[]; matchPriority: number },
+  draft?: { name: string; matchRules: MatchRulesInput | null; matchContexts: string[]; matchPriority: number },
 ): Promise<MatchPreviewResult> {
   let types = await loadMatchableTypes();
 
@@ -452,11 +477,7 @@ export async function previewMatchRules(
   let matched = 0;
 
   for (const a of assets) {
-    const { type, clause } = explainAssetType(
-      types,
-      { os: a.os, hostname: a.hostname, manufacturer: a.manufacturer, model: a.model },
-      "directory",
-    );
+    const { type, clause } = explainAssetType(types, factsOf(a), "directory");
     if (!type || type === "other") continue;
     matched++;
     byType.set(type, (byType.get(type) ?? 0) + 1);
@@ -506,11 +527,7 @@ export async function applyMatchRules(): Promise<{
 
   const idsByType = new Map<string, string[]>();
   for (const a of assets) {
-    const { type } = explainAssetType(
-      types,
-      { os: a.os, hostname: a.hostname, manufacturer: a.manufacturer, model: a.model },
-      "directory",
-    );
+    const { type } = explainAssetType(types, factsOf(a), "directory");
     if (!type || type === "other") continue;
     const list = idsByType.get(type);
     if (list) list.push(a.id);

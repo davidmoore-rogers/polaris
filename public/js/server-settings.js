@@ -3872,7 +3872,10 @@ var _deviceIcons = [];
 // matching vocabulary + authoritative-source catalogue the server publishes so
 // this file doesn't carry a second copy that drifts from the resolver.
 var _assetTypes = [];
-var _assetTypeMatchSchema = { fields: [], ops: [], contexts: [], authoritativeSources: [] };
+// `condition` is the shared condition-builder catalog (fields + operators +
+// group operators + labels + depth cap), in the same shape scopeConditionMeta
+// publishes for the automations device filter — see _dtConditionMeta.
+var _assetTypeMatchSchema = { fields: [], ops: [], contexts: [], condition: null, authoritativeSources: [] };
 var _mibFilter = { manufacturer: "", model: "", scope: "all" };
 // Slice 6b — editable Manufacturer Profile (DB-backed) state.
 // _mfgProfiles is the summary list shown in the card; _mfgProfileTransforms
@@ -5469,6 +5472,10 @@ var _deviceIconAssetTypes = [
 // rather than leaving an operator to discover it by writing a rule that never
 // fires.
 
+// Fallback vocabulary. The live one is server-published on
+// GET /asset-types/match-schema as `condition`, in the SAME shape
+// scopeConditionMeta hands the automations device filter — this only covers a
+// payload that hasn't arrived yet.
 var _DT_FIELD_LABELS = {
   any: "Any field",
   os: "OS",
@@ -5480,10 +5487,25 @@ var _DT_FIELD_LABELS = {
 };
 var _DT_OP_LABELS = {
   contains: "contains",
-  equals: "equals",
+  notContains: "does not contain",
+  equals: "is equal to",
+  notEquals: "is not equal to",
+  startsWith: "starts with",
+  notStartsWith: "does not start with",
+  endsWith: "ends with",
+  notEndsWith: "does not end with",
+  regex: "matches regex",
+  notRegex: "does not match regex",
+  // Pre-2026-09 spellings. The API folds these forward on read, so they only
+  // reach here from a stale payload.
   starts_with: "starts with",
   ends_with: "ends with",
-  regex: "matches regex",
+};
+var _DT_GROUP_OP_PROSE = {
+  and: "all of",
+  or: "any of",
+  none: "none of",
+  notAll: "not all of",
 };
 var _DT_CONTEXT_LABELS = {
   directory: "Directory discovery (AD / Entra / Intune / Azure Arc)",
@@ -5496,19 +5518,118 @@ function _dtLabelFor(name) {
   return t ? t.label : name;
 }
 
+/**
+ * The condition-builder vocabulary. Server-published (`/match-schema` →
+ * `condition`) in the shape `scopeConditionMeta` returns for the automations
+ * device filter, so the shared PolarisConditionBuilder takes it unchanged and
+ * this page holds no field or operator list of its own.
+ */
+function _dtConditionMeta() {
+  var pub = _assetTypeMatchSchema && _assetTypeMatchSchema.condition;
+  if (pub && pub.fields && pub.fields.length) return pub;
+  // Pre-upgrade payload: rebuild the catalog from the fallback label maps.
+  var fields = (_assetTypeMatchSchema && _assetTypeMatchSchema.fields) || Object.keys(_DT_FIELD_LABELS);
+  var ops = (_assetTypeMatchSchema && _assetTypeMatchSchema.ops) || Object.keys(_DT_OP_LABELS);
+  return {
+    groupOps: ["and", "or", "none", "notAll"],
+    groupOpLabels: {
+      and: "All child conditions must be satisfied (AND)",
+      or: "At least one child condition must be satisfied (OR)",
+      none: "All child conditions must NOT be satisfied",
+      notAll: "At least one child condition must NOT be satisfied",
+    },
+    operatorLabels: _DT_OP_LABELS,
+    fields: fields.map(function (f) {
+      return { field: f, label: _DT_FIELD_LABELS[f] || f, ops: ops };
+    }),
+    maxDepth: 5,
+    maxRules: 64,
+  };
+}
+
+function _dtFieldLabel(field) {
+  var fm = (_dtConditionMeta().fields || []).find(function (f) { return f.field === field; });
+  return (fm && fm.label) || _DT_FIELD_LABELS[field] || field;
+}
+function _dtOpLabel(op) {
+  return (_dtConditionMeta().operatorLabels || {})[op] || _DT_OP_LABELS[op] || op;
+}
+
+/**
+ * A type's rules as a condition TREE, whatever shape the payload carried.
+ *
+ * The API folds the pre-2026-09 flat list forward on read (`{clauses:[…]}`, an
+ * ANY-of, with the leaf operator under `op` and negation on a `negate` flag),
+ * so this only ever fires on a stale or hand-built payload — but the card must
+ * never render a legacy row as "Assigned only", which is what reading
+ * `.children` off it would do, and the editor must never open one with an
+ * empty builder, which is how saving would delete a built-in's matching.
+ *
+ * Mirrors `normalizeMatchRules` in src/utils/assetTypeMatch.ts.
+ */
+function _dtRulesTree(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  var NEG = { equals: "notEquals", contains: "notContains", startsWith: "notStartsWith",
+    endsWith: "notEndsWith", regex: "notRegex", starts_with: "notStartsWith", ends_with: "notEndsWith" };
+  var ALIAS = { starts_with: "startsWith", ends_with: "endsWith" };
+  var leaf = function (c) {
+    var stated = c.operator || c.op;
+    return {
+      field: c.field,
+      operator: c.negate ? (NEG[stated] || stated) : (ALIAS[stated] || stated),
+      value: c.value,
+    };
+  };
+  if (Array.isArray(raw.clauses)) {
+    return { op: "or", children: raw.clauses.map(leaf) };
+  }
+  if (!Array.isArray(raw.children)) return null;
+  var walk = function (g) {
+    return {
+      op: g.op,
+      children: (g.children || []).map(function (c) {
+        return Array.isArray(c && c.children) ? walk(c) : leaf(c);
+      }),
+    };
+  };
+  return walk(raw);
+}
+
+/** Every leaf in a tree, in walk order. */
+function _dtLeaves(tree) {
+  var out = [];
+  var walk = function (g) {
+    (g.children || []).forEach(function (c) {
+      if (Array.isArray(c && c.children)) walk(c);
+      else out.push(c);
+    });
+  };
+  if (tree) walk(tree);
+  return out;
+}
+
+/** One leaf as prose, using the server's own field + operator wording. */
+function _dtClauseProse(c) {
+  return _dtFieldLabel(c.field) + " " + _dtOpLabel(c.operator || c.op) + ' "' + c.value + '"';
+}
+
 /** One-line summary of a type's matching, for the table's Matching column. */
 function _dtMatchSummary(t) {
-  var clauses = (t.matchRules && t.matchRules.clauses) || [];
+  var tree = _dtRulesTree(t.matchRules);
+  var leaves = _dtLeaves(tree);
   var contexts = t.matchContexts || [];
-  if (!clauses.length || !contexts.length) {
+  if (!leaves.length || !contexts.length) {
     return '<span style="color:var(--color-text-tertiary)">Assigned only</span>';
   }
   var where = contexts.map(function (c) { return _DT_CONTEXT_SHORT[c] || c; }).join(" + ");
-  var first = clauses[0];
-  var lead = (_DT_FIELD_LABELS[first.field] || first.field) + " " +
-    (first.negate ? "does not " : "") + (_DT_OP_LABELS[first.op] || first.op) +
-    ' "' + first.value + '"';
-  var more = clauses.length > 1 ? ' <span style="color:var(--color-text-tertiary)">+' + (clauses.length - 1) + " more</span>" : "";
+  // The root operator is named only when there is more than one condition for
+  // it to combine — on a single leaf it would read as noise, and on the very
+  // common one-leaf OR it would be actively misleading.
+  var lead = (leaves.length > 1 ? (_DT_GROUP_OP_PROSE[tree.op] || tree.op) + ": " : "") +
+    _dtClauseProse(leaves[0]);
+  var more = leaves.length > 1
+    ? ' <span style="color:var(--color-text-tertiary)">+' + (leaves.length - 1) + " more</span>"
+    : "";
   return '<span style="color:var(--color-text-tertiary)">' + escapeHtml(where) + ':</span> ' +
     escapeHtml(lead) + more;
 }
@@ -5642,60 +5763,59 @@ async function deleteDeviceTypeUI(id) {
 }
 
 // ─── Editor ────────────────────────────────────────────────────────────────
+//
+// The conditions are edited in the shared PolarisConditionBuilder — the same
+// nested AND/OR widget, the same group operators and the same stored tree
+// shape as the automations device filter, the address book and tag
+// auto-assign. It was a flat clause list with a "not" checkbox until 2026-09;
+// two condition dialects that look alike and behave differently was the whole
+// problem, and this one now differs only where it has to (its own field
+// vocabulary of discovery-time FACTS, and negation on the leaf so an absent
+// fact can't satisfy it).
 
-var _dtClauseSeq = 0;
-
-function _dtClauseRowHTML(clause) {
-  var id = "dtc-" + (++_dtClauseSeq);
-  var c = clause || { field: "os", op: "contains", value: "", negate: false };
-  var fields = _assetTypeMatchSchema.fields || Object.keys(_DT_FIELD_LABELS);
-  var ops = _assetTypeMatchSchema.ops || Object.keys(_DT_OP_LABELS);
-
-  var fieldSel = '<select class="dt-clause-field" style="flex:0 0 150px">';
-  fields.forEach(function (f) {
-    fieldSel += '<option value="' + escapeHtml(f) + '"' + (f === c.field ? ' selected' : '') + '>' +
-      escapeHtml(_DT_FIELD_LABELS[f] || f) + '</option>';
-  });
-  fieldSel += '</select>';
-
-  var opSel = '<select class="dt-clause-op" style="flex:0 0 130px">';
-  ops.forEach(function (o) {
-    opSel += '<option value="' + escapeHtml(o) + '"' + (o === c.op ? ' selected' : '') + '>' +
-      escapeHtml(_DT_OP_LABELS[o] || o) + '</option>';
-  });
-  opSel += '</select>';
-
-  return '<div class="dt-clause-row" id="' + id + '" style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">' +
-    '<label style="display:flex;align-items:center;gap:4px;font-size:0.78rem;color:var(--color-text-secondary);flex:0 0 auto" ' +
-      'title="Match devices where this condition is NOT true. A device that reported nothing for the field never matches either way.">' +
-      '<input type="checkbox" class="dt-clause-negate"' + (c.negate ? ' checked' : '') + '> not' +
-    '</label>' +
-    fieldSel + opSel +
-    '<input type="text" class="dt-clause-value" style="flex:1 1 180px;min-width:140px" ' +
-      'value="' + escapeHtml(c.value || "") + '" placeholder="value">' +
-    '<button type="button" class="btn-icon dt-clause-remove" title="Remove condition">&times;</button>' +
-  '</div>';
+/** The tree the editor opens with. A new type starts as an OR — a list of
+ *  alternatives is what type matching almost always is, and it is the shape
+ *  every built-in ships with. */
+function _dtEditorTree(t) {
+  var stored = _dtRulesTree(t && t.matchRules);
+  return stored && (stored.children || []).length ? stored : { op: "or", children: [] };
 }
 
-function _dtWireClauseRow(row) {
-  var rm = row.querySelector(".dt-clause-remove");
-  if (rm) rm.addEventListener("click", function () { row.remove(); });
+/**
+ * Prune a collected tree the way the server's `normalizeMatchRules` does: a
+ * valueless row is dropped, a group left with nothing is dropped, and a root
+ * with nothing left becomes null.
+ *
+ * Pruning rather than refusing is this surface's existing contract — "+
+ * Condition" renders an empty row, and an operator who adds one and thinks
+ * better of it must not have to remove it before saving. Doing it here rather
+ * than leaving it to the server means the payload matches what will actually
+ * be stored, so the preview and the saved row can't differ.
+ */
+function _dtPruneTree(group) {
+  var children = [];
+  (group.children || []).forEach(function (c) {
+    if (Array.isArray(c && c.children)) {
+      var kept = _dtPruneTree(c);
+      if (kept) children.push(kept);
+    } else if (c && String(c.value || "").trim()) {
+      children.push({ field: c.field, operator: c.operator, value: String(c.value).trim() });
+    }
+  });
+  return children.length ? { op: group.op, children: children } : null;
 }
 
-/** Read the editor form back into the payload shape the API expects. */
-function _dtReadForm() {
-  var clauses = [];
-  document.querySelectorAll("#dt-clause-list .dt-clause-row").forEach(function (row) {
-    var value = (row.querySelector(".dt-clause-value").value || "").trim();
-    if (!value) return; // a blank row is an unfinished thought, not a clause
-    var clause = {
-      field: row.querySelector(".dt-clause-field").value,
-      op: row.querySelector(".dt-clause-op").value,
-      value: value,
-    };
-    if (row.querySelector(".dt-clause-negate").checked) clause.negate = true;
-    clauses.push(clause);
-  });
+/**
+ * Read the editor form back into the payload shape the API expects.
+ *
+ * An empty tree posts `matchRules: null`, never the empty group: `and([])` is
+ * true by identity, so shipping it would ask the server to claim the whole
+ * fleet for this type. Null is the shape that means "only ever assigned".
+ */
+function _dtReadForm(builder) {
+  var rootGroup = document.querySelector("#dt-cond-root > .scg-group");
+  var collected = rootGroup && builder ? builder.collect(rootGroup) : null;
+  var tree = collected ? _dtPruneTree(collected) : null;
   var contexts = [];
   document.querySelectorAll("#dt-context-list input[type=checkbox]").forEach(function (cb) {
     if (cb.checked) contexts.push(cb.getAttribute("data-ctx"));
@@ -5705,7 +5825,7 @@ function _dtReadForm() {
     label: (document.getElementById("f-dt-label").value || "").trim(),
     name: (document.getElementById("f-dt-name").value || "").trim().toLowerCase(),
     description: (document.getElementById("f-dt-description").value || "").trim(),
-    matchRules: clauses.length ? { clauses: clauses } : null,
+    matchRules: tree,
     matchContexts: contexts,
     matchPriority: isNaN(priorityRaw) ? 100 : priorityRaw,
   };
@@ -5715,9 +5835,20 @@ function openDeviceTypeModal(id) {
   var t = id ? (_assetTypes || []).find(function (x) { return x.id === id; }) : null;
   var isNew = !t;
   var locked = !!(t && t.isProtected);
-  var clauses = (t && t.matchRules && t.matchRules.clauses) || [];
   var contexts = (t && t.matchContexts) || [];
   var ctxList = _assetTypeMatchSchema.contexts || ["directory", "scan"];
+
+  // The vocabulary is already on the page (loadIdentificationTab fetches
+  // /match-schema alongside the registry), so the builder can be created
+  // synchronously — unlike the tag modals, which have to await their own
+  // schema before they can assemble a body.
+  var condBuilder = window.PolarisConditionBuilder.create({
+    meta: _dtConditionMeta(),
+    // No suggestions: these are facts about a device that may have no Asset
+    // row yet, so there is no inventory to offer values from. Free text only.
+    valueOptions: function () { return []; },
+    onChange: function () {},
+  });
 
   var body =
     '<div class="form-group"><label>Label *</label>' +
@@ -5749,8 +5880,14 @@ function openDeviceTypeModal(id) {
 
   body +=
     '<p style="font-size:0.8rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
-      'A device is filed here when <strong>any one</strong> condition below is true. ' +
-      'Leave the list empty and this type is only ever assigned by an authoritative discovery source or by hand.' +
+      'A device is filed here when the conditions below are satisfied — the same nested ' +
+      'AND/OR builder the automations device filter uses. Leave it empty and this type is only ever ' +
+      'assigned by an authoritative discovery source or by hand.' +
+    '</p>' +
+    '<p style="font-size:0.8rem;color:var(--color-text-secondary);margin:0 0 0.75rem">' +
+      'One difference from a device filter, because these run before a device is in inventory: a device that ' +
+      'reported <strong>nothing</strong> for a field never matches a condition on it, ' +
+      '<em>including a negative one</em>. At discovery time a missing fact means “not known yet”, not “empty”.' +
     '</p>';
 
   body += '<div class="form-group"><label>Applies to</label><div id="dt-context-list">';
@@ -5762,10 +5899,10 @@ function openDeviceTypeModal(id) {
   });
   body += '</div><div class="hint">Where these rules run. A rule set with nothing ticked never fires.</div></div>';
 
-  body += '<div class="form-group"><label>Conditions</label><div id="dt-clause-list">';
-  clauses.forEach(function (c) { body += _dtClauseRowHTML(c); });
-  body += '</div>' +
-    '<button type="button" class="btn btn-secondary btn-sm" id="btn-dt-add-clause" style="margin-top:4px">+ Add condition</button>' +
+  body += '<div class="form-group" id="dt-cond-body"><label>Conditions</label>' +
+    '<p class="hint" style="margin:0 0 8px">Drag the <span class="aw-grip" style="cursor:default">&#x2842;</span> handle to ' +
+      'move a condition into another group or reorder groups.</p>' +
+    '<div id="dt-cond-root">' + condBuilder.groupHtml(_dtEditorTree(t), 0) + '</div>' +
   '</div>';
 
   body += '<div class="form-group"><label>Priority</label>' +
@@ -5784,18 +5921,14 @@ function openDeviceTypeModal(id) {
 
   openModal(isNew ? "Add Device Type" : "Edit Device Type — " + t.label, body, footer, { wide: true });
 
-  // Wire the clause rows rendered above, then each one added afterwards.
-  document.querySelectorAll("#dt-clause-list .dt-clause-row").forEach(_dtWireClauseRow);
-  document.getElementById("btn-dt-add-clause").addEventListener("click", function () {
-    var list = document.getElementById("dt-clause-list");
-    var wrap = document.createElement("div");
-    wrap.innerHTML = _dtClauseRowHTML(null);
-    var row = wrap.firstChild;
-    list.appendChild(row);
-    _dtWireClauseRow(row);
-    var input = row.querySelector(".dt-clause-value");
-    if (input) input.focus();
-  });
+  // Rows, groups and the grip drag all live in the shared module. Bind to the
+  // section, NEVER to #modal-overlay: openModal reuses one persistent overlay
+  // element, so a listener there would outlive the dialog and stack up per
+  // open (see the same note on _wireTagFilterBuilder).
+  var condBody = document.getElementById("dt-cond-body");
+  condBuilder.wire(condBody, "#dt-cond-root");
+  // A new type opens on an empty root — seed one row so it lands editable.
+  condBuilder.seedIfEmpty(document.getElementById("dt-cond-root"));
 
   // Auto-fill the machine name from the label while it is still untouched, so
   // the common case is one field, not two.
@@ -5812,7 +5945,7 @@ function openDeviceTypeModal(id) {
   document.getElementById("btn-dt-preview").addEventListener("click", async function () {
     var btn = this;
     var out = document.getElementById("dt-preview-out");
-    var form = _dtReadForm();
+    var form = _dtReadForm(condBuilder);
     if (!form.name) { showToast("Give the type a name before previewing", "error"); return; }
     btn.disabled = true;
     out.innerHTML = '<p class="empty-state" style="margin:0">Checking…</p>';
@@ -5836,9 +5969,13 @@ function openDeviceTypeModal(id) {
 
   document.getElementById("btn-dt-save").addEventListener("click", async function () {
     var btn = this;
-    var form = _dtReadForm();
+    var form = _dtReadForm(condBuilder);
     if (!locked && !form.label) { showToast("Label is required", "error"); return; }
     if (isNew && !form.name) { showToast("Name is required", "error"); return; }
+    // No builder.validate() call: _dtPruneTree has already removed the two
+    // things it would report (a valueless row, an empty group), and the only
+    // other rule it carries — the CIDR shape check — belongs to a field this
+    // vocabulary does not have.
     if (form.matchRules && !form.matchContexts.length) {
       showToast('Tick at least one "Applies to" box, or the rules will never run', "error");
       return;
@@ -5910,9 +6047,11 @@ function _dtPreviewHTML(res, onlyType) {
         '<td>' + escapeHtml(r.hostname || "—") + '</td>' +
         '<td style="font-size:0.78rem;color:var(--color-text-secondary)">' + escapeHtml(r.os || "—") + '</td>' +
         (onlyType ? '' : '<td>' + escapeHtml(_dtLabelFor(r.matchedType)) + '</td>') +
+        // A tree under `none` / `notAll` has no leaf that can honestly be
+        // called the reason (a leaf that tested TRUE there is what would have
+        // PREVENTED the match), so the server sends null and this reads "—".
         '<td style="font-size:0.78rem;color:var(--color-text-tertiary)">' +
-          (c ? escapeHtml((_DT_FIELD_LABELS[c.field] || c.field) + " " + (c.negate ? "not " : "") +
-            (_DT_OP_LABELS[c.op] || c.op) + ' "' + c.value + '"') : "—") +
+          (c ? escapeHtml(_dtClauseProse(c)) : "—") +
         '</td>' +
       '</tr>';
     });

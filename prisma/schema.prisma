@@ -3288,9 +3288,18 @@ model AssetTypeDef {
   updatedAt   DateTime @updatedAt
 
   // Operator-editable inference rules: which discovery-time facts land a
-  // device in THIS bucket. Shape is validated by src/utils/assetTypeMatch.ts
-  // (`{ clauses: [{ field, op, value }] }`). Null / empty = this type is
-  // never inferred, only assigned by an authoritative source or by hand.
+  // device in THIS bucket. A nested AND/OR condition tree —
+  // `{ op: "and"|"or"|"none"|"notAll", children: [leaf | group] }` with
+  // leaves `{ field, operator, value }` — i.e. the same grammar the
+  // automations device filter stores, so the shared PolarisConditionBuilder
+  // edits it unchanged. Validated + evaluated by src/utils/assetTypeMatch.ts.
+  // Null / empty = this type is never inferred, only assigned by an
+  // authoritative source or by hand.
+  //
+  // The pre-2026-09 flat shape (`{ clauses: [{ field, op, value, negate? }] }`,
+  // an ANY-of) is still in this column on every existing install: there is no
+  // migration, and `normalizeMatchRules` folds it forward on every READ.
+  //
   // Editable on built-in rows too — `isProtected` locks identity (name +
   // label), which code branches on, not the matching that fills the bucket.
   matchRules    Json?    @map("match_rules")

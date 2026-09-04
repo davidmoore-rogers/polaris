@@ -10,14 +10,27 @@
  * migration. If the transcription drifts, a fleet silently re-types on its next
  * discovery run with nothing in the UI to explain it — so the old ladders are
  * reimplemented here as oracles and the resolver is held against them.
+ *
+ * Second load-bearing block, since the 2026-09 cutover to the nested AND/OR
+ * tree: "the legacy shape folds forward". The seed migration wrote the flat
+ * `{clauses:[…]}` list with `starts_with` / `ends_with` / `negate`, and nothing
+ * rewrites it — every install reads those rows through `normalizeMatchRules`
+ * forever. A fold that stopped covering one of the three would blank a
+ * built-in's rules on read, which reads in the UI as "Assigned only" and in
+ * discovery as a fleet of unrecognized devices.
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   DEFAULT_TYPE_MATCHING,
   MATCH_CONTEXTS,
+  MATCH_GROUP_OPS,
+  MATCH_MAX_DEPTH,
   clauseMatches,
+  conditionMatches,
   explainAssetType,
+  matchClauses,
+  matchConditionMeta,
   normalizeMatchRules,
   orderTypes,
   resolveAssetType,
@@ -29,7 +42,9 @@ import {
   validateMatchRules,
   type MatchableType,
   type MatchContext,
+  type MatchGroup,
 } from "../../src/utils/assetTypeMatch.js";
+import { scopeConditionMeta, SCOPE_GROUP_OPS, DEVICE_FILTER_FIELD_OPS } from "../../src/services/notificationTypes.js";
 
 /** The shipped registry, shaped for the resolver. */
 function defaultTypes(): MatchableType[] {
@@ -39,6 +54,11 @@ function defaultTypes(): MatchableType[] {
     matchContexts: m.contexts,
     matchPriority: m.priority,
   }));
+}
+
+/** An OR of `any contains <v>` leaves — the shorthand most fixtures want. */
+function anyOf(...values: string[]): MatchGroup {
+  return { op: "or", children: values.map((value) => ({ field: "any" as const, operator: "contains" as const, value })) };
 }
 
 // ─── The retired predicates, verbatim, as oracles ──────────────────────────
@@ -182,8 +202,8 @@ describe("the process cache", () => {
 
   it("serves what was loaded, in resolver order", () => {
     setAssetTypeMatchRegistry([
-      { name: "b", matchPriority: 9, matchContexts: ["scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "x" }] } },
-      { name: "a", matchPriority: 1, matchContexts: ["scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "x" }] } },
+      { name: "b", matchPriority: 9, matchContexts: ["scan"], matchRules: anyOf("x") },
+      { name: "a", matchPriority: 1, matchContexts: ["scan"], matchRules: anyOf("x") },
     ]);
     expect(getAssetTypeMatchRegistry().map((t) => t.name)).toEqual(["a", "b"]);
     expect(resolveAssetTypeCached({ os: "x" }, "scan")).toBe("a");
@@ -194,49 +214,58 @@ describe("clause evaluation", () => {
   const facts = { os: "Ubuntu 22.04 LTS", hostname: "srv-app-01", manufacturer: "Dell Inc." };
 
   it("is case-insensitive on every operator", () => {
-    expect(clauseMatches({ field: "os", op: "contains", value: "UBUNTU" }, facts)).toBe(true);
-    expect(clauseMatches({ field: "manufacturer", op: "equals", value: "dell inc." }, facts)).toBe(true);
-    expect(clauseMatches({ field: "hostname", op: "starts_with", value: "SRV-" }, facts)).toBe(true);
-    expect(clauseMatches({ field: "hostname", op: "ends_with", value: "-01" }, facts)).toBe(true);
-    expect(clauseMatches({ field: "os", op: "regex", value: "^ubuntu" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "os", operator: "contains", value: "UBUNTU" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "manufacturer", operator: "equals", value: "dell inc." }, facts)).toBe(true);
+    expect(clauseMatches({ field: "hostname", operator: "startsWith", value: "SRV-" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "hostname", operator: "endsWith", value: "-01" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "os", operator: "regex", value: "^ubuntu" }, facts)).toBe(true);
   });
 
   it("reads `any` as the space-joined facts", () => {
-    expect(clauseMatches({ field: "any", op: "contains", value: "srv-app" }, facts)).toBe(true);
-    expect(clauseMatches({ field: "any", op: "contains", value: "dell" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "any", operator: "contains", value: "srv-app" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "any", operator: "contains", value: "dell" }, facts)).toBe(true);
   });
 
-  it("never matches an absent fact — negated or not", () => {
-    // The invariant: at discovery time a missing field means "not yet known",
-    // so letting absence satisfy a negation would let one field outage
-    // re-type a fleet.
+  it("never matches an absent fact — negative operator or not", () => {
+    // The invariant, and the one place this evaluator deliberately disagrees
+    // with the device filter it now shares a builder with: at discovery time a
+    // missing field means "not yet known", so letting absence satisfy a
+    // negation would let one field outage re-type a fleet. (In
+    // evaluateScopeCondition, `notContains` against a NULL column IS
+    // satisfied — that one filters stored rows, where null is an answer.)
     const empty = { os: null, hostname: "  " };
-    expect(clauseMatches({ field: "os", op: "contains", value: "x" }, empty)).toBe(false);
-    expect(clauseMatches({ field: "os", op: "contains", value: "x", negate: true }, empty)).toBe(false);
-    expect(clauseMatches({ field: "hostname", op: "contains", value: "x", negate: true }, empty)).toBe(false);
-    expect(clauseMatches({ field: "any", op: "contains", value: "x" }, { os: null })).toBe(false);
+    expect(clauseMatches({ field: "os", operator: "contains", value: "x" }, empty)).toBe(false);
+    expect(clauseMatches({ field: "os", operator: "notContains", value: "x" }, empty)).toBe(false);
+    expect(clauseMatches({ field: "hostname", operator: "notEquals", value: "x" }, empty)).toBe(false);
+    expect(clauseMatches({ field: "os", operator: "notRegex", value: "^x" }, empty)).toBe(false);
+    expect(clauseMatches({ field: "any", operator: "contains", value: "x" }, { os: null })).toBe(false);
   });
 
-  it("negates a present fact", () => {
-    expect(clauseMatches({ field: "os", op: "contains", value: "windows", negate: true }, facts)).toBe(true);
-    expect(clauseMatches({ field: "os", op: "contains", value: "ubuntu", negate: true }, facts)).toBe(false);
+  it("negates a present fact, on every operator that has a negative twin", () => {
+    expect(clauseMatches({ field: "os", operator: "notContains", value: "windows" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "os", operator: "notContains", value: "ubuntu" }, facts)).toBe(false);
+    expect(clauseMatches({ field: "manufacturer", operator: "notEquals", value: "hp" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "hostname", operator: "notStartsWith", value: "ws-" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "hostname", operator: "notEndsWith", value: "-99" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "os", operator: "notRegex", value: "^windows" }, facts)).toBe(true);
+    expect(clauseMatches({ field: "os", operator: "notRegex", value: "^ubuntu" }, facts)).toBe(false);
   });
 
   it("treats an uncompilable stored regex as no-match rather than throwing", () => {
     // Write-time validation refuses these, but a hand-edited row or a restored
     // backup can still carry one, and it must not throw into the discovery loop.
-    expect(() => clauseMatches({ field: "os", op: "regex", value: "([unclosed" }, facts)).not.toThrow();
-    expect(clauseMatches({ field: "os", op: "regex", value: "([unclosed" }, facts)).toBe(false);
+    expect(() => clauseMatches({ field: "os", operator: "regex", value: "([unclosed" }, facts)).not.toThrow();
+    expect(clauseMatches({ field: "os", operator: "regex", value: "([unclosed" }, facts)).toBe(false);
   });
 });
 
 describe("resolution", () => {
   const types: MatchableType[] = [
-    { name: "pdu", matchPriority: 5, matchContexts: ["directory", "scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "eaton" }] } },
-    { name: "camera", matchPriority: 5, matchContexts: ["scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "axis" }] } },
-    { name: "server", matchPriority: 20, matchContexts: ["directory"], matchRules: { clauses: [{ field: "os", op: "contains", value: "server" }] } },
+    { name: "pdu", matchPriority: 5, matchContexts: ["directory", "scan"], matchRules: anyOf("eaton") },
+    { name: "camera", matchPriority: 5, matchContexts: ["scan"], matchRules: anyOf("axis") },
+    { name: "server", matchPriority: 20, matchContexts: ["directory"], matchRules: { op: "or", children: [{ field: "os", operator: "contains", value: "server" }] } },
     { name: "unruled", matchPriority: 1, matchContexts: ["directory"], matchRules: null },
-    { name: "outofcontext", matchPriority: 1, matchContexts: [], matchRules: { clauses: [{ field: "any", op: "contains", value: "eaton" }] } },
+    { name: "outofcontext", matchPriority: 1, matchContexts: [], matchRules: anyOf("eaton") },
   ];
 
   it("returns null when nothing claims the device, leaving the default to the caller", () => {
@@ -245,8 +274,8 @@ describe("resolution", () => {
 
   it("honours priority, then name, deterministically", () => {
     const tied: MatchableType[] = [
-      { name: "zebra", matchPriority: 10, matchContexts: ["scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "x" }] } },
-      { name: "alpha", matchPriority: 10, matchContexts: ["scan"], matchRules: { clauses: [{ field: "any", op: "contains", value: "x" }] } },
+      { name: "zebra", matchPriority: 10, matchContexts: ["scan"], matchRules: anyOf("x") },
+      { name: "alpha", matchPriority: 10, matchContexts: ["scan"], matchRules: anyOf("x") },
     ];
     expect(resolveAssetType(tied, { os: "x" }, "scan")).toBe("alpha");
     expect(resolveAssetType([...tied].reverse(), { os: "x" }, "scan")).toBe("alpha");
@@ -272,7 +301,7 @@ describe("resolution", () => {
   it("explains which clause decided, agreeing with the resolver", () => {
     const { type, clause } = explainAssetType(types, { os: "Eaton ePDU G3" }, "scan");
     expect(type).toBe("pdu");
-    expect(clause).toEqual({ field: "any", op: "contains", value: "eaton" });
+    expect(clause).toEqual({ field: "any", operator: "contains", value: "eaton" });
     expect(type).toBe(resolveAssetType(types, { os: "Eaton ePDU G3" }, "scan"));
   });
 });
@@ -283,21 +312,29 @@ describe("validation", () => {
     expect(validateMatchRules(undefined)).toBeNull();
   });
 
-  it("refuses an uncompilable regex at write time", () => {
+  it("refuses an uncompilable regex at write time, in either shape", () => {
     // The whole point of write-time validation: the resolver runs per device
     // per discovery run, so one typo must not be able to reach it.
-    const err = validateMatchRules({ clauses: [{ field: "os", op: "regex", value: "([unclosed" }] });
-    expect(err).toMatch(/Invalid regular expression/);
+    expect(validateMatchRules({ clauses: [{ field: "os", op: "regex", value: "([unclosed" }] }))
+      .toMatch(/Invalid regular expression/);
+    expect(validateMatchRules({ op: "or", children: [{ field: "os", operator: "notRegex", value: "([unclosed" }] }))
+      .toMatch(/Invalid regular expression/);
   });
 
-  it("names the offending clause", () => {
-    const err = validateMatchRules({
+  it("names the offending condition, by its place in the tree", () => {
+    expect(validateMatchRules({
       clauses: [
         { field: "os", op: "contains", value: "ok" },
         { field: "nope", op: "contains", value: "x" },
       ],
-    });
-    expect(err).toMatch(/Clause 2/);
+    })).toMatch(/Condition 2/);
+    expect(validateMatchRules({
+      op: "and",
+      children: [
+        { field: "os", operator: "contains", value: "ok" },
+        { op: "or", children: [{ field: "os", operator: "bogus", value: "x" }] },
+      ],
+    })).toMatch(/group 2 . condition 1/);
   });
 
   it("refuses unknown fields, operators, empty values and bad contexts", () => {
@@ -305,20 +342,236 @@ describe("validation", () => {
     expect(validateMatchRules({ clauses: [{ field: "os", op: "matches", value: "x" }] })).toMatch(/operator/);
     expect(validateMatchRules({ clauses: [{ field: "os", op: "contains", value: "  " }] })).toMatch(/value is required/);
     expect(validateMatchRules({ clauses: [{ field: "os", op: "contains", value: "x".repeat(201) }] })).toMatch(/longer than/);
-    expect(validateMatchRules({ notClauses: [] })).toMatch(/clauses/);
+    expect(validateMatchRules({ notChildren: [] })).toMatch(/children/);
+    expect(validateMatchRules({ op: "xor", children: [] })).toMatch(/group operator/);
     expect(validateMatchContexts(["directory", "nope"])).toMatch(/Unknown match context/);
     expect(validateMatchContexts([...MATCH_CONTEXTS] as MatchContext[])).toBeNull();
+  });
+
+  it("refuses a tree nested deeper than the builder allows", () => {
+    // The builder caps nesting client-side; the server has to agree, or a
+    // hand-built payload walks past a limit the UI advertises.
+    let node: MatchGroup = { op: "or", children: [{ field: "os", operator: "contains", value: "x" }] };
+    for (let i = 0; i < MATCH_MAX_DEPTH; i++) node = { op: "and", children: [node] };
+    expect(validateMatchRules(node)).toMatch(/nest at most/);
+  });
+
+  it("counts leaves across the whole tree, not per group", () => {
+    const leaf = { field: "os" as const, operator: "contains" as const, value: "x" };
+    const big: MatchGroup = {
+      op: "or",
+      children: [
+        { op: "and", children: Array.from({ length: 33 }, () => ({ ...leaf })) },
+        { op: "and", children: Array.from({ length: 33 }, () => ({ ...leaf })) },
+      ],
+    };
+    expect(validateMatchRules(big)).toMatch(/At most 64 conditions/);
   });
 
   it("normalizes an unusable blob to null rather than throwing", () => {
     expect(normalizeMatchRules({ clauses: [{ field: "bogus", op: "contains", value: "x" }] })).toBeNull();
     expect(normalizeMatchRules({ clauses: [] })).toBeNull();
+    expect(normalizeMatchRules({ op: "and", children: [] })).toBeNull();
     expect(normalizeMatchRules(null)).toBeNull();
     expect(normalizeMatchRules("not an object")).toBeNull();
   });
+});
 
-  it("drops a falsy negate rather than storing it", () => {
-    const out = normalizeMatchRules({ clauses: [{ field: "os", op: "contains", value: "x", negate: false }] });
-    expect(out?.clauses[0]).toEqual({ field: "os", op: "contains", value: "x" });
+describe("the legacy flat shape folds forward", () => {
+  // Nothing rewrites the rows the seed migration wrote, so this fold runs on
+  // every read on every install, forever.
+
+  it("reads a flat clause list as an OR of its clauses", () => {
+    const out = normalizeMatchRules({
+      clauses: [
+        { field: "os", op: "contains", value: "centos" },
+        { field: "os", op: "contains", value: "rhel" },
+      ],
+    });
+    expect(out).toEqual({
+      op: "or",
+      children: [
+        { field: "os", operator: "contains", value: "centos" },
+        { field: "os", operator: "contains", value: "rhel" },
+      ],
+    });
+  });
+
+  it("renames the two snake_case operators", () => {
+    const out = normalizeMatchRules({
+      clauses: [
+        { field: "hostname", op: "starts_with", value: "srv-" },
+        { field: "hostname", op: "ends_with", value: "-01" },
+      ],
+    });
+    expect(matchClauses(out).map((c) => c.operator)).toEqual(["startsWith", "endsWith"]);
+  });
+
+  it("folds `negate` onto the operator's negative twin, and drops a falsy one", () => {
+    expect(matchClauses(normalizeMatchRules({
+      clauses: [
+        { field: "os", op: "contains", value: "a", negate: true },
+        { field: "os", op: "equals", value: "b", negate: true },
+        { field: "hostname", op: "starts_with", value: "c", negate: true },
+        { field: "hostname", op: "ends_with", value: "d", negate: true },
+        { field: "os", op: "regex", value: "e", negate: true },
+      ],
+    }))).toEqual([
+      { field: "os", operator: "notContains", value: "a" },
+      { field: "os", operator: "notEquals", value: "b" },
+      { field: "hostname", operator: "notStartsWith", value: "c" },
+      { field: "hostname", operator: "notEndsWith", value: "d" },
+      { field: "os", operator: "notRegex", value: "e" },
+    ]);
+    // A falsy negate is not stored — it was never a distinct state.
+    expect(matchClauses(normalizeMatchRules({
+      clauses: [{ field: "os", op: "contains", value: "x", negate: false }],
+    }))[0]).toEqual({ field: "os", operator: "contains", value: "x" });
+  });
+
+  it("evaluates a folded legacy list exactly as the flat ANY-of did", () => {
+    const legacy = normalizeMatchRules({
+      clauses: [
+        { field: "os", op: "contains", value: "windows" },
+        { field: "hostname", op: "starts_with", value: "prn-" },
+      ],
+    })!;
+    expect(conditionMatches(legacy, { os: "Windows 11" })).toBe(true);
+    expect(conditionMatches(legacy, { hostname: "prn-acct" })).toBe(true);
+    expect(conditionMatches(legacy, { os: "Ubuntu", hostname: "srv-1" })).toBe(false);
+  });
+});
+
+describe("tree evaluation", () => {
+  const facts = { os: "Windows Server 2019", hostname: "dc-01", manufacturer: "Dell Inc." };
+
+  it("carries the same four group operators as the device filter, with the same identities", () => {
+    // Shared grammar is the point of the cutover — a tree an operator reads in
+    // one builder has to mean the same thing in the other.
+    expect([...MATCH_GROUP_OPS]).toEqual([...SCOPE_GROUP_OPS]);
+    const hit = { field: "os" as const, operator: "contains" as const, value: "windows" };
+    const miss = { field: "os" as const, operator: "contains" as const, value: "ubuntu" };
+    expect(conditionMatches({ op: "and", children: [hit, miss] }, facts)).toBe(false);
+    expect(conditionMatches({ op: "or", children: [hit, miss] }, facts)).toBe(true);
+    expect(conditionMatches({ op: "none", children: [hit, miss] }, facts)).toBe(false);
+    expect(conditionMatches({ op: "none", children: [miss] }, facts)).toBe(true);
+    expect(conditionMatches({ op: "notAll", children: [hit, miss] }, facts)).toBe(true);
+    expect(conditionMatches({ op: "notAll", children: [hit] }, facts)).toBe(false);
+  });
+
+  it("expresses the thing the flat list could not: AND with an exclusion", () => {
+    // "A Windows box that is NOT a server" needed one hand-written regex
+    // before; this is why the cutover happened.
+    const rules: MatchGroup = {
+      op: "and",
+      children: [
+        { field: "os", operator: "contains", value: "windows" },
+        { field: "os", operator: "notContains", value: "server" },
+      ],
+    };
+    expect(conditionMatches(rules, { os: "Windows 11 Enterprise" })).toBe(true);
+    expect(conditionMatches(rules, facts)).toBe(false);
+  });
+
+  it("nests groups", () => {
+    const rules: MatchGroup = {
+      op: "and",
+      children: [
+        { field: "manufacturer", operator: "contains", value: "dell" },
+        { op: "or", children: [
+          { field: "hostname", operator: "startsWith", value: "dc-" },
+          { field: "hostname", operator: "startsWith", value: "srv-" },
+        ] },
+      ],
+    };
+    expect(conditionMatches(rules, facts)).toBe(true);
+    expect(conditionMatches(rules, { ...facts, hostname: "ws-04" })).toBe(false);
+  });
+
+  it("never lets an emptied group claim the fleet", () => {
+    // `and([])` is true by identity, so an operator who cleared the last
+    // condition would otherwise have handed this type every device. The
+    // structural answer is that normalization prunes it away to null, and a
+    // type with null rules matches nothing.
+    expect(normalizeMatchRules({ op: "and", children: [] })).toBeNull();
+    expect(normalizeMatchRules({
+      op: "and",
+      children: [{ field: "os", operator: "contains", value: "x" }, { op: "and", children: [] }],
+    })).toEqual({ op: "and", children: [{ field: "os", operator: "contains", value: "x" }] });
+    const types: MatchableType[] = [{ name: "greedy", matchPriority: 1, matchContexts: ["scan"], matchRules: null }];
+    expect(resolveAssetType(types, { os: "anything" }, "scan")).toBeNull();
+  });
+});
+
+describe("explaining a match", () => {
+  it("names a satisfied leaf, agreeing with the resolver", () => {
+    const types: MatchableType[] = [
+      { name: "pdu", matchPriority: 5, matchContexts: ["scan"], matchRules: anyOf("eaton", "vertiv") },
+    ];
+    const { type, clause } = explainAssetType(types, { os: "Vertiv rPDU" }, "scan");
+    expect(type).toBe("pdu");
+    expect(clause).toEqual({ field: "any", operator: "contains", value: "vertiv" });
+    expect(type).toBe(resolveAssetType(types, { os: "Vertiv rPDU" }, "scan"));
+  });
+
+  it("descends into a nested and/or group", () => {
+    const types: MatchableType[] = [{
+      name: "ws", matchPriority: 5, matchContexts: ["directory"],
+      matchRules: { op: "and", children: [
+        { field: "os", operator: "contains", value: "windows" },
+        { op: "or", children: [{ field: "os", operator: "contains", value: "11" }] },
+      ] },
+    }];
+    expect(explainAssetType(types, { os: "Windows 11" }, "directory").clause)
+      .toEqual({ field: "os", operator: "contains", value: "windows" });
+  });
+
+  it("names nothing under an inverted group, rather than naming the wrong thing", () => {
+    // Under `none`, a leaf that tested TRUE is what would have PREVENTED the
+    // match — reporting it as the reason would be exactly backwards, so the
+    // preview shows a dash instead.
+    const types: MatchableType[] = [{
+      name: "odd", matchPriority: 5, matchContexts: ["scan"],
+      matchRules: { op: "none", children: [{ field: "os", operator: "contains", value: "windows" }] },
+    }];
+    const { type, clause } = explainAssetType(types, { os: "Ubuntu" }, "scan");
+    expect(type).toBe("odd");
+    expect(clause).toBeNull();
+  });
+});
+
+describe("the builder catalog", () => {
+  const meta = matchConditionMeta();
+  const filterMeta = scopeConditionMeta(DEVICE_FILTER_FIELD_OPS);
+
+  it("publishes the same shape the device filter's builder consumes", () => {
+    // The shared PolarisConditionBuilder reads meta.fields[].{field,label,ops},
+    // meta.groupOps, meta.groupOpLabels, meta.operatorLabels and meta.maxDepth.
+    // A key missing here renders a builder with empty dropdowns.
+    for (const key of ["groupOps", "groupOpLabels", "operatorLabels", "fields", "maxDepth"]) {
+      expect(meta, key).toHaveProperty(key);
+    }
+    expect(meta.fields.every((f) => f.field && f.label && f.ops.length)).toBe(true);
+    expect(meta.maxDepth).toBe(filterMeta.maxDepth);
+  });
+
+  it("words the shared operators identically to the device filter", () => {
+    // Two labels for one operator in two builders on the same install is how a
+    // rule copied from one to the other quietly stops meaning the same thing.
+    for (const op of ["equals", "notEquals", "contains", "notContains", "startsWith", "endsWith"] as const) {
+      expect(meta.operatorLabels[op], op).toBe(
+        (filterMeta.operatorLabels as Record<string, string>)[op],
+      );
+    }
+    expect(meta.groupOpLabels).toEqual(filterMeta.groupOpLabels);
+  });
+
+  it("offers no field the resolver cannot read", () => {
+    // The vocabularies are deliberately disjoint: there is no tag, subnet or
+    // status at inference time. What must hold is that every offered field is
+    // one factText() knows.
+    expect(meta.fields.map((f) => f.field)).toEqual(
+      ["any", "os", "osVersion", "hostname", "manufacturer", "model", "chassis"],
+    );
   });
 });

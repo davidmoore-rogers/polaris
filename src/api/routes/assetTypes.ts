@@ -22,25 +22,52 @@ import * as assetTypeService from "../../services/assetTypeService.js";
 import {
   MATCH_FIELDS,
   MATCH_OPS,
+  MATCH_GROUP_OPS,
   MATCH_CONTEXTS,
+  MATCH_MAX_LEAVES,
   AUTHORITATIVE_TYPE_SOURCES,
+  matchConditionMeta,
+  type MatchGroup,
 } from "../../utils/assetTypeMatch.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 
 const router = Router();
 
-// Shape only. The semantic rules — regex compiles, clause count, value
-// length — live in `utils/assetTypeMatch.validateMatchRules`, because the
+// Shape only. The semantic rules — regex compiles, leaf count, nesting depth,
+// value length — live in `utils/assetTypeMatch.validateMatchRules`, because the
 // service is also reached by the seed path and by preview, and a rule that
 // only the route rejected would still be storable.
+// A leaf carries `operator` — the device filter's own leaf key, so the shared
+// builder needs no translation. `op` + `negate` are the pre-2026-09 spelling,
+// still accepted (an older client, an unedited built-in round-tripping through
+// the editor) and folded by `normalizeMatchRules` on the way in.
 const ClauseSchema = z.object({
-  field:  z.enum(MATCH_FIELDS),
-  op:     z.enum(MATCH_OPS),
-  value:  z.string().min(1).max(200),
-  negate: z.boolean().optional(),
-});
-const MatchRulesSchema = z.object({ clauses: z.array(ClauseSchema).max(64) }).nullable();
+  field:    z.enum(MATCH_FIELDS),
+  operator: z.enum(MATCH_OPS).optional(),
+  op:       z.enum(MATCH_OPS).optional(),
+  value:    z.string().min(1).max(200),
+  negate:   z.boolean().optional(),
+}).refine((c) => c.operator || c.op, { message: "condition needs an operator" });
+
+/**
+ * The nested AND/OR tree — the same grammar the automations device filter
+ * validates (`makeScopeConditionSchema`), recursed the same way. The legacy
+ * flat `{clauses:[…]}` list stays in the union: it is what the seed migration
+ * wrote, and a client round-tripping an unedited built-in must not 400.
+ */
+const GroupSchema: z.ZodType<MatchGroup> = z.lazy(() =>
+  z.object({
+    op: z.enum(MATCH_GROUP_OPS),
+    children: z.array(z.union([ClauseSchema, GroupSchema])).max(50),
+  }).strict(),
+) as z.ZodType<MatchGroup>;
+
+const LegacyClauseListSchema = z
+  .object({ clauses: z.array(ClauseSchema).max(MATCH_MAX_LEAVES) })
+  .strict();
+
+const MatchRulesSchema = z.union([GroupSchema, LegacyClauseListSchema]).nullable();
 const MatchContextsSchema = z.array(z.enum(MATCH_CONTEXTS)).max(MATCH_CONTEXTS.length);
 const MatchPrioritySchema = z.number().int().min(0).max(1000);
 
@@ -91,6 +118,11 @@ router.get("/match-schema", requirePermission("assets", "read"), (_req, res) => 
     fields: MATCH_FIELDS,
     ops: MATCH_OPS,
     contexts: MATCH_CONTEXTS,
+    // The builder catalog, in the shape `scopeConditionMeta` publishes for the
+    // automations device filter — the shared PolarisConditionBuilder consumes
+    // it unchanged, so the page carries no field, operator or label list of
+    // its own and the two builders cannot drift apart in wording.
+    condition: matchConditionMeta(),
     authoritativeSources: AUTHORITATIVE_TYPE_SOURCES,
   });
 });
