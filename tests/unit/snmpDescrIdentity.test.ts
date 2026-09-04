@@ -26,10 +26,8 @@
 import { describe, it, expect } from "vitest";
 import {
   parseVendorSysDescr,
-  decideDescrAdoption,
-  type StoredDescrIdentity,
+  sameDescrObserved,
 } from "../../src/utils/snmpDescrIdentity.js";
-import { setAliasMap, _resetAliasMap } from "../../src/utils/manufacturerNormalize.js";
 
 /**
  * The real reading off a prod camera, verbatim — leading empty name field and
@@ -137,112 +135,50 @@ describe("parseVendorSysDescr — everything else", () => {
   });
 });
 
-describe("decideDescrAdoption", () => {
-  const AXIS = {
+describe("sameDescrObserved — the monitor path's no-I/O gate", () => {
+  const reading = {
     manufacturer: "Axis Communications",
     model: "M2036-LE",
-    productType: "Bullet Camera",
     osVersion: "10.12.114",
-  };
-  const DESCR = "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1";
-  const empty: StoredDescrIdentity = { manufacturer: null, model: null, osVersion: null, os: null };
-  const adopted: StoredDescrIdentity = {
-    manufacturer: "Axis Communications", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
+    os: "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1",
+    productType: "Bullet Camera",
   };
 
-  it("fills every empty field on the first reading", () => {
-    expect(decideDescrAdoption(empty, AXIS, DESCR)).toEqual({
-      manufacturer: "Axis Communications",
-      model: "M2036-LE",
-      osVersion: "10.12.114",
-      os: DESCR,
-    });
+  it("is true when the device said exactly what we last recorded", () => {
+    // The steady state for every camera on every pass: one indexed read, no
+    // write, no projection, no event.
+    expect(sameDescrObserved({ ...reading }, reading)).toBe(true);
   });
 
-  it("writes NOTHING once the asset already agrees", () => {
-    // The fleet-scale property: every pass after the first costs a comparison,
-    // not a write. A null here is what keeps this free at 2000 assets.
-    expect(decideDescrAdoption(adopted, AXIS, DESCR)).toBeNull();
+  it("is false on a firmware upgrade, a swap, and a vendor correction", () => {
+    expect(sameDescrObserved({ ...reading, osVersion: "10.12.100" }, reading)).toBe(false);
+    expect(sameDescrObserved({ ...reading, model: "P3364-LVE" }, reading)).toBe(false);
+    expect(sameDescrObserved({ ...reading, manufacturer: "ServerTech" }, reading)).toBe(false);
   });
 
-  it("refreshes the firmware after an upgrade, and drags os along with it", () => {
-    const upgraded = "; AXIS M2036-LE; Bullet Camera; 11.11.61; Mar 14 2026 09:02; 7EC.1; 1";
-    const patch = decideDescrAdoption(adopted, { ...AXIS, osVersion: "11.11.61" }, upgraded);
-    expect(patch).toEqual({ osVersion: "11.11.61", os: upgraded });
-    // Hardware identity is NOT restated on an upgrade.
-    expect(patch).not.toHaveProperty("model");
-    expect(patch).not.toHaveProperty("manufacturer");
+  it("is false with nothing recorded yet, so the first reading always lands", () => {
+    expect(sameDescrObserved(null, reading)).toBe(false);
+    expect(sameDescrObserved(undefined, reading)).toBe(false);
   });
 
-  it("corrects a model that disagrees with what the device states", () => {
-    // Refreshed rather than fill-only, so a camera SWAPPED behind the same
-    // address reports its real model within one pass instead of carrying its
-    // predecessor's. The accepted cost is that an operator-typed model on a
-    // readable-format device does not survive — there is no pin column for it.
-    const swapped: StoredDescrIdentity = {
-      manufacturer: "Axis Communications", model: "M2036-LE-BLK", osVersion: "10.12.114", os: DESCR,
-    };
-    expect(decideDescrAdoption(swapped, AXIS, DESCR)).toEqual({ model: "M2036-LE" });
+  it("does not treat absent, null, empty and whitespace as changes", () => {
+    // Field-wise, not JSON-wise: a row written before productType existed
+    // must not re-write on every pass just for carrying fewer keys.
+    const terse = { manufacturer: "Axis Communications", model: "M2036-LE" };
+    expect(sameDescrObserved(terse, { ...terse, osVersion: null, os: null, productType: "" }))
+      .toBe(true);
+    expect(sameDescrObserved({ ...terse, model: "   " }, { ...terse, model: null }))
+      .toBe(true);
   });
 
-  it("self-heals a manufacturer Polaris had wrong", () => {
-    // Every AXIS camera adopted before the enterprise-arc-368 fix carries
-    // "ServerTech" (368 was mis-mapped; Axis is 368, Server Technology 1718).
-    // Refreshing manufacturer is what corrects those rows with no migration.
-    const wrongVendor: StoredDescrIdentity = {
-      manufacturer: "ServerTech", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
-    };
-    expect(decideDescrAdoption(wrongVendor, AXIS, DESCR)).toEqual({
-      manufacturer: "Axis Communications",
-    });
+  it("ignores key order and extra keys it does not compare", () => {
+    const reordered: Record<string, unknown> = {};
+    for (const k of Object.keys(reading).reverse()) reordered[k] = (reading as any)[k];
+    reordered.sysDescr = "something a later version added";
+    expect(sameDescrObserved(reordered, reading)).toBe(true);
   });
 
-  it("does not thrash when an alias canonicalizes the vendor name", () => {
-    // db.ts runs every staged manufacturer through normalizeManufacturer, so
-    // comparing the raw parse against an alias-canonicalized stored value
-    // would differ FOREVER: a write and an audit row every pass, never
-    // converging. Both sides are normalized, so this is a no-op.
-    try {
-      setAliasMap([["axis communications", "Axis"]]);
-      const canonical: StoredDescrIdentity = {
-        manufacturer: "Axis", model: "M2036-LE", osVersion: "10.12.114", os: DESCR,
-      };
-      expect(decideDescrAdoption(canonical, AXIS, DESCR)).toBeNull();
-      // And an empty column is filled with the canonical form, not the parse.
-      expect(decideDescrAdoption({ ...canonical, manufacturer: null }, AXIS, DESCR))
-        .toEqual({ manufacturer: "Axis" });
-    } finally {
-      _resetAliasMap();
-    }
-  });
-
-  it("treats whitespace as empty rather than as a held value", () => {
-    const blank: StoredDescrIdentity = { manufacturer: "  ", model: "	", osVersion: " ", os: "" };
-    expect(decideDescrAdoption(blank, AXIS, DESCR)).toEqual({
-      manufacturer: "Axis Communications",
-      model: "M2036-LE",
-      osVersion: "10.12.114",
-      os: DESCR,
-    });
-  });
-
-  it("has no opinion at all when the vendor layout was unreadable", () => {
-    // The whole fleet outside the vendor table lands here: no detail, no
-    // patch, so a Cisco switch's stored fields are never touched by this path.
-    expect(decideDescrAdoption(empty, undefined, "Cisco IOS Software, Version 15.0")).toBeNull();
-    expect(decideDescrAdoption(adopted, undefined, DESCR)).toBeNull();
-  });
-
-  it("does not move a field the format did not state", () => {
-    // A reading that yielded only a model must not blank the firmware.
-    const patch = decideDescrAdoption(adopted, { manufacturer: "Axis Communications", model: "M2036-LE" }, DESCR);
-    expect(patch).toBeNull();
-  });
-
-  it("fills the firmware silently when it was never known", () => {
-    // Deliberately paired with the service-side comment: computeFirmwareChange
-    // rules a first learn is not an upgrade, so this patch fires no Event.
-    const neverKnown: StoredDescrIdentity = { ...adopted, osVersion: null };
-    expect(decideDescrAdoption(neverKnown, AXIS, DESCR)).toEqual({ osVersion: "10.12.114" });
+  it("compares only strings, so a malformed stored blob reads as changed", () => {
+    expect(sameDescrObserved({ model: 42 } as any, { model: "42" })).toBe(false);
   });
 });

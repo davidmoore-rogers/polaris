@@ -31,7 +31,7 @@ import {
 import { isFortinetIntegrationType } from "../../utils/pollingCompatibility.js";
 import { ENTRA_ASSET_TAG_PREFIX, AD_ASSET_TAG_PREFIX, AD_GUID_TAG_PREFIX, SID_TAG_PREFIX } from "../../utils/assetSourceTags.js";
 import type { DiscoveryResult, DiscoveryProgressCallback } from "../fortimanagerService.js";
-import { projectAssetFromSources } from "../../utils/assetProjection.js";
+import { projectAssetFromSources, ENRICHMENT_SOURCE_KINDS } from "../../utils/assetProjection.js";
 import { scoreDhcpClaim, claimBeats, type DhcpClaimScore } from "../../utils/dhcpClaimFreshness.js";
 import { bareFortinetDeviceName } from "../../utils/assetSourceLocation.js";
 import { refreshProjectionPriority } from "../assetSourcePriorityService.js";
@@ -9725,10 +9725,20 @@ export async function syncVcenterDevices(
 
       // Which of those assets are now unclaimed? Read AFTER the delete, so
       // "remaining" is literally what still points at the asset.
+      //
+      // ENRICHMENT rows don't count. A `snmp-sysdescr` row says what the
+      // device answered about itself the last time Polaris polled it, which
+      // is not evidence that anything still holds it in an inventory — count
+      // one as a claim and a VM deleted from vCenter stays active forever,
+      // vouched for by its own SNMP reply. Only ownership-bearing kinds
+      // answer "does something still claim this device exists?".
       const orphanCandidateIds = [...new Set(gone.map((r) => r.assetId))];
       if (orphanCandidateIds.length > 0) {
         const remaining = await prisma.assetSource.findMany({
-          where: { assetId: { in: orphanCandidateIds } },
+          where: {
+            assetId: { in: orphanCandidateIds },
+            sourceKind: { notIn: [...ENRICHMENT_SOURCE_KINDS] },
+          },
           select: { assetId: true },
         });
         const stillClaimed = new Set(remaining.map((r) => r.assetId));

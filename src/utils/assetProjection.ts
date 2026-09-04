@@ -77,7 +77,35 @@ export type AssetSourceKind =
   | "vcenter-host"
   | "arc"
   | "arc-k8s"
+  // The device's OWN answer to sysDescr, parsed through its vendor's
+  // documented format (utils/snmpDescrIdentity.ts) on the monitor path.
+  // ENRICHMENT, not ownership: it says what the device claims to be, never
+  // that the device is in anyone's inventory — see ENRICHMENT_SOURCE_KINDS.
+  | "snmp-sysdescr"
   | "manual";
+
+/**
+ * Source kinds that describe a device without CLAIMING it.
+ *
+ * Every other kind is written by something that holds the device in an
+ * inventory — a directory, a hypervisor, a controller, an operator. Their
+ * presence answers "does anything still say this device exists?", which is
+ * what the vCenter disappearance sweep asks before decommissioning an asset
+ * that left the inventory (business rule: absence only counts when nothing
+ * else claims it).
+ *
+ * An enrichment row answers a different question: "what did the device say
+ * about itself when we last spoke to it?" A camera that answered sysDescr is
+ * not evidence that a VM still exists in vCenter, so counting one as a claim
+ * would leave a deleted VM active forever. Callers asking about EXISTENCE
+ * filter these out; callers asking about IDENTITY (projection) do not.
+ */
+export const ENRICHMENT_SOURCE_KINDS: readonly AssetSourceKind[] = ["snmp-sysdescr"];
+
+/** True when this kind's presence means "something still holds this device". */
+export function sourceClaimsExistence(kind: string): boolean {
+  return !ENRICHMENT_SOURCE_KINDS.includes(kind as AssetSourceKind);
+}
 
 export interface AssetSourceForProjection {
   sourceKind: AssetSourceKind | string;
@@ -277,6 +305,22 @@ const MANUFACTURER_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: () => "Fortinet" },
   { sourceKind: "fortiswitch", pick: () => "Fortinet" },
   { sourceKind: "fortiap", pick: () => "Fortinet" },
+  // The device's OWN answer, parsed through its vendor's documented sysDescr
+  // format. Ranked HERE — directly above fortigate-endpoint and no higher —
+  // because the claim is narrow and defensible: a device's own SNMP
+  // self-report beats a gate's DHCP/device-inventory FINGERPRINT, which
+  // answers with a category ("ip camera") rather than a vendor. It stays BELOW
+  // the agent / Arc / vCenter / MDM rows deliberately — those read the
+  // running system from inside it, and outranking them is a claim this
+  // parser has no business making. A row exists only where
+  // parseVendorSysDescr recognized the layout, so today it can only be an
+  // AXIS device: a Windows host answering "Hardware: Intel64 Family 6 -
+  // Software: Windows Version 6.3" never gets one, and cannot displace
+  // Intune's model with it.
+  { sourceKind: "snmp-sysdescr", pick: (o) => {
+      const raw = obsString(o, "manufacturer");
+      return raw ? normalizeManufacturer(raw) : null;
+    } },
   // fortigate-endpoint hardwareVendor — populated from FortiOS device-
   // inventory or OUI lookup at discovery time. Coarser than Intune
   // (vendor only, no model fidelity) but better than nothing for assets
@@ -307,6 +351,19 @@ const MODEL_RULES: FieldRule[] = [
   // and AP do carry a meaningful model string.
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "model") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "model") },
+  // The device's OWN answer, parsed through its vendor's documented sysDescr
+  // format. Ranked HERE — directly above fortigate-endpoint and no higher —
+  // because the claim is narrow and defensible: a device's own SNMP
+  // self-report beats a gate's DHCP/device-inventory FINGERPRINT, which
+  // answers with a category ("ip camera") rather than a model. It stays BELOW
+  // the agent / Arc / vCenter / MDM rows deliberately — those read the
+  // running system from inside it, and outranking them is a claim this
+  // parser has no business making. A row exists only where
+  // parseVendorSysDescr recognized the layout, so today it can only be an
+  // AXIS device: a Windows host answering "Hardware: Intel64 Family 6 -
+  // Software: Windows Version 6.3" never gets one, and cannot displace
+  // Intune's model with it.
+  { sourceKind: "snmp-sysdescr", pick: (o) => obsString(o, "model") },
   // fortigate-endpoint model — DHCP fingerprint or device-inventory model
   // string. Coarse signal but better than nothing for non-MDM assets.
   { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "model") },
@@ -349,6 +406,19 @@ const OS_RULES: FieldRule[] = [
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "intune", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystem") },
+  // The device's OWN answer, parsed through its vendor's documented sysDescr
+  // format. Ranked HERE — directly above fortigate-endpoint and no higher —
+  // because the claim is narrow and defensible: a device's own SNMP
+  // self-report beats a gate's DHCP/device-inventory FINGERPRINT, which
+  // answers with a category ("ip camera") rather than a self-description. It stays BELOW
+  // the agent / Arc / vCenter / MDM rows deliberately — those read the
+  // running system from inside it, and outranking them is a claim this
+  // parser has no business making. A row exists only where
+  // parseVendorSysDescr recognized the layout, so today it can only be an
+  // AXIS device: a Windows host answering "Hardware: Intel64 Family 6 -
+  // Software: Windows Version 6.3" never gets one, and cannot displace
+  // Intune's model with it.
+  { sourceKind: "snmp-sysdescr", pick: (o) => obsString(o, "os") },
   // fortigate-endpoint os — FortiGate device-inventory's OS detection
   // (rough fingerprint based on DHCP options + traffic). Coarse but
   // useful when no MDM/AD source has the device.
@@ -369,6 +439,19 @@ const OS_VERSION_RULES: FieldRule[] = [
   { sourceKind: "fortigate-firewall", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiswitch", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortiap", pick: (o) => obsString(o, "osVersion") },
+  // The device's OWN answer, parsed through its vendor's documented sysDescr
+  // format. Ranked HERE — directly above fortigate-endpoint and no higher —
+  // because the claim is narrow and defensible: a device's own SNMP
+  // self-report beats a gate's DHCP/device-inventory FINGERPRINT, which
+  // answers with a category ("ip camera") rather than a firmware version. It stays BELOW
+  // the agent / Arc / vCenter / MDM rows deliberately — those read the
+  // running system from inside it, and outranking them is a claim this
+  // parser has no business making. A row exists only where
+  // parseVendorSysDescr recognized the layout, so today it can only be an
+  // AXIS device: a Windows host answering "Hardware: Intel64 Family 6 -
+  // Software: Windows Version 6.3" never gets one, and cannot displace
+  // Intune's model with it.
+  { sourceKind: "snmp-sysdescr", pick: (o) => obsString(o, "osVersion") },
   { sourceKind: "fortigate-endpoint", pick: (o) => obsString(o, "osVersion") },
 ];
 

@@ -150,92 +150,50 @@ export function parseVendorSysDescr(sysDescr: string | undefined): SysDescrDetai
 
 // ─── Adopting what the format said onto a stored asset ──────────────────────
 
-/** The stored fields an adoption decision compares against. */
-export interface StoredDescrIdentity {
-  manufacturer: string | null;
-  model: string | null;
-  osVersion: string | null;
-  /** The device's own self-description, i.e. the last sysDescr we stored. */
-  os: string | null;
-}
-
-/** Fields to write. Only ever the ones that should actually move. */
-export interface DescrPatch {
-  manufacturer?: string;
-  model?: string;
-  osVersion?: string;
-  os?: string;
-}
+/**
+ * How the reading reaches the Asset row, and why nothing here decides it.
+ *
+ * This file used to own that decision: `decideDescrAdoption` compared the
+ * parse against the stored columns and returned the fields to write. It was
+ * retired when the reading became a real `AssetSource` row (`snmp-sysdescr`),
+ * because the decision it was making is the one `utils/assetProjection.ts`
+ * already makes for every other source — by PRIORITY, across all of them at
+ * once. Two places answering "may this overwrite that?" is how a fleet ends
+ * up with two writers trading values every cycle.
+ *
+ * The priority list ranks this source directly above `fortigate-endpoint`:
+ * a device's own SNMP self-report beats a gate's DHCP fingerprint (which
+ * answers "ip camera"), and loses to an agent, Arc, vCenter or MDM reading
+ * the running system from inside it.
+ *
+ * What survives here is the cheap gate below — the question the monitor path
+ * asks before doing any I/O at all.
+ */
 
 /**
- * Decide what a fresh reading should change on a stored asset.
+ * Did the device's answer change since we last recorded it?
  *
- * A Discovery reads sysDescr once, at adoption, so a camera upgraded a year
- * later still showed the firmware it shipped with. The monitor pass re-reads
- * it, which makes this the question: of the fields the format states, which
- * may a later reading overwrite?
+ * The comparison the monitor path gates on, and it deliberately compares two
+ * RECORDINGS rather than a recording against the Asset columns. A device
+ * whose model a higher-priority source legitimately owns (an in-guest agent,
+ * Arc, Intune) disagrees with those columns on every single pass — so gating
+ * on the columns would re-write and re-project forever to arrive at the same
+ * answer. Gating on "what the device said last time" converges whoever wins.
  *
- * One answer for all four: **what the device states about itself wins.** The
- * device is the authority on its own identity — the posture business rule 12
- * takes for presence and rule 28 takes for the Windows build — and a reading
- * parsed out of the vendor's own documented format is the device stating it,
- * not Polaris guessing. So a value that disagrees is corrected on the next
- * pass, whichever field it is.
- *
- * Model and manufacturer were fill-only when this shipped, on the reasoning
- * that hardware does not change while the address stays put, so a
- * disagreement had to be either operator-typed or a swap — indistinguishable
- * from here. Refreshing them was chosen instead, deliberately, because both
- * of those cases are better served by it:
- *
- *  - **A swapped device self-heals.** A camera replaced behind the same
- *    address reports its real model within one system-info pass instead of
- *    carrying its predecessor's forever.
- *  - **A bad stored value self-heals too.** Every AXIS camera adopted before
- *    the enterprise arc 368 fix carries the manufacturer "ServerTech"; with
- *    manufacturer refreshed, those rows correct themselves on the next pass
- *    rather than needing a migration or a hand edit.
- *
- * The cost, stated plainly: there is no operator-pin column for these two
- * (unlike `Asset.hostnameOverride` / `ipOverride`), so a hand-typed model on a
- * device whose format Polaris can read is overwritten on the next pass. An
- * operator who needs a different model on such a device has to clear the
- * vendor's entry from the parser table, not edit the row.
- *
- * `os` follows the firmware for its own reason: it holds the whole sysDescr,
- * in which the firmware is one token, so leaving it behind while `osVersion`
- * moves would publish two different answers about one device on one page.
- *
- * Returns `null` when nothing should move — which is the steady state on every
- * pass after the first, and is what keeps this free at fleet scale: an
- * unchanged camera costs a comparison, not a write.
+ * Field-wise rather than JSON-wise: key order and absent-vs-null are not
+ * changes, and a stringify comparison would call them one.
  */
-export function decideDescrAdoption(
-  stored: StoredDescrIdentity,
-  detail: SysDescrDetail | undefined,
-  descrText?: string | null,
-): DescrPatch | null {
-  // No readable layout ⇒ no opinion. Most devices land here, and they must be
-  // left exactly as they were.
-  if (!detail) return null;
-
-  const patch: DescrPatch = {};
-  const held = (v: string | null | undefined): string => (v ?? "").trim();
-
-  // Manufacturer is compared and written in its CANONICAL form, because the
-  // `db.ts` extension runs every staged value through `normalizeManufacturer`
-  // on the way to the column. Comparing the raw parse against an
-  // alias-canonicalized stored value ("Axis Communications" vs an install's
-  // "Axis") would differ forever: a write every pass, an audit row every pass,
-  // and the row never converging. Normalizing both sides is what makes
-  // refreshing this field idempotent.
-  const vendor = detail.manufacturer ? normalizeManufacturer(detail.manufacturer) : null;
-  if (vendor && vendor !== held(stored.manufacturer)) patch.manufacturer = vendor;
-  if (detail.model && detail.model !== held(stored.model)) patch.model = detail.model;
-  if (detail.osVersion && detail.osVersion !== held(stored.osVersion)) patch.osVersion = detail.osVersion;
-
-  const descr = (descrText ?? "").trim();
-  if (descr && descr !== held(stored.os)) patch.os = descr;
-
-  return Object.keys(patch).length ? patch : null;
+export function sameDescrObserved(
+  prev: Record<string, unknown> | null | undefined,
+  next: Record<string, unknown>,
+): boolean {
+  if (!prev) return false;
+  const read = (o: Record<string, unknown>, k: string): string | null => {
+    const v = o[k];
+    return typeof v === "string" && v.trim() ? v : null;
+  };
+  for (const k of ["manufacturer", "model", "osVersion", "os", "productType"]) {
+    if (read(prev, k) !== read(next, k)) return false;
+  }
+  return true;
 }

@@ -764,3 +764,96 @@ describe("projectAssetFromSources — freshest same-kind row speaks for the kind
     expect(provenance.ipAddress).toBe("fortiswitch");
   });
 });
+
+describe("projectAssetFromSources — snmp-sysdescr (the device's own word)", () => {
+  // The real prod reading, and the real fingerprint it competes with: a
+  // FortiGate's device inventory answers the CATEGORY "ip camera" where the
+  // camera itself answers its model.
+  const DESCR = "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1";
+  const sysdescr = {
+    manufacturer: "Axis Communications",
+    model: "M2036-LE",
+    osVersion: "10.12.114",
+    os: DESCR,
+    productType: "Bullet Camera",
+  };
+
+  it("beats a gate's fingerprint on model, os and firmware", () => {
+    const { projected, provenance } = projectAssetFromSources([
+      src("fortigate-endpoint", { model: "ip camera", os: "IP Camera", hardwareVendor: "Axis" }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(projected.model).toBe("M2036-LE");
+    expect(provenance.model).toBe("snmp-sysdescr");
+    expect(projected.osVersion).toBe("10.12.114");
+    expect(projected.os).toBe(DESCR);
+  });
+
+  it("wins regardless of the order the rows come back in", () => {
+    // The rule list decides, not the query. Both orders, same answer.
+    const { projected } = projectAssetFromSources([
+      src("snmp-sysdescr", sysdescr),
+      src("fortigate-endpoint", { model: "ip camera" }),
+    ]);
+    expect(projected.model).toBe("M2036-LE");
+  });
+
+  it("loses to an agent, Arc and MDM — they read the running system", () => {
+    // The deliberate ceiling on this source: it is a parse of a text field,
+    // not a look inside the machine.
+    const agent = projectAssetFromSources([
+      src("polaris-agent", { model: "PowerEdge R740", manufacturer: "Dell Inc." }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(agent.projected.model).toBe("PowerEdge R740");
+    expect(agent.provenance.model).toBe("polaris-agent");
+
+    const arc = projectAssetFromSources([
+      src("arc", { model: "OptiPlex 7090" }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(arc.projected.model).toBe("OptiPlex 7090");
+
+    const intune = projectAssetFromSources([
+      src("intune", { model: "Surface Laptop 5" }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(intune.projected.model).toBe("Surface Laptop 5");
+  });
+
+  it("loses to Fortinet infrastructure rows, which state their own model", () => {
+    const { projected } = projectAssetFromSources([
+      src("fortiap", { model: "FAP-431F" }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(projected.model).toBe("FAP-431F");
+  });
+
+  it("canonicalizes the vendor it contributes", () => {
+    // Mirrors every other manufacturer rule: the projected value has to match
+    // what the db.ts extension stamps on the column, or the two differ on
+    // every pass and drift fires forever.
+    const { projected } = projectAssetFromSources([src("snmp-sysdescr", sysdescr)]);
+    expect(projected.manufacturer).toBe("Axis Communications");
+  });
+
+  it("contributes nothing from a row with no readable fields", () => {
+    // A device whose layout the parser did not recognize never gets a row at
+    // all; an empty one must not blank what another source stated.
+    const { projected } = projectAssetFromSources([
+      src("fortigate-endpoint", { model: "ip camera" }),
+      src("snmp-sysdescr", {}),
+    ]);
+    expect(projected.model).toBe("ip camera");
+  });
+
+  it("supplies identity for a device with no other source at all", () => {
+    const { projected } = projectAssetFromSources([src("snmp-sysdescr", sysdescr)]);
+    expect(projected.model).toBe("M2036-LE");
+    expect(projected.osVersion).toBe("10.12.114");
+    // And states nothing it cannot know.
+    expect(projected.hostname).toBeNull();
+    expect(projected.serialNumber).toBeNull();
+    expect(projected.ipAddress).toBeNull();
+  });
+});

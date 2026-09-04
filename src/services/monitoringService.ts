@@ -109,10 +109,12 @@ import {
   type RosterDeviceStatus,
 } from "./fortimanagerService.js";
 import { logEvent, logEventsBatch, buildConnectionChangedEvent, buildFirmwareChangedEvent } from "./eventLogService.js";
+import { projectAssetFromSources } from "../utils/assetProjection.js";
+import { lookupOuiOverride } from "./ouiService.js";
 import { SYS_OIDS } from "../utils/snmpIdentity.js";
 import {
   parseVendorSysDescr,
-  decideDescrAdoption,
+  sameDescrObserved,
   type SysDescrDetail,
 } from "../utils/snmpDescrIdentity.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
@@ -9340,6 +9342,8 @@ type SystemInfoPins = {
   manufacturer: string | null;
   osVersion: string | null;
   os: string | null;
+  /** For the OUI-override guard in adoptSysDescrIdentity. */
+  macAddress: string | null;
 } | null;
 
 /**
@@ -9610,28 +9614,94 @@ async function adoptSysDescrIdentity(
   pinned: SystemInfoPins,
 ): Promise<void> {
   if (!pinned || !d.descrIdentity) return;
+  const detail = d.descrIdentity;
 
-  const patch = decideDescrAdoption(
-    {
-      manufacturer: pinned.manufacturer,
-      model: pinned.model,
-      osVersion: pinned.osVersion,
-      os: pinned.os,
+  // What the device said about itself, in the shape the projection reads.
+  const observed = {
+    manufacturer: detail.manufacturer ?? null,
+    model: detail.model ?? null,
+    osVersion: detail.osVersion ?? null,
+    // `os` carries the WHOLE sysDescr: the firmware is one token inside it,
+    // so a reader given only the parsed fields would show a device
+    // describing itself in less detail than it actually did.
+    os: d.sysDescr ?? null,
+    productType: detail.productType ?? null,
+  };
+
+  // Steady state costs ONE indexed read and nothing else. The gate is "did
+  // the device's answer change since we last recorded it?" — deliberately
+  // NOT "does it disagree with the Asset row", which never converges for a
+  // device whose identity a higher-priority source legitimately owns: that
+  // comparison differs on every pass forever, re-writing and re-projecting
+  // to reach the same answer. Comparing against our own last recording is
+  // stable whoever wins the projection.
+  const existing = await prisma.assetSource.findUnique({
+    where: { sourceKind_externalId: { sourceKind: "snmp-sysdescr", externalId: assetId } },
+    select: { observed: true },
+  });
+  if (existing && sameDescrObserved(existing.observed as Record<string, unknown> | null, observed)) {
+    return;
+  }
+
+  const now = new Date();
+  await prisma.assetSource.upsert({
+    where: { sourceKind_externalId: { sourceKind: "snmp-sysdescr", externalId: assetId } },
+    // externalId is the assetId — the convention `manual` rows already use.
+    // This source has no identifier of its own to key on, being the device's
+    // own voice rather than a record in someone else's inventory.
+    create: {
+      assetId,
+      sourceKind: "snmp-sysdescr",
+      externalId: assetId,
+      observed,
+      syncedAt: now,
+      lastSeen: now,
     },
-    d.descrIdentity,
-    d.sysDescr,
-  );
-  if (!patch) return;
+    update: { assetId, observed, syncedAt: now, lastSeen: now },
+  });
 
-  // Ownership check, paid only by a device that actually publishes a readable
-  // format and has something to change.
+  // Whether the device's word WINS is the priority list's call, not this
+  // function's — which is the whole reason this routes through an AssetSource
+  // instead of writing the columns. A gate that fingerprinted the device as
+  // "ip camera" loses to the device's own "M2036-LE"; an in-guest agent or
+  // Arc reading real SMBIOS does not.
   const sources = await prisma.assetSource.findMany({
     where: { assetId },
-    select: { sourceKind: true },
+    select: { sourceKind: true, inferred: true, observed: true, lastSeen: true },
   });
-  if (sources.some((s) => s.sourceKind !== "manual")) return;
+  const { projected } = projectAssetFromSources(
+    sources.map((r) => ({
+      sourceKind: r.sourceKind,
+      inferred: r.inferred,
+      observed: r.observed as Record<string, unknown> | null,
+      lastSeen: r.lastSeen,
+    })),
+  );
 
-  await prisma.asset.update({ where: { id: assetId }, data: patch });
+  // ONLY the four identity fields this source can speak to. Applying the
+  // whole projection here would make the monitor path a general projection
+  // writer — rewriting hostname, IP and learnedLocation from other sources on
+  // a cadence that has nothing to do with them.
+  const diff: Record<string, string> = {};
+  for (const f of ["manufacturer", "model", "os", "osVersion"] as const) {
+    const next = projected[f];
+    if (next !== null && next !== pinned[f]) diff[f] = next;
+  }
+
+  // An operator's OUI override is an explicit statement about the VENDOR, and
+  // discovery Phase 9a writes it straight onto the Asset rather than through a
+  // source row — so the projection cannot see it, and the two would trade
+  // writes every cycle, each auditing an identity "change" that is really two
+  // writers disagreeing. The operator's statement wins; the device still
+  // supplies model, firmware and self-description. Costs an in-memory map
+  // lookup, and only when there is a vendor diff to suppress.
+  if (diff.manufacturer && pinned.macAddress) {
+    const override = await lookupOuiOverride(pinned.macAddress);
+    if (override) delete diff.manufacturer;
+  }
+
+  if (Object.keys(diff).length === 0) return;
+  await prisma.asset.update({ where: { id: assetId }, data: diff });
 
   const ev = buildFirmwareChangedEvent(
     { assetId, assetName: pinned.hostname, actor: "system:monitor", source: "snmp-sysdescr" },
@@ -9639,7 +9709,7 @@ async function adoptSysDescrIdentity(
     // Only osVersion is offered to the differ: `os` here is the whole
     // sysDescr, in which the firmware is one token, so reporting both would
     // state the same upgrade twice in one sentence.
-    { osVersion: patch.osVersion ?? pinned.osVersion },
+    { osVersion: diff.osVersion ?? pinned.osVersion },
   );
   if (ev) logEvent(ev);
 
@@ -9653,11 +9723,11 @@ async function adoptSysDescrIdentity(
   // nothing changed. Reuses `asset.model_detected`, the action
   // `adoptDetectedModel` already writes, so no new event vocabulary appears.
   const moved: string[] = [];
-  if (patch.model && (pinned.model ?? "").trim()) {
-    moved.push(`model "${pinned.model}" → "${patch.model}"`);
+  if (diff.model && (pinned.model ?? "").trim()) {
+    moved.push(`model "${pinned.model}" → "${diff.model}"`);
   }
-  if (patch.manufacturer && (pinned.manufacturer ?? "").trim()) {
-    moved.push(`manufacturer "${pinned.manufacturer}" → "${patch.manufacturer}"`);
+  if (diff.manufacturer && (pinned.manufacturer ?? "").trim()) {
+    moved.push(`manufacturer "${pinned.manufacturer}" → "${diff.manufacturer}"`);
   }
   if (moved.length) {
     logEvent({
@@ -9670,9 +9740,9 @@ async function adoptSysDescrIdentity(
       details: {
         source: "snmp:sysDescr",
         previousModel: pinned.model || null,
-        model: patch.model ?? pinned.model ?? null,
+        model: diff.model ?? pinned.model ?? null,
         previousManufacturer: pinned.manufacturer || null,
-        manufacturer: patch.manufacturer ?? pinned.manufacturer ?? null,
+        manufacturer: diff.manufacturer ?? pinned.manufacturer ?? null,
       },
     });
   }
@@ -9688,7 +9758,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   // history fold and the model adoption.
   const pinned: SystemInfoPins = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true, manufacturer: true, osVersion: true, os: true },
+    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true, manufacturer: true, osVersion: true, os: true, macAddress: true },
   });
 
   // Reconcile the collected names against the identity of record BEFORE
