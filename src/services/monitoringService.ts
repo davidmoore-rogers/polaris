@@ -115,6 +115,7 @@ import { SYS_OIDS } from "../utils/snmpIdentity.js";
 import {
   parseVendorSysDescr,
   sameDescrObserved,
+  descrReadDue,
   type SysDescrDetail,
 } from "../utils/snmpDescrIdentity.js";
 import { maybeEmitChangeEvents, type ChangeItem } from "./notificationChangeEvents.js";
@@ -237,6 +238,18 @@ export interface ProbeResult {
    * declare an entire virtual fleet down the moment vCenter hiccups.
    */
   skipped?: boolean;
+  /**
+   * The device's raw sysDescr, when the probe was asked to carry it.
+   *
+   * Only the SNMP transport can supply this, and only on the tick where
+   * `Asset.lastDescrAt` says the identity read is due — it rides the GET the
+   * probe was already making (one extra varbind, same packet, same session,
+   * same per-host gate) rather than opening a session of its own. An
+   * unreadable or absent sysDescr leaves this undefined and NEVER fails the
+   * probe: the probe's job is liveness, and a device that answered sysUpTime
+   * is up whatever it says about its own name.
+   */
+  sysDescr?: string;
 }
 
 /**
@@ -2079,7 +2092,30 @@ export async function probeAsset(
       } catch (err: any) {
         return finish(start, false, err?.message || "SNMP credential lookup failed");
       }
-      return await probeSnmp(targetIp, probeCfg, dispatchStart, timeoutMs);
+      const snmpRes = await probeSnmp(
+        targetIp, probeCfg, dispatchStart, timeoutMs, descrReadDue(asset.lastDescrAt),
+      );
+      // The identity read rode this probe. Reconcile it here — the probe path
+      // is the only reader that reaches an SNMP asset with no heavy stream
+      // enabled, which is exactly the camera case: response time on SNMP and
+      // nothing else. Best-effort by construction: an identity write must
+      // never turn a successful probe into a failed one, and the anchor is
+      // stamped by recordProbeResult off `result.sysDescr` regardless, so a
+      // device whose blob we cannot parse is not re-read every tick.
+      if (snmpRes.sysDescr) {
+        const detail = parseVendorSysDescr(snmpRes.sysDescr);
+        if (detail) {
+          try {
+            await applyDescrIdentity(asset.id, detail, snmpRes.sysDescr, asset);
+          } catch (err: any) {
+            logger.debug(
+              { assetId: asset.id, err: err?.message },
+              "sysDescr identity reconcile failed",
+            );
+          }
+        }
+      }
+      return snmpRes;
     }
     if (polling === "winrm") {
       // Per-stream credential wins, then asset default, then AD bind fallback.
@@ -3761,7 +3797,13 @@ export async function withSnmpGate<T>(host: string, port: number, fn: () => Prom
   });
 }
 
-async function probeSnmp(host: string, config: Record<string, unknown>, start: number, timeoutMs: number): Promise<ProbeResult> {
+async function probeSnmp(
+  host: string,
+  config: Record<string, unknown>,
+  start: number,
+  timeoutMs: number,
+  wantDescr = false,
+): Promise<ProbeResult> {
   const port = toPositiveInt(config.port, 161);
   return withSnmpGate(host, port, () => new Promise<ProbeResult>((resolve) => {
     // Reset start INSIDE the gate so reported responseTimeMs reflects only
@@ -3783,22 +3825,39 @@ async function probeSnmp(host: string, config: Record<string, unknown>, start: n
       session = buildSnmpSession(host, config, timeoutMs);
 
       session.on("error", (err: Error) => finishOnce(finish(start, false, err?.message || "SNMP error")));
-      session.get([sysUpTimeOid], (err: Error | null, varbinds: any[]) => {
+      // sysDescr rides along only when the identity read is due. Two OIDs in
+      // ONE GET: no extra round trip, no second session, nothing new queued.
+      const oids = wantDescr ? [sysUpTimeOid, SYS_OIDS.sysDescr] : [sysUpTimeOid];
+      session.get(oids, (err: Error | null, varbinds: any[]) => {
         clearTimeout(timer);
         if (err) return finishOnce(finish(start, false, err.message || "SNMP get failed"));
         if (!varbinds || varbinds.length === 0) {
           return finishOnce(finish(start, false, "SNMP returned no varbinds"));
         }
-        const vb = varbinds[0];
-        if (snmp.isVarbindError(vb)) {
-          return finishOnce(finish(start, false, snmp.varbindError(vb)));
+        // Keyed by OID, never by position. Agents are free to answer in any
+        // order, and once this GET can carry two OIDs, reading varbinds[0]
+        // would eventually file a sysDescr STRING as the device's uptime.
+        const byOid = new Map<string, any>();
+        for (const v of varbinds) if (v?.oid) byOid.set(String(v.oid), v);
+        const upVb = byOid.get(sysUpTimeOid) ?? varbinds[0];
+        if (snmp.isVarbindError(upVb)) {
+          return finishOnce(finish(start, false, snmp.varbindError(upVb)));
         }
         // sysUpTime is TimeTicks (hundredths of a second since boot) — capture
         // it for free (the probe already fetched it for the liveness check);
         // drives reboot detection. snmpTicksToSeconds ignores non-finite/neg.
         const ok = finish(start, true);
-        const up = snmpTicksToSeconds(vb?.value);
+        const up = snmpTicksToSeconds(upVb?.value);
         if (up !== null) ok.uptimeSec = up;
+        // The identity half is strictly best-effort: an error varbind here is
+        // an agent that does not publish sysDescr, not a probe failure.
+        if (wantDescr) {
+          const dVb = byOid.get(SYS_OIDS.sysDescr);
+          if (dVb && !snmp.isVarbindError(dVb)) {
+            const text = snmpVbToString(dVb.value);
+            if (text) ok.sysDescr = text;
+          }
+        }
         finishOnce(ok);
       });
     } catch (err: any) {
@@ -9614,7 +9673,26 @@ async function adoptSysDescrIdentity(
   pinned: SystemInfoPins,
 ): Promise<void> {
   if (!pinned || !d.descrIdentity) return;
-  const detail = d.descrIdentity;
+  await applyDescrIdentity(assetId, d.descrIdentity, d.sysDescr ?? null, pinned);
+}
+
+/**
+ * Reconcile one parsed sysDescr reading onto an asset.
+ *
+ * Shared by the two readers, which see the same device on different
+ * schedules: the SNMP **system-info pass** (which reads sysDescr anyway, but
+ * only runs when an interfaces / LLDP / storage stream is enabled AND the
+ * asset reads `up`), and the SNMP **response-time probe** (which reaches
+ * every SNMP-polled asset on its own 10-minute anchor, including one that is
+ * flapping and therefore never gets a heavy pass). Whichever runs first
+ * stamps `Asset.lastDescrAt` and satisfies the other.
+ */
+async function applyDescrIdentity(
+  assetId: string,
+  detail: SysDescrDetail,
+  sysDescr: string | null,
+  pinned: NonNullable<SystemInfoPins>,
+): Promise<void> {
 
   // What the device said about itself, in the shape the projection reads.
   const observed = {
@@ -9624,7 +9702,7 @@ async function adoptSysDescrIdentity(
     // `os` carries the WHOLE sysDescr: the firmware is one token inside it,
     // so a reader given only the parsed fields would show a device
     // describing itself in less detail than it actually did.
-    os: d.sysDescr ?? null,
+    os: sysDescr,
     productType: detail.productType ?? null,
   };
 
@@ -9925,7 +10003,15 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   // still refresh on every successful pull.
   if (d.interfaces.length > 0) {
     const endUpdate = startPhase("systeminfo.persist.update_asset");
-    await prisma.asset.update({ where: { id: assetId }, data: { lastSystemInfoAt: now } });
+    await prisma.asset.update({
+      where: { id: assetId },
+      // This pass read sysDescr in its own multi-GET, so the identity read is
+      // satisfied for another interval — folded into the update this path
+      // already makes rather than costing a write of its own. It is what
+      // keeps the response-time probe from carrying a redundant sysDescr
+      // varbind for every asset that also has a heavy stream enabled.
+      data: { lastSystemInfoAt: now, ...(d.sysDescr ? { lastDescrAt: now } : {}) },
+    });
     endUpdate();
   }
 }
@@ -11395,6 +11481,12 @@ export async function recordProbeResult(
     // detected this tick.
     lastUptimeSec: uptimeSec ?? undefined,
     lastRebootAt: rebooted ? now : undefined,
+    // The probe carried sysDescr this tick, so the identity read is done for
+    // another DESCR_READ_INTERVAL_SEC. Stamped whenever the string came back
+    // — parseable or not — because an unparseable answer is still an answer,
+    // and re-asking every 60s would never start parsing. Undefined otherwise,
+    // so the flush's COALESCE keeps the prior stamp.
+    lastDescrAt: result.sysDescr ? now : undefined,
     // Presence: a successful probe IS the authoritative "last online" signal
     // for a monitored asset (bumpLastSeen defers discovery-origin evidence on
     // monitored assets to this). `now` is always the freshest evidence, so set

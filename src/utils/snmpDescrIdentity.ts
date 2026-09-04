@@ -197,3 +197,34 @@ export function sameDescrObserved(
   }
   return true;
 }
+
+/**
+ * How often a device's identity is re-read, in seconds.
+ *
+ * Ten minutes: identity changes when someone swaps hardware or applies
+ * firmware, so the reading is worth having promptly but is nowhere near a
+ * per-minute question. It also bounds the cost — the read rides the
+ * response-time probe's existing GET as one extra varbind, so at a 60s
+ * cadence this is one varbind in ten rather than one per probe, and the DB
+ * work behind it happens only when the answer actually changed.
+ */
+export const DESCR_READ_INTERVAL_SEC = 600;
+
+/**
+ * Is the sysDescr identity read due for an asset?
+ *
+ * NULL means never read, which is due — so every existing asset picks up its
+ * identity on the next probe after deploy and then settles onto the cadence.
+ * A stamp in the future (clock skew, a restored backup) reads as due rather
+ * than parking the asset until the clock catches up.
+ */
+export function descrReadDue(
+  lastDescrAt: Date | null | undefined,
+  now: Date = new Date(),
+  intervalSec: number = DESCR_READ_INTERVAL_SEC,
+): boolean {
+  if (!lastDescrAt) return true;
+  const age = now.getTime() - lastDescrAt.getTime();
+  if (!Number.isFinite(age)) return true;
+  return age < 0 || age >= intervalSec * 1000;
+}

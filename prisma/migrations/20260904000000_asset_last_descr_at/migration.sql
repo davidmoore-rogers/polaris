@@ -1,0 +1,19 @@
+-- Identity reading gets its own cadence anchor.
+--
+-- A device's sysDescr is parsed into an `snmp-sysdescr` AssetSource row (the
+-- device's own word about its manufacturer / model / firmware). That read used
+-- to happen only on the SNMP system-info pass, which is gated on an
+-- interfaces / LLDP / storage stream being enabled -- so a camera configured
+-- for SNMP RESPONSE TIME and nothing else never had its identity re-read, and
+-- the operator's only workaround was to enable interface polling on a device
+-- whose single interface nobody cares about.
+--
+-- The response-time probe already opens an authenticated SNMP session to the
+-- same host on every interval, so sysDescr now rides that GET as one extra
+-- varbind -- but only when this anchor says the reading is due, which keeps a
+-- 60s probe from carrying it 10 times a minute. Both readers (the probe and
+-- the system-info pass) stamp it, so whichever runs first satisfies the other.
+--
+-- NULL means "never read", so every existing asset is due once and then
+-- settles onto the cadence.
+ALTER TABLE "assets" ADD COLUMN IF NOT EXISTS "lastDescrAt" TIMESTAMP(3);

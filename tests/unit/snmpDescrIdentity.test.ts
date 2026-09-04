@@ -27,6 +27,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseVendorSysDescr,
   sameDescrObserved,
+  descrReadDue,
+  DESCR_READ_INTERVAL_SEC,
 } from "../../src/utils/snmpDescrIdentity.js";
 
 /**
@@ -180,5 +182,54 @@ describe("sameDescrObserved — the monitor path's no-I/O gate", () => {
 
   it("compares only strings, so a malformed stored blob reads as changed", () => {
     expect(sameDescrObserved({ model: 42 } as any, { model: "42" })).toBe(false);
+  });
+});
+
+describe("descrReadDue — what makes the probe carry the extra varbind", () => {
+  const now = new Date("2026-09-04T12:00:00Z");
+  const agoSec = (n: number) => new Date(now.getTime() - n * 1000);
+
+  it("is due when never read, so existing assets pick identity up once", () => {
+    expect(descrReadDue(null, now)).toBe(true);
+    expect(descrReadDue(undefined, now)).toBe(true);
+  });
+
+  it("is not due inside the interval, and due at it", () => {
+    expect(descrReadDue(agoSec(DESCR_READ_INTERVAL_SEC - 1), now)).toBe(false);
+    expect(descrReadDue(agoSec(DESCR_READ_INTERVAL_SEC), now)).toBe(true);
+  });
+
+  it("carries the varbind on one probe in ten at a 60s cadence", () => {
+    // The whole cost argument, simulated the way it actually runs: each probe
+    // that carries the read stamps the anchor, so the following nine at 60s
+    // spacing skip it. Ten probes, one extra varbind.
+    let stamp: Date | null = null;
+    let carried = 0;
+    for (let i = 0; i < 10; i++) {
+      const at = new Date(now.getTime() + i * 60_000);
+      if (descrReadDue(stamp, at)) { carried++; stamp = at; }
+    }
+    expect(carried).toBe(1);
+  });
+
+  it("carries it again once the interval has passed", () => {
+    let stamp: Date | null = null;
+    let carried = 0;
+    // An hour of 60s probes: the read lands every ten minutes, six times.
+    for (let i = 0; i < 60; i++) {
+      const at = new Date(now.getTime() + i * 60_000);
+      if (descrReadDue(stamp, at)) { carried++; stamp = at; }
+    }
+    expect(carried).toBe(6);
+  });
+
+  it("reads a future stamp as due rather than parking the asset", () => {
+    // Clock skew or a restored backup must not freeze identity until the
+    // wall clock catches up.
+    expect(descrReadDue(new Date(now.getTime() + 86_400_000), now)).toBe(true);
+  });
+
+  it("treats an invalid stamp as due", () => {
+    expect(descrReadDue(new Date(NaN), now)).toBe(true);
   });
 });

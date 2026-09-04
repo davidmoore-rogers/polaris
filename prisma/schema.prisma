@@ -940,6 +940,12 @@ model Asset {
   eventLogTimeoutMs       Int?
   lastTelemetryAt         DateTime?
   lastSystemInfoAt        DateTime?
+  // Cadence anchor for the sysDescr identity read (the `snmp-sysdescr`
+  // AssetSource). Stamped by BOTH readers — the SNMP response-time probe,
+  // which carries sysDescr as one extra varbind when this says the reading is
+  // due, and the system-info pass, which reads it anyway — so whichever runs
+  // first satisfies the other. NULL = never read, i.e. due now.
+  lastDescrAt             DateTime?
   // Management-access summary read during discovery for Fortinet devices:
   // { source, interfaceName, profileName, mgmtIp, protocols: string[],
   //   https, ssh, snmp, checkedAt }. Drives the asset slide-over's Open HTTPS /
