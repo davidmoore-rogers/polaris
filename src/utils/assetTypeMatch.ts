@@ -74,6 +74,18 @@ export interface AssetTypeFacts {
   model?: string | null;
   /** Entra / Intune chassis type ("desktop", "laptop", "tablet", …). */
   chassis?: string | null;
+  /**
+   * The vendor's OWN words for what the device is — "Network Camera",
+   * "Bullet Camera" — parsed out of a documented sysDescr format
+   * (`utils/snmpDescrIdentity.ts`) and stored on `Asset.productType`.
+   *
+   * The precise field for typing equipment that a directory has never heard
+   * of. Before it existed, the only place that phrase appeared was inside the
+   * raw sysDescr in `os`, so a camera rule had to be a regex over the whole
+   * self-description — which also reads `hostname`, and therefore typed an
+   * NVR called CAMERA-NVR-01 as a camera.
+   */
+  productType?: string | null;
 }
 
 export const MATCH_FIELDS = [
@@ -84,6 +96,7 @@ export const MATCH_FIELDS = [
   "manufacturer",
   "model",
   "chassis",
+  "productType",
 ] as const;
 export type MatchField = (typeof MATCH_FIELDS)[number];
 
@@ -431,7 +444,15 @@ export function matchClauses(rules: MatchRules | null | undefined): MatchClause[
  */
 function factText(facts: AssetTypeFacts, field: MatchField): string | null {
   if (field === "any") {
-    const parts = [facts.os, facts.hostname, facts.manufacturer, facts.model, facts.chassis]
+    const parts = [
+      facts.os, facts.hostname, facts.manufacturer, facts.model, facts.chassis,
+      // Widens `any` for every existing rule, deliberately: a device that
+      // calls itself a "Network Switch" SHOULD land in the switch bucket, and
+      // the seeded clauses look for exactly those words. Nothing the seeds
+      // search for (fortigate / switch / router / printer) appears in an AXIS
+      // product type, so no existing hit re-types on this alone.
+      facts.productType,
+    ]
       .map((v) => (v ?? "").trim())
       .filter(Boolean);
     return parts.length ? parts.join(" ") : null;
@@ -595,6 +616,7 @@ export function matchConditionMeta() {
     manufacturer: "Manufacturer",
     model: "Model",
     chassis: "Chassis (Entra / Intune)",
+    productType: "Product type (device self-report)",
   };
   return {
     groupOps: MATCH_GROUP_OPS,

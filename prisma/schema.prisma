@@ -951,6 +951,12 @@ model Asset {
   eventLogIntervalSec     Int?
   processesTimeoutMs      Int?
   eventLogTimeoutMs       Int?
+  // What the device calls ITSELF, in the vendor's own words ("Network
+  // Camera") — parsed from a documented sysDescr layout and projected from the
+  // `snmp-sysdescr` AssetSource. Not a type: it is the FACT a device-type rule
+  // matches on (utils/assetTypeMatch.ts MATCH_FIELDS), which is what lets one
+  // rule type a camera fleet instead of a regex over the whole sysDescr.
+  productType             String?
   lastTelemetryAt         DateTime?
   lastSystemInfoAt        DateTime?
   // Cadence anchor for the sysDescr identity read (the `snmp-sysdescr`

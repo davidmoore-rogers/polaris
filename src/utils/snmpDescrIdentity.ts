@@ -192,7 +192,7 @@ export function sameDescrObserved(
     const v = o[k];
     return typeof v === "string" && v.trim() ? v : null;
   };
-  for (const k of ["manufacturer", "model", "osVersion", "os", "productType"]) {
+  for (const k of ["manufacturer", "model", "osVersion", "productType", "sysDescr"]) {
     if (read(prev, k) !== read(next, k)) return false;
   }
   return true;

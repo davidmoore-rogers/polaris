@@ -5776,6 +5776,10 @@ function _assetGeneralTabHTML(a) {
       // read as a bare "10.0.22631.7219" with the edition dropped; on Fortinet
       // infra (os null, osVersion "7.4.4") the join is identical to before.
       viewRow("OS / Firmware", [a.os, a.osVersion].filter(Boolean).join(" ")) +
+      // What the device calls itself, when it says so. Rendered next to the
+      // type it produced rather than folded into it: "Network Camera" is the
+      // vendor's phrase, and the Type field is the operator's bucket.
+      (a.productType ? viewRow("Product type", a.productType) : "") +
       haTopologyHTML(a) +
       // Upstream-sighting rows name what the asset is connected BEHIND, so they
       // say nothing about a firewall — a FortiGate is the thing doing the

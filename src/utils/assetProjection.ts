@@ -136,6 +136,15 @@ export interface ProjectedAsset {
   longitude: number | null;
   snmpLocation: string | null;
   learnedAddress: string | null;
+  /**
+   * What the device calls ITSELF ("Network Camera") — not a type, a phrase.
+   * Only a source that reads the device directly can state it, so today only
+   * `snmp-sysdescr` does. Feeds the device-type match rules as its own fact,
+   * which is what lets ONE rule type a camera fleet without a regex over the
+   * whole self-description (that also reads hostname, so it typed an NVR
+   * called CAMERA-NVR-01 as a camera).
+   */
+  productType: string | null;
 }
 
 export type ProjectionProvenance = Partial<Record<keyof ProjectedAsset, AssetSourceKind | string>>;
@@ -406,19 +415,17 @@ const OS_RULES: FieldRule[] = [
   { sourceKind: "ad", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "intune", pick: (o) => obsString(o, "operatingSystem") },
   { sourceKind: "entra", pick: (o) => obsString(o, "operatingSystem") },
-  // The device's OWN answer, parsed through its vendor's documented sysDescr
-  // format. Ranked HERE — directly above fortigate-endpoint and no higher —
-  // because the claim is narrow and defensible: a device's own SNMP
-  // self-report beats a gate's DHCP/device-inventory FINGERPRINT, which
-  // answers with a category ("ip camera") rather than a self-description. It stays BELOW
-  // the agent / Arc / vCenter / MDM rows deliberately — those read the
-  // running system from inside it, and outranking them is a claim this
-  // parser has no business making. A row exists only where
-  // parseVendorSysDescr recognized the layout, so today it can only be an
-  // AXIS device: a Windows host answering "Hardware: Intel64 Family 6 -
-  // Software: Windows Version 6.3" never gets one, and cannot displace
-  // Intune's model with it.
-  { sourceKind: "snmp-sysdescr", pick: (o) => obsString(o, "os") },
+  // NOTE: deliberately NO `snmp-sysdescr` rule here.
+  //
+  // This source's `os` is the RAW sysDescr, which is a record of the
+  // reading rather than a value an operator reads: the asset page renders
+  // OS / Firmware as `[os, osVersion]`, so contributing it printed
+  // "; AXIS M2025-LE; Network Camera; 8.40.3; Sep 06 2019 17:30; 727; 1; 8.40.3"
+  // where "8.40.3" belonged. The raw text stays verbatim on the source
+  // row's observed blob — the Sources tab is where what each source SAID
+  // belongs — and the parsed halves land in model / osVersion /
+  // productType. A device whose format we cannot read gets no row at all
+  // and keeps whatever `os` it already had.
   // fortigate-endpoint os — FortiGate device-inventory's OS detection
   // (rough fingerprint based on DHCP options + traffic). Coarse but
   // useful when no MDM/AD source has the device.
@@ -529,6 +536,18 @@ export function setLearnedLocationPriority(config: SourceLocationPriority): void
 export function getLearnedLocationPriority(): SourceLocationPriority {
   return activeLocationPriority;
 }
+
+/**
+ * Product type: the device's own words, and nobody else's.
+ *
+ * One rule, because no directory, hypervisor or controller publishes this —
+ * they publish a model, or a category they inferred from one. If one ever
+ * does, it ranks by the question every other list here answers: who read the
+ * device more directly?
+ */
+const PRODUCT_TYPE_RULES: FieldRule[] = [
+  { sourceKind: "snmp-sysdescr", pick: (o) => obsString(o, "productType") },
+];
 
 const IP_ADDRESS_RULES: FieldRule[] = [
   // Infrastructure management IP wins. A newly-deployed FortiGate/switch/AP
@@ -702,6 +721,7 @@ export function projectAssetFromSources(
     longitude: null,
     snmpLocation: null,
     learnedAddress: null,
+    productType: null,
   };
   const provenance: ProjectionProvenance = {};
 
@@ -747,6 +767,7 @@ export function projectAssetFromSources(
   apply("longitude", LONGITUDE_RULES);
   apply("snmpLocation", SNMP_LOCATION_RULES);
   apply("learnedAddress", LEARNED_ADDRESS_RULES);
+  apply("productType", PRODUCT_TYPE_RULES);
 
   return { projected, provenance };
 }

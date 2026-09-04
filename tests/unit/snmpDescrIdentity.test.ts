@@ -142,8 +142,11 @@ describe("sameDescrObserved — the monitor path's no-I/O gate", () => {
     manufacturer: "Axis Communications",
     model: "M2036-LE",
     osVersion: "10.12.114",
-    os: "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1",
     productType: "Bullet Camera",
+    // The raw reading is part of the comparison: a vendor that changes its
+    // build date or hardware id has changed what it says, and the Sources tab
+    // shows that string, so it has to be re-recorded.
+    sysDescr: "; AXIS M2036-LE; Bullet Camera; 10.12.114; Oct 03 2022 14:20; 7EC.1; 1",
   };
 
   it("is true when the device said exactly what we last recorded", () => {
@@ -173,11 +176,19 @@ describe("sameDescrObserved — the monitor path's no-I/O gate", () => {
       .toBe(true);
   });
 
-  it("ignores key order and extra keys it does not compare", () => {
+  it("ignores key order and keys outside the compared set", () => {
     const reordered: Record<string, unknown> = {};
     for (const k of Object.keys(reading).reverse()) reordered[k] = (reading as any)[k];
-    reordered.sysDescr = "something a later version added";
+    reordered.readAt = "2026-09-04T12:00:00Z";
     expect(sameDescrObserved(reordered, reading)).toBe(true);
+  });
+
+  it("is false when only the raw descr changed", () => {
+    // Same model and firmware, new build date — the parsed fields agree, so a
+    // comparison over them alone would never re-record the string the Sources
+    // tab displays.
+    const rebuilt = { ...reading, sysDescr: reading.sysDescr.replace("Oct 03 2022", "Nov 14 2022") };
+    expect(sameDescrObserved(rebuilt, reading)).toBe(false);
   });
 
   it("compares only strings, so a malformed stored blob reads as changed", () => {
@@ -233,3 +244,33 @@ describe("descrReadDue — what makes the probe carry the extra varbind", () => 
     expect(descrReadDue(new Date(NaN), now)).toBe(true);
   });
 });
+
+describe("parseVendorSysDescr — the second confirmed AXIS layout", () => {
+  /**
+   * A real prod reading off an M2025-LE, verbatim. Kept beside the M2036-LE
+   * because the two differ in FIELD COUNT — this one repeats the firmware in
+   * an 8th field and carries a plain-numeric hardware id (727 vs 7EC.1) — so
+   * together they are the evidence that the layout is anchored, not counted.
+   */
+  const AXIS_M2025 =
+    "; AXIS M2025-LE; Network Camera; 8.40.3; Sep 06 2019 17:30; 727; 1; 8.40.3";
+
+  it("reads it exactly, ignoring the trailing repeat and the hardware id", () => {
+    expect(parseVendorSysDescr(AXIS_M2025)).toEqual({
+      manufacturer: "Axis Communications",
+      model: "M2025-LE",
+      productType: "Network Camera",
+      osVersion: "8.40.3",
+    });
+  });
+
+  it("reads it the same way once the camera has been named", () => {
+    const named = parseVendorSysDescr(
+      "gatehouse-cam; AXIS M2025-LE; Network Camera; 8.40.3; Sep 06 2019 17:30; 727; 1; 8.40.3",
+    );
+    expect(named?.model).toBe("M2025-LE");
+    expect(named?.osVersion).toBe("8.40.3");
+    expect(named?.productType).toBe("Network Camera");
+  });
+});
+

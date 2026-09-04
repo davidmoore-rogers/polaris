@@ -32,6 +32,7 @@ describe("projectAssetFromSources — empty + edge cases", () => {
       longitude: null,
       snmpLocation: null,
       learnedAddress: null,
+      productType: null,
     });
     expect(provenance).toEqual({});
   });
@@ -464,6 +465,7 @@ describe("projectAssetFromSources — hybrid Windows laptop (full integration sc
       longitude: null,
       snmpLocation: null, // not a fortigate-firewall source
       learnedAddress: null, // not a fortigate-firewall source
+      productType: null,
     });
     expect(provenance.hostname).toBe("ad");
     expect(provenance.os).toBe("ad");
@@ -774,11 +776,13 @@ describe("projectAssetFromSources — snmp-sysdescr (the device's own word)", ()
     manufacturer: "Axis Communications",
     model: "M2036-LE",
     osVersion: "10.12.114",
-    os: DESCR,
     productType: "Bullet Camera",
+    // The whole reading, kept as the record of what the device said. Not
+    // offered to any projection rule — see the `os` test below.
+    sysDescr: DESCR,
   };
 
-  it("beats a gate's fingerprint on model, os and firmware", () => {
+  it("beats a gate's fingerprint on model and firmware", () => {
     const { projected, provenance } = projectAssetFromSources([
       src("fortigate-endpoint", { model: "ip camera", os: "IP Camera", hardwareVendor: "Axis" }),
       src("snmp-sysdescr", sysdescr),
@@ -786,7 +790,26 @@ describe("projectAssetFromSources — snmp-sysdescr (the device's own word)", ()
     expect(projected.model).toBe("M2036-LE");
     expect(provenance.model).toBe("snmp-sysdescr");
     expect(projected.osVersion).toBe("10.12.114");
-    expect(projected.os).toBe(DESCR);
+    expect(projected.productType).toBe("Bullet Camera");
+    expect(provenance.productType).toBe("snmp-sysdescr");
+  });
+
+  it("contributes NO `os`, so the raw descr never prints as the OS", () => {
+    // The asset page renders OS / Firmware as `[os, osVersion]`, so a raw
+    // sysDescr here printed the whole semicolon-delimited string where the
+    // version belonged. The reading is kept verbatim on the source row
+    // instead; whatever else states an os keeps stating it.
+    const withGate = projectAssetFromSources([
+      src("fortigate-endpoint", { os: "IP Camera" }),
+      src("snmp-sysdescr", sysdescr),
+    ]);
+    expect(withGate.projected.os).toBe("IP Camera");
+    expect(withGate.provenance.os).toBe("fortigate-endpoint");
+
+    const alone = projectAssetFromSources([src("snmp-sysdescr", sysdescr)]);
+    expect(alone.projected.os).toBeNull();
+    // …while the firmware it parsed out DOES land.
+    expect(alone.projected.osVersion).toBe("10.12.114");
   });
 
   it("wins regardless of the order the rows come back in", () => {

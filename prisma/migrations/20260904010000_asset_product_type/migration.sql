@@ -1,0 +1,19 @@
+-- What the device calls itself, as its own column.
+--
+-- An AXIS camera's sysDescr states a product type in its own words ("Network
+-- Camera", "Bullet Camera") next to its model and firmware. That phrase is the
+-- precise fact for typing equipment no directory has ever heard of, but until
+-- now the only place it existed was inside the raw sysDescr stored in
+-- Asset.os -- so a device-type rule for a camera fleet had to be a regex over
+-- the whole self-description, which also reads `hostname` and therefore typed
+-- an NVR called CAMERA-NVR-01 as a camera.
+--
+-- As a column it is a first-class match field (utils/assetTypeMatch.ts), so
+-- ONE rule -- productType contains camera -> camera -- covers the fleet, and
+-- it survives Asset.os being cleaned back to just the firmware version. It is
+-- projected from the `snmp-sysdescr` AssetSource like every other identity
+-- field, so nothing else can quietly write it.
+--
+-- NULL means no source has stated one, which is every device today and most
+-- devices forever: only a vendor with a documented sysDescr layout says it.
+ALTER TABLE "assets" ADD COLUMN IF NOT EXISTS "productType" TEXT;

@@ -489,6 +489,11 @@ export function assetTypeForHit(hit: ScanHit): string {
         // re-types.
         manufacturer: hit.identity?.manufacturer ?? null,
         model: hit.identity?.model ?? null,
+        // The vendor's own words for what it is. The precise fact for typing
+        // equipment no directory has heard of — one `productType contains
+        // camera` rule instead of a regex over `any`, which also reads
+        // hostname and typed an NVR called CAMERA-NVR-01 as a camera.
+        productType: hit.identity?.productType ?? null,
       },
       "scan",
     ) ?? "other"
@@ -584,7 +589,21 @@ export async function adoptHits(
           // than carrying a slice of its description as a model number.
           model: hit.identity?.model ?? null,
           osVersion: hit.identity?.osVersion ?? null,
-          os: hit.identity?.os ?? null,
+          // What the device calls itself — the fact a device-type rule can
+          // match precisely (utils/assetTypeMatch.ts), rather than a regex
+          // over the whole self-description.
+          productType: hit.identity?.productType ?? null,
+          // The RAW sysDescr, but only for a device whose layout we could NOT
+          // read. Where we parsed it, the pieces are in model / osVersion /
+          // productType and the whole string would just print over the top of
+          // them in the asset page's "OS / Firmware" row. It is not lost: the
+          // monitor's first identity read records it verbatim on the
+          // `snmp-sysdescr` AssetSource, which is where what a source SAID
+          // belongs. Note `assetTypeForHit` is still handed the full string
+          // below, so typing keeps matching exactly what it matched before.
+          os: hit.identity?.model || hit.identity?.productType
+            ? null
+            : hit.identity?.os ?? null,
           snmpLocation: hit.identity?.snmpLocation ?? null,
           notes: `Found by Polaris Discovery "${run.scan.name}" at ${address}` +
             (hit.identifiedBy ? ` (answered ${hit.identifiedBy})` : ""),

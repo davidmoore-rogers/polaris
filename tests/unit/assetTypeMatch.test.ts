@@ -571,7 +571,89 @@ describe("the builder catalog", () => {
     // status at inference time. What must hold is that every offered field is
     // one factText() knows.
     expect(meta.fields.map((f) => f.field)).toEqual(
-      ["any", "os", "osVersion", "hostname", "manufacturer", "model", "chassis"],
+      ["any", "os", "osVersion", "hostname", "manufacturer", "model", "chassis", "productType"],
     );
   });
 });
+
+describe("productType — typing equipment no directory has heard of", () => {
+  /** The registry row an operator would add for a camera fleet. */
+  const cameraType = {
+    name: "camera",
+    label: "Camera",
+    matchRules: { op: "or", children: [{ field: "productType", operator: "contains", value: "camera" }] },
+    matchContexts: ["scan"],
+    matchPriority: 50,
+  } as any;
+
+  const axisM2025 = {
+    os: "; AXIS M2025-LE; Network Camera; 8.40.3; Sep 06 2019 17:30; 727; 1; 8.40.3",
+    hostname: "gatehouse-cam",
+    manufacturer: "Axis Communications",
+    model: "M2025-LE",
+    productType: "Network Camera",
+  };
+
+  it("types both AXIS product-type spellings from ONE rule", () => {
+    expect(resolveAssetType([cameraType], axisM2025, "scan")).toBe("camera");
+    expect(
+      resolveAssetType([cameraType], { ...axisM2025, productType: "Bullet Camera" }, "scan"),
+    ).toBe("camera");
+  });
+
+  it("does not type an NVR merely NAMED for cameras — the point of the field", () => {
+    // The same fleet expressed as a regex over `any` would catch this host,
+    // because `any` folds in hostname. Keyed on productType it cannot.
+    const nvr = {
+      os: "Linux nvr01 5.4.0-91-generic",
+      hostname: "CAMERA-NVR-01",
+      manufacturer: "Dell",
+      model: "PowerEdge R640",
+      productType: null,
+    };
+    expect(resolveAssetType([cameraType], nvr, "scan")).toBeNull();
+
+    // …and the `any` version of the same rule demonstrably does catch it,
+    // which is why the narrow field exists.
+    const anyRule = {
+      ...cameraType,
+      matchRules: { op: "or", children: [{ field: "any", operator: "regex", value: "\\bcamera\\b" }] },
+    } as any;
+    expect(resolveAssetType([anyRule], nvr, "scan")).toBe("camera");
+  });
+
+  it("matches case-insensitively, including via regex", () => {
+    // "Network Camera" has a capital C; a case-sensitive engine would miss it.
+    const rx = {
+      ...cameraType,
+      matchRules: { op: "or", children: [{ field: "productType", operator: "regex", value: "\\bcamera\\b" }] },
+    } as any;
+    expect(resolveAssetType([rx], axisM2025, "scan")).toBe("camera");
+  });
+
+  it("an absent productType never matches, negated or not", () => {
+    const notCamera = {
+      ...cameraType,
+      matchRules: { op: "or", children: [{ field: "productType", operator: "notContains", value: "camera" }] },
+    } as any;
+    // A device that reported no product type is *not yet known*, not "not a
+    // camera" — the resolver's absence rule, checked here for the new field.
+    expect(resolveAssetType([notCamera], { ...axisM2025, productType: null }, "scan")).toBeNull();
+  });
+
+  it("rides `any` too, so a device calling itself a switch lands in that bucket", () => {
+    const switchType = {
+      name: "switch",
+      label: "Switch",
+      matchRules: { op: "or", children: [{ field: "any", operator: "contains", value: "switch" }] },
+      matchContexts: ["scan"],
+      matchPriority: 60,
+    } as any;
+    const facts = {
+      os: null, hostname: "sw-idf3", manufacturer: "Acme",
+      model: "A1", productType: "Network Switch",
+    };
+    expect(resolveAssetType([switchType], facts, "scan")).toBe("switch");
+  });
+});
+

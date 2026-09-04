@@ -111,6 +111,7 @@ import {
 import { logEvent, logEventsBatch, buildConnectionChangedEvent, buildFirmwareChangedEvent } from "./eventLogService.js";
 import { projectAssetFromSources } from "../utils/assetProjection.js";
 import { lookupOuiOverride } from "./ouiService.js";
+import { resolveAssetTypeCached } from "../utils/assetTypeMatch.js";
 import { SYS_OIDS } from "../utils/snmpIdentity.js";
 import {
   parseVendorSysDescr,
@@ -9403,6 +9404,9 @@ type SystemInfoPins = {
   os: string | null;
   /** For the OUI-override guard in adoptSysDescrIdentity. */
   macAddress: string | null;
+  /** For the device-type inference gate — only `other` may be re-typed. */
+  assetType: string;
+  productType: string | null;
 } | null;
 
 /**
@@ -9699,11 +9703,14 @@ async function applyDescrIdentity(
     manufacturer: detail.manufacturer ?? null,
     model: detail.model ?? null,
     osVersion: detail.osVersion ?? null,
-    // `os` carries the WHOLE sysDescr: the firmware is one token inside it,
-    // so a reader given only the parsed fields would show a device
-    // describing itself in less detail than it actually did.
-    os: sysDescr,
     productType: detail.productType ?? null,
+    // The whole reading, verbatim, as the record of what the device said —
+    // read by the Sources tab and by nothing that decides anything. It is
+    // deliberately NOT offered to the `os` projection: that column is
+    // rendered as "OS / Firmware" beside osVersion, so contributing the raw
+    // descr printed the entire semicolon-delimited string where "8.40.3"
+    // belonged.
+    sysDescr,
   };
 
   // Steady state costs ONE indexed read and nothing else. The gate is "did
@@ -9760,10 +9767,21 @@ async function applyDescrIdentity(
   // whole projection here would make the monitor path a general projection
   // writer — rewriting hostname, IP and learnedLocation from other sources on
   // a cadence that has nothing to do with them.
-  const diff: Record<string, string> = {};
-  for (const f of ["manufacturer", "model", "os", "osVersion"] as const) {
+  const diff: Record<string, string | null> = {};
+  for (const f of ["manufacturer", "model", "os", "osVersion", "productType"] as const) {
     const next = projected[f];
     if (next !== null && next !== pinned[f]) diff[f] = next;
+  }
+
+  // One-way cleanup, provenance-bounded: earlier versions of this path (and
+  // Discovery adoption) stamped the RAW sysDescr into `os`, which the asset
+  // page prints beside osVersion as "OS / Firmware". Clear it where the stored
+  // value IS the string this device is telling us right now — never a value
+  // some other source contributed, and never a guess at what the OS is called.
+  // Projection cannot do this: it only ever writes non-null, so a column
+  // nobody states any more keeps its last value forever.
+  if (sysDescr && (pinned.os ?? "").trim() === sysDescr.trim() && diff.os === undefined) {
+    diff.os = null;
   }
 
   // An operator's OUI override is an explicit statement about the VENDOR, and
@@ -9780,6 +9798,59 @@ async function applyDescrIdentity(
 
   if (Object.keys(diff).length === 0) return;
   await prisma.asset.update({ where: { id: assetId }, data: diff });
+
+  // A device that just told us what it is can be TYPED from that, through the
+  // operator's own rules in the registry rather than a predicate in here.
+  //
+  // Three deliberate bounds. It runs in the **scan** context, not a context of
+  // its own: an SNMP read on the monitor path is the same KIND of evidence a
+  // Network Discovery collects — we asked the device directly — so a rule an
+  // operator wrote for scans applies here without being written twice, and
+  // this is the only reader that reaches a camera already in inventory (the
+  // scan context otherwise fires once, at adoption). It is **`other`-only**,
+  // the eligibility the registry's own retroactive Apply uses, so a type an
+  // authoritative source or an operator set is never overwritten. And the
+  // facts include the raw sysDescr as `os` even though the column no longer
+  // stores it, because a rule written against the whole self-description has
+  // to keep matching what it matched before productType existed.
+  if (pinned.assetType === "other") {
+    const nextType = resolveAssetTypeCached(
+      {
+        os: sysDescr,
+        hostname: pinned.hostname,
+        manufacturer: diff.manufacturer ?? pinned.manufacturer,
+        model: diff.model ?? pinned.model,
+        productType: diff.productType ?? pinned.productType,
+      },
+      "scan",
+    );
+    if (nextType && nextType !== "other") {
+      // Re-assert `other` in the WHERE, not just in the read: discovery or an
+      // operator may have typed this row in the time it took to get here.
+      const typed = await prisma.asset.updateMany({
+        where: { id: assetId, assetType: "other" },
+        data: { assetType: nextType },
+      });
+      if (typed.count > 0) {
+        logEvent({
+          action: "asset.type_inferred",
+          resourceType: "asset",
+          resourceId: assetId,
+          resourceName: pinned.hostname || undefined,
+          level: "info",
+          message:
+            `Device type inferred as "${nextType}" from what the device reports` +
+            `${detail.productType ? ` ("${detail.productType}")` : ""}`,
+          details: {
+            source: "snmp:sysDescr",
+            assetType: nextType,
+            productType: detail.productType ?? null,
+            model: detail.model ?? null,
+          },
+        });
+      }
+    }
+  }
 
   const ev = buildFirmwareChangedEvent(
     { assetId, assetName: pinned.hostname, actor: "system:monitor", source: "snmp-sysdescr" },
@@ -9836,7 +9907,7 @@ export async function recordSystemInfoResult(assetId: string, result: Collection
   // history fold and the model adoption.
   const pinned: SystemInfoPins = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true, manufacturer: true, osVersion: true, os: true, macAddress: true },
+    select: { monitoredInterfaces: true, monitoredStorage: true, monitoredIpsecTunnels: true, ipAddress: true, model: true, hostname: true, manufacturer: true, osVersion: true, os: true, macAddress: true, assetType: true, productType: true },
   });
 
   // Reconcile the collected names against the identity of record BEFORE
