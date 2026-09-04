@@ -838,6 +838,8 @@ async function _loadAssetTypeOptions() {
     if (!ASSET_TYPE_LABELS.hasOwnProperty(o.value)) ASSET_TYPE_LABELS[o.value] = o.label;
   });
   if (_assetsSF) _assetsSF.setColumnOptions("assetType", ASSET_TYPE_OPTIONS);
+  // The bulk bar is wired before this resolves — repaint it with the real list.
+  if (typeof _renderBulkTypeMenu === "function") _renderBulkTypeMenu();
 }
 
 // <option> list for a Type select, built from the registry. `current` is kept
@@ -1193,12 +1195,20 @@ async function _handleTypePillClick(e) {
   var currentType = pill.getAttribute('data-asset-type') || "other";
 
   var dd = _ensureTypeDropdown();
-  // Build dropdown content fresh each open — the option list is small (8
-  // entries) and the active highlight changes per asset.
+  // Build dropdown content fresh each open — the registry list is short and the
+  // active highlight changes per asset. Read ASSET_TYPE_OPTIONS, not
+  // ASSET_TYPE_LABELS: the labels map only ever GAINS keys, so a type retired
+  // from the registry stayed selectable here. The asset's own type is kept as an
+  // option when the registry no longer carries it (assetTypeOptionsHTML's rule),
+  // so opening the menu can never hide what the row currently is.
+  var typeOpts = ASSET_TYPE_OPTIONS.slice();
+  if (!typeOpts.some(function (o) { return o.value === currentType; })) {
+    typeOpts.push({ value: currentType, label: ASSET_TYPE_LABELS[currentType] || currentType });
+  }
   var html = ['<div class="dropdown-heading">Asset type</div>'];
-  Object.keys(ASSET_TYPE_LABELS).forEach(function (key) {
-    var active = key === currentType ? ' style="font-weight:600;"' : '';
-    html.push('<button type="button" data-type-option="' + escapeHtml(key) + '"' + active + '>' + escapeHtml(ASSET_TYPE_LABELS[key]) + (key === currentType ? ' ✓' : '') + '</button>');
+  typeOpts.forEach(function (o) {
+    var active = o.value === currentType ? ' style="font-weight:600;"' : '';
+    html.push('<button type="button" data-type-option="' + escapeHtml(o.value) + '"' + active + '>' + escapeHtml(o.label) + (o.value === currentType ? ' ✓' : '') + '</button>');
   });
   dd.innerHTML = html.join("");
 
@@ -1656,15 +1666,22 @@ function _assetsUpdateBulkBar() {
   // Disable every bulk action while nothing is selected.
   ["assets-bulk-deselect-btn", "assets-bulk-type-btn", "assets-bulk-state-btn",
    "assets-bulk-monitor-btn", "assets-bulk-delete-btn",
-   "assets-bulk-compare-btn", "assets-bulk-merge-btn", "assets-bulk-agent-btn",
+   "assets-bulk-merge-btn", "assets-bulk-agent-btn",
    "assets-bulk-maint-btn",
    "assets-bulk-quarantine-btn", "assets-bulk-unquarantine-btn"
   ].forEach(function (id) { var b = document.getElementById(id); if (b) b.disabled = count === 0; });
 
-  // Compare needs at least two assets to overlay. Available to any role that
-  // can view assets — comparing telemetry is read-only.
+  // Compare needs at least two assets to overlay, so it stays VISIBLE and greys
+  // out below two — a button that only appears once the right number of rows is
+  // ticked is a verb nobody discovers. Available to any role that can view
+  // assets — comparing telemetry is read-only.
   var bCompare = document.getElementById("assets-bulk-compare-btn");
-  if (bCompare) bCompare.style.display = count >= 2 ? "" : "none";
+  if (bCompare) {
+    bCompare.disabled = count < 2;
+    bCompare.title = count < 2
+      ? "Select two or more assets to compare their telemetry"
+      : "Compare telemetry of the selected assets";
+  }
 
   // Edit opens the single-asset edit modal, so it stays visible but greys out
   // unless exactly one asset is selected (data-manage-assets already hides it
@@ -3113,23 +3130,33 @@ function _openBulkBarMenu(menu) {
   }, 0);
 }
 
-function _wireBulkBarDropdowns() {
-  // Populate Type menu from ASSET_TYPE_LABELS.
+// Populate the bulk-bar Type menu from ASSET_TYPE_OPTIONS — the registry list,
+// not ASSET_TYPE_LABELS, so operator-added custom types are offered and the
+// registry's own label + ordering is what an operator reads. Its own function
+// because wiring runs before _loadAssetTypeOptions() resolves, so this is
+// called AGAIN once the registry answers; without that second call the menu
+// carried the built-in seed forever and a custom type was unreachable from the
+// bulk bar (it was already selectable in the edit form and the row menu, both
+// of which build after load).
+function _renderBulkTypeMenu() {
   var typeMenu = document.getElementById("assets-bulk-type-menu");
-  if (typeMenu) {
-    var typeHtml = ['<div class="dropdown-heading">Change type</div>'];
-    Object.keys(ASSET_TYPE_LABELS).forEach(function (key) {
-      typeHtml.push('<button type="button" data-bulk-type="' + escapeHtml(key) + '">' + escapeHtml(ASSET_TYPE_LABELS[key]) + '</button>');
+  if (!typeMenu) return;
+  var typeHtml = ['<div class="dropdown-heading">Change type</div>'];
+  ASSET_TYPE_OPTIONS.forEach(function (o) {
+    typeHtml.push('<button type="button" data-bulk-type="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</button>');
+  });
+  typeMenu.innerHTML = typeHtml.join("");
+  typeMenu.querySelectorAll('button[data-bulk-type]').forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var key = btn.getAttribute("data-bulk-type");
+      _closeBulkBarMenu();
+      bulkChangeType(key);
     });
-    typeMenu.innerHTML = typeHtml.join("");
-    typeMenu.querySelectorAll('button[data-bulk-type]').forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var key = btn.getAttribute("data-bulk-type");
-        _closeBulkBarMenu();
-        bulkChangeType(key);
-      });
-    });
-  }
+  });
+}
+
+function _wireBulkBarDropdowns() {
+  _renderBulkTypeMenu();
 
   // Populate State menu from ASSET_STATUS_LABELS.
   var stateMenu = document.getElementById("assets-bulk-state-menu");
@@ -17756,6 +17783,7 @@ var _assetSourceLabels = {
   "fortiswitch":        "FortiSwitch",
   "fortiap":            "FortiAP",
   "fortigate-endpoint": "FortiGate / FortiManager (endpoint)",
+  "snmp-sysdescr": "Device self-report (SNMP sysDescr)",
   "vcenter-vm":         "VMware vCenter (VM)",
   "vcenter-host":       "VMware vCenter (ESXi host)",
   "arc":                "Azure Arc",
