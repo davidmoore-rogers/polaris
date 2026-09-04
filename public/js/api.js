@@ -1297,6 +1297,8 @@ const api = {
     topologySearch: (id, q) => request("GET", `/map/sites/${id}/topology/search?q=${encodeURIComponent(q)}`),
     saveTopologyLayout:   (id, view, positions) => request("PUT",    `/map/sites/${id}/topology/layout`, { view, positions }),
     deleteTopologyLayout: (id, view)            => request("DELETE", `/map/sites/${id}/topology/layout?view=${encodeURIComponent(view)}`),
+    // Explicit Save — stamps the restore point "Reset to last save" restores.
+    saveTopologyCheckpoint: (id, view, positions) => request("POST", `/map/sites/${id}/topology/layout/checkpoint`, { view, positions }),
   },
   applicationMap: {
     get:          ()                => request("GET",    "/application-map"),

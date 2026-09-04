@@ -1,7 +1,8 @@
 /**
  * tests/integration/topologyLayout.test.ts
  *
- * Shared topology layouts — PUT/DELETE /map/sites/:id/topology/layout and the
+ * Shared topology layouts — PUT/POST/DELETE /map/sites/:id/topology/layout
+ * (the last two being the explicit Save restore point and the baseline reset) and the
  * savedLayouts embed on GET /map/sites/:id/topology. Write routes are gated
  * deviceMap=write; reads carry a deviceMap=read floor applied at the /map mount
  * in router.ts (added 2026-08 — the reads were previously auth-only, so a
@@ -27,6 +28,9 @@ let serverId = ""; // non-firewall asset — layout routes must 404 on it
 
 const FLAT = { fg: { x: 0, y: 0 }, sw: { x: 260, y: 95 } };
 const FLOOR_VIEW = "f|plant|mill|1";
+// Its own view so the restore-point tests cannot disturb the flat layout the
+// earlier cases assert on.
+const CKPT_VIEW = "f|plant|mill|2";
 
 beforeAll(async () => {
   if (!dbReachable) return;
@@ -240,4 +244,73 @@ d("topology layout persistence", () => {
     await prisma.asset.delete({ where: { id: fg2.id } });
     expect(await prisma.topologyLayout.count({ where: { siteId: fg2.id } })).toBe(0);
   });
+  // ── Restore points (the explicit Save behind "Reset to last save") ────────
+  // Declared last so the reset-event count asserted above stays exact.
+  it("POST /checkpoint stamps the restore point and the topology GET embeds it", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const saved = { fg: { x: 10, y: 20 }, sw: { x: 270, y: 105 } };
+    const resp = await agent
+      .post(`/api/v1/map/sites/${fgId}/topology/layout/checkpoint`)
+      .set("X-CSRF-Token", csrf)
+      .send({ view: CKPT_VIEW, positions: saved });
+    expect(resp.status).toBe(200);
+    // The live layout AND the restore point, in one write — a checkpoint of a
+    // layout the server never stored would restore a state nobody displayed.
+    expect(resp.body.positions).toEqual(saved);
+    expect(resp.body.savedPositions).toEqual(saved);
+    expect(resp.body.savedBy).toBeTruthy();
+    expect(resp.body.savedAt).toBeTruthy();
+
+    const topo = await agent.get(`/api/v1/map/sites/${fgId}/topology`);
+    expect(topo.body.savedLayouts[CKPT_VIEW].savedPositions).toEqual(saved);
+
+    expect(await waitForEventCount("map.topology.layout_checkpointed", 1, fgId)).toBe(1);
+  });
+
+  it("a later drag PUT moves the live layout and leaves the restore point alone", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const dragged = { fg: { x: 500, y: 500 } };
+    const put = await agent
+      .put(`/api/v1/map/sites/${fgId}/topology/layout`)
+      .set("X-CSRF-Token", csrf)
+      .send({ view: CKPT_VIEW, positions: dragged });
+    expect(put.status).toBe(200);
+    expect(put.body.positions).toEqual(dragged);
+    expect(put.body.savedPositions).toEqual({ fg: { x: 10, y: 20 }, sw: { x: 270, y: 105 } });
+  });
+
+  it("baseline reset empties a row carrying a restore point instead of deleting it", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const del = await agent
+      .delete(`/api/v1/map/sites/${fgId}/topology/layout?view=${encodeURIComponent(CKPT_VIEW)}`)
+      .set("X-CSRF-Token", csrf);
+    expect(del.status).toBe(204);
+
+    // Row survives: an operator who resets to baseline must still be able to
+    // change their mind and go back to their last save.
+    const topo = await agent.get(`/api/v1/map/sites/${fgId}/topology`);
+    const entry = topo.body.savedLayouts[CKPT_VIEW];
+    expect(entry).toBeDefined();
+    expect(entry.positions).toEqual({}); // restores nothing → the solver baseline
+    expect(entry.savedPositions).toEqual({ fg: { x: 10, y: 20 }, sw: { x: 270, y: 105 } });
+  });
+
+  it("403s the checkpoint route for a deviceMap=read caller", async () => {
+    const { agent, csrf } = await loginAs(`${PFX}-user-ro`);
+    const resp = await agent
+      .post(`/api/v1/map/sites/${fgId}/topology/layout/checkpoint`)
+      .set("X-CSRF-Token", csrf)
+      .send({ view: "flat", positions: FLAT });
+    expect(resp.status).toBe(403);
+  });
+
+  it("404s the checkpoint route on a non-firewall asset", async () => {
+    const { agent, csrf } = await authedAgent(app);
+    const resp = await agent
+      .post(`/api/v1/map/sites/${serverId}/topology/layout/checkpoint`)
+      .set("X-CSRF-Token", csrf)
+      .send({ view: "flat", positions: FLAT });
+    expect(resp.status).toBe(404);
+  });
+
 });

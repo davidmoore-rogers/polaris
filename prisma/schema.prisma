@@ -3219,6 +3219,12 @@ model TopologyLayout {
   site      Asset    @relation(fields: [siteId], references: [id], onDelete: Cascade)
   view      String   @default("flat")
   positions Json
+  // Operator-stamped restore point: the positions blob as it stood the last
+  // time Save was clicked. NULL = this view has never been saved, which is
+  // what greys out "Reset to last save" in the Reset menu.
+  savedPositions Json?     @map("saved_positions")
+  savedBy        String?   @map("saved_by")
+  savedAt        DateTime? @map("saved_at")
   updatedBy String?  @map("updated_by")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

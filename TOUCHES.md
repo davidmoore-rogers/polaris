@@ -2564,18 +2564,21 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ## services/topologyLayoutService.ts
 
-**What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback.
+**What it owns:** Shared Device Map topology layouts — the `TopologyLayout` table (one row per `(siteId, view)`, siteId = the FortiGate Asset the graph is rooted on, `positions` = `{nodeId: {x,y}}` pixel model coords). The server-side half of topology drag persistence; the browser's localStorage layout remains a per-browser fallback. Each row carries TWO blobs: `positions` (the LIVE layout every drag rewrites) and `savedPositions` + `savedBy`/`savedAt` (the operator's RESTORE POINT, written only by the explicit Save).
 
-**Public API:** TopologyNodePosition, TopologyPositions, TopologyLayoutDto, MAX_LAYOUT_NODES, MAX_VIEW_KEY_LEN, MAX_NODE_ID_LEN, MAX_COORD, isValidViewKey, sanitizePositions, getLayoutsForSite, saveLayout, deleteLayout.
+**Public API:** TopologyNodePosition, TopologyPositions, TopologyLayoutDto, LayoutResetResult, MAX_LAYOUT_NODES, MAX_VIEW_KEY_LEN, MAX_NODE_ID_LEN, MAX_COORD, isValidViewKey, sanitizePositions, getLayoutsForSite, saveLayout, saveCheckpoint, resetLayout.
 
 **Cross-service deps:** `prisma.topologyLayout`, `prisma.asset` (firewall existence check on save).
 
 **Used by:**
-- `src/api/routes/map.ts` — `GET /map/sites/:id/topology` embeds `getLayoutsForSite` as `savedLayouts` (via `topologyGraphService.buildSiteTopology`); `PUT|DELETE /map/sites/:id/topology/layout` (both `deviceMap=write`) call `saveLayout` / `deleteLayout` and write `map.topology.layout_saved` / `map.topology.layout_reset` Events.
-- `public/js/map.js` — `loadNodePositions` prefers `savedLayouts[view]` over localStorage; `saveNodePositions` → `_queueServerLayoutSave` (debounced ~1s, writer-gated via `permAtLeast("deviceMap","write")`, dirty-flagged so open/close/refresh alone never PUTs); `resetTopologyLayout` deletes the active view's row; `_snapAllPositions` (Snap chip enable) re-snaps and re-queues other views' blobs.
+- `src/api/routes/map.ts` — `GET /map/sites/:id/topology` embeds `getLayoutsForSite` as `savedLayouts` (via `topologyGraphService.buildSiteTopology`); `PUT|DELETE /map/sites/:id/topology/layout` and `POST /map/sites/:id/topology/layout/checkpoint` (all three `deviceMap=write`) call `saveLayout` / `resetLayout` / `saveCheckpoint` and write `map.topology.layout_saved` / `map.topology.layout_reset` / `map.topology.layout_checkpointed` Events.
+- `public/js/map.js` — `loadNodePositions` prefers `savedLayouts[view]` over localStorage; `saveNodePositions` → `_queueServerLayoutSave` (debounced ~1s, writer-gated via `permAtLeast("deviceMap","write")`, dirty-flagged so open/close/refresh alone never PUTs); `saveTopologyLayoutCheckpoint` (toolbar Save) POSTs the checkpoint, `openResetLayoutMenu` → `restoreTopologyLayoutCheckpoint` / `resetTopologyLayoutToBaseline`, `_readCheckpoint` picks server `savedPositions` over the localStorage mirror; `_snapAllPositions` (Snap chip enable) re-snaps and re-queues other views' blobs.
 
 **Invariants:**
 - Full-replace per (site, view); last-write-wins between concurrent editors (`updatedBy`/`updatedAt` stored for a future conditional write).
+- **A drag never writes `savedPositions`.** `saveLayout` touches the live blob only; only `saveCheckpoint` stamps the restore point. Overwriting it from the drag path would leave nothing to reset to, which is the entire point of the column. The client mirrors this: `_queueServerLayoutSave` MERGES into `topoState.data.savedLayouts[view]` rather than replacing the entry, or a drag would drop the restore point out of the in-memory cache and grey out "Reset to last save" until the next topology fetch.
+- **A baseline reset EMPTIES a row that carries a restore point** (`positions` → `{}`) and deletes one that does not. `{}` restores nothing at render, so it IS the baseline; deleting would take the restore point with it, and an operator who resets to baseline must still be able to change their mind. Client-side `resetTopologyLayoutToBaseline` mirrors that emptying, and its non-writer refusal tests for a NON-EMPTY `positions` — an emptied row is not a shared layout that would re-assert.
+- NULL `savedPositions` = never saved; nothing backfills it, so every pre-existing row starts there and each view earns its restore point on first Save.
 - `view` is `"flat"` or a `computeFloorViews` key (`b|<area>|<bldg>` / `f|<area>|<bldg>|<floor>`) — the grammar is shared with `public/js/topology-render.js:computeFloorViews`; changing the slug derivation there orphans saved layout rows (harmless: they cascade with the site, but operators lose that view's hand layout).
 - Saves 404 unless the site Asset exists AND `assetType === "firewall"`; rows cascade-delete with the Asset (plain table — the no-FK rule only covers Timescale hypertables).
 - Stale nodeIds inside a blob are never pruned server-side — ignored at render, dropped on the client's next full-replace save (mirrors the old localStorage semantics).
@@ -2585,7 +2588,8 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 **When changing this:**
 - New view-key shapes (beyond b|/f|) need `isValidViewKey`, the route Zod, AND map.js `_activeViewKey` updated together.
 - If node ids in the topology payload ever stop being Asset UUIDs (or synthetics become persistable), revisit `MAX_NODE_ID_LEN` and the stale-entry story.
-- Keep the localStorage key scheme (`polaris.topology.positions:<siteId>[:<view>]`, bare key = flat) in sync — it's the seed/fallback the server store was modeled on.
+- Keep the localStorage key scheme in sync — `polaris.topology.positions:<siteId>[:<view>]` for the live layout and `polaris.topology.saved:<siteId>[:<view>]` for the restore point (bare key = flat in both) — they're the seed/fallback the server store was modeled on, and the second is the ONLY restore point a non-writer gets.
+- Tests: `tests/unit/topologyLayoutService.test.ts` (pure validators), `tests/integration/topologyLayout.test.ts` (RBAC, the savedLayouts embed, checkpoint stamping, drag-leaves-the-restore-point-alone, and the empty-not-delete baseline reset).
 
 ---
 

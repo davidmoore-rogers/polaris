@@ -15,6 +15,7 @@
  *
  * Write endpoints (escalate to deviceMap=write per-route):
  *   PUT    /map/sites/:id/topology/layout — full-replace one (site, view) layout
+ *   POST   /map/sites/:id/topology/layout/checkpoint — stamp the restore point
  *   DELETE /map/sites/:id/topology/layout?view=<key> — reset one view's layout
  *
  * Coordinates and topology metadata are populated by the FortiManager / FortiGate
@@ -39,7 +40,8 @@ import {
 import { getRegionHierarchy } from "../../services/mapRegionService.js";
 import {
   saveLayout,
-  deleteLayout,
+  saveCheckpoint,
+  resetLayout,
   sanitizePositions,
   isValidViewKey,
   MAX_LAYOUT_NODES,
@@ -335,23 +337,55 @@ router.put("/sites/:id/topology/layout", requirePermission("deviceMap", "write")
   }
 });
 
+// ─── POST /map/sites/:id/topology/layout/checkpoint ────────────────────────────
+// Stamp the operator's restore point for one (site, view) — the explicit Save
+// behind "Reset to last save". Same body as the PUT above; it writes the live
+// layout AND `savedPositions` in one statement, so the checkpoint can never be
+// of a layout the server has not stored. Declared before the DELETE for
+// readability only — no path capture is in play.
+router.post("/sites/:id/topology/layout/checkpoint", requirePermission("deviceMap", "write"), async (req, res, next) => {
+  try {
+    const siteId = req.params.id as string;
+    const input = SaveLayoutSchema.parse(req.body);
+    const positions = sanitizePositions(input.positions);
+    const actor = req.session?.username ?? null;
+    const saved = await saveCheckpoint(siteId, input.view, positions, actor);
+    const nodeCount = Object.keys(positions).length;
+    logEvent({
+      action: "map.topology.layout_checkpointed",
+      resourceType: "asset",
+      resourceId: siteId,
+      actor: req.session?.username,
+      message: `Topology layout saved as a restore point (view "${input.view}", ${nodeCount} node${nodeCount === 1 ? "" : "s"})`,
+      details: { view: input.view, nodeCount },
+    });
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── DELETE /map/sites/:id/topology/layout?view=<key> ───────────────────────────
-// Remove one (site, view) shared layout — the server half of "Reset layout".
-// Idempotent 204 so the client's reset flow is unconditional.
+// Reset one (site, view) layout back to the column solver's baseline — the
+// server half of "Reset to baseline". A row carrying a restore point is
+// emptied rather than deleted so the operator can still go back to their last
+// save; one without is removed. Idempotent 204 so the client's reset flow is
+// unconditional.
 router.delete("/sites/:id/topology/layout", requirePermission("deviceMap", "write"), async (req, res, next) => {
   try {
     const siteId = req.params.id as string;
     const view = String(req.query.view ?? "");
     if (!isValidViewKey(view)) throw new AppError(400, "Invalid or missing view key");
-    const removed = await deleteLayout(siteId, view);
-    if (removed) {
+    const result = await resetLayout(siteId, view);
+    if (result.changed) {
       logEvent({
         action: "map.topology.layout_reset",
         resourceType: "asset",
         resourceId: siteId,
         actor: req.session?.username,
-        message: `Topology layout reset (view "${view}")`,
-        details: { view },
+        message: `Topology layout reset to baseline (view "${view}")`
+          + (result.checkpointKept ? " — the saved restore point was kept" : ""),
+        details: { view, checkpointKept: result.checkpointKept },
       });
     }
     res.status(204).send();

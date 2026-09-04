@@ -25,6 +25,9 @@
   var topoSearchDebounce = null;
   var topoSuggestState  = { open: false, items: [], index: -1 };
   var POSITION_STORAGE_PREFIX = "polaris.topology.positions:";
+  // Per-browser restore points — the local half of Save, and the only half a
+  // non-writer gets. Keyed like the positions store (bare key = flat view).
+  var CHECKPOINT_STORAGE_PREFIX = "polaris.topology.saved:";
   // Column-layout spacing (shared by the base preset layout + the
   // connection-path overlay so an endpoint lands exactly one column right of
   // its access switch/AP). depth → x (px between adjacent columns),
@@ -536,6 +539,7 @@
     var screenshotBtn = document.getElementById("topology-screenshot");
     var fullscreenBtn = document.getElementById("topology-fullscreen");
     var refreshBtn = document.getElementById("topology-refresh");
+    var saveBtn = document.getElementById("topology-save-layout");
     var resetBtn = document.getElementById("topology-reset-layout");
     var legendBtn = document.getElementById("topology-legend");
     var legendCloseBtn = document.getElementById("topology-legend-close");
@@ -547,7 +551,8 @@
     if (screenshotBtn) screenshotBtn.addEventListener("click", screenshotTopologyModal);
     if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleFullscreenTopology);
     if (refreshBtn) refreshBtn.addEventListener("click", refreshTopology);
-    if (resetBtn) resetBtn.addEventListener("click", resetTopologyLayout);
+    if (saveBtn) saveBtn.addEventListener("click", saveTopologyLayoutCheckpoint);
+    if (resetBtn) resetBtn.addEventListener("click", function () { openResetLayoutMenu(resetBtn); });
     if (legendBtn) legendBtn.addEventListener("click", toggleTopologyLegend);
     if (legendCloseBtn) legendCloseBtn.addEventListener("click", function () { setLegendVisible(false); });
     if (showFullBtn) showFullBtn.addEventListener("click", clearConnectionPathOverlay);
@@ -925,14 +930,237 @@
     }
   }
 
-  // Drop the saved node positions for this site and re-run the column
-  // layout against the cached topology data. Used when manual drags have
-  // produced a layout the operator wants to abandon (e.g. inherited
-  // positions from before a column-spacing change). Removes BOTH stores:
-  // the per-browser localStorage layout and (for deviceMap writers) the
-  // shared server layout. A non-writer can only clear their local copy —
-  // the shared layout re-asserts on their next open.
-  function resetTopologyLayout() {
+  // == Save / Reset ========================================================
+  // Drags persist on their own (debounced, shared), which is the layout
+  // everyone sees but not a decision anyone made. Save stamps the current
+  // arrangement as a RESTORE POINT, and that is what gives Reset two
+  // meanings: back to the last save, or back to the column solver's baseline.
+  //
+  // Both stores mirror the live-position ones: the server row's
+  // `savedPositions` for a deviceMap writer (shared with every operator),
+  // localStorage for everyone else — a non-writer's drags are already
+  // local-only, so their restore point is too.
+  function _checkpointStorageKey(siteId) {
+    var view = _activeViewKey();
+    return CHECKPOINT_STORAGE_PREFIX + siteId + (view !== "flat" ? ":" + view : "");
+  }
+  // The active view's restore point, or null when it was never saved. Server
+  // wins over localStorage, the same precedence loadNodePositions uses — a
+  // shared save is the one the whole team agreed on.
+  function _readCheckpoint(siteId) {
+    if (!siteId) return null;
+    var layouts = topoState.data && topoState.data.savedLayouts;
+    var server = layouts && layouts[_activeViewKey()];
+    if (server && server.savedPositions && typeof server.savedPositions === "object") {
+      return {
+        positions: server.savedPositions,
+        savedAt:   server.savedAt || null,
+        savedBy:   server.savedBy || null,
+        shared:    true,
+      };
+    }
+    try {
+      var raw = localStorage.getItem(_checkpointStorageKey(siteId));
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return null;
+      if (!parsed.positions || typeof parsed.positions !== "object") return null;
+      return { positions: parsed.positions, savedAt: parsed.savedAt || null, savedBy: null, shared: false };
+    } catch (e) { return null; }
+  }
+  function _writeLocalCheckpoint(siteId, positions) {
+    try {
+      localStorage.setItem(_checkpointStorageKey(siteId), JSON.stringify({
+        positions: positions,
+        savedAt: new Date().toISOString(),
+      }));
+    } catch (e) { /* quota / private mode — the server copy (if any) still stands */ }
+  }
+  // Current on-canvas positions of the real nodes. Synthetic overlays (hulls,
+  // floor portals) are derived every render, so persisting them would pin
+  // stale geometry onto ids the next render rebuilds.
+  function _currentNodePositions() {
+    if (!cyInstance) return null;
+    var out = {};
+    cyInstance.nodes().forEach(function (n) {
+      if (n.data("isLocGroup") || n.data("isPortal")) return;
+      var p = n.position();
+      if (p && typeof p.x === "number" && typeof p.y === "number") {
+        out[n.id()] = { x: p.x, y: p.y };
+      }
+    });
+    return out;
+  }
+  // A connection-path overlay parks the graph in a temporary tight chain the
+  // operator never arranged, which is why every other persistence path skips
+  // it too. Saving or restoring there would stamp (or overwrite) a restore
+  // point with scaffolding.
+  function _layoutActionBlockedByOverlay() {
+    if (!topoState.pathOverlay) return false;
+    if (typeof showToast === "function") showToast("Clear the connection path first — those positions are temporary");
+    return true;
+  }
+  function _checkpointLabel(cp) {
+    if (!cp) return "";
+    var when = "";
+    if (cp.savedAt) {
+      var d = new Date(cp.savedAt);
+      if (!isNaN(d.getTime())) when = d.toLocaleString();
+    }
+    var who = cp.shared && cp.savedBy ? " by " + cp.savedBy : "";
+    if (!when && !who) return cp.shared ? "shared save" : "saved in this browser";
+    return (when || "saved") + who;
+  }
+  // Keep the toolbar honest about what the active view can do: the Save
+  // tooltip says where the save will land, the Reset tooltip says whether
+  // there is a restore point to go back to. Re-run on every render and after
+  // each save / reset, since both answers are per view.
+  function _refreshLayoutToolbar() {
+    var saveBtn = document.getElementById("topology-save-layout");
+    var resetBtn = document.getElementById("topology-reset-layout");
+    var cp = topoState.siteId ? _readCheckpoint(topoState.siteId) : null;
+    if (saveBtn) {
+      saveBtn.disabled = !topoState.siteId || !cyInstance;
+      saveBtn.title = _canWriteServerLayout()
+        ? "Save this layout as a restore point (shared)"
+        : "Save this layout as a restore point (this browser only)";
+    }
+    if (resetBtn) {
+      resetBtn.title = cp
+        ? "Reset layout — back to the last save (" + _checkpointLabel(cp) + ") or to the baseline"
+        : "Reset layout to the baseline";
+    }
+  }
+
+  // Explicit Save. Lands the live positions through the normal pipeline first
+  // (so the shared layout and this browser agree), then stamps them as the
+  // restore point. The server write carries the positions itself rather than
+  // checkpointing whatever the row happens to hold, because the debounced drag
+  // PUT may not have landed yet and a restore point of a layout the server
+  // never stored would restore a state nobody displayed.
+  async function saveTopologyLayoutCheckpoint() {
+    if (!topoState.siteId || !cyInstance) return;
+    if (_layoutActionBlockedByOverlay()) return;
+    var view = _activeViewKey();
+    var positions = _currentNodePositions();
+    if (!positions) return;
+    var btn = document.getElementById("topology-save-layout");
+    if (btn) btn.disabled = true;
+    try {
+      saveNodePositions(topoState.siteId);
+      _writeLocalCheckpoint(topoState.siteId, positions);
+      if (!_canWriteServerLayout()) {
+        // A non-writer cannot touch the shared row at all, so say where the
+        // save actually went instead of implying the team now sees it.
+        if (typeof showToast === "function") {
+          showToast("Layout saved in this browser — saving it for everyone requires Device Map write access");
+        }
+        return;
+      }
+      await _flushServerLayoutSaves();
+      var saved = await api.map.saveTopologyCheckpoint(topoState.siteId, view, positions);
+      if (topoState.data) {
+        if (!topoState.data.savedLayouts) topoState.data.savedLayouts = {};
+        topoState.data.savedLayouts[view] = {
+          view: view,
+          positions: positions,
+          savedPositions: positions,
+          savedAt: (saved && saved.savedAt) || new Date().toISOString(),
+          savedBy: (saved && saved.savedBy) || null,
+        };
+      }
+      if (typeof showToast === "function") showToast("Layout saved");
+    } catch (err) {
+      if (typeof showToast === "function") {
+        showToast("Layout not saved — " + (err && err.message ? err.message : String(err)), "error");
+      }
+    } finally {
+      if (btn) btn.disabled = false;
+      _refreshLayoutToolbar();
+    }
+  }
+
+  // Reset menu. Two destinations, and the last-save entry is DISABLED (with
+  // the reason in its tooltip) rather than hidden when this view was never
+  // saved — a menu whose shape changes is harder to learn than one whose
+  // entries grey out.
+  function openResetLayoutMenu(anchor) {
+    if (!topoState.siteId || !topoState.data) return;
+    if (typeof showRowMenu !== "function") { resetTopologyLayoutToBaseline(); return; }
+    var cp = _readCheckpoint(topoState.siteId);
+    showRowMenu(anchor, [
+      { heading: "Reset layout" },
+      {
+        label: cp ? "Reset to last save (" + _checkpointLabel(cp) + ")" : "Reset to last save",
+        title: cp
+          ? "Put every node back where it was when this layout was last saved"
+          : "This view has never been saved — use Save first",
+        disabled: !cp,
+        onSelect: restoreTopologyLayoutCheckpoint,
+      },
+      {
+        label: "Reset to baseline",
+        title: "Discard manual node positions and re-run the automatic layout"
+             + (cp ? " — the saved restore point is kept" : ""),
+        danger: true,
+        onSelect: resetTopologyLayoutToBaseline,
+      },
+    ], { label: "Reset layout", align: "end" });
+  }
+
+  // Put the active view back to its restore point. The checkpoint blob becomes
+  // the live layout through the normal save pipeline, so it propagates to both
+  // stores exactly like a drag would — and the restore point itself survives,
+  // because an operator who restores once usually wants to be able to do it
+  // again after the next experiment.
+  function restoreTopologyLayoutCheckpoint() {
+    if (!topoState.siteId || !topoState.data) return;
+    if (_layoutActionBlockedByOverlay()) return;
+    var cp = _readCheckpoint(topoState.siteId);
+    if (!cp) {
+      if (typeof showToast === "function") showToast("This view has no saved layout yet");
+      return;
+    }
+    var view = _activeViewKey();
+    // Copy rather than alias: the restore point must survive the live blob
+    // being rewritten by the next drag.
+    var positions = {};
+    Object.keys(cp.positions).forEach(function (id) {
+      var p = cp.positions[id];
+      if (p && typeof p.x === "number" && typeof p.y === "number") positions[id] = { x: p.x, y: p.y };
+    });
+    try { localStorage.setItem(_positionsStorageKey(topoState.siteId), JSON.stringify(positions)); }
+    catch (e) { /* quota / private mode — the in-memory render below still applies */ }
+    var layouts = topoState.data.savedLayouts;
+    var entry = layouts && layouts[view];
+    if (entry) {
+      entry.positions = positions;
+    } else if (cp.shared) {
+      if (!topoState.data.savedLayouts) topoState.data.savedLayouts = {};
+      topoState.data.savedLayouts[view] = {
+        view: view, positions: positions,
+        savedPositions: cp.positions, savedAt: cp.savedAt, savedBy: cp.savedBy,
+      };
+    }
+    // Writers push the restored layout back to the shared row; a non-writer
+    // only ever had the local copy, which the setItem above already updated.
+    if (_canWriteServerLayout()) {
+      _markLayoutDirty();
+      _queueServerLayoutSave(topoState.siteId, view, positions);
+    }
+    renderTopologyGraph(topoState.data);
+    if (typeof showToast === "function") showToast("Layout restored to the last save");
+  }
+
+  // Drop the manual node positions for this view and re-run the column layout
+  // against the cached topology data — used when drags have produced a layout
+  // the operator wants to abandon (e.g. positions inherited from before a
+  // column-spacing change). Clears BOTH position stores: the per-browser
+  // localStorage copy and, for deviceMap writers, the shared server one. A
+  // non-writer can only clear their local copy — the shared layout re-asserts
+  // on their next open. The RESTORE POINT is deliberately untouched in either
+  // store, so going back to the last save stays available afterwards.
+  function resetTopologyLayoutToBaseline() {
     if (!topoState.siteId || !topoState.data) return;
     // Scoped to the ACTIVE view — resetting a floor view's drags leaves the
     // Flat layout (and every other floor's) untouched.
@@ -940,7 +1168,11 @@
     try { localStorage.removeItem(_positionsStorageKey(topoState.siteId)); }
     catch (e) { /* quota / private mode — proceed with re-render anyway */ }
     delete _layoutDirty[topoState.siteId + "|" + view];
-    var hadServerLayout = !!(topoState.data.savedLayouts && topoState.data.savedLayouts[view]);
+    var entry = topoState.data.savedLayouts && topoState.data.savedLayouts[view];
+    // An emptied row (a previous baseline reset that kept its restore point)
+    // is not a shared layout to be re-asserted, so it must not trip the
+    // non-writer refusal below.
+    var hadServerLayout = !!(entry && entry.positions && Object.keys(entry.positions).length > 0);
     if (hadServerLayout && !_canWriteServerLayout()) {
       // The shared layout would simply re-assert on re-render — tell the
       // operator why nothing moved instead of pretending to reset.
@@ -949,8 +1181,14 @@
       }
       return;
     }
+    if (entry) {
+      // Mirror the server: a row carrying a restore point is EMPTIED, not
+      // dropped, so _readCheckpoint can still offer it. An empty positions
+      // blob restores nothing at render, which is the baseline.
+      if (entry.savedPositions) entry.positions = {};
+      else delete topoState.data.savedLayouts[view];
+    }
     if (hadServerLayout) {
-      delete topoState.data.savedLayouts[view];
       api.map.deleteTopologyLayout(topoState.siteId, view).catch(function (err) {
         if (typeof showToast === "function") {
           showToast("Server layout not reset — " + (err && err.message ? err.message : String(err)), "error");
@@ -958,7 +1196,7 @@
       });
     }
     renderTopologyGraph(topoState.data);
-    if (typeof showToast === "function") showToast("Layout reset");
+    if (typeof showToast === "function") showToast("Layout reset to baseline");
   }
 
   // ── Right-click description editor ──────────────────────────────────────
@@ -1272,7 +1510,14 @@
     delete _layoutDirty[dirtyKey];
     if (topoState.data && topoState.siteId === siteId) {
       if (!topoState.data.savedLayouts) topoState.data.savedLayouts = {};
-      topoState.data.savedLayouts[view] = { view: view, positions: positions };
+      // MERGE, never replace: the entry also carries this view's restore
+      // point (savedPositions / savedAt / savedBy), which a drag must not
+      // clear — the server does not, and the two must agree or "Reset to
+      // last save" would grey out until the next topology fetch.
+      var prev = topoState.data.savedLayouts[view] || {};
+      prev.view = view;
+      prev.positions = positions;
+      topoState.data.savedLayouts[view] = prev;
     }
     if (_serverSaveTimers[dirtyKey]) clearTimeout(_serverSaveTimers[dirtyKey].timer);
     var entry = {
@@ -1303,16 +1548,10 @@
   }
   function saveNodePositions(siteId) {
     if (!cyInstance || !siteId) return;
-    var out = {};
-    cyInstance.nodes().forEach(function (n) {
-      // Synthetic overlays (location hulls, floor portals) are derived every
-      // render — persisting them would pin stale geometry onto real node ids.
-      if (n.data("isLocGroup") || n.data("isPortal")) return;
-      var p = n.position();
-      if (p && typeof p.x === "number" && typeof p.y === "number") {
-        out[n.id()] = { x: p.x, y: p.y };
-      }
-    });
+    // Shared with the explicit Save so the two can never disagree about
+    // which nodes are persistable.
+    var out = _currentNodePositions();
+    if (!out) return;
     try { localStorage.setItem(_positionsStorageKey(siteId), JSON.stringify(out)); }
     catch (e) { /* quota / private mode — silently skip */ }
     _queueServerLayoutSave(siteId, _activeViewKey(), out);
@@ -2054,6 +2293,9 @@
     _renderTopologyTypeToggles(roleCounts, hiddenRoles);
     _renderTopologyFloorViews();
     _wireCtrlPan();
+    // Save/Reset affordances are per VIEW — re-state them whenever the
+    // graph is rebuilt (open, refresh, view switch, reset).
+    _refreshLayoutToolbar();
   }
 
   // Ctrl + left-drag pans the viewport from ANYWHERE on the graph —

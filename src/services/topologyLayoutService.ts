@@ -11,6 +11,14 @@
  * layouts interchangeably (server wins, localStorage is the per-browser
  * fallback for non-writers).
  *
+ * Two blobs per row. `positions` is the LIVE layout -- rewritten by the
+ * client's debounced drag save, shared with every viewer. `savedPositions`
+ * is the operator's RESTORE POINT, written only by an explicit Save, which
+ * is what makes "Reset to last save" a different thing from "Reset to
+ * baseline": the first copies the restore point back over the live blob, the
+ * second clears the live blob and keeps the restore point (a row with no
+ * restore point is deleted outright).
+ *
  * Full-replace semantics per (site, view): each save overwrites the whole
  * blob, so nodeIds that left the topology age out on the next save and
  * concurrent editors are last-write-wins (updatedBy/updatedAt are stored
@@ -31,6 +39,10 @@ export type TopologyPositions = Record<string, TopologyNodePosition>;
 export interface TopologyLayoutDto {
   view: string;
   positions: TopologyPositions;
+  /** The last explicitly-saved layout, or null when this view was never saved. */
+  savedPositions: TopologyPositions | null;
+  savedBy: string | null;
+  savedAt: string | null;
   updatedBy: string | null;
   updatedAt: string;
 }
@@ -95,10 +107,23 @@ export function sanitizePositions(raw: unknown): TopologyPositions {
   return out;
 }
 
-function toDto(row: { view: string; positions: Prisma.JsonValue; updatedBy: string | null; updatedAt: Date }): TopologyLayoutDto {
+interface LayoutRow {
+  view: string;
+  positions: Prisma.JsonValue;
+  savedPositions: Prisma.JsonValue | null;
+  savedBy: string | null;
+  savedAt: Date | null;
+  updatedBy: string | null;
+  updatedAt: Date;
+}
+
+function toDto(row: LayoutRow): TopologyLayoutDto {
   return {
     view: row.view,
     positions: row.positions as unknown as TopologyPositions,
+    savedPositions: (row.savedPositions ?? null) as unknown as TopologyPositions | null,
+    savedBy: row.savedBy,
+    savedAt: row.savedAt ? row.savedAt.toISOString() : null,
     updatedBy: row.updatedBy,
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -125,8 +150,10 @@ async function assertTopologySite(siteId: string): Promise<void> {
 }
 
 /**
- * Full-replace upsert of one (site, view) layout. `positions` must already
- * be validated (route Zod + sanitizePositions).
+ * Full-replace upsert of one (site, view) LIVE layout -- the debounced drag
+ * save. `positions` must already be validated (route Zod + sanitizePositions).
+ * Deliberately never touches `savedPositions`: a drag is not a decision, and
+ * overwriting the restore point from here would leave nothing to reset to.
  */
 export async function saveLayout(
   siteId: string,
@@ -146,11 +173,64 @@ export async function saveLayout(
 }
 
 /**
- * Delete one (site, view) layout. Returns true when a row was removed —
- * idempotent for the client's unconditional reset flow.
+ * Stamp the operator's restore point for one (site, view): the positions
+ * they are looking at become BOTH the live layout and `savedPositions`.
+ * Writing the live blob in the same statement is what makes Save reliable --
+ * the client's debounced drag PUT may not have landed yet, and a checkpoint
+ * of a layout the server has not seen would be restorable to a state nobody
+ * ever displayed.
  */
-export async function deleteLayout(siteId: string, view: string): Promise<boolean> {
+export async function saveCheckpoint(
+  siteId: string,
+  view: string,
+  positions: TopologyPositions,
+  actor: string | null,
+): Promise<TopologyLayoutDto> {
   if (!isValidViewKey(view)) throw new AppError(400, "Invalid view key");
-  const res = await prisma.topologyLayout.deleteMany({ where: { siteId, view } });
-  return res.count > 0;
+  await assertTopologySite(siteId);
+  const json = positions as unknown as Prisma.InputJsonValue;
+  const savedAt = new Date();
+  const row = await prisma.topologyLayout.upsert({
+    where:  { siteId_view: { siteId, view } },
+    create: { siteId, view, positions: json, savedPositions: json, savedBy: actor, savedAt, updatedBy: actor },
+    update: { positions: json, savedPositions: json, savedBy: actor, savedAt, updatedBy: actor },
+  });
+  return toDto(row);
+}
+
+export interface LayoutResetResult {
+  /** True when a stored layout was actually cleared (false = nothing to reset). */
+  changed: boolean;
+  /** True when the row survived because it still carries a restore point. */
+  checkpointKept: boolean;
+}
+
+/**
+ * Reset one (site, view) layout to the column solver's baseline -- the server
+ * half of "Reset to baseline".
+ *
+ * A row carrying a restore point is EMPTIED rather than deleted (`positions`
+ * becomes `{}`, which restores nothing at render so the solver's own
+ * placement stands): an operator who resets to baseline must still be able to
+ * change their mind and go back to their last save. A row with no restore
+ * point has nothing worth keeping and is deleted outright, which is the
+ * pre-checkpoint behavior. Idempotent either way -- the client's reset flow
+ * is unconditional.
+ */
+export async function resetLayout(siteId: string, view: string): Promise<LayoutResetResult> {
+  if (!isValidViewKey(view)) throw new AppError(400, "Invalid view key");
+  const row = await prisma.topologyLayout.findUnique({
+    where: { siteId_view: { siteId, view } },
+    select: { id: true, savedPositions: true },
+  });
+  if (!row) return { changed: false, checkpointKept: false };
+  if (row.savedPositions != null) {
+    await prisma.topologyLayout.update({
+      where: { id: row.id },
+      data: { positions: {} as Prisma.InputJsonValue },
+    });
+    return { changed: true, checkpointKept: true };
+  }
+  await prisma.topologyLayout.delete({ where: { id: row.id } });
+  return { changed: true, checkpointKept: false };
 }
