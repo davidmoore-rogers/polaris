@@ -72,9 +72,9 @@ import {
 } from "../discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../dnsResolvedReservationService.js";
 import { createSubnetRowChecked } from "../subnetService.js";
-import { snapshotSubnet } from "../subnetArchiveService.js";
+import { snapshotSubnet, archiveSubnet } from "../subnetArchiveService.js";
 import { raiseChassisReplacedConflict } from "../subnetChassisConflictService.js";
-import { classifyChassis, verdictWritesSerial } from "../../utils/chassisIdentity.js";
+import { classifyChassis, verdictWritesSerial, classifyDeprecatedSupersede } from "../../utils/chassisIdentity.js";
 import { findCoveringExclusion } from "../../utils/subnetExclusion.js";
 import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
@@ -2151,6 +2151,18 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
   // Subnets by CIDR (non-deprecated only) and by blockId
   const subnetByCidr = new Map<string, any>();
   const siblingsByBlockId = new Map<string, any[]>();
+  // Dead rows, keyed `blockId|cidr` — the EXACT key `@@unique([blockId, cidr])`
+  // enforces. They are excluded from both indexes above (invisible to the
+  // update path) while still occupying that unique slot (blocking to the create
+  // path), which is what made a replacement gate's identical subnet
+  // unrecordable; Phase 1's create path consults this to retire one when a
+  // DIFFERENT gate now serves the range. Business rule 41.
+  //
+  // Exact-CIDR only, deliberately. A deprecated /23 PARTIALLY overlapping a new
+  // /24 is a different judgement — it is not the same address space coming
+  // back — so it still falls through to createSubnetRowChecked and is reported
+  // as the genuine overlap it is.
+  const deprecatedByBlockCidr = new Map<string, any>();
   const allSubnets = [...allSubnetsRaw]; // mutable copy — we push newly created subnets here
   for (const s of allSubnets) {
     if (s.status !== "deprecated") {
@@ -2158,6 +2170,8 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
       const siblings = siblingsByBlockId.get(s.blockId) || [];
       siblings.push(s);
       siblingsByBlockId.set(s.blockId, siblings);
+    } else {
+      deprecatedByBlockCidr.set(`${s.blockId}|${s.cidr}`, s);
     }
   }
 
@@ -2461,6 +2475,65 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     if (!matchingBlock) {
       skipped.push(`${cidr} (no matching parent block)`);
       continue;
+    }
+
+    // ── A dead subnet must not squat on the CIDR (business rule 41) ─────────
+    //
+    // A subnet deprecated before the chassis column existed — or by Phase 2
+    // when its gate left the roster — still holds `@@unique([blockId, cidr])`
+    // while being INVISIBLE to `subnetByCidr` above. So a replacement gate
+    // reporting the identical range matched nothing, fell through to the
+    // create, and was refused by the committed-state overlap check on the dead
+    // row: skipped every run, forever, with a self-overlap message. The chassis
+    // check above cannot reach this case — it only runs when a LIVE row exists
+    // to compare against.
+    //
+    // Retire the dead row here so the create can proceed, but ONLY when a
+    // DIFFERENT gate is now serving that space (`classifyDeprecatedSupersede`).
+    // An operator who deprecated a subnet its own gate still serves gets it
+    // re-reported every cycle, and archiving there would silently undo their
+    // decision and hand the range back as active.
+    const deadKey = `${matchingBlock.id}|${cidr}`;
+    const dead = deprecatedByBlockCidr.get(deadKey);
+    if (dead) {
+      const verdict = classifyDeprecatedSupersede({
+        storedSerial: dead.fortigateSerial,
+        storedDeviceName: dead.fortigateDevice,
+        discoveredSerial: entry.fortigateSerial,
+        discoveredDeviceName: entry.fortigateDevice,
+        clusterSerials: clusterSerialsByDevice.get((entry.fortigateDevice || "").toLowerCase()),
+      });
+      if (verdict.kind === "supersede") {
+        try {
+          const snap = await archiveSubnet(dead.id, { actor, reason: "chassis-replaced" });
+          // Drop it from every in-memory structure so Phase 2 and the later
+          // phases cannot act on a row that no longer exists.
+          deprecatedByBlockCidr.delete(deadKey);
+          const at = allSubnets.findIndex((s: any) => s.id === dead.id);
+          if (at >= 0) allSubnets.splice(at, 1);
+          syncLog(
+            "info",
+            `Retired the dead subnet ${cidr} (was served by "${dead.fortigateDevice || "unknown"}", ` +
+              `${snap.reservationCount} reservation(s) archived) so "${entry.fortigateDevice}" can serve it — ` +
+              `superseded by ${verdict.via === "serial" ? "a different chassis serial" : "a different FortiGate"}`,
+          );
+        } catch (err: any) {
+          skipped.push(`${cidr} (could not archive the deprecated subnet it replaces)`);
+          syncLog("error", `Failed to archive deprecated subnet ${cidr}: ${err?.message || "Unknown error"}`);
+          continue;
+        }
+      } else {
+        // Deliberately actionable: the old message was a bare self-overlap and
+        // told an operator nothing about what to do.
+        skipped.push(`${cidr} (a deprecated network still holds this range — archive it to free the address space)`);
+        syncLog(
+          "warning",
+          `Subnet ${cidr} is still held by a deprecated network on the same FortiGate ` +
+            `("${dead.fortigateDevice || "unknown"}", ${verdict.reason}). Its address space stays reserved ` +
+            `until that network is archived; discovery will not reactivate a network somebody retired.`,
+        );
+        continue;
+      }
     }
 
     // Cheap in-memory pre-filter against the siblings this run already knows

@@ -500,6 +500,27 @@ Three consequences of that choice, each deliberate. The archive carries **no for
 
 Archiving is also deliberately exempt from rule 4's active-reservation deletion protection. That protection exists to stop accidental DESTRUCTION; this preserves everything it moves.
 
+### Retiring the dead row is discovery's job, not an API call
+
+The first cut of this rule shipped the archive as an operator action and left it there. That was wrong, and it showed up immediately: an install that had already had a gate replaced ran a discovery on the fixed build and got **the same skipped-subnet event as before**.
+
+The reason is where the chassis comparison sits. It lives inside Phase 1's `if (existing)` branch, and `existing` comes from `subnetByCidr` — which excludes deprecated rows. For a subnet that was ALREADY deprecated, which is every subnet on an install whose gate was swapped before the feature existed, the comparison never ran at all: the lookup missed, the create path was reached, and the committed-state overlap check refused it on the dead row. `classifyDeprecatedSupersede` being correct did not matter, because nothing called it. The only remedy was `POST /subnets/:id/archive`, an endpoint with no button behind it.
+
+So Phase 1's create path now consults a second index of the deprecated rows (`deprecatedByBlockCidr`, keyed exactly as `@@unique([blockId, cidr])` is) and retires one in place when a live gate re-reports its range.
+
+**It only fires when a DIFFERENT gate is serving that space**, because two very different situations reach this point:
+
+- the subnet died with its gate and another box now serves the range — retire the dead row so the new one can be recorded. This is the case the rule exists for.
+- an operator deliberately deprecated a subnet its gate STILL serves, to stop allocating from it. Discovery re-reports it every cycle, and archiving there would silently undo that decision and hand the range back as active.
+
+Serial decides it where both sides have one; the device NAME is the fallback for rows predating the serial column, which is exactly the population that needs this. When the name matches and there is no stored serial the two cases are genuinely indistinguishable, and the answer is to KEEP — a wrongly-kept row is a skipped subnet somebody can archive by hand, while a wrongly-archived one silently reactivates a range somebody retired on purpose.
+
+The skip that remains now **names the fix** (`a deprecated network still holds this range — archive it to free the address space`) instead of the bare `Subnet X overlaps with existing subnet X`. That self-overlap message was true, useless, and the reason this went unnoticed for a whole release.
+
+Matching is **exact-CIDR only**. A deprecated `/23` partially overlapping a new `/24` is a different judgement — it is not the same address space coming back — so it still falls through to `createSubnetRowChecked` and is reported as the genuine overlap it is.
+
+Ordering matters and is load-bearing: the excluded-address check (business rule 42) runs BEFORE this, so a CIDR an operator has declared out of scope never reaches the archiving path.
+
 ### What rule 23 keeps
 
 A decommissioned managed device still gives its address back. The release happens while the subnet is live, exactly as before — archiving is a later, separate act, and it snapshots whatever state the reservations are in at that moment. Rule 23 is unchanged.

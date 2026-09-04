@@ -372,6 +372,11 @@ const api = {
     refresh:       (id)     => request("POST", `/subnets/${id}/refresh`),
     update:        (id, b)  => request("PUT", `/subnets/${id}`, b),
     delete:        (id)     => request("DELETE", `/subnets/${id}`),
+    // Retire a network into the archive, freeing its CIDR (business rule 41).
+    // Preserves everything it moves, unlike delete.
+    archive:       (id)     => request("POST", `/subnets/${id}/archive`),
+    archivedList:  (params) => request("GET", "/subnets/archived" + toQuery(params)),
+    archivedGet:   (id)     => request("GET", `/subnets/archived/${id}`),
     // Address space declared out of scope for the networks list (business rule
     // 42). No `cidr` on update — it is the exclusion's identity; changing which
     // space is excluded is a delete plus an add.

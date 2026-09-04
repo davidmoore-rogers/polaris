@@ -29,6 +29,7 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyChassis,
+  classifyDeprecatedSupersede,
   normalizeSerial,
   normalizeSerialSet,
   verdictWritesSerial,
@@ -127,6 +128,98 @@ describe("classifyChassis — HA clusters", () => {
   it("blank entries in the cluster set cannot match a stored serial", () => {
     // Guards against a roster row with an empty `sn` making everything match.
     expect(classifyChassis(OLD, NEW, ["", null, undefined]).kind).toBe("replaced");
+  });
+});
+
+describe("classifyDeprecatedSupersede", () => {
+  // The half that had been left to an operator's API call. A subnet deprecated
+  // before the chassis column existed still holds the unique index while being
+  // invisible to discovery's lookup, so a replacement gate's identical CIDR was
+  // skipped on every run. The question here is only ever "is a DIFFERENT gate
+  // serving this space now?".
+
+  it("supersedes on a different chassis serial", () => {
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: OLD, storedDeviceName: "gate-a",
+        discoveredSerial: NEW, discoveredDeviceName: "gate-a",
+      }),
+    ).toEqual({ kind: "supersede", via: "serial" });
+  });
+
+  it("keeps when the same chassis still serves it", () => {
+    // An operator deprecated a range its own gate still hands out. Archiving
+    // would silently reactivate what they retired.
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: OLD, storedDeviceName: "gate-a",
+        discoveredSerial: OLD, discoveredDeviceName: "gate-a",
+      }),
+    ).toEqual({ kind: "keep", reason: "same-chassis" });
+  });
+
+  it("keeps across an HA failover", () => {
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: OLD, discoveredSerial: PEER, clusterSerials: [OLD, PEER],
+      }),
+    ).toMatchObject({ kind: "keep", reason: "same-chassis" });
+  });
+
+  it("falls back to the device NAME for a row predating the serial column", () => {
+    // The case that actually bit: rows deprecated long before rule 41 carry no
+    // serial at all, so a name change is the only evidence available.
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: null, storedDeviceName: "old-gate",
+        discoveredSerial: NEW, discoveredDeviceName: "new-gate",
+      }),
+    ).toEqual({ kind: "supersede", via: "device-name" });
+  });
+
+  it("keeps a same-named gate with no stored serial — genuinely ambiguous", () => {
+    // Could be a same-name RMA swap or an operator's deliberate deprecation,
+    // and nothing here can tell them apart. A wrongly-kept row is a skipped
+    // subnet somebody can archive by hand; a wrongly-archived one silently
+    // reactivates a retired range.
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: null, storedDeviceName: "gate-a",
+        discoveredSerial: NEW, discoveredDeviceName: "gate-a",
+      }),
+    ).toEqual({ kind: "keep", reason: "same-device-name" });
+  });
+
+  it("is case- and whitespace-insensitive about device names", () => {
+    expect(
+      classifyDeprecatedSupersede({
+        storedDeviceName: "  GATE-A ", discoveredDeviceName: "gate-a",
+      }),
+    ).toMatchObject({ kind: "keep", reason: "same-device-name" });
+  });
+
+  it("keeps when either side has no name to compare", () => {
+    for (const pair of [
+      { storedDeviceName: null, discoveredDeviceName: "gate-b" },
+      { storedDeviceName: "gate-a", discoveredDeviceName: "" },
+      { storedDeviceName: null, discoveredDeviceName: null },
+    ]) {
+      expect(classifyDeprecatedSupersede(pair)).toEqual({
+        kind: "keep",
+        reason: "indistinguishable",
+      });
+    }
+  });
+
+  it("an unreadable serial this run does not block the name fallback", () => {
+    // `unknown` means "no serial evidence", not "same gate" — the name still
+    // gets its say, which is what unblocks a fleet whose CMDB read failed.
+    expect(
+      classifyDeprecatedSupersede({
+        storedSerial: OLD, storedDeviceName: "old-gate",
+        discoveredSerial: null, discoveredDeviceName: "new-gate",
+      }),
+    ).toEqual({ kind: "supersede", via: "device-name" });
   });
 });
 

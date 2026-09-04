@@ -112,6 +112,73 @@ export function classifyChassis(
 }
 
 /**
+ * Should a DEPRECATED subnet be retired to the archive so a live gate can
+ * record the same address space?
+ *
+ * This is the other half of business rule 41, and the half that had been left
+ * to an operator's API call. A subnet deprecated BEFORE the chassis column
+ * existed — or deprecated by the stale sweep when its gate left the roster —
+ * still occupies `@@unique([blockId, cidr])` while being invisible to
+ * discovery's lookup index, so a replacement gate reporting the identical CIDR
+ * was skipped on every run, forever, with a self-overlap message. The chassis
+ * comparison above cannot help there: it only runs when a LIVE row exists to
+ * compare against.
+ *
+ * The discriminator is whether a DIFFERENT gate is now serving that space,
+ * because two very different things reach this point:
+ *
+ *   • the subnet died with its gate and another box now serves the range —
+ *     retire the dead row so the new one can be recorded. This is the case the
+ *     rule exists for.
+ *   • an operator deliberately deprecated a subnet its gate STILL serves, to
+ *     stop allocating from it. Discovery re-reports it every cycle, and
+ *     archiving there would silently undo the operator's decision and hand the
+ *     range back as active. Leave it alone.
+ *
+ * Serial decides it when both sides have one. A row predating the column has
+ * none, so the device NAME is the fallback — and when the name matches with no
+ * serial to check, the two cases above are genuinely indistinguishable and the
+ * answer is to KEEP, leaving the operator's deprecation standing. That is the
+ * conservative direction: a wrongly-kept row is a skipped subnet an operator
+ * can archive by hand, while a wrongly-archived one silently reactivates a
+ * range somebody retired on purpose.
+ */
+export type SupersedeVerdict =
+  | { kind: "supersede"; via: "serial" | "device-name" }
+  | { kind: "keep"; reason: "same-chassis" | "same-device-name" | "indistinguishable" };
+
+const sameName = (a: string | null | undefined, b: string | null | undefined): boolean => {
+  const x = (a ?? "").trim().toLowerCase();
+  const y = (b ?? "").trim().toLowerCase();
+  return x.length > 0 && x === y;
+};
+
+export function classifyDeprecatedSupersede(input: {
+  storedSerial?: string | null;
+  storedDeviceName?: string | null;
+  discoveredSerial?: string | null;
+  discoveredDeviceName?: string | null;
+  clusterSerials?: Iterable<string | null | undefined> | null;
+}): SupersedeVerdict {
+  // Serial first — chassis identity, and the only signal a rename can't fool.
+  const byChassis = classifyChassis(input.storedSerial, input.discoveredSerial, input.clusterSerials);
+  if (byChassis.kind === "replaced") return { kind: "supersede", via: "serial" };
+  if (byChassis.kind === "same") return { kind: "keep", reason: "same-chassis" };
+
+  // No usable serial pair (a pre-column row, or an unreadable read this run).
+  if (sameName(input.storedDeviceName, input.discoveredDeviceName)) {
+    return { kind: "keep", reason: "same-device-name" };
+  }
+  const stored = (input.storedDeviceName ?? "").trim();
+  const discovered = (input.discoveredDeviceName ?? "").trim();
+  if (stored.length > 0 && discovered.length > 0) {
+    return { kind: "supersede", via: "device-name" };
+  }
+  // One side has no name at all — nothing to compare, so nothing to act on.
+  return { kind: "keep", reason: "indistinguishable" };
+}
+
+/**
  * True when the verdict should write `Subnet.fortigateSerial`.
  *
  * `learn` adopts; `same` re-stamps so the stored value tracks the active

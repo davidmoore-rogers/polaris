@@ -65,6 +65,16 @@ async function _initSubnetsPage() {
     if (canEditSubnet(s)) {
       items.push({ label: "Edit", onSelect: function () { openSubnetEditModal(id); } });
       items.push({ separator: true });
+      // Archive is `subnets:fullwrite`, not the ownership-aware write the rest
+      // of this menu uses: a discovered network carries createdBy=null, so an
+      // ownership-scoped caller could never reach one, and retiring a site's
+      // address space is not an own-rows action (business rule 41).
+      if (permAtLeast("subnets", "fullwrite")) {
+        items.push({
+          label: "Archive",
+          onSelect: function () { confirmArchiveSubnet(id, s.cidr, s._count ? s._count.reservations : 0); },
+        });
+      }
       items.push({
         label: "Delete",
         danger: true,
@@ -1208,6 +1218,32 @@ async function openSubnetEditModal(id) {
         }
       });
     }
+  } catch (err) {
+    showToast(err.message, "error");
+  }
+}
+
+// Retire a network (business rule 41). Deliberately worded against Delete
+// sitting right below it: this one PRESERVES, and the distinction is the whole
+// reason both verbs exist. Archiving is also what frees a CIDR that a
+// deprecated network is still holding — the state discovery reports as
+// "a deprecated network still holds this range".
+async function confirmArchiveSubnet(id, cidr, reservationCount) {
+  var msg = 'Archive network "' + cidr + '"?';
+  if (reservationCount > 0) {
+    msg += ' Its ' + reservationCount + ' reservation' + (reservationCount !== 1 ? 's' : '') +
+      ' will be archived with it.';
+  }
+  msg += ' Nothing is deleted — the network and everything it held stay readable under' +
+    ' Archived networks — and its address space is released, so a replacement FortiGate' +
+    ' can record the same range.';
+  var ok = await showConfirm(msg);
+  if (!ok) return;
+  try {
+    var out = await api.subnets.archive(id);
+    showToast('Network archived with ' + out.reservationCount + ' reservation' +
+      (out.reservationCount !== 1 ? 's' : '') + ' — its address space is free again');
+    loadSubnets();
   } catch (err) {
     showToast(err.message, "error");
   }
