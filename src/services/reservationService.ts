@@ -248,6 +248,25 @@ function isSupersedableByCreate(row: {
   return isLeaseBackedInfraRow(row);
 }
 
+/**
+ * Source types whose row is owned by the DEVICE's own config, not by anything
+ * Polaris granted: a FortiGate virtual IP and a statically-configured
+ * router/firewall interface address. Polaris reports them and offers no
+ * Reserve / Release / Edit.
+ *
+ * Lives here rather than in the route that first needed it because it is a
+ * domain fact about a source type, and a second consumer arrived with business
+ * rule 41: a chassis-replacement diff must not offer to migrate these lines to
+ * the new gate — the new gate's OWN config states them, so "migrating" one
+ * would mean writing Polaris's memory of a dead box over a live device's truth.
+ */
+export const DEVICE_OWNED_SOURCE_TYPES: ReadonlySet<string> = new Set(["vip", "interface_ip"]);
+
+/** True when this row is device-owned and therefore read-only in Polaris. */
+export function isDeviceOwnedRow(row: { sourceType: string }): boolean {
+  return DEVICE_OWNED_SOURCE_TYPES.has(row.sourceType);
+}
+
 // Phase 2 of the create flow: validate the requested target and 409 on
 // collision. See isSupersedableByCreate above for which rows a create may take
 // over silently — they're excluded from the collision check here and released

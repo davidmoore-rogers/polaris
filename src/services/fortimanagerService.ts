@@ -916,6 +916,14 @@ export interface DiscoveredSubnet {
   cidr: string;
   name: string;           // DHCP server interface name
   fortigateDevice: string;
+  // Chassis serial of the gate that reported this subnet. `fortigateDevice` is
+  // a NAME and names get changed; the serial is chassis identity and never
+  // does, which is what lets syncDhcpSubnets tell a rename (re-point quietly)
+  // from a replacement (raise the `chassis-replaced` conflict). Business rule
+  // 41. Optional because it must stay TRI-STATE end to end: a source that
+  // could not read a serial reports UNKNOWN, never "different" — one failed
+  // CMDB read would otherwise declare every subnet on the fleet replaced.
+  fortigateSerial?: string;
   dhcpServerId: string;
   vlan?: number;          // 802.1Q VLAN ID from the interface, if present
 }
@@ -1862,7 +1870,11 @@ async function fmgStepDhcpConfig(ctx: FmgDeviceCtx): Promise<void> {
           try {
             const block = new Netmask(`${startIp}/${netmaskStr}`);
             const cidr = `${block.base}/${block.bitmask}`;
-            localSubnets.push({ cidr, name: iface || `dhcp-${serverId}`, fortigateDevice: deviceName, dhcpServerId: serverId });
+            // localDevice is fully built (serial from the roster's `sn`, HA
+            // members from extractHaFromFmgDevice) before the ctx this step
+            // receives, so the serial is available here rather than only at
+            // the end of the run.
+            localSubnets.push({ cidr, name: iface || `dhcp-${serverId}`, fortigateDevice: deviceName, fortigateSerial: ctx.localDevice.serial || undefined, dhcpServerId: serverId });
             deviceSubnetCount++;
           } catch { /* skip invalid netmask/IP */ }
 

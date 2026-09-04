@@ -5776,6 +5776,57 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/subnetArchiveService.ts
+
+**What it owns:** Retiring a subnet into the archive tables (business rule 41) — the `ArchivedSubnet` / `ArchivedReservation` writes, the `subnet.archived` Event, and the two review reads.
+
+**Public API:** `snapshotSubnet(subnetId, {reason, actor}, tx?)` (COPY only — live rows untouched; accepts a transaction client so the chassis-replacement path archives and re-points in one commit), `archiveSubnet(subnetId, {actor, reason?})` (snapshot + DELETE the live subnet), `getArchivedSubnet(id)`, `listArchivedSubnets(filter)`, `ArchiveReason`, `SnapshotResult`.
+
+**Cross-service deps:** eventLogService (`subnet.archived`), utils/chunk (`chunkArray`).
+
+**Used by:** `src/api/routes/subnets.ts` (`GET /subnets/archived`, `GET /subnets/archived/:id`, `POST /subnets/:id/archive`), `src/services/discovery/discoveryEngine.ts` (`snapshotSubnet` from the Phase 1 chassis-replacement pass), `src/services/subnetChassisConflictService.ts` (`getArchivedSubnet` for the diff's old side).
+
+**Invariants:**
+- **`archiveSubnet` is what frees the CIDR.** A `deprecated` row still holds `@@unique([blockId, cidr])`; moving it OUT is the entire point. `tests/integration/subnetArchive.test.ts` pins BOTH halves — that a deprecated row still 409s a same-CIDR create, and that archiving lets it through.
+- **`snapshotSubnet` is additive and must stay so.** The chassis-replacement path calls it on an automatic detection; deleting or releasing anything there would make a false positive cost data.
+- **No FKs out of the archive to `ip_blocks` or `integrations`.** `Subnet.block` is `onDelete: Cascade`, so an FK would let deleting a block erase the archive. Block/integration identity is denormalized (`blockCidr`/`blockName`/`integrationName`) instead — the `DirectoryContactSource.integrationId` reasoning.
+- **Push POINTERS are never copied** (`pushedScopeId`/`pushedEntryId`/`pushedToId`). They address an entry inside a scope on a chassis that no longer exists; a future restore or unpush carrying them forward would aim a delete at whatever now occupies those ids on a different box. Push STATE (`pushStatus`/`pushedAt`) is kept.
+- **Business rule 4's active-reservation protection deliberately does NOT apply.** It guards against accidental destruction; this preserves everything it moves.
+- **Not a retention entity.** Nothing prunes these tables, by design.
+- Reservation copies go through `createMany` in `COPY_CHUNK` batches — never a per-row await (a /16 scope can hold a lot).
+
+**When changing this:**
+- Adding a column to `Reservation` that a reviewer would want? Add it to `RESERVATION_SELECT` **and** `ArchivedReservation` — the copy is explicit, not a spread, so a new column is silently dropped otherwise.
+- If a RESTORE path is ever added, it must not resurrect push pointers (they aren't stored) and must refuse when the CIDR is occupied in that block.
+- Keep `snapshotSubnet` transaction-capable; the discovery path depends on it.
+
+---
+
+## services/subnetChassisConflictService.ts
+
+**What it owns:** The `chassis-replaced` Conflict flavour (business rule 41) — the first and only `entityType="subnet"` variant. Raise/refresh/suppress, the per-address diff, and the accept/reject handlers plus their `subnet.chassis.adopted` / `subnet.chassis.dismissed` Events.
+
+**Public API:** `raiseChassisReplacedConflict(input)` → `"raised" | "refreshed" | "suppressed"`, `buildChassisDiff(conflict)`, `diffReservationLines(oldRows, newRows)` (pure), `acceptChassisReplacement`, `rejectChassisReplacement`, `listChassisConflicts`, `CHASSIS_REPLACED_COLLISION_REASON`, and the `ChassisReplacedPayload` / `DiffSide` / `ChassisDiffLine` / `LineVerdict` types.
+
+**Cross-service deps:** subnetArchiveService (`getArchivedSubnet`), reservationService (`DEVICE_OWNED_SOURCE_TYPES`), utils/chassisIdentity (`normalizeSerial`), eventLogService.
+
+**Used by:** `src/services/discovery/discoveryEngine.ts` (raise, from the Phase 1 pass), `src/services/conflictResolutionService.ts` (the `entityType === "subnet"` branch of `acceptConflict` / `rejectConflict`), `src/api/routes/conflicts.ts` (`GET /conflicts/:id/chassis-diff`).
+
+**Invariants:**
+- **Dedup is keyed on the (oldSerial, newSerial) PAIR, not the subnet.** A pending row for the same pair refreshes, a REJECTED row for the same pair suppresses, and a different pair — the box swapped twice — raises anew.
+- **Raising never re-points `Subnet.fortigateSerial`.** The pending conflict is the unresolved state, and the stored serial is what keeps the detection derivable from the subnet row rather than dependent on the conflict row surviving. `acceptChassisReplacement` is what moves it; `verdictWritesSerial` returns null for `replaced` to enforce the same thing on the discovery side.
+- **The diff is computed ON READ, never snapshotted.** Discovery syncs subnets in Phase 1 and reservations in Phases 3–5, so a payload built at detection time would compare the old chassis against itself.
+- **`vip` / `interface_ip` lines are shown and never migratable.** They are the new gate's own config to state; migrating one would write Polaris's memory of a dead box over a live device's truth. Sourced from `DEVICE_OWNED_SOURCE_TYPES`, shared with `assertNotDeviceOwned`.
+- **The dispatcher owns the conflict's status.** These handlers must NOT stamp `status`/`resolvedBy`/`resolvedAt` — `conflictResolutionService.acceptConflict`/`rejectConflict` do it after every handler returns, as for the reservation and asset variants.
+- Raise refuses equal or blank serials outright, so a caller cannot manufacture a self-conflict.
+
+**When changing this:**
+- Adding a compared field to the diff? It goes in `COMPARED_FIELDS`, and `tests/unit/chassisDiff.test.ts` has a table-driven case per field — extend it.
+- A second `entityType="subnet"` flavour must add its own `collisionReason` and its own branch in the two dispatchers; `CHASSIS_CONFLICT_WHERE` filters on the reason, not the entity type alone.
+- Migration (Phase 2) must null every push pointer on a carried row and re-queue it (`pushStatus: "pending"` + `pushQueuedAt`) rather than pushing inline — see the reservation-push-lifecycle entry.
+
+---
+
 ## services/subnetService.ts
 
 **What it owns:** Subnet creation, allocation, bulk templates, and lifecycle (manual vs discovered), plus the `subnet.created` / `subnet.updated` / `subnet.deleted` / `subnet.bulk-allocated` audit Events (emitted in-service; inputs carry `actor?`, and `via: "auto-allocate"` discriminates the allocateNextSubnet message from a manual create).
@@ -5790,7 +5841,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Subnet must be contained within parent block CIDR
 - No overlapping sibling subnets in the same block (checked before create)
 - IPv4-only for auto-allocation (allocateNextSubnet, bulkAllocate)
-- Subnet status = "deprecated" rejects new reservations
+- Subnet status = "deprecated" rejects new reservations — but it does NOT release the CIDR. A deprecated row still holds `@@unique([blockId, cidr])` and is still counted by `createSubnetRowChecked`'s overlap re-read, while discovery's `subnetByCidr` index skips it: no update path and no create path, so the address space becomes unrecordable rather than reusable. Retiring a subnet so its CIDR can be re-used is `subnetArchiveService.archiveSubnet`, not a status change (business rule 41)
 - Full-subnet reservation (ipAddress=null) sets subnet status → "reserved"
 - Prefix length must be [8, 32] for IPv4
 - **First-claim parity (discovery side, lives in `src/services/discovery/discoveryEngine.ts` syncDhcpSubnets Phase 1):** when a discovery cycle's CIDR matches a manual subnet (`existing.discoveredBy == null`), the row gets brought into parity with a freshly-discovered subnet — `name` rewritten to `DHCP: <scope> (<fortigate>)`, `status` reset to `available`, `tags` union-merged with `["dhcp-discovered", <integrationType>]`, `purpose` stamped only when blank. Subsequent passes see `discoveredBy` set and skip the claim branch (operator can rename/retag after claim and edits survive). One `subnet.claimed` Event per first-claim.
@@ -5800,6 +5851,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Verify bulkAllocate's anchor-aligned packing (all-or-nothing transaction)
 - Check updateSubnet does not allow status changes that violate reservation constraints
 - Review overlapping-sibling check performance for large blocks
+- **`createSubnetRowChecked`'s sibling re-read is status-BLIND on purpose** — it counts deprecated rows, which is what makes them block a same-CIDR create. Do not add a status filter to make room for a replacement subnet; that is the archive's job, and filtering here would leave two live rows racing the unique index instead
 - **bulkAllocate's single `subnet.bulk-allocated` Event must stay AFTER the `$transaction` resolves** (an event from inside would be a phantom on rollback), and the per-subnet `tx.subnet.create` calls must stay event-free — `tests/integration/subnets.test.ts` asserts one-bulk-event + zero-per-subnet-events. allocateNextSubnet delegates to createSubnet, so it must keep passing `via: "auto-allocate"` rather than emitting its own event.
 
 ---

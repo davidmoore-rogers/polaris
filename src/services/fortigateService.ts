@@ -422,7 +422,7 @@ interface FgtChainCtx {
 
 // Chain A: DHCP CMDB (Step 3) → live DHCP monitor (3a) + interface IPs (3b) in parallel.
 async function fgtChainDhcp(ctx: FgtChainCtx): Promise<void> {
-  const { config, queryBase, signal, log, deviceName, deviceHostname, mgmtIfaceName, discovered, interfaceIps, dhcpEntries, dhcpInterfaceNames, flags } = ctx;
+  const { config, queryBase, signal, log, deviceName, deviceHostname, deviceSerial, mgmtIfaceName, discovered, interfaceIps, dhcpEntries, dhcpInterfaceNames, flags } = ctx;
       // Step 3: DHCP server configuration
       try {
         const dhcpData = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/system.dhcp/server", { query: queryBase, signal });
@@ -454,6 +454,12 @@ async function fgtChainDhcp(ctx: FgtChainCtx): Promise<void> {
             cidr,
             name: iface || `dhcp-${serverId}`,
             fortigateDevice: deviceName,
+            // Chassis identity (business rule 41). Resolved by the status
+            // chain before this one; blank stays UNKNOWN rather than becoming
+            // a claim that the chassis changed. The HA members this unit's
+            // cluster names are read later (chain G) and are joined in by
+            // syncDhcpSubnets from `result.devices`, not from here.
+            fortigateSerial: deviceSerial || undefined,
             dhcpServerId: serverId,
           });
           deviceSubnetCount++;

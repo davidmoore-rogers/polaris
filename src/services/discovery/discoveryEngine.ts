@@ -72,6 +72,9 @@ import {
 } from "../discoveryRunState.js";
 import { releaseDnsResolvedAt } from "../dnsResolvedReservationService.js";
 import { createSubnetRowChecked } from "../subnetService.js";
+import { snapshotSubnet } from "../subnetArchiveService.js";
+import { raiseChassisReplacedConflict } from "../subnetChassisConflictService.js";
+import { classifyChassis, verdictWritesSerial } from "../../utils/chassisIdentity.js";
 import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../monitoringService.js";
@@ -2295,6 +2298,31 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
       }
     }
   }
+  // Per-device CHASSIS SET, for the Phase 1 subnet chassis-identity check
+  // (business rule 41). One entry per processed device, keyed on its lowercased
+  // name, holding its own serial plus every HA member's.
+  //
+  // Deliberately PER DEVICE rather than the fleet-wide `knownFirewallSerials`
+  // above: an old chassis re-registered in FMG under a different device entry
+  // (a gate repurposed to another site) is genuinely a replacement for THIS
+  // subnet, and testing against the fleet set would call it unchanged. It is
+  // built from `result.devices` — not at subnet-emission time — because the
+  // standalone FortiGate path resolves the calling unit's serial in its status
+  // chain but does not learn its HA members until the later `ha-peer` read.
+  const clusterSerialsByDevice = new Map<string, Set<string>>();
+  for (const dev of result.devices) {
+    const key = (dev.name || dev.hostname || "").toLowerCase();
+    if (!key) continue;
+    const set = clusterSerialsByDevice.get(key) ?? new Set<string>();
+    if (dev.serial) set.add(dev.serial.toUpperCase());
+    for (const m of dev.haMembers ?? []) if (m.serial) set.add(m.serial.toUpperCase());
+    clusterSerialsByDevice.set(key, set);
+    // A FortiGate's FMG device name and its own hostname can differ; index
+    // both so a subnet stamped with either resolves to the same chassis set.
+    const hostKey = (dev.hostname || "").toLowerCase();
+    if (hostKey && hostKey !== key) clusterSerialsByDevice.set(hostKey, set);
+  }
+
   // Lowercased view of the roster. FMG-stored device names and FortiOS
   // system-status hostnames can disagree in case; the Phase 2 / 2a roster
   // checks compare lowercase-on-both-sides so an asset hostname written
@@ -2322,6 +2350,19 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     newName: string;
     fortigateDevice: string;
   }> = [];
+  // Subnets whose serving chassis changed this run (business rule 41).
+  // Collected here and processed AFTER the batch update, because each one
+  // archives a snapshot + raises a conflict and neither belongs inside the
+  // tight per-subnet loop.
+  const chassisReplacements: Array<{
+    subnetId: string;
+    cidr: string;
+    blockId: string;
+    from: string;
+    to: string;
+    oldDeviceName: string | null;
+    newDeviceName: string | null;
+  }> = [];
 
   for (const entry of result.subnets) {
     let cidr: string;
@@ -2336,10 +2377,38 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     const existing = subnetByCidr.get(cidr);
     if (existing) {
       const isFirstClaim = existing.discoveredBy == null;
+
+      // ── Chassis identity (business rule 41) ──────────────────────────────
+      // Is this still the same physical FortiGate? The stored serial, the one
+      // this run reports, and the reporting device's whole cluster set decide.
+      // `unknown` (nothing readable this run) writes nothing and constrains
+      // nothing; `learn` adopts; `same` re-stamps so the stored value tracks
+      // the active cluster member; `replaced` archives the old chassis's state
+      // and raises a conflict WITHOUT re-pointing the serial — the pending
+      // conflict is the unresolved state, and accepting it is what moves it.
+      const chassis = classifyChassis(
+        existing.fortigateSerial,
+        entry.fortigateSerial,
+        clusterSerialsByDevice.get((entry.fortigateDevice || "").toLowerCase()),
+      );
+      const serialToWrite = verdictWritesSerial(chassis);
+      if (chassis.kind === "replaced") {
+        chassisReplacements.push({
+          subnetId: existing.id,
+          cidr,
+          blockId: existing.blockId,
+          from: chassis.from,
+          to: chassis.to,
+          oldDeviceName: existing.fortigateDevice ?? null,
+          newDeviceName: entry.fortigateDevice ?? null,
+        });
+      }
+
       const baseData: any = {
         discoveredBy: integrationId,
         fortigateDevice: entry.fortigateDevice,
         lastDiscoveredAt: new Date(),
+        ...(serialToWrite ? { fortigateSerial: serialToWrite } : {}),
         ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
       };
       if (isFirstClaim) {
@@ -2400,6 +2469,9 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
         status: "available",
         discoveredBy: integrationId,
         fortigateDevice: entry.fortigateDevice,
+        // Chassis identity from the first sighting. A fresh row has nothing to
+        // compare against, so this is a learn, never a replacement.
+        ...(entry.fortigateSerial ? { fortigateSerial: entry.fortigateSerial } : {}),
         lastDiscoveredAt: new Date(),
         tags: ["dhcp-discovered", integrationType],
         ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
@@ -2430,6 +2502,61 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     await batchSettled(subnetUpdates, (u) =>
       prisma.subnet.update({ where: { id: u.id }, data: u.data })
     );
+    // Mirror each write onto the in-memory row Phase 2 filters.
+    //
+    // Phase 2 decides staleness from `allSubnets` — the snapshot read at the
+    // top of this function — and `subnetByCidr` hands out references INTO it.
+    // So a subnet this phase just re-pointed at a renamed or replaced gate
+    // still carried the OLD `fortigateDevice` in memory, was not found in the
+    // roster, and was deprecated by Phase 2 in the SAME run that had just
+    // re-pointed it. The DB then held a subnet pointing at a live gate with
+    // status=deprecated, and because a deprecated row is invisible to
+    // `subnetByCidr` (no update path) while still occupying
+    // `@@unique([blockId, cidr])` (no create path), that CIDR could never be
+    // recorded again — every later run skipped it with a self-overlap message.
+    // A gate rename was enough to trigger it.
+    const subnetById = new Map(allSubnets.map((s: any) => [s.id, s]));
+    for (const u of subnetUpdates) {
+      const row = subnetById.get(u.id);
+      if (row) Object.assign(row, u.data);
+    }
+  }
+
+  // ── Chassis replacements (business rule 41) ────────────────────────────────
+  // Archive a COPY of what the old chassis served, then raise one conflict per
+  // subnet. Additive on purpose: no live reservation is released, re-pushed or
+  // deleted on the strength of an automatic detection, so a false positive
+  // costs a card and an archive row rather than data. Migration is an explicit
+  // operator action.
+  for (const rep of chassisReplacements) {
+    try {
+      const snap = await snapshotSubnet(
+        rep.subnetId,
+        { reason: "chassis-replaced", actor },
+      );
+      const outcome = await raiseChassisReplacedConflict({
+        subnetId: rep.subnetId,
+        cidr: rep.cidr,
+        blockId: rep.blockId,
+        oldSerial: rep.from,
+        newSerial: rep.to,
+        oldDeviceName: rep.oldDeviceName,
+        newDeviceName: rep.newDeviceName,
+        archivedSubnetId: snap.archivedSubnetId,
+        integrationId,
+        integrationName,
+        actor,
+      });
+      syncLog(
+        "warning",
+        `Subnet ${rep.cidr} is served by a different FortiGate chassis (${rep.from} → ${rep.to}) — ` +
+          `${snap.reservationCount} reservation(s) archived, conflict ${outcome}`,
+      );
+    } catch (err: any) {
+      // Never fail the run over this: the subnet itself synced fine, and the
+      // next pass re-derives the verdict from the still-unchanged stored serial.
+      syncLog("error", `Failed to record chassis replacement for ${rep.cidr}: ${err?.message || "Unknown error"}`);
+    }
   }
 
   // Emit one `subnet.claimed` Event per first-claim row (manual → discovered

@@ -268,13 +268,15 @@ router.post("/", requireOwnership("reservations"), async (req, res, next) => {
 // 409s) — this closes the other two verbs. Enforced at the ROUTE layer rather
 // than in the service, because discovery's own reconcile still has to be able
 // to refresh and retire these rows.
-const DEVICE_OWNED_SOURCE_TYPES = new Set(["vip", "interface_ip"]);
-
+// The set itself now lives in reservationService (a second consumer arrived
+// with business rule 41's chassis-replacement diff, which must not offer to
+// migrate a device-owned line onto the new gate). The route keeps the
+// route-layer ENFORCEMENT for the reason above.
 function assertNotDeviceOwned(
   reservation: { sourceType: string; ipAddress: string | null },
   verb: string,
 ): void {
-  if (!DEVICE_OWNED_SOURCE_TYPES.has(reservation.sourceType)) return;
+  if (!reservationService.isDeviceOwnedRow(reservation)) return;
   const what = reservation.sourceType === "vip" ? "a FortiGate VIP" : "a device interface address";
   throw new AppError(
     409,

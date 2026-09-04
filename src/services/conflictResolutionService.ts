@@ -45,6 +45,21 @@
  *         by ipOverrideService). Accept adopts the discovered IP and releases
  *         the pin; reject keeps the pin (the same discovered IP won't
  *         re-raise). No proposedDeviceId / AssetSource identity involved.
+ *
+ *   entityType "subnet" — the third entity, added with business rule 41.
+ *     Payload lives on `proposedSubnetFields` (its own column; the asset
+ *     variants' `proposedAssetFields` would be a lie about what it holds).
+ *       - "chassis-replaced"       — the FortiGate serving this subnet answered
+ *         with a serial that is neither the stored one nor any member of its HA
+ *         cluster, i.e. the physical box was swapped (raised by
+ *         subnetChassisConflictService from discovery Phase 1). The old
+ *         chassis's subnet + reservations are COPIED into the archive tables
+ *         first, so raising destroys nothing. Accept adopts the new chassis
+ *         (stamps `Subnet.fortigateSerial`, after which the next run reads the
+ *         same serial and nothing re-raises); reject dismisses, and the
+ *         rejected row is the dedup marker for that exact (old, new) serial
+ *         pair. Dedup is keyed on the PAIR, not the subnet, so a box swapped
+ *         twice raises again.
  */
 
 import { prisma } from "../db.js";
@@ -64,6 +79,10 @@ import {
   DUPLICATE_IP_COLLISION_REASON,
   logDuplicateIpDismissal,
 } from "./duplicateIpConflictService.js";
+import {
+  acceptChassisReplacement,
+  rejectChassisReplacement,
+} from "./subnetChassisConflictService.js";
 
 // Shared with the discovery sync that writes these tags — see
 // src/utils/assetSourceTags.ts (imported at the top of this file).
@@ -104,8 +123,10 @@ function conflictSourceLabel(src: AssetConflictSource): string {
 
 // List conflicts for GET /api/v1/conflicts. entityTypes comes from the
 // route's role-based visibility resolution (visibleEntityTypes).
+export type ConflictEntityType = "reservation" | "asset" | "subnet";
+
 export async function listConflicts(
-  entityTypes: ("reservation" | "asset")[],
+  entityTypes: ConflictEntityType[],
   status: string,
   limit: number,
   offset: number,
@@ -119,6 +140,10 @@ export async function listConflicts(
       include: {
         reservation: { include: { subnet: { include: { block: true } } } },
         asset: true,
+        // Business rule 41's chassis-replacement variant renders from the live
+        // subnet plus `proposedSubnetFields`; the per-address diff is a
+        // separate read (see buildChassisDiff on why it is not snapshotted).
+        subnet: { include: { block: true } },
       },
       orderBy: { createdAt: "desc" },
       skip: offset,
@@ -143,7 +168,7 @@ export async function listConflicts(
 // Pending count for GET /api/v1/conflicts/count (nav badge), scoped by the
 // route's role-based entity-type visibility.
 export async function countPendingConflicts(
-  entityTypes: ("reservation" | "asset")[],
+  entityTypes: ConflictEntityType[],
 ): Promise<number> {
   return prisma.conflict.count({
     where: { status: "pending", entityType: { in: entityTypes } },
@@ -169,6 +194,11 @@ export async function loadPendingConflict(id: string): Promise<any> {
 export async function acceptConflict(conflict: any, actor?: string): Promise<void> {
   if (conflict.entityType === "asset") {
     await acceptAssetConflict(conflict, actor, {});
+  } else if (conflict.entityType === "subnet") {
+    // Business rule 41: adopting a replacement chassis. Stamps the new serial
+    // onto the subnet so the next discovery pass reads `same`; per-reservation
+    // migration is a separate, explicit action.
+    await acceptChassisReplacement(conflict, actor);
   } else {
     await acceptReservationConflict(conflict, actor);
   }
@@ -200,6 +230,9 @@ export async function mergeAssetConflict(
 export async function rejectConflict(conflict: any, actor?: string): Promise<void> {
   if (conflict.entityType === "asset") {
     await rejectAssetConflict(conflict, actor);
+  } else if (conflict.entityType === "subnet") {
+    // The rejected row is the dedup marker for this exact serial pair.
+    await rejectChassisReplacement(conflict, actor);
   } else {
     await rejectReservationConflict(conflict, actor);
   }

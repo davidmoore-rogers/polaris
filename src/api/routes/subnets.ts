@@ -6,6 +6,7 @@ import { Router } from "express";
 import { z } from "zod";
 import * as subnetService from "../../services/subnetService.js";
 import { refreshSubnet } from "../../services/subnetRefreshService.js";
+import * as subnetArchiveService from "../../services/subnetArchiveService.js";
 import { requirePermission, requireOwnership, assertOwnership } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
 
@@ -122,6 +123,60 @@ router.post("/bulk-allocate", requireOwnership("subnets"), async (req, res, next
       actor: req.session?.username,
     });
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Archived subnets (business rule 41) ─────────────────────────────────────
+//
+// A retired subnet lives in its own table rather than as a `deprecated` status,
+// because a retired row still holds `@@unique([blockId, cidr])` and so blocks a
+// replacement gate's identical address space from ever being recorded. These
+// two reads are the review surface; they MUST stay declared before `/:id`, or
+// `/subnets/archived` is captured as a subnet id.
+
+// GET /subnets/archived?cidr=&blockId=&fortigateSerial=&limit=&offset=
+router.get("/archived", requirePermission("subnets", "read"), async (req, res, next) => {
+  try {
+    const result = await subnetArchiveService.listArchivedSubnets({
+      cidr: typeof req.query.cidr === "string" ? req.query.cidr : undefined,
+      blockId: typeof req.query.blockId === "string" ? req.query.blockId : undefined,
+      fortigateSerial:
+        typeof req.query.fortigateSerial === "string" ? req.query.fortigateSerial : undefined,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+      offset: req.query.offset ? Number(req.query.offset) : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /subnets/archived/:id — one retirement with every reservation it held.
+router.get("/archived/:id", requirePermission("subnets", "read"), async (req, res, next) => {
+  try {
+    res.json(await subnetArchiveService.getArchivedSubnet(req.params.id as string));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /subnets/:id/archive — retire a subnet: snapshot it + its reservations
+// into the archive, then delete the live row so its CIDR is free again.
+//
+// `fullwrite`, not the ownership-aware `write` every other mutation here uses:
+// a discovered subnet carries `createdBy: null`, so an ownership-scoped caller
+// could never archive one anyway, and retiring a site's address space is not an
+// own-rows action. Deliberately NOT subject to business rule 4's active-
+// reservation protection — that exists to stop accidental DESTRUCTION, and this
+// preserves everything it moves.
+router.post("/:id/archive", requirePermission("subnets", "fullwrite"), async (req, res, next) => {
+  try {
+    const result = await subnetArchiveService.archiveSubnet(req.params.id as string, {
+      actor: req.session?.username ?? null,
+    });
+    res.json(result);
   } catch (err) {
     next(err);
   }

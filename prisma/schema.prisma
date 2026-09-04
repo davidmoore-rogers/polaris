@@ -86,6 +86,17 @@ model Subnet {
   discoveredBy    String?
   integration     Integration? @relation(fields: [discoveredBy], references: [id], onDelete: SetNull)
   fortigateDevice String?
+
+  // Chassis identity of the gate that serves this subnet -- the serial, which
+  // unlike `fortigateDevice` (FMG's device NAME) is never renamed. TRI-STATE:
+  // NULL means unknown (a row predating this column, or a source that
+  // published no serial) and applies no constraint; a value is the chassis
+  // that last served the subnet. Compared per run by
+  // `utils/chassisIdentity.ts:classifyChassis` against the reporting device's
+  // whole cluster serial set, so an HA failover reads as the same gate while a
+  // genuinely new chassis raises the `chassis-replaced` Conflict flavour.
+  // Business rule 41.
+  fortigateSerial String?
   createdBy       String?
 
   // Bumped whenever discovery touches this subnet — both the integration-wide
@@ -97,6 +108,7 @@ model Subnet {
   updatedAt DateTime @updatedAt
 
   reservations Reservation[]
+  conflicts    Conflict[]
 
   // DB backstop for business rule 1 (no overlapping subnets in a block). The
   // exact guard is the per-block advisory lock every subnet writer takes
@@ -108,6 +120,7 @@ model Subnet {
   // legitimately report this index missing on such an install.
   @@unique([blockId, cidr], map: "subnets_block_cidr_key")
   @@index([blockId])
+  @@index([fortigateSerial])
   @@index([blockId, status])
   @@index([cidr])
   @@index([status])
@@ -3680,7 +3693,7 @@ model ManufacturerCustomWidget {
 
 model Conflict {
   id         String @id @default(uuid())
-  entityType String @default("reservation") // "reservation" | "asset"
+  entityType String @default("reservation") // "reservation" | "asset" | "subnet"
 
   // Reservation conflicts (discovery proposes changes to a manually-created reservation)
   reservationId String?
@@ -3689,6 +3702,16 @@ model Conflict {
   // Asset conflicts (discovery proposes an asset that collides by hostname with an existing untagged asset)
   assetId String?
   asset   Asset?  @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  // Subnet conflicts. One flavour so far: `chassis-replaced` — the gate
+  // serving this subnet answered with a serial that is neither the stored one
+  // nor any member of its cluster, i.e. the physical FortiGate was swapped.
+  // The row points at the LIVE subnet (now re-pointed at the new chassis); the
+  // old chassis's subnet + reservations are in the archive tables, and
+  // `proposedSubnetFields` carries the diff payload the resolution UI reads.
+  // Business rule 41.
+  subnetId String?
+  subnet   Subnet? @relation(fields: [subnetId], references: [id], onDelete: Cascade)
 
   integrationId String?
 
@@ -3709,6 +3732,22 @@ model Conflict {
   // Null for conflicts predating this column (UI falls back to the live asset).
   existingAssetSnapshot Json?
 
+  // Subnet-conflict payload (entityType="subnet"). Shape for `chassis-replaced`:
+  //   collisionReason  "chassis-replaced"
+  //   cidr, blockId
+  //   oldSerial / newSerial, oldDeviceName / newDeviceName
+  //   archivedSubnetId — the ArchivedSubnet row holding the old chassis's state
+  //   lines[]          — one entry per address across BOTH chassis, each with
+  //                      `ip`, `verdict` ("only-old" | "only-new" | "differs" |
+  //                      "same"), `old` and `new` reservation snapshots, and
+  //                      `migratable` (false for device-owned vip /
+  //                      interface_ip rows, which the new gate's own config
+  //                      states).
+  // A snapshot, not a live join: the old chassis's rows are gone from
+  // `reservations` by the time this is read, and the archive is the system of
+  // record behind it.
+  proposedSubnetFields Json?
+
   conflictFields String[]
 
   status     ConflictStatus @default(pending)
@@ -3720,11 +3759,124 @@ model Conflict {
 
   @@index([reservationId])
   @@index([assetId])
+  @@index([subnetId])
   @@index([entityType])
   @@index([status])
   @@index([integrationId])
   @@index([proposedDeviceId])
   @@map("conflicts")
+}
+
+// ─── Subnet archive (business rule 41) ────────────────────────────────────────
+//
+// A retired subnet and the reservations it held, kept for review after the
+// live row is gone. Two things make this a separate table rather than a
+// `deprecated` status:
+//
+//   1. `@@unique([blockId, cidr])` — a retired row still occupies its CIDR, so
+//      a replacement gate reporting the same address space could never be
+//      recorded. Discovery skipped those subnets on every run with a
+//      self-overlap message, and every lease, DHCP reservation, VIP and
+//      interface IP inside them was dropped with them.
+//   2. Locked by construction. An archived reservation is not in `reservations`
+//      at all, so no write path can reach it — no guard to add at ~50 call
+//      sites, and no future writer to forget one.
+//
+// Deliberately NOT a retention entity: nothing prunes it. Subnets number in
+// the thousands at most, so keeping every retirement forever costs nothing.
+model ArchivedSubnet {
+  id String @id @default(uuid())
+
+  // The live row this was archived from. Kept as a plain string, not an FK —
+  // the live row is deleted as part of archiving, so there is nothing to point
+  // at. Events written before the archive still cite this id.
+  originalSubnetId String
+
+  // Block identity is DENORMALIZED, with no FK, deliberately. `Subnet.block`
+  // is `onDelete: Cascade`, so an FK here would let deleting a block erase the
+  // archive — the exact opposite of what it is for. Same reasoning as
+  // `DirectoryContactSource.integrationId`.
+  blockId   String
+  blockCidr String
+  blockName String
+
+  cidr    String
+  name    String
+  purpose String?      @db.Text
+  status  SubnetStatus
+  vlan    Int?
+  tags    String[]     @default([])
+
+  // Provenance as it stood, also FK-free for the reason above.
+  discoveredBy    String?
+  integrationName String?
+  fortigateDevice String?
+  fortigateSerial String?
+  createdBy       String?
+
+  lastDiscoveredAt  DateTime?
+  originalCreatedAt DateTime
+  originalUpdatedAt DateTime
+
+  archivedAt    DateTime @default(now())
+  archivedBy    String?
+  // Why it was retired: "chassis-replaced" (business rule 41's conflict path)
+  // or "operator" (the explicit Archive action).
+  archiveReason String
+
+  reservations ArchivedReservation[]
+
+  @@index([originalSubnetId])
+  @@index([cidr])
+  @@index([blockId])
+  @@index([archivedAt])
+  @@index([fortigateSerial])
+  @@map("archived_subnets")
+}
+
+// One reservation as it stood when its subnet was archived. Cascades with the
+// ArchivedSubnet — a cascade INSIDE the archive is fine; what must never
+// cascade is anything from the live tables into it.
+model ArchivedReservation {
+  id               String         @id @default(uuid())
+  archivedSubnetId String
+  archivedSubnet   ArchivedSubnet @relation(fields: [archivedSubnetId], references: [id], onDelete: Cascade)
+
+  originalReservationId String
+
+  ipAddress   String?
+  hostname    String?
+  owner       String?
+  projectRef  String?
+  expiresAt   DateTime?
+  notes       String?               @db.Text
+  status      ReservationStatus
+  sourceType  ReservationSourceType
+  createdBy   String?
+  macAddress  String?
+  dhcpBinding String?
+  vipInfo     Json?
+
+  // Push STATE is recorded; the push POINTERS (pushedScopeId / pushedEntryId /
+  // pushedToId) deliberately are NOT. They address a DHCP entry inside a scope
+  // on a chassis that no longer exists, and carrying them forward would let a
+  // future restore or unpush path aim a delete at whatever now occupies those
+  // ids on a different box. The state is what a reviewer needs; the pointers
+  // are a loaded gun. Same posture as `AssetPhysicalEntity.ifName`, which is
+  // on the model and deliberately never populated.
+  pushStatus String?
+  pushedAt   DateTime?
+
+  lastSeenLeased DateTime?
+  lastSeenArp    DateTime?
+
+  originalCreatedAt DateTime
+  originalUpdatedAt DateTime
+
+  @@index([archivedSubnetId])
+  @@index([originalReservationId])
+  @@index([ipAddress])
+  @@map("archived_reservations")
 }
 
 // Sighting log: every (asset, FortiGate) pair where the FortiGate has handed

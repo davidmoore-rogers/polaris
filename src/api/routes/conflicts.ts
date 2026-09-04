@@ -31,7 +31,9 @@ import {
   acceptConflict,
   mergeAssetConflict,
   rejectConflict,
+  type ConflictEntityType,
 } from "../../services/conflictResolutionService.js";
+import { buildChassisDiff } from "../../services/subnetChassisConflictService.js";
 import {
   reassignDuplicateIpAsset,
   mergeDuplicateIpAssets,
@@ -41,9 +43,13 @@ import {
 const router = Router();
 router.use(requireAuth);
 
-function visibleEntityTypes(req: Request): ("reservation" | "asset")[] {
+function visibleEntityTypes(req: Request): ConflictEntityType[] {
   if (!hasPermission(req, "discoveryConflicts", "read")) return [];
-  return ["reservation", "asset"];
+  // "subnet" arrived with business rule 41's chassis-replacement variant. It
+  // rides the same `discoveryConflicts` gate as the other two: it IS a
+  // discovery conflict, and gating it separately would leave a replaced gate
+  // reported to nobody who can act on it.
+  return ["reservation", "asset", "subnet"];
 }
 
 function canResolve(req: Request): boolean {
@@ -81,6 +87,31 @@ router.get("/count", async (req, res, next) => {
     }
     const count = await countPendingConflicts(entityTypes);
     res.json({ count });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/conflicts/:id/chassis-diff — the per-address diff behind a
+// `chassis-replaced` subnet conflict (business rule 41): what the archived old
+// chassis served against what the live subnet holds now.
+//
+// A separate read rather than a field on the conflict row: discovery syncs
+// subnets in Phase 1 and reservations in Phases 3–5, so a payload built at
+// detection time would compare the old chassis against itself. Reading it live
+// also means the card can never show a diff that has since gone stale.
+router.get("/:id/chassis-diff", async (req, res, next) => {
+  try {
+    // Same read gate the list and count carry — requireAuth alone would let any
+    // authenticated session enumerate a subnet's whole reservation history.
+    if (!visibleEntityTypes(req).includes("subnet")) {
+      throw new AppError(403, "You do not have permission to view discovery conflicts");
+    }
+    const conflict = await loadPendingConflict(req.params.id);
+    if (conflict.entityType !== "subnet") {
+      throw new AppError(400, "This conflict is not a subnet chassis replacement");
+    }
+    res.json(await buildChassisDiff(conflict));
   } catch (err) {
     next(err);
   }

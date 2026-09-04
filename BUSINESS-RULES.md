@@ -455,3 +455,56 @@ Four decisions about the row itself:
 And a duplicate that resolves itself (a device decommissioned, a discovery write moving one row onto its real address) **closes itself** on the next pass, as `rejected` by `system:auto-resolved` — the auto-resolution convention `resolveStaleReservationConflicts` and `resolvePendingIpOverrideConflicts` already use. Nothing may leave a resolved collision sitting in the queue, because a queue that keeps entries after the problem is gone stops being read.
 
 One limitation, stated rather than papered over: the Event is asset-scoped (`resourceType: "asset"`), so an automation firing on it obeys rule 37 — an unmonitored asset triggers nothing. A duplicate between two assets neither of which Polaris polls still lands in the Conflicts queue and its badge, but it will not page anyone. That is the same trade the rest of the alerting surface makes, and the queue is the backstop.
+
+---
+
+<a id="rule-41"></a>
+## Rule 41 — A subnet dies with its FortiGate; the chassis, not the name, says which gate that is
+
+**The invariant.** A discovered `Subnet` records the SERIAL of the chassis serving it (`Subnet.fortigateSerial`), tri-state: NULL is unknown and constrains nothing, a value is the chassis that last served it. Each run compares it against the reporting device's whole cluster serial set (`utils/chassisIdentity.ts:classifyChassis`) — absent-stored LEARNS, unreadable-discovered is UNKNOWN and never "different", a member of the same HA cluster is the SAME gate, and anything else raises the `chassis-replaced` Conflict. And a retired subnet MOVES to `ArchivedSubnet` / `ArchivedReservation` rather than sitting in `subnets` as `deprecated`, because a retired row still occupies `@@unique([blockId, cidr])`.
+
+### What went wrong
+
+An operator replaced a FortiGate with a different model, keeping the IP addressing. The old gate was decommissioned and its subnets went `deprecated`. The new gate's subnets never appeared in IPAM — and never would have, on any future run.
+
+Two independent defects, and it took both to make the state permanent.
+
+**The CIDR was unrecordable.** Discovery's Phase 1 builds `subnetByCidr` from NON-deprecated rows only, so the new gate's `10.x.0.0/24` found no match and fell through to the create path. `createSubnetRowChecked`'s committed-state overlap re-read counts EVERY row in the block, deprecated included, so it threw 409 and the subnet landed in `skipped`. Invisible to the update path, blocking to the create path — every run, forever, with the tell being a self-overlap message no one reads:
+
+    Skipped subnet 10.x.0.0/24: Subnet 10.x.0.0/24 overlaps with existing subnet 10.x.0.0/24
+
+It was never only the network, either. `findSubnetForIp` also skips deprecated rows, so every DHCP lease, DHCP reservation, VIP and interface IP the new gate reported inside that space was dropped with it.
+
+**Phase 2 was deprecating live subnets.** Phase 1 re-points a matched subnet's `fortigateDevice` in a batched DB update but never mirrored the change onto the in-memory row; Phase 2 decides staleness by filtering that same in-memory array against the roster. So a subnet Phase 1 had just re-pointed at a renamed or replaced gate still carried the OLD name in memory, wasn't in the roster, and was deprecated by Phase 2 **in the same run that had just re-pointed it** — after which defect one made the state permanent. A plain gate rename was enough to trigger it. Phase 2a, the stale-FIREWALL sweep, had long since learned this class of lesson (`haStandbyOfUnreadCluster` — "absence of evidence is not evidence of absence"); the subnet sweep never got the same care.
+
+### Why serial, not name
+
+Both defects trace to one ambiguity: `fortigateDevice` is a NAME, and a name cannot distinguish a rename from a replacement. Those need opposite handling — a rename should re-point silently, a replacement must be reported — and the code had no way to tell them apart, so it did the wrong thing for both.
+
+The name-only model also left a THIRD case entirely silent, and it is the common one. An RMA or warranty swap normally reuses the device name. Then the CIDR matches, the name matches the roster, Phase 2 leaves it alone, and the new chassis **silently inherits every reservation row of the old one** — including rows marked `pushStatus: "synced"` whose `pushedScopeId` / `pushedEntryId` address a DHCP entry inside a scope on a box that no longer exists. Nothing looks wrong, which makes it worse than the failure that started this.
+
+Serial is chassis identity and is never renamed. The stale-firewall sweep already matched firewalls by serial first and hostname second; subnets simply never got the same treatment.
+
+### The four decisions
+
+**(a) Tri-state, in both directions.** A NULL stored serial means unknown and LEARNS on first sight — which is why the migration deliberately backfills nothing: every pre-existing row converges on its own, and a backfill could only have guessed chassis identity from a name. Symmetrically, an unreadable serial THIS run is unknown and applies no constraint. That second half is load-bearing: mapping it to "different" would let one failed CMDB read declare every subnet on the fleet replaced. The same discipline `AssetDependencyParent.managedSwitchSerials` uses.
+
+**(b) The comparison is against a SET, per device.** A cluster has several chassis and FMG's device record flips its top-level `sn` to whichever member is active, so comparing against a single stored value would report a replacement on every failover — the largest false-positive risk in the feature. The test is membership in the reporting device's own chassis set (its serial plus every `ha_slave[]` member). Per DEVICE and not fleet-wide, because an old chassis re-registered in FMG under a different device entry — a gate repurposed to another site — genuinely IS a replacement for this subnet, and a fleet-wide set would call it unchanged.
+
+**(c) Raising is additive; nothing is destroyed on an automatic detection.** The old chassis's subnet and reservations are COPIED into the archive and the live rows are left exactly as they are. No release, no re-push, no delete. The worst a false positive can cost is one conflict card and one archive row. Raising also deliberately does NOT re-point the stored serial: while the conflict is pending, `Subnet.fortigateSerial` still names the chassis Polaris last agreed served the space, which keeps the detection derivable from the subnet row itself rather than dependent on the conflict row surviving. Accepting is what moves it. Dedup is keyed on the (old, new) serial PAIR rather than the subnet, so a rejected row suppresses exactly that transition while a box swapped a second time raises again.
+
+**(d) An archive, not a status — and it locks by construction.** Freeing the CIDR is the first reason: moving the row out of `subnets` is the only thing that releases the unique index, and no partial index was needed once the row simply left. The second reason is that a retired reservation is then unreachable BY CONSTRUCTION. There are ~50 `prisma.reservation.*` write sites across a dozen files; a "locked" status would need a guard at each one and a promise that no future writer forgets. An archived row is not in `reservations` at all. Compare `assertNotDeviceOwned`, which has to sit at the route layer precisely because discovery still writes the VIP rows it protects — here nothing legitimately writes a retired subnet, so the stronger mechanism is available and is the one used.
+
+Three consequences of that choice, each deliberate. The archive carries **no foreign keys** out to `ip_blocks` or `integrations`: `Subnet.block` is `onDelete: Cascade`, so an FK would let deleting a block erase the archive — the exact opposite of what it is for. Block and integration identity are denormalized instead, the `DirectoryContactSource.integrationId` reasoning. The device-side push **pointers are not copied**, only push state: `pushedScopeId` / `pushedEntryId` / `pushedToId` address an entry inside a scope on a chassis that no longer exists, and carrying them forward would let a future restore or unpush aim a delete at whatever now occupies those ids on a different box — a loaded gun in a table whose purpose is review. And it is **not a retention entity**; nothing prunes it, because subnets number in the thousands at most and the point is posterity.
+
+Archiving is also deliberately exempt from rule 4's active-reservation deletion protection. That protection exists to stop accidental DESTRUCTION; this preserves everything it moves.
+
+### What rule 23 keeps
+
+A decommissioned managed device still gives its address back. The release happens while the subnet is live, exactly as before — archiving is a later, separate act, and it snapshots whatever state the reservations are in at that moment. Rule 23 is unchanged.
+
+### What is deliberately not here yet
+
+Per-line MIGRATION of the old chassis's reservations onto the new gate — the part that writes. `GET /conflicts/:id/chassis-diff` computes the diff (per address: `only-old` / `only-new` / `differs` / `same`, with `vip` and `interface_ip` lines shown but never migratable, since the new gate's own config states those), and accepting adopts the new chassis. Carrying a chosen line forward has to null every push pointer and re-queue the row through `retryQueuedReservationPushes` rather than pushing inline, and that lands separately.
+
+The diff is computed ON READ rather than snapshotted into the conflict row, because discovery syncs subnets in Phase 1 and reservations in Phases 3–5: a payload built at detection time would compare the old chassis against itself.
