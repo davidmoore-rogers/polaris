@@ -2,15 +2,32 @@
  * src/api/routes/credentials.ts
  *
  * CRUD for the named-credential store used by monitoring probes.
- * Write operations are admin-only (Server Settings → Credentials);
- * read is open to any authenticated session so the Asset Monitoring
- * tab can populate its credential picker and label.
+ * Read is open to any role with `credentials=read` so the Asset Monitoring
+ * tab can populate its credential picker and label (secrets masked).
+ *
+ * Writes carry the OWNERSHIP dimension (see CLAUDE.md "Ownership model"),
+ * the fourth key to do so after subnets / reservations / contacts:
+ *
+ *   write     — create; edit / delete / test-with ONLY rows you created
+ *   fullwrite — edit / delete / test-with any row
+ *
+ * `createdBy` is stamped once at create and no update path rewrites it, so
+ * ownership cannot be adopted by saving someone else's row. A null
+ * `createdBy` (every row that predates the column, and anything created by
+ * a bearer token, which has no username) is UNOWNED and therefore
+ * fullwrite-only — `assertOwnership` already treats null that way.
+ *
+ * POST /test is gated the same way, and not merely as a courtesy: passing
+ * `id` merges that credential's STORED secrets into the probe, so a
+ * write-level caller who could test any row could aim someone else's
+ * password at any host in inventory. Testing an unsaved form (no `id`) is
+ * always allowed at write — the secret in that body is one the caller typed.
  */
 
 import { Router } from "express";
 import { z } from "zod";
 import * as credentialService from "../../services/credentialService.js";
-import { requirePermission } from "../middleware/permissions.js";
+import { requirePermission, requireOwnership, assertOwnership } from "../middleware/permissions.js";
 import { logEvent } from "./events.js";
 import { AppError } from "../../utils/errors.js";
 import { probeCredentialAgainstHost } from "../../services/monitoringService.js";
@@ -93,14 +110,16 @@ router.get("/:id/usage", requirePermission("credentials", "read"), async (req, r
   } catch (err) { next(err); }
 });
 
-// POST /credentials
-router.post("/", requirePermission("credentials", "write"), async (req, res, next) => {
+// POST /credentials — any write-level caller may create; the row is stamped
+// with their username so they (and fullwrite callers) can edit it later.
+router.post("/", requireOwnership("credentials"), async (req, res, next) => {
   try {
     const input = CreateSchema.parse(req.body);
     const saved = await credentialService.createCredential({
       name: input.name,
       type: input.type,
       config: input.config,
+      createdBy: req.session?.username ?? null,
     });
     logEvent({
       action: "credential.created",
@@ -114,10 +133,12 @@ router.post("/", requirePermission("credentials", "write"), async (req, res, nex
   } catch (err) { next(err); }
 });
 
-// PUT /credentials/:id
-router.put("/:id", requirePermission("credentials", "write"), async (req, res, next) => {
+// PUT /credentials/:id — own rows at write, any row at fullwrite.
+router.put("/:id", requireOwnership("credentials"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
+    const existing = await credentialService.getCredential(id);
+    assertOwnership(req, existing.createdBy, "edit credentials");
     const input = UpdateSchema.parse(req.body);
     const saved = await credentialService.updateCredential(id, {
       name: input.name,
@@ -140,9 +161,18 @@ router.put("/:id", requirePermission("credentials", "write"), async (req, res, n
 // is set, masked secrets in `config` are merged from the stored credential so
 // the operator doesn't have to retype the password on edit. Returns the same
 // shape as a probe: { success, responseTimeMs, error?, host }.
-router.post("/test", requirePermission("credentials", "write"), async (req, res, next) => {
+router.post("/test", requireOwnership("credentials"), async (req, res, next) => {
   try {
     const input = TestSchema.parse(req.body);
+
+    // Testing a STORED credential is an ownership-scoped act — the merge
+    // below fills the form's masked fields from the row's real secrets, so
+    // this is the difference between "test my credential" and "borrow
+    // yours". Checked before any target resolution or device I/O.
+    if (input.id) {
+      const owner = await credentialService.getCredential(input.id);
+      assertOwnership(req, owner.createdBy, "test credentials");
+    }
 
     // Resolve the target. An assetId wins when both are sent, so a stale `host`
     // left in a request body can never redirect a probe the operator aimed at
@@ -252,11 +282,12 @@ router.post("/test", requirePermission("credentials", "write"), async (req, res,
   } catch (err) { next(err); }
 });
 
-// DELETE /credentials/:id
-router.delete("/:id", requirePermission("credentials", "write"), async (req, res, next) => {
+// DELETE /credentials/:id — own rows at write, any row at fullwrite.
+router.delete("/:id", requireOwnership("credentials"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const existing = await credentialService.getCredential(id);
+    assertOwnership(req, existing.createdBy, "delete credentials");
     await credentialService.deleteCredential(id);
     logEvent({
       action: "credential.deleted",

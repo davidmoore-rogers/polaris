@@ -199,6 +199,27 @@ function canManageAssets() { return permAtLeast("assets", "write"); }
 // verbs in the UI must check this and not canManageAssets(), or the control
 // appears for operators whose click can only 403.
 function canQuarantineAssets() { return permAtLeast("assetsQuarantine", "write"); }
+// Deploying the Polaris Agent is the one act on the `assets` key that reaches
+// OUTSIDE Polaris to change a host: it runs an installer over a stored SSH /
+// WinRM credential and leaves a service behind. Every agent
+// install / retry / reinstall / upgrade / uninstall route (and the bulk
+// deploy) is gated `assets=fullwrite`, so anything OFFERING those verbs must
+// check this and not canManageAssets() — an assets:write operator keeps full
+// inventory editing and gets no dead Install button. Reads (what version is
+// installed, which scripts exist) stay at `assets=read`.
+function canDeployAgent() { return permAtLeast("assets", "fullwrite"); }
+// Probing is its own key and — since 2026-09-04 — a READ-ONLY one: a probe
+// dials the device and writes nothing in Polaris, so `read` IS the grant
+// (business rule 43). Anything offering Poll Now / SNMP Walk / a DNS lookup
+// must check this rather than isUserOrAbove() or isAdmin(), both of which
+// answer a different question: the first showed the button to a role granted
+// IP-space writes and nothing on probes (its click could only 403), and the
+// second hid it from every custom role that holds the grant.
+function canProbeAssets() { return permAtLeast("assetsProbe", "read"); }
+// The dependency-down SIMULATION is not a probe — it stamps
+// `dependencyTestUntil` and can briefly mask a real outage — so it sits on
+// `assetMonitorSettings=fullwrite`, admin-only in every built-in role.
+function canSimulateDependencyDown() { return permAtLeast("assetMonitorSettings", "fullwrite"); }
 function canManageMaintenance() { return permAtLeast("maintenanceManagement", "fullwrite"); }
 function isUserOrAbove() { return permAtLeast("subnets", "write") || permAtLeast("reservations", "write"); }
 function canReviewConflicts() { return permAtLeast("discoveryConflicts", "write"); }
@@ -208,6 +229,15 @@ function canEditSubnet(subnet) {
   if (permAtLeast("subnets", "fullwrite")) return true;
   if (!permAtLeast("subnets", "write")) return false;
   return !!(subnet && subnet.createdBy && subnet.createdBy === currentUsername);
+}
+// Credentials carry the ownership dimension: write = your own rows only,
+// fullwrite = any row. A null createdBy is UNOWNED (rows predating the
+// column) and reachable only at fullwrite — same rule the server's
+// assertOwnership applies, so the button and the route agree.
+function canEditCredential(cred) {
+  if (permAtLeast("credentials", "fullwrite")) return true;
+  if (!permAtLeast("credentials", "write")) return false;
+  return !!(cred && cred.createdBy && cred.createdBy === currentUsername);
 }
 function canEditReservation(reservation) {
   if (permAtLeast("reservations", "fullwrite")) return true;
@@ -551,7 +581,7 @@ function renderNav() {
       <div id="update-status" class="query-status update-status" style="display:none"></div>
       <div id="query-status" class="query-status" style="display:none"></div>
       <div id="capacity-critical-alert" class="capacity-critical-alert" style="display:none"></div>
-      ${(isAdmin() || canManageAssets()) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
+      ${(isAdmin() || canManageAssets() || permAtLeast("credentials", "write")) ? `<div style="padding:0.5rem 0.5rem 0;border-top:1px solid var(--color-border-light)">
         <a href="/server-settings.html" class="sidebar-bottom-link${current === '/server-settings.html' ? ' active' : ''}">${ICONS.settings}<span>Server Settings</span></a>
       </div>` : ''}
       <!-- The theme picker sits here, below Server Settings and above the
@@ -3705,6 +3735,13 @@ function hideAdminOnlyElements() {
   });
   document.querySelectorAll("[data-manage-assets]").forEach(function (el) {
     if (!canManageAssets()) el.style.display = "none";
+  });
+  // Separate from data-manage-assets for the same reason quarantine is:
+  // deploying the Polaris Agent is gated `assets=fullwrite`, so a control
+  // that pushes an installer onto a host must not ride the asset-editing
+  // gate (an assets:write role would see a button that can only 403).
+  document.querySelectorAll("[data-deploy-agent]").forEach(function (el) {
+    if (!canDeployAgent()) el.style.display = "none";
   });
   // Separate from data-manage-assets: quarantine is its own function key, so a
   // control that pushes a MAC block must not ride the asset-editing gate.

@@ -43,6 +43,7 @@ place if it stops being true, and give a new rule the next free number.
 - [Rule 36 — The automation decides what "down" means; a device no automation covers is never judged](#rule-36)
 - [Rule 37 — An automation only fires about a device Polaris is actually polling](#rule-37)
 - [Rule 42 — Some address space is not one network, and the way to say so is to exclude it](#rule-42)
+- [Rule 43 — A grant is only as narrow as the act it names](#rule-43)
 
 ---
 
@@ -602,3 +603,38 @@ An exclusion is the operator's statement, and it is the smallest one that works:
 It does not hide an excluded CIDR from anything except the networks list and discovery's writers. An asset addressed inside excluded space is still an asset, `dns_resolved` reservations still cannot be created there (there is no subnet to hold them, which is the same answer as before), and `findSubnetForIp` simply finds nothing — leases, DHCP reservations, VIPs and interface IPs inside an excluded range are not recorded, which is the intended consequence of the range not being a network in Polaris.
 
 It is also not a retention entity, not per-integration, and carries no FK to anything: an exclusion outlives the integration, block and gate that made it necessary.
+
+---
+
+<a id="rule-43"></a>
+## Rule 43 — A grant is only as narrow as the act it names
+
+**The invariant.** Three permission levels were describing acts they did not match, and each is fixed in the same direction — the level a route asks for is the level the act deserves.
+
+1. **Deploying the Polaris Agent is `assets=fullwrite`, not `write`.** Every verb that pushes, replaces or removes the agent on a host (`POST /assets/:id/agent/install|retry|reinstall|upgrade`, `DELETE /assets/:id/agent`, `POST /assets/bulk-agent-install`) requires the top level of the assets key. Turning an integration class block's **`agentDeploy.enabled` ON is the same grant, CHAINED** onto `integrations=write` (`assertAgentDeployGrant`) — turning it OFF, and any save that leaves it unchanged, needs nothing extra. Reads (`GET /:id/agent`, `GET /agent-install-scripts`) stay at `read`.
+2. **`assetsProbe` is a read-only key.** Its ladder is `none | read` (`levels` on `FunctionKeyDef`), and probe-now / SNMP walk / DNS lookup are gated at `read`. The one thing on that key that actually WROTE — the dependency-test outage simulation — moved to **`assetMonitorSettings=fullwrite`**.
+3. **`credentials` carries the ownership dimension.** `write` = create, plus edit / delete / **test-with** only the rows you created; `fullwrite` = any row. `Credential.createdBy` is stamped once at create and no update path rewrites it; `null` is UNOWNED (every row predating the column, deliberately not backfilled) and therefore fullwrite-only.
+
+### What went wrong
+
+**Deploying the agent was an inventory edit.** `assets=write` is the level that lets an operator fix a hostname, retype a serial, change an asset's type. It was also the level that let them run an installer on someone else's machine over a stored SSH or WinRM credential and leave a service behind — and, through an integration checkbox, do that unattended to every newly-discovered device of a class, on every discovery cycle. Those are not the same act, and the built-in roles show why the difference matters: `assetsadmin` exists to manage inventory and holds `assets=write`, so fleet deployment came free with the inventory job. `networkadmin` holds `assets=read` and could not deploy to one device — but holds `integrations=write`, which reached the auto-deploy toggle, so the narrow grant was bypassable through a route that never mentions assets at all. That is why the toggle is chained rather than merely documented: a capability with two doors has to be gated at both.
+
+Only the ON transition is gated, and the asymmetry is deliberate. A role that inherits an integration with auto-deploy already enabled must still be able to turn it off; refusing the save in both directions would leave the more dangerous state as the only reachable one.
+
+**The probe key had two levels nothing could ever ask for.** `assetsProbe` was gated at `write` everywhere it appeared, so `read` granted exactly nothing — a role set to Read-Only on Asset Probes could not probe — and no route asked for `fullwrite` at all. Two of the four radio buttons in the role matrix were decoration an admin could nonetheless click, and a third was the real switch under the wrong label. The honest shape is `none | read`, because a probe reads a device and changes nothing in Polaris, which is what the key's own description always claimed.
+
+Levels are now declared per key (`levels` on `FunctionKeyDef`) and enforced three ways so the shape cannot drift: `normalizePermissions` clamps a stored or incoming value DOWN into the ladder (never up — a stored `fullwrite` on a read-only key means "as much as possible", so rounding up would be a silent grant while resolving it to `none` would be a silent revocation), `permissionOf` clamps on read so a session snapshot stamped before a ladder narrowed still resolves correctly, and the `requirePermission` factory **throws at module load** if a route asks for a level its key cannot hold. That last one matters more than it looks: such a route is permanently unreachable — nothing can grant the level — and it would present as an unexplainable 403 rather than a broken build.
+
+The migration folds every stored matrix at or above `read` down to `read`, so no role loses the ability to probe. The one capability that would otherwise have been lost is the one that never belonged there: **dependency-test writes.** It stamps `Asset.dependencyTestUntil` and can briefly mask a real outage on every monitored child of its target, and its own code comment read "strictly admin-only — assets-admin and network-admin do NOT have access." The gate said `assetsProbe=write`, which `networkadmin`, `assetsadmin` and the plain `user` role all held; the comment had been wrong about the code for as long as both existed. Making the key read-only removed the last level that could express "admin" there, so the simulation moved to `assetMonitorSettings=fullwrite` — admin-only in every built-in seed, and the right neighbourhood for a control that changes how monitoring reads.
+
+**A credential was a shared secret with no owner.** The store held one flat list: any `credentials=write` role could rename, re-point or delete a credential another operator created — including the SSH key half the fleet's agents were installed with. The dimension applied is the one `subnets`, `reservations` and `contacts` already carry, implemented with the same three pieces (`requireOwnership` on the route, `assertOwnership` once the row is loaded, `createdBy` stamped on create) rather than a new mechanism.
+
+Two decisions inside it are not obvious. **`POST /credentials/test` is ownership-scoped when it names a stored `id`**, because that path merges the row's REAL secrets into the probe (`mergeConfigPreservingSecrets`) so an operator can retest without retyping a password. Left open, it would let a write-level caller aim a peer's credential at any host in inventory — a read-shaped route that lends out a secret. Testing an unsaved form (no `id`) stays open at `write`, since the secret in that body is one the caller typed. And **an unowned row is fullwrite-only.** `createdBy` is not backfilled, in either direction: inventing an owner for the credentials an install already had would hand a write-level operator every secret in the store, and the honest reading of a row nobody claims is that only a fleet-wide grant should touch it. The LIST stays readable at `read` throughout — the gate is on writes, not on knowing a credential exists, because the Asset Monitoring tab's picker needs the names.
+
+### What it does not do
+
+It does not create a function key. Agent deployment rides the level above `assets=write` rather than a key of its own, which keeps the matrix from growing a row for every dangerous verb — but it does mean an operator granted `assets=fullwrite` for any other reason can deploy. If that separation is ever wanted, a key is the next step, and the client-side gate (`canDeployAgent` / `data-deploy-agent`) is already the single place to repoint.
+
+It does not retro-scope credentials. Nothing is reassigned, nothing is deleted, and an admin who wants a shared credential to stay shared changes nothing: every built-in role sits at `credentials=read`, so the dimension only starts mattering the moment someone is granted `write`.
+
+And it does not change what a probe can reach. `assetsProbe=read` dials exactly what `assetsProbe=write` dialled — the narrowing is about which cells the matrix offers and which level the routes name, not about what the act does.

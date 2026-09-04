@@ -427,6 +427,16 @@ model Credential {
   name      String   @unique
   type      String // "snmp" | "winrm" | "ssh"
   config    Json     @default("{}")
+  // Ownership dimension for the `credentials` function key: a write-level
+  // role may edit / delete / test-with only the rows it created, fullwrite
+  // reaches any. Nullable, and null means UNOWNED — every row that predates
+  // the column, which is deliberately NOT backfilled to anyone: a
+  // credential nobody claims is exactly the thing only a fullwrite caller
+  // should be able to touch, and inventing an owner for it would hand a
+  // write-level operator every secret the install already had. Same shape
+  // as Subnet / Reservation / Contact.createdBy (a username string, no FK,
+  // so it survives the account being deleted).
+  createdBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -456,6 +466,7 @@ model Credential {
   managedAgents                   ManagedAgent[]             @relation("AgentInstallCredential")
 
   @@index([type])
+  @@index([createdBy])
   @@map("credentials")
 }
 
@@ -3137,8 +3148,8 @@ model User {
   updatedAt DateTime @updatedAt
 
   dashboard         UserDashboard?
-  networkScans      NetworkScan[]
   pushSubscriptions PushSubscription[]
+  networkScans      NetworkScan[]
   savedDashboards   SavedDashboard[]
   savedTableFilters SavedTableFilter[]
   tableTabs         UserTableTabs[]

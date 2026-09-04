@@ -2,13 +2,13 @@
  * src/api/routes/integrations.ts — Integration CRUD + connection testing
  */
 
-import { Router } from "express";
+import { Router, type Request } from "express";
 import { z } from "zod";
 import { prisma } from "../../db.js";
 import { AppError } from "../../utils/errors.js";
 import { purgeDirectoryContacts } from "../../services/directorySyncService.js";
 import { bumpDirectoryCache } from "../../services/directorySearchService.js";
-import { requirePermission } from "../middleware/permissions.js";
+import { requirePermission, hasPermission } from "../middleware/permissions.js";
 import * as fortimanager from "../../services/fortimanagerService.js";
 import { getFmgActivityForIntegration } from "../../services/fmgActivityService.js";
 import { getIntegrationHealthSummary } from "../../services/integrationHealthService.js";
@@ -197,6 +197,41 @@ router.get("/:id/fmg-activity", async (req, res, next) => {
 // authenticated caller with read access can see the integration list. Every
 // route below this line is a write — escalate the bar to `integrations=write`.
 router.use(requirePermission("integrations", "write"));
+
+// ─── Agent auto-deploy is an assets=fullwrite grant ──────────────────────
+//
+// `agentDeploy.enabled` on a class block makes discovery push the Polaris
+// Agent to every newly-discovered agent-less device of that class — the same
+// act as POST /assets/:id/agent/install, at fleet scale and unattended. That
+// route is gated `assets=fullwrite` (see the deployment note in
+// api/routes/assets.ts), so turning the toggle ON is gated the same way,
+// CHAINED onto `integrations=write`: without it an integrations-write role
+// (built-in `networkadmin`, which holds assets=read) could deploy the agent
+// to the whole fleet through a checkbox it was never allowed to click on one
+// device. Only the ON transition is gated — turning it OFF, and every save
+// that leaves it as it was, need nothing extra, so a role that inherited an
+// enabled block can still edit the rest of the integration (and switch it
+// off).
+const AGENT_DEPLOY_BLOCK_KEYS = ["workstationMonitor", "serverMonitor", "vmMonitor", "hostMonitor"] as const;
+
+function agentDeployEnabledIn(config: unknown, blockKey: string): boolean {
+  const block = (config as Record<string, any> | null | undefined)?.[blockKey];
+  return !!block?.agentDeploy?.enabled;
+}
+
+function assertAgentDeployGrant(req: Request, prevConfig: unknown, nextConfig: unknown): void {
+  const turnedOn = AGENT_DEPLOY_BLOCK_KEYS.filter(
+    k => agentDeployEnabledIn(nextConfig, k) && !agentDeployEnabledIn(prevConfig, k),
+  );
+  if (turnedOn.length === 0) return;
+  if (hasPermission(req, "assets", "fullwrite")) return;
+  throw new AppError(
+    403,
+    "Forbidden — enabling Polaris Agent auto-deploy requires Full Read-Write on Assets " +
+    "(the same grant as deploying the agent to a single device).",
+  );
+}
+
 
 // ─── Zod Schemas ─────────────────────────────────────────────────────────────
 
@@ -1049,6 +1084,8 @@ router.post("/", async (req, res, next) => {
     // fall back to — surface a clear error so the operator pastes the
     // real token instead.
     const createCfg = input.config as Record<string, unknown>;
+    // A create can only ever turn auto-deploy ON (there is no prior config).
+    assertAgentDeployGrant(req, null, createCfg);
     for (const field of ["apiToken", "fortigateApiToken", "password", "clientSecret", "bindPassword"] as const) {
       if (isMaskedSecretSentinel(createCfg[field])) {
         throw new AppError(
@@ -1291,6 +1328,11 @@ router.put("/:id", async (req, res, next) => {
       } else if (newConfig.verboseLogging === false) {
         delete newConfig.verboseLoggingEnabledAt;
       }
+      // Chained gate: flipping any class block's agentDeploy.enabled from off
+      // to on needs assets=fullwrite. Checked on the MERGED config so a PUT
+      // that omits the block (the common partial save) is compared against
+      // what is actually stored, not against an absent key.
+      assertAgentDeployGrant(req, currentConfig, newConfig);
       data.config = newConfig;
     }
 

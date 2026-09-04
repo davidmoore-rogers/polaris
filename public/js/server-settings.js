@@ -6814,8 +6814,15 @@ async function loadCredentialsTab() {
     // Assets-admin loads only the MIB-related endpoints (the only ones the
     // backend opens to them). admin gets the full set — credentials list,
     // MIBs + facets (for the MIB Database card), and manufacturer profiles.
+    //
+    // `credentials=write` also loads the credential list: that level owns
+    // "add credentials, edit your own" (the ownership dimension), so the card
+    // it manages can't be admin-gated any more. The MIB / profile calls in
+    // the same batch already swallow their own 403s, and both those cards
+    // still render for admin only.
     var adminUser = !(typeof isAdmin === "function" && !isAdmin());
-    if (adminUser) {
+    var mayWriteCreds = _credsWritable();
+    if (adminUser || mayWriteCreds) {
       var results = await Promise.all([
         api.credentials.list(),
         api.serverSettings.listMibs().catch(function () { return []; }),
@@ -6894,29 +6901,57 @@ function credSummary(c) {
   return "";
 }
 
+// Any role with `credentials=write` manages the Stored Credentials card —
+// their own rows at write, everyone's at fullwrite (the ownership dimension).
+function _credsWritable() {
+  if (typeof permAtLeast === "function") return permAtLeast("credentials", "write");
+  return !(typeof isAdmin === "function" && !isAdmin());
+}
+
+// Ownership check for ONE row, shared with the server's assertOwnership: null
+// createdBy is unowned (rows predating the column) and fullwrite-only.
+function _credEditable(c) {
+  if (typeof canEditCredential === "function") return canEditCredential(c);
+  return _credsWritable();
+}
+
 function renderCredentialsTab() {
   var container = document.getElementById("tab-credentials");
   var adminUser = !(typeof isAdmin === "function" && !isAdmin());
+  var mayWriteCreds = _credsWritable();
 
   var html = "";
 
-  // ── 1. Stored Credentials (admin-only) ──
-  if (adminUser) {
+  // ── 1. Stored Credentials (credentials=write; own rows only below fullwrite) ──
+  if (mayWriteCreds) {
     var rows = _credsData.map(function (c) {
       var n = _credUsageCounts[c.id] || 0;
       var assetsCell = n > 0
         ? '<button type="button" data-action="usage" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '" title="Show the assets using this credential" ' +
             'style="background:none;border:none;padding:0;cursor:pointer;color:var(--color-accent);font:inherit;text-decoration:underline">' + n + '</button>'
         : '<span style="color:var(--color-text-secondary)">0</span>';
+      // Editing, deleting and TESTING are all ownership-scoped — testing
+      // because passing the row's id merges its stored secrets into the
+      // probe, so it is "borrow this password", not a read.
+      var mine = _credEditable(c);
+      var lock = mine ? "" : " disabled";
+      var lockTitle = mine ? "" :
+        ' title="' + escapeHtml(c.createdBy
+          ? ("Owned by " + c.createdBy + " — needs Full Read-Write on Credentials")
+          : "No recorded owner — needs Full Read-Write on Credentials") + '"';
+      var ownerCell = c.createdBy
+        ? escapeHtml(c.createdBy)
+        : '<span style="color:var(--color-text-tertiary)" title="Created before credentials had an owner — only Full Read-Write can edit it">&mdash;</span>';
       return '<tr>' +
         '<td>' + escapeHtml(c.name) + '</td>' +
         '<td>' + credTypeLabel(c.type) + '</td>' +
         '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + credSummary(c) + '</td>' +
+        '<td style="color:var(--color-text-secondary);font-size:0.85rem">' + ownerCell + '</td>' +
         '<td>' + assetsCell + '</td>' +
         '<td style="text-align:right">' +
-          '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '">Edit</button> ' +
-          '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '">Test</button> ' +
-          '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '">Delete</button>' +
+          '<button class="btn btn-sm btn-secondary" data-action="edit" data-id="' + escapeHtml(c.id) + '"' + lock + lockTitle + '>Edit</button> ' +
+          '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + escapeHtml(c.id) + '"' + lock + lockTitle + '>Test</button> ' +
+          '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + escapeHtml(c.id) + '" data-name="' + escapeHtml(c.name) + '"' + lock + lockTitle + '>Delete</button>' +
         '</td>' +
       '</tr>';
     }).join("");
@@ -6931,10 +6966,13 @@ function renderCredentialsTab() {
           'Named credentials for asset monitoring probes. ' +
           'SNMP (v2c/v3), WinRM, and SSH credentials can be reused across assets. ' +
           'ICMP needs no credentials, and FortiManager-discovered firewalls reuse the direct-mode API token configured on their integration.' +
+          ((typeof permAtLeast === "function" && !permAtLeast("credentials", "fullwrite"))
+            ? '<br><span style="color:var(--color-text-tertiary)">You can edit, delete and test the credentials you created; the rest are listed read-only.</span>'
+            : '') +
         '</p>' +
         (_credsData.length === 0
           ? '<p class="empty-state">No credentials yet. Click "Add Credential" to create one.</p>'
-          : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th>Assets</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
+          : '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Details</th><th>Owner</th><th>Assets</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>') +
       '</div>';
   }
 
@@ -6948,8 +6986,8 @@ function renderCredentialsTab() {
 
   container.innerHTML = html;
 
-  // Wire credentials list controls only when rendered (admin).
-  if (adminUser) {
+  // Wire credentials list controls only when rendered.
+  if (mayWriteCreds) {
     document.getElementById("btn-cred-new").addEventListener("click", function () { openCredentialModal(null); });
     container.querySelectorAll('button[data-action="edit"]').forEach(function (btn) {
       btn.addEventListener("click", function () { openCredentialModal(btn.getAttribute("data-id")); });

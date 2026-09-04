@@ -63,8 +63,21 @@ export interface FunctionKeyDef {
   description: string;
   // Functions where the "write" level applies an ownership filter
   // (createdBy === username) and "fullwrite" bypasses it — subnets,
-  // reservations, and address-book contacts.
+  // reservations, address-book contacts, and credentials.
   hasOwnershipDimension?: boolean;
+  // The access levels this key can actually hold. Omitted = the full
+  // ladder (none < read < write < fullwrite). A key declares a SHORTER
+  // ladder when the levels above the top one it supports would be
+  // indistinguishable from it: `assetsProbe` is read-only by nature (a
+  // probe dials the device and writes nothing in Polaris), so offering
+  // Read-Write / Full Read-Write put two dead radio buttons in the matrix
+  // and let an operator grant a level no route ever asks for. Enforced in
+  // three places that must not drift: `normalizePermissions` clamps a
+  // stored or incoming value DOWN into the ladder, the `requirePermission`
+  // factory throws at module load if a route asks for a level the key
+  // cannot hold, and the roles matrix renders only the supported cells
+  // (the frontend reads this off GET /roles/functions).
+  levels?: readonly AccessLevel[];
 }
 
 export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
@@ -74,14 +87,20 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "allocationTemplates", label: "Allocation Templates", description: "Saved multi-subnet allocation templates used by the bulk-allocate modal." },
   { key: "assets", label: "Assets", description: "Asset inventory CRUD + PDF/CSV export." },
   { key: "assetsQuarantine", label: "Asset Quarantine", description: "Push MAC quarantine to FortiGates + release + verify." },
-  { key: "assetsProbe", label: "Asset Probes", description: "Manual probe-now, SNMP walk, forward/reverse DNS lookup on a specific asset." },
+  // Read-only by nature: a probe dials the device and writes nothing in
+  // Polaris, so `read` IS the grant and there is no higher level to offer.
+  // The outage SIMULATION that used to sit here (POST/DELETE
+  // /assets/:id/dependency-test) does write — and can mask a real outage —
+  // so it moved to `assetMonitorSettings=fullwrite`, which is the
+  // admin-only level its own code comment always claimed for it.
+  { key: "assetsProbe", label: "Asset Probes", description: "Manual probe-now, SNMP walk, forward/reverse DNS lookup on a specific asset. Read-only — a probe reads the device and changes nothing in Polaris, so Read is the whole grant.", levels: ["none", "read"] },
   { key: "networkScan", label: "Network Discovery", description: "Active scan of operator-supplied IP ranges: create / edit / run a Discovery and adopt what answers. Its own key rather than part of `assetsProbe` (probe-now / SNMP walk on ONE existing asset) — an unannounced sweep is IDS-visible. Read = browse the Discoveries you can see (your own, plus every SHARED one) + watch a run; Read-Write = create / run / edit + delete your own; Full Read-Write = edit + delete anyone's. PUBLISHING a Discovery for other operators needs only Read-Write — sharing is what the feature is for. Adopting the responders as assets additionally requires `assets` Read-Write, chained at the route.", hasOwnershipDimension: true },
   { key: "assetMonitorSettings", label: "Asset Monitor Settings", description: "Per-asset / class / integration / manual monitor cadence + retention overrides." },
   { key: "processControl", label: "Process Control", description: "Start / stop / restart a service-backed process on a host via the Polaris Agent. Operator-initiated, confirmed, and audited; the agent never self-acts." },
   { key: "mibDatabase", label: "MIB Database", description: "Upload / browse / walk SNMP MIB modules." },
   { key: "manufacturerProfiles", label: "Manufacturer Profiles", description: "Per-vendor telemetry profile (CPU/memory/temperature OIDs + custom widgets)." },
   { key: "manufacturerAliases", label: "Manufacturer Aliases", description: "Vendor-name normalization map." },
-  { key: "credentials", label: "Credentials", description: "Stored SNMP / WinRM / SSH credentials for monitoring probes." },
+  { key: "credentials", label: "Credentials", description: "Stored SNMP / WinRM / SSH / REST / HTTP credentials for monitoring probes. Read = list (secrets masked) + see where each is wired; Read-Write = add + edit/delete/test own only; Full Read-Write = edit/delete/test any.", hasOwnershipDimension: true },
   { key: "integrations", label: "Integrations", description: "FortiManager / FortiGate / Windows Server / Entra ID / Active Directory integration CRUD + discovery." },
   { key: "discoveryConflicts", label: "Discovery Conflicts", description: "Accept / reject / merge reservation + asset conflicts raised by discovery." },
   { key: "deviceMap", label: "Device Map", description: "Geographic map of FortiGates + topology graphs." },
@@ -107,6 +126,46 @@ const FUNCTION_KEY_SET = new Set(FUNCTION_KEYS.map(f => f.key));
 
 export function isValidFunctionKey(key: string): boolean {
   return FUNCTION_KEY_SET.has(key);
+}
+
+// ─── Per-key access ladders ────────────────────────────────────────────
+//
+// Most keys hold the full ladder. A key that declares `levels` holds only
+// those — see the field's note on FunctionKeyDef. Unknown keys answer the
+// full ladder so callers never have to special-case a legacy alias.
+
+const FUNCTION_LEVELS = new Map<string, readonly AccessLevel[]>(
+  FUNCTION_KEYS.filter(f => f.levels).map(f => [f.key, f.levels as readonly AccessLevel[]]),
+);
+
+/** The access levels `functionKey` can hold, in ladder order. */
+export function levelsFor(functionKey: string): readonly AccessLevel[] {
+  return FUNCTION_LEVELS.get(functionKey) ?? ACCESS_LEVELS;
+}
+
+/** Can `functionKey` hold `level` at all? */
+export function keySupportsLevel(functionKey: string, level: AccessLevel): boolean {
+  return levelsFor(functionKey).includes(level);
+}
+
+/**
+ * Clamp `level` DOWN into `functionKey`'s ladder: the highest supported
+ * level that is no higher than the one asked for. Always downward, never
+ * up — a matrix that stored (or a client that posts) `fullwrite` on a
+ * read-only key means "as much as possible", and rounding UP would be a
+ * silent grant. Every supported ladder contains "none", so this always
+ * resolves.
+ */
+export function clampLevelToKey(functionKey: string, level: AccessLevel): AccessLevel {
+  const allowed = levelsFor(functionKey);
+  if (allowed.includes(level)) return level;
+  let best: AccessLevel = "none";
+  for (const candidate of allowed) {
+    if (ACCESS_RANK[candidate] <= ACCESS_RANK[level] && ACCESS_RANK[candidate] >= ACCESS_RANK[best]) {
+      best = candidate;
+    }
+  }
+  return best;
 }
 
 // ─── Legacy key aliases (Automations rename, 2026-07) ──────────────────
@@ -141,11 +200,13 @@ export function permissionOf(
   functionKey: string,
 ): AccessLevel {
   const direct = permissions[functionKey];
-  if (typeof direct === "string" && isValidAccessLevel(direct)) return direct;
+  if (typeof direct === "string" && isValidAccessLevel(direct)) {
+    return clampLevelToKey(functionKey, direct);
+  }
   const legacy = MODERN_TO_LEGACY[functionKey];
   if (legacy) {
     const v = permissions[legacy];
-    if (typeof v === "string" && isValidAccessLevel(v)) return v;
+    if (typeof v === "string" && isValidAccessLevel(v)) return clampLevelToKey(functionKey, v);
   }
   return "none";
 }
@@ -175,7 +236,11 @@ export function normalizePermissions(input: unknown): Record<string, AccessLevel
   }
   for (const def of FUNCTION_KEYS) {
     const v = raw[def.key];
-    out[def.key] = typeof v === "string" && isValidAccessLevel(v) ? v : "none";
+    const level = typeof v === "string" && isValidAccessLevel(v) ? v : "none";
+    // Clamp into the key's own ladder, so a read-only key can never hold
+    // a level no route asks for — whether the value came from an older
+    // stored matrix, an imported role JSON, or a stale UI client.
+    out[def.key] = clampLevelToKey(def.key, level);
   }
   return out;
 }
@@ -428,6 +493,16 @@ export function rankMeets(actual: AccessLevel, required: AccessLevel): boolean {
 export function requirePermission(functionKey: string, required: AccessLevel) {
   if (!isValidFunctionKey(functionKey)) {
     throw new Error(`requirePermission: unknown functionKey "${functionKey}"`);
+  }
+  // A route asking for a level the key cannot hold would be permanently
+  // unreachable (nothing can grant it), so this is a boot-time failure
+  // rather than a 403 nobody can explain. Throws at module load —
+  // tests/unit/routerBoots.test.ts is what turns it into a red build.
+  if (!keySupportsLevel(functionKey, required)) {
+    throw new Error(
+      `requirePermission: "${functionKey}" cannot hold "${required}" ` +
+      `(supported: ${levelsFor(functionKey).join(", ")})`,
+    );
   }
   return async (req: Request, _res: Response, next: NextFunction) => {
     try {

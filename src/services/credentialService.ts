@@ -138,6 +138,12 @@ export interface CredentialRecord {
   name: string;
   type: CredentialType;
   config: Record<string, unknown>;
+  // Ownership dimension for the `credentials` function key — the username
+  // that created the row, or null for a row that predates the column
+  // (unowned; fullwrite-only). Never inferred: the routes stamp it on
+  // create and no update path may rewrite it, or a write-level operator
+  // could adopt someone else's credential by saving it.
+  createdBy: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -146,6 +152,7 @@ export interface SaveCredentialInput {
   name: string;
   type: CredentialType;
   config: Record<string, unknown>;
+  createdBy?: string | null;
 }
 
 export interface UpdateCredentialInput {
@@ -501,7 +508,14 @@ export async function createCredential(input: SaveCredentialInput): Promise<Cred
     throw new AppError(409, `A credential named "${name}" already exists`);
   }
   const created = await prisma.credential.create({
-    data: { name, type: input.type, config: input.config as any },
+    data: {
+      name,
+      type: input.type,
+      config: input.config as any,
+      // Stamped once, at create. `updateCredential` takes no createdBy and
+      // never writes one, so ownership cannot be reassigned by an edit.
+      createdBy: input.createdBy ?? null,
+    },
   });
   return stripSecrets(created as unknown as CredentialRecord);
 }

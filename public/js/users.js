@@ -1401,6 +1401,34 @@ async function openGroupMappingSlideover(id) {
 
 var _PERM_LEVELS = ["none", "read", "write", "fullwrite"];
 var _PERM_LABELS = { none: "No Access", read: "Read-Only", write: "Read-Write", fullwrite: "Full Read-Write" };
+var _PERM_RANK_UI = { none: 0, read: 1, write: 2, fullwrite: 3 };
+
+// A function key may declare a SHORTER ladder than the four columns — a key
+// that is read-only by nature (Asset Probes: a probe reads the device and
+// writes nothing in Polaris) has no meaning above Read, and offering the
+// cell put a radio there that no route ever asks for. The catalogue says so
+// per key via `levels` on GET /roles/functions; a key without the field
+// holds the full ladder. Server-side, normalizePermissions clamps the same
+// way, so what this hides cannot be stored by another client either.
+function _permLevelsFor(f) {
+  return (f && f.levels && f.levels.length) ? f.levels : _PERM_LEVELS;
+}
+function _permKeySupports(f, lvl) {
+  return _permLevelsFor(f).indexOf(lvl) !== -1;
+}
+// Highest level the key supports that is no higher than `lvl` — used by the
+// bulk "set every row to" control so a narrow key follows the operator's
+// intent downward instead of silently keeping its old value.
+function _permClampToKey(f, lvl) {
+  var allowed = _permLevelsFor(f);
+  if (allowed.indexOf(lvl) !== -1) return lvl;
+  var best = "none";
+  for (var i = 0; i < allowed.length; i++) {
+    var c = allowed[i];
+    if (_PERM_RANK_UI[c] <= _PERM_RANK_UI[lvl] && _PERM_RANK_UI[c] >= _PERM_RANK_UI[best]) best = c;
+  }
+  return best;
+}
 
 async function openRoleSlideover(roleId) {
   if (!_matrixSpec) {
@@ -1411,7 +1439,9 @@ async function openRoleSlideover(roleId) {
   var isCreate = !role;
   var isProtected = !!(role && role.isProtected);
   var permissions = role ? Object.assign({}, role.permissions) : {};
-  // Pre-fill new roles with all-none.
+  // Pre-fill new roles with all-none. Clamping a stored value into its key's
+  // ladder happens in buildRoleSlideoverHtml, so every caller of the builder
+  // gets it.
   _matrixSpec.functions.forEach(function (f) {
     if (!(f.key in permissions)) permissions[f.key] = "none";
   });
@@ -1438,7 +1468,8 @@ async function openRoleSlideover(roleId) {
     var lvl = this.value;
     if (!lvl) return;
     _matrixSpec.functions.forEach(function (f) {
-      var radio = document.querySelector('input[type="radio"][name="perm-' + f.key + '"][value="' + lvl + '"]');
+      var target = _permClampToKey(f, lvl);
+      var radio = document.querySelector('input[type="radio"][name="perm-' + f.key + '"][value="' + target + '"]');
       if (radio && !radio.disabled) radio.checked = true;
     });
     this.value = "";
@@ -1525,8 +1556,18 @@ function buildRoleSlideoverHtml(role, isCreate, isProtected, permissions) {
   var userCountMeta = role ? (role.userCount + " user(s) hold this role") : "Not yet assigned";
 
   var matrixRows = _matrixSpec.functions.map(function (f) {
-    var current = permissions[f.key] || "none";
+    // Clamp into the key's ladder HERE rather than only in the caller: a
+    // role stored before a key narrowed (assetsProbe=write) would otherwise
+    // select no radio in its row, and the save would collect that as "none" —
+    // a silent revocation instead of the fold-down the server applies on read.
+    var current = _permClampToKey(f, permissions[f.key] || "none");
     var cells = _PERM_LEVELS.map(function (lvl) {
+      // A level outside this key's ladder gets a dash, not a radio — see
+      // _permLevelsFor. The cell still renders so the columns stay aligned.
+      if (!_permKeySupports(f, lvl)) {
+        return '<td style="text-align:center;color:var(--color-text-tertiary)" ' +
+          'title="' + escapeHtml(_PERM_LABELS[lvl]) + ' does not apply to ' + escapeHtml(f.label) + '">&mdash;</td>';
+      }
       var disabled = isProtected ? " disabled" : "";
       var checked = current === lvl ? " checked" : "";
       return '<td style="text-align:center">' +

@@ -2924,7 +2924,8 @@ function bulkMaintenanceSelectedAssets() {
 // bulkInstallAgents) — installs run in a bounded server-side pool; progress
 // shows per-asset on each System tab exactly like a manual install.
 function openBulkAgentDeployModal() {
-  if (!canManageAssets()) return;
+  // assets=fullwrite, not assets=write — see canDeployAgent() in app.js.
+  if (!canDeployAgent()) return;
   var ids = Array.from(_assetsSelected);
   if (!ids.length) return;
 
@@ -5486,15 +5487,18 @@ async function openViewModal(id) {
       api.assets.getSightings(id).catch(function (err) { console.warn("Failed to load asset sightings", err); return []; }),
       api.assets.getIpHistory(id).catch(function (err) { console.warn("Failed to load asset IP history", err); return []; }),
       // Effective monitor settings — needed pre-paint only to decide whether
-      // the SNMP Walk tab shows (admin-only), so non-admins skip it here; the
-      // post-paint consumers still share one fetch through effSettings().
-      isAdmin()
+      // the SNMP Walk tab shows, so callers who can't reach that tab skip it
+      // here; the post-paint consumers still share one fetch through
+      // effSettings(). Keyed on canProbeAssets(), the tab's own gate — it was
+      // isAdmin(), which starved the tab of both this and the credential
+      // cache for every custom role holding `assetsProbe`.
+      canProbeAssets()
         ? effSettings().catch(function (err) { console.warn("Failed to load effective monitor settings", err); return null; })
         : Promise.resolve(null),
       // Credentials — the SNMP Walk tab's picker renders from this cache, so
       // it has to be warm before that tab's HTML is built. Module-cached, so
       // this is a no-op after the first open of the session.
-      isAdmin() ? _ensureCredentials() : Promise.resolve(null),
+      canProbeAssets() ? _ensureCredentials() : Promise.resolve(null),
       customWidgetsP,
       sdwanP,
     ]);
@@ -5612,13 +5616,16 @@ async function openViewModal(id) {
     if (customWidgetPayload && customWidgetPayload.widgets && customWidgetPayload.widgets.length) {
       tabs.push({ key: "customMib", label: "Custom MIB", html: _customMibTabHTML(customWidgetPayload) });
     }
-    // SNMP Walk tab — admin-only, mirrors the backend gate. Additionally
+    // SNMP Walk tab — `assetsProbe=read`, mirrors the backend gate (that key
+    // is read-only by nature since 2026-09-04, business rule 43; it was
+    // isAdmin() here, which hid the tab from every custom role holding the
+    // grant). Additionally
     // hidden when no monitoring stream resolves to SNMP for this asset
     // (effective settings prefetched in the wave above, so the tab never
     // flashes-then-vanishes — same idiom as Custom MIB). Credentials for the
     // picker rode the same wave, so the cache is warm here — do NOT re-add an
     // await, it was the fourth serial barrier in front of first paint.
-    var showSnmpWalkTab = isAdmin() && _assetUsesSnmpPolling(a, effMonitorSettings);
+    var showSnmpWalkTab = canProbeAssets() && _assetUsesSnmpPolling(a, effMonitorSettings);
     if (showSnmpWalkTab) {
       tabs.push({ key: "snmp", label: "SNMP Walk", html: assetSnmpWalkViewHTML(a) });
     }
@@ -6387,7 +6394,11 @@ function assetAgentSubpanelHTML(a, agent) {
         'You picked "Polaris Agent" as a polling method but no agent is installed yet. ' +
         'Click below to push the agent to this host via a stored SSH or WinRM credential.' +
       '</p>' +
-      '<button type="button" class="btn btn-primary" id="btn-agent-install" data-asset-id="' + escapeHtml(a.id) + '">Install Agent…</button>';
+      // Deploying is `assets=fullwrite` (canDeployAgent) — a notch above the
+      // rest of this page. Withhold the button rather than let the click 403.
+      (canDeployAgent()
+        ? '<button type="button" class="btn btn-primary" id="btn-agent-install" data-asset-id="' + escapeHtml(a.id) + '">Install Agent…</button>'
+        : '<p class="hint" style="margin:0">Deploying the agent needs Full Read-Write on Assets — ask an administrator.</p>');
   } else {
     // Row exists — show the diagnostic strip + action buttons relevant to
     // the current state. We render the strip uniformly regardless of state
@@ -6479,12 +6490,20 @@ function assetAgentSubpanelHTML(a, agent) {
         ' <button type="button" class="btn btn-secondary" id="btn-agent-force-remove" data-managed-agent-id="' + escapeHtml(agent.id) + '" data-asset-id="' + escapeHtml(a.id) + '">Force Remove</button>';
     }
 
+    // Every verb in `actions` pushes, replaces or removes the agent on the
+    // host, so the whole strip is behind canDeployAgent(). The diagnostic
+    // rows above stay visible at `assets=read` — seeing what is installed is
+    // not the same grant as changing it.
+    if (!canDeployAgent()) actions = '';
+
     body =
       errBlock +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0.4rem 1.25rem;margin:0.5rem 0">' +
         versionRow + platformRow + lastSeenRow + wsRow + privRow +
       '</div>' +
-      '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem">' + actions + '</div>';
+      (actions
+        ? '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.5rem">' + actions + '</div>'
+        : '');
   }
 
   return '<div id="asset-agent-panel" data-asset-id="' + escapeHtml(a.id) + '" style="margin:0 0 1.5rem;padding:1rem;border:1px solid var(--color-border);border-radius:6px;background:var(--color-surface)">' +
@@ -11385,18 +11404,21 @@ function assetMonitoringViewHTML(a) {
     if (a.monitorCredential) sourceLabel = rtPolling.toUpperCase() + " · " + a.monitorCredential.name;
     else sourceLabel = rtPolling.toUpperCase();
   }
-  var probeBtn = isUserOrAbove()
+  var probeBtn = canProbeAssets()
     ? '<button class="btn btn-sm btn-primary" id="btn-asset-probe-now" style="margin-right:6px" title="Poll the device now: run a response-time probe and pull fresh telemetry + interface data">Poll Now</button>'
     : '';
   // Admin-only "Dependency Test" trigger lives next to the Status pill on
   // the System tab. Eligible for Fortinet infra only — workstations etc.
   // aren't part of the dependency tree, so the simulation has no children
   // to suppress and the backend rejects the call. Active state shows a
-  // "Clear" button instead. Strictly admin-only.
+  // "Clear" button instead. Gated `assetMonitorSettings=fullwrite`
+  // (canSimulateDependencyDown) — admin-only in every built-in role, and the
+  // same level the route now requires: this WRITES, so it did not belong on
+  // the read-only probe key. Business rule 43.
   var depTestBtn = "";
   var isInfraType = a.assetType === "firewall" || a.assetType === "switch" || a.assetType === "access_point";
   var depTestActiveNow = a.dependencyTestUntil && new Date(a.dependencyTestUntil).getTime() > Date.now();
-  if (typeof isAdmin === "function" && isAdmin() && a.monitored && isInfraType) {
+  if (canSimulateDependencyDown() && a.monitored && isInfraType) {
     if (depTestActiveNow) {
       depTestBtn = '<button class="btn btn-sm btn-secondary" onclick="clearDependencyTestNow(\'' + escapeHtml(a.id) + '\')" style="margin-left:6px" title="Stop the simulation immediately and let children resume">Clear Dep. Test</button>';
     } else {

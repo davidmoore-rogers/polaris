@@ -2744,12 +2744,24 @@ function _agentDeployHTML(idPrefix, kindLabel, currentCfg, credentials) {
       '</div>';
   }
   var bodyHidden = enabled ? "" : "display:none";
+  // Turning this ON is gated `assets=fullwrite` server-side (the same grant as
+  // deploying to ONE device — see assertAgentDeployGrant in
+  // api/routes/integrations.ts), chained onto integrations=write. A caller
+  // without it sees the card's current state read-only rather than a toggle
+  // whose save 403s; an ALREADY-enabled block stays switchable OFF, which is
+  // the one direction that needs no extra grant.
+  var mayDeploy = (typeof canDeployAgent !== "function") || canDeployAgent();
+  var lockToggle = (!mayDeploy && !enabled) ? " disabled" : "";
+  var lockNote = (!mayDeploy && !enabled)
+    ? '<p class="hint" style="margin:0 0 0.5rem 0">Enabling auto-deploy needs Full Read-Write on Assets — the same grant as installing the agent on a single device.</p>'
+    : '';
   return sectionHeading("Agent auto-deploy") +
     '<div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.3);border-radius:var(--radius-md);padding:0.75rem 0.9rem;margin-bottom:1rem">' +
       '<div class="form-group" style="display:flex;align-items:center;gap:8px;margin-bottom:0.5rem">' +
-        '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (enabled ? "checked" : "") + ' style="width:auto">' +
+        '<input type="checkbox" id="' + idPrefix + 'enabled" ' + (enabled ? "checked" : "") + lockToggle + ' style="width:auto">' +
         '<label for="' + idPrefix + 'enabled" style="margin:0;font-weight:500">Auto-deploy the Polaris Agent to discovered ' + escapeHtml(_kindPlural(kindLabel)) + '</label>' +
       '</div>' +
+      lockNote +
       '<p class="hint" style="margin:0 0 0.5rem 0;color:var(--color-warning)">⚠ Pushes the Polaris Agent over SSH/WinRM to every newly-discovered, agent-less ' + escapeHtml(kindLabel) + ' during discovery. Test on a small OU first; a human should review rollout scope before enabling fleet-wide. Rollout is paced — at most a few new installs per discovery cycle.</p>' +
       '<div id="' + idPrefix + 'body" style="' + bodyHidden + '">' +
         '<p class="hint" style="margin:0 0 0.5rem 0;font-size:0.8rem">Platform is inferred from each device\'s OS. Windows uses WinRM (or SSH if no WinRM credential); Linux/macOS use SSH.</p>' +

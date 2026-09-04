@@ -1584,13 +1584,15 @@ router.get("/:id/monitor-history", requirePermission("assets", "read"), async (r
   } catch (err) { next(err); }
 });
 
-// POST /api/v1/assets/:id/probe-now — run a one-off probe immediately (user or above).
+// POST /api/v1/assets/:id/probe-now — run a one-off probe immediately.
+// Gated `assetsProbe=read`: probing dials the device and writes no Polaris
+// state, so read IS the grant on that key (its ladder stops there).
 // Triggers all three cadences (response-time, telemetry, system info) so the
 // asset details panel refreshes everything at once instead of waiting for the
 // scheduler to come around. Returns a per-stream status so the UI can tell
 // the operator which streams refreshed and which failed (and why) — silent
 // failures used to leave the System tab stale with no explanation.
-router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (req, res, next) => {
+router.post("/:id/probe-now", requirePermission("assetsProbe", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
 
@@ -1747,8 +1749,8 @@ router.post("/:id/probe-now", requirePermission("assetsProbe", "write"), async (
 // with the finalize pass in "finalize-scoped" mode (per-controller switch/AP
 // decommission only; no fleet sweeps). For a standalone-FortiGate asset the
 // integration IS the single gate, so a plain full run is the exact equivalent.
-// No request body. Gated assets:write (one notch above Poll Now's
-// assetsProbe:write) because a re-discover mutates inventory — creates/updates
+// No request body. Gated assets:write (above Poll Now's read-only
+// assetsProbe grant) because a re-discover mutates inventory — creates/updates
 // assets + reservations, decommissions vanished switches/APs, releases stale
 // VIP/dhcp_reservation rows.
 // HA note: fortinetTopology.deviceName resolves to the FMG cluster device, so
@@ -1854,7 +1856,7 @@ const SnmpWalkSchema = z.object({
   maxRows:      z.number().int().min(1).max(5000).optional().default(500),
 });
 
-router.post("/:id/snmp-walk", requirePermission("assetsProbe", "write"), async (req, res, next) => {
+router.post("/:id/snmp-walk", requirePermission("assetsProbe", "read"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const parsed = SnmpWalkSchema.safeParse(req.body);
@@ -5379,16 +5381,21 @@ router.delete("/:id/dependencies/override", requirePermission("assets", "write")
 // `asset.dependency_test.expired`. Manual clear via DELETE writes
 // `asset.dependency_test.cleared`.
 //
-// Strictly admin-only — assets-admin and network-admin do NOT have access.
-// The simulation can briefly mask a real outage (any monitored child of the
-// test target gets marked dependencySuppressed even if it's also genuinely
-// failing), so we keep the privilege narrow.
+// Gated `assetMonitorSettings=fullwrite` — admin-only in every built-in
+// role. The simulation can briefly mask a real outage (any monitored child of
+// the test target gets marked dependencySuppressed even if it's also
+// genuinely failing), so we keep the privilege narrow. It used to sit on
+// `assetsProbe=write`, which did NOT deliver that: network-admin,
+// assets-admin and even the plain `user` role all hold that level. And when
+// `assetsProbe` became a read-only key (a probe writes nothing; this does —
+// it stamps `dependencyTestUntil`) there was no level left there to express
+// "admin only" at all.
 
 const dependencyTestSchema = z.object({
   durationMinutes: z.number().int().min(1).max(240).default(30),
 });
 
-router.post("/:id/dependency-test", requirePermission("assetsProbe", "write"), async (req, res, next) => {
+router.post("/:id/dependency-test", requirePermission("assetMonitorSettings", "fullwrite"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const { durationMinutes } = dependencyTestSchema.parse(req.body ?? {});
@@ -5436,7 +5443,7 @@ router.post("/:id/dependency-test", requirePermission("assetsProbe", "write"), a
   }
 });
 
-router.delete("/:id/dependency-test", requirePermission("assetsProbe", "write"), async (req, res, next) => {
+router.delete("/:id/dependency-test", requirePermission("assetMonitorSettings", "fullwrite"), async (req, res, next) => {
   try {
     const id = req.params.id as string;
     const asset = await prisma.asset.findUnique({
@@ -5668,7 +5675,21 @@ const BulkAgentInstallSchema = z.object({
 }).refine((b) => b.sshCredentialId || b.winrmCredentialId, {
   message: "Provide at least one credential (SSH and/or WinRM)",
 });
-router.post("/bulk-agent-install", requirePermission("assets", "write"), async (req, res, next) => {
+// ─── Polaris Agent deployment (assets=fullwrite) ─────────────────────────
+//
+// Every verb that PUSHES, REPLACES or REMOVES the agent on a host is gated
+// one notch above the rest of this router: `assets=fullwrite`, not `write`.
+// Deploying the agent runs an installer on someone else's machine over a
+// stored SSH / WinRM credential and leaves a service behind — a materially
+// different act from editing an inventory record, and the one action on the
+// assets key that reaches outside Polaris to change a host. Built-in roles:
+// admin only (assets=fullwrite); `assetsadmin` keeps full inventory editing
+// at `write` and no longer reaches deployment. Reads (GET /:id/agent, GET
+// /agent-install-scripts) stay at `read` — an operator who cannot deploy can
+// still see what is installed. The client hides these controls behind
+// canDeployAgent() in public/js/app.js; keep the two in lockstep.
+
+router.post("/bulk-agent-install", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const input = BulkAgentInstallSchema.parse(req.body);
     const actor = requestActor(req) || "unknown";
@@ -5734,7 +5755,7 @@ router.get("/:id/agent", requirePermission("assets", "read"), async (req, res, n
   } catch (err) { next(err); }
 });
 
-router.post("/:id/agent/install", requirePermission("assets", "write"), async (req, res, next) => {
+router.post("/:id/agent/install", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
     const body = AgentInstallSchema.parse(req.body);
@@ -5877,7 +5898,7 @@ router.post("/:id/agent/install", requirePermission("assets", "write"), async (r
   } catch (err) { next(err); }
 });
 
-router.post("/:id/agent/retry", requirePermission("assets", "write"), async (req, res, next) => {
+router.post("/:id/agent/retry", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
     const actor = requestActor(req) || "unknown";
@@ -5937,7 +5958,7 @@ router.post("/:id/agent/retry", requirePermission("assets", "write"), async (req
 // which re-pushes the binary + agent.conf and re-runs the installer. The
 // ManagedAgent row and the asset's per-stream *Polling config are kept — an
 // operator wanting a truly clean slate uses force-remove + a fresh install.
-router.post("/:id/agent/reinstall", requirePermission("assets", "write"), async (req, res, next) => {
+router.post("/:id/agent/reinstall", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
     const actor = requestActor(req) || "unknown";
@@ -6007,7 +6028,7 @@ const AgentUpgradeSchema = z.object({
   credentialId: z.string().uuid().optional(),
 });
 
-router.post("/:id/agent/upgrade", requirePermission("assets", "write"), async (req, res, next) => {
+router.post("/:id/agent/upgrade", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
     const body = AgentUpgradeSchema.parse(req.body ?? {});
@@ -6034,7 +6055,7 @@ router.post("/:id/agent/upgrade", requirePermission("assets", "write"), async (r
   } catch (err) { next(err); }
 });
 
-router.delete("/:id/agent", requirePermission("assets", "write"), async (req, res, next) => {
+router.delete("/:id/agent", requirePermission("assets", "fullwrite"), async (req, res, next) => {
   try {
     const assetId = req.params.id as string;
     const actor = requestActor(req) || "unknown";

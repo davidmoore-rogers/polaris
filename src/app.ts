@@ -580,7 +580,12 @@ const pageRequiredPermission: Record<string, PagePermission> = {
   // widget lives).
   "/notifications.html":   { key: "automationManagement", level: "read" },
   "/automations.html":     { key: "automationManagement", level: "read" },
-  "/server-settings.html": { key: "serverSettingsSystem", level: "read" },
+  // `credentials=write` joins the floor with the ownership dimension on that
+  // key (2026-09-04): a role granted "add credentials, edit your own" has to
+  // be able to REACH the Credentials tab, and it lives on this page. The page
+  // JS already hides every other tab from a non-admin, so this widens the
+  // door to exactly the tab the grant is about.
+  "/server-settings.html": { anyOf: [{ key: "serverSettingsSystem", level: "read" }, { key: "credentials", level: "write" }] },
   "/appmap.html":          { key: "applicationMap",       level: "read" },
   // Added 2026-08 alongside the deviceMap=read floor on the /map API mount.
   // Without it a deviceMap=none role could still load the page shell (the nav
