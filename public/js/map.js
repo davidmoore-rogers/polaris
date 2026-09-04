@@ -143,6 +143,7 @@
       iconCreateFunction: clusterIcon,
     });
     map.addLayer(markerCluster);
+    addStatusLegend();
 
     attachRightClickPan();
   }
@@ -347,6 +348,42 @@
         }
       });
     }
+  }
+
+  // Status legend, bottom-left - the Status Map widget's legend
+  // (siteMap.js) on the page that paints the same dots. The widget's stops
+  // at five because its own healthKey has five; monitorClass() below can
+  // return eight, and a swatch an operator can see with no row to read it
+  // against is the thing a legend exists to prevent. Order mirrors
+  // monitorClass's own precedence, worst-verdict-first after Up.
+  // Every color lives in the .fg-marker / .map-legend i palette in map.css
+  // - the swatch is styled by the SAME class the marker carries, so the two
+  // cannot drift.
+  var LEGEND_ENTRIES = [
+    ["monitor-up",          "Up"],
+    ["monitor-degraded",    "Warn"],
+    ["monitor-down",        "Down"],
+    ["monitor-dep-down",    "Dep. Down"],
+    ["monitor-maintenance", "Maint"],
+    ["monitor-passive",     "Passive"],
+    ["monitor-unmonitored", "Unmonitored"],
+    ["monitor-unknown",     "Unknown"],
+  ];
+
+  function addStatusLegend() {
+    var ctl = L.control({ position: "bottomleft" });
+    ctl.onAdd = function () {
+      var div = L.DomUtil.create("div", "map-legend");
+      div.innerHTML = LEGEND_ENTRIES.map(function (e) {
+        return '<span><i class="' + e[0] + '" aria-hidden="true"></i>' + escapeHtml(e[1]) + "</span>";
+      }).join("");
+      // Without this a click on the legend reaches the map underneath - which
+      // in region edit mode drops a polygon vertex behind the panel.
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      return div;
+    };
+    ctl.addTo(map);
   }
 
   function monitorClass(site) {
