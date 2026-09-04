@@ -57,8 +57,10 @@ beforeEach(async () => {
     String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   g.api = {
     serverSettings: {
-      getTagSettings: async () => ({ enforce: false }),
-      listTags: async () => TAGS,
+      // The picker reads the auth-only catalogue route, NOT the registry's own
+      // gated listTags + getTagSettings pair — those 403 for every non-admin
+      // built-in role, which left the picker claiming the install had no tags.
+      tagCatalog: async () => ({ enforce: false, tags: TAGS }),
     },
   };
 

@@ -951,3 +951,40 @@ export async function stripTagAssignments(tagId: string, tagName: string): Promi
   await applyDelta(tagId, tagName, [], ids);
   return ids.length;
 }
+
+/**
+ * The tag REGISTRY as a picker needs it — every row's name, category and
+ * colour, plus the enforce flag that decides whether the picker may offer an
+ * "add new tag" row at all.
+ *
+ * Its own function, and its own route above the `/server-settings` gate,
+ * because the tag picker is rendered by every form that can tag something —
+ * the asset edit form, blocks, subnets — and NONE of those roles need
+ * `serverSettingsSystem`. Reading the catalogue through the registry's own
+ * `GET /server-settings/tags` meant every non-admin role (`user`,
+ * `assetsadmin`, `networkadmin`, `readonly` — all seeded
+ * `serverSettingsSystem: "none"`) 403'd on it, and `_ensureTagCache` swallows
+ * the failure, so the picker rendered "No tags defined yet" at an install with
+ * a full registry and the operator's only way to tag a device was to type a
+ * new tag (which then 403'd on create).
+ *
+ * Deliberately LEAN rather than the registry read with a lower gate: a Tag row
+ * also carries `assetCondition` / `criteria`, the auto-assignment device
+ * filter, which is registry-management detail and stays behind the
+ * management gate. What a picker needs is what an asset row already shows
+ * anyone holding `assets:read`.
+ */
+export async function listTagCatalog(): Promise<{
+  enforce: boolean;
+  tags: { id: string; name: string; category: string; color: string }[];
+}> {
+  const [tags, settings] = await Promise.all([
+    prisma.tag.findMany({
+      orderBy: [{ category: "asc" }, { name: "asc" }],
+      select: { id: true, name: true, category: true, color: true },
+    }),
+    prisma.setting.findUnique({ where: { key: "tagSettings" } }),
+  ]);
+  const value = (settings?.value ?? null) as { enforce?: unknown } | null;
+  return { enforce: value?.enforce === true, tags };
+}

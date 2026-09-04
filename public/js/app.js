@@ -3446,18 +3446,26 @@ function randomTagColor() {
 
 // ─── Tag field (enforced or free-text) ─────────────────────────────────────
 
-var _tagCache = { loaded: false, enforce: false, tags: [] };
+// `failed` is the difference between "this install has no tags" and "we could
+// not find out" — the picker says which, instead of inviting the operator to
+// add a tag to a registry it just couldn't read.
+var _tagCache = { loaded: false, failed: false, enforce: false, tags: [] };
 
 function _ensureTagCache() {
   if (_tagCache.loaded) return Promise.resolve();
-  return Promise.all([
-    api.serverSettings.getTagSettings(),
-    api.serverSettings.listTags(),
-  ]).then(function (results) {
-    _tagCache.enforce = results[0] && results[0].enforce === true;
-    _tagCache.tags = results[1] || [];
+  // ONE read, and deliberately the catalogue route rather than the registry's
+  // own GET /server-settings/tags + /tags/settings pair: those sit behind the
+  // serverSettingsSystem read floor, which every non-admin built-in role is
+  // seeded "none" on, so both calls 403'd and the catch below left the picker
+  // claiming the install had no tags.
+  return api.serverSettings.tagCatalog().then(function (payload) {
+    _tagCache.enforce = !!(payload && payload.enforce === true);
+    _tagCache.tags = (payload && payload.tags) || [];
+    _tagCache.failed = false;
     _tagCache.loaded = true;
   }).catch(function () {
+    _tagCache.tags = [];
+    _tagCache.failed = true;
     _tagCache.loaded = true;
   });
 }
@@ -3484,6 +3492,14 @@ function _tagChipStyle(color, checked) {
     : 'background:' + c + '11;border-color:' + c + '40;color:' + c + '99';
 }
 
+// Creating a registry tag is gated fullwrite on serverSettingsSystem; a failed
+// catalogue read also means we can't offer it (we'd be adding to a list we
+// couldn't show).
+function _canCreateRegistryTags() {
+  if (_tagCache.failed) return false;
+  return typeof permAtLeast === "function" && permAtLeast("serverSettingsSystem", "fullwrite");
+}
+
 /**
  * Build tag field HTML. Call _ensureTagCache() before using this.
  * selected: array of currently selected tag names
@@ -3499,7 +3515,13 @@ function _renderTagChips(selected) {
   var html = '';
 
   if (_tagCache.tags.length === 0) {
-    html += '<p class="hint" style="margin:0">No tags defined yet. Use the form below to add one.</p>';
+    html += '<p class="hint" style="margin:0">' + (
+      _tagCache.failed
+        ? 'Could not load the tag list. Reload the page to try again.'
+        : (_canCreateRegistryTags()
+            ? 'No tags defined yet. Use the form below to add one.'
+            : 'No tags defined yet. An administrator adds them under Server Settings → Tags.')
+    ) + '</p>';
   } else {
     catNames.forEach(function (cat) {
       html += '<div class="tag-picker-category">' +
@@ -3550,7 +3572,12 @@ function tagFieldHTML(selected, opts) {
     _renderTagChips(selected) +
     '</div>';
 
-  if (!_tagCache.enforce) {
+  // Adding a registry row is a server-settings mutation (POST /server-settings
+  // /tags is fullwrite-gated), so only offer it to a caller who holds that
+  // grant — the users.js picker's posture. Everyone else got a "+ Add Tag"
+  // button whose only outcome was a 403 toast, which read as the tag feature
+  // being broken rather than as not theirs.
+  if (!_tagCache.enforce && _canCreateRegistryTags()) {
     var catOptions = '';
     var seenCats = {};
     _tagCache.tags.forEach(function (t) {

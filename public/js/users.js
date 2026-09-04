@@ -1789,15 +1789,17 @@ var _tagList = [];              // registry tag names, category-then-name order
 var _tagByName = {};            // lower(name) → the registry row
 var _tagCatalogLoaded = false;  // false also means "we never read it"
 
-// GET /server-settings/tags sits behind the serverSettingsSystem read floor,
-// which a user administrator may not hold. Same posture as loadRegionList: a
-// failed read leaves the catalogue empty and the picker degrades to the
-// free-text chip input it was before it had a catalogue — never to a claim
-// that the install has no tags.
+// Reads the picker-shaped catalogue route, which is auth-only — the registry's
+// own GET /server-settings/tags sits behind the serverSettingsSystem read
+// floor, which a user administrator may not hold, so this used to skip the read
+// entirely for them. Same posture as loadRegionList either way: a failed read
+// leaves the catalogue empty and the picker degrades to the free-text chip
+// input it was before it had a catalogue — never to a claim that the install
+// has no tags.
 async function loadTagList() {
-  if (typeof permAtLeast === "function" && !permAtLeast("serverSettingsSystem", "read")) return;
   try {
-    var tags = await api.serverSettings.listTags();
+    var payload = await api.serverSettings.tagCatalog();
+    var tags = (payload && payload.tags) || [];
     _tagList = [];
     _tagByName = {};
     (Array.isArray(tags) ? tags : []).forEach(function (t) {

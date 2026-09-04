@@ -1148,6 +1148,10 @@ const api = {
       });
     },
     listTags:    ()       => request("GET", "/server-settings/tags"),
+    // The picker-shaped catalogue (name/category/colour + the enforce flag).
+    // Mounted above the serverSettingsSystem floor that listTags sits behind,
+    // so every role that can tag something can read the tag list.
+    tagCatalog:  ()       => request("GET", "/server-settings/tags/catalog"),
     createTag:   (body)   => request("POST", "/server-settings/tags", body),
     updateTag:   (id, body) => request("PUT", `/server-settings/tags/${id}`, body),
     deleteTag:   (id)     => request("DELETE", `/server-settings/tags/${id}`),

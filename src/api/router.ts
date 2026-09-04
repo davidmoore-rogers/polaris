@@ -239,6 +239,23 @@ router.use("/server-settings/manufacturer-profiles", manufacturerProfilesRouter)
 // they can lock out the operator from the UI if mis-set — so fullwrite is
 // the right floor regardless of the blanket gate's read level.
 router.use("/server-settings/proxy", proxySettingsRouter);
+// The tag REGISTRY's picker-shaped read, declared above the blanket
+// /server-settings gate so it escapes it. The tag picker is rendered by every
+// form that can tag something — the asset edit form, blocks, subnets — and
+// none of those roles hold serverSettingsSystem (every non-admin built-in is
+// seeded "none"), so reading the catalogue through the registry's own
+// GET /server-settings/tags 403'd for all of them and the picker rendered
+// "No tags defined yet" at an install with a full registry. Auth-only, the
+// /monitor-settings-reads precedent: this returns name / category / colour,
+// which every asset, block and subnet row already shows its reader. The
+// registry's own routes — including the auto-assignment device filter on each
+// row — stay behind the gate below.
+router.get("/server-settings/tags/catalog", async (_req, res, next) => {
+  try {
+    const { listTagCatalog } = await import("../services/tagAssignmentService.js");
+    res.json(await listTagCatalog());
+  } catch (err) { next(err); }
+});
 // Blanket /server-settings gate: serverSettingsSystem read floor for the
 // whole surface. Mutating routes inside additionally carry per-route
 // requirePermission escalations (serverSettingsSystem fullwrite for the
