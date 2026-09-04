@@ -28,13 +28,14 @@
  * the ambiguity underneath both failures. Same serial + new name is a rename
  * and re-points silently; a new serial raises this.
  *
- * WHAT IT DELIBERATELY DOES NOT DO (yet)
- * Raising is ADDITIVE. The old chassis's subnet + reservations are COPIED into
- * the archive (`snapshotSubnet`) and the live rows are left exactly as they
- * are. Nothing is deleted, released or re-pushed on the strength of an
- * automatic detection, so the worst a false positive can cost is one card and
- * one archive row. Per-line migration onto the new gate — the part that writes
- * — is the second phase and lives behind an explicit operator action.
+ * RAISING IS ADDITIVE; MIGRATING IS THE EXPLICIT ACT
+ * Raising COPIES the old chassis's subnet + reservations into the archive
+ * (`snapshotSubnet`) and leaves the live rows exactly as they are. Nothing is
+ * deleted, released or re-pushed on the strength of an automatic detection, so
+ * the worst a false positive can cost is one card and one archive row.
+ * `migrateArchivedReservations` is the operator-driven half that WRITES — see
+ * its block comment for why every migrated row lands `manual` and why the push
+ * is queued rather than sent inline.
  *
  * LIFECYCLE
  *   raise      — one pending Conflict per SUBNET, keyed on the (old, new)
@@ -48,6 +49,11 @@
  *                variant.
  *   reject     — dismiss. The rejected row is the dedup marker: the SAME serial
  *                pair never re-raises, a different one does.
+ *   migrate    — `migrateArchivedReservations`: carry chosen addresses' OLD
+ *                reservations onto the live subnet. Independent of accept, and
+ *                deliberately does NOT close the conflict — an operator can
+ *                migrate a few lines, look again, and migrate more, so the diff
+ *                has to stay reachable until they adopt the chassis.
  *
  * The stored serial is deliberately NOT re-pointed at raise time. While the
  * conflict is pending, `Subnet.fortigateSerial` still names the chassis Polaris
@@ -61,6 +67,8 @@ import { AppError } from "../utils/errors.js";
 import { logEvent } from "./eventLogService.js";
 import { normalizeSerial } from "../utils/chassisIdentity.js";
 import { DEVICE_OWNED_SOURCE_TYPES } from "./reservationService.js";
+import { integrationPushEnabled } from "./reservationPushService.js";
+import { chunkArray } from "../utils/chunk.js";
 import { getArchivedSubnet } from "./subnetArchiveService.js";
 
 export const CHASSIS_REPLACED_COLLISION_REASON = "chassis-replaced";
@@ -117,13 +125,50 @@ export interface ChassisDiffLine {
   new: DiffSide | null;
   /**
    * Whether an operator may carry the OLD line onto the new gate. False when
-   * there is no old line, and false for a device-owned row (`vip` /
-   * `interface_ip`) — the new gate's own config states those, so writing
-   * Polaris's memory of the dead box over them would be backwards.
+   * there is no old line, and false for every source type that is not a
+   * DELIBERATE assignment the new box is missing — see MIGRATABLE_SOURCE_TYPES.
    */
   migratable: boolean;
   /** Present when `migratable` is false and an old line exists. */
-  notMigratableReason?: "device-owned";
+  notMigratableReason?: NotMigratableReason;
+}
+
+export type NotMigratableReason = "device-owned" | "observed" | "device-managed";
+
+/**
+ * The only two source types worth carrying onto a replacement chassis.
+ *
+ * Migration answers "the new box does not know about an assignment somebody
+ * MADE". That is exactly `manual` (an operator reserved it) and
+ * `dhcp_reservation` (a MAC→IP binding configured on the old gate). Everything
+ * else is excluded for a reason of its own, and each reason matters:
+ *
+ *   • `vip` / `interface_ip` — DEVICE-OWNED. Read-only in Polaris everywhere
+ *     else, and the new gate's own config states them. Migrating one would
+ *     write Polaris's memory of a dead box over a live device's truth.
+ *   • `dhcp_lease` / `dns_resolved` — OBSERVED, not assigned. A lease is a
+ *     sighting of a client that may not even be there any more, and a
+ *     dns_resolved row is a fallback marker. The new gate will observe its own;
+ *     turning an old observation into a reservation would invent an assignment
+ *     nobody made.
+ *   • `fortiswitch` / `fortinap` / `fortimanager` / `fortigate` — DEVICE-MANAGED
+ *     infrastructure addresses. Those devices are still on the wire and the new
+ *     gate re-discovers them within a cycle, so migrating is at best a no-op
+ *     and at worst fights rule 23's give-the-address-back lifecycle.
+ */
+export const MIGRATABLE_SOURCE_TYPES: ReadonlySet<string> = new Set([
+  "manual",
+  "dhcp_reservation",
+]);
+
+const OBSERVED_SOURCE_TYPES: ReadonlySet<string> = new Set(["dhcp_lease", "dns_resolved"]);
+
+/** Why this old line cannot be carried forward, or null when it can. */
+export function notMigratableReasonFor(sourceType: string): NotMigratableReason | null {
+  if (MIGRATABLE_SOURCE_TYPES.has(sourceType)) return null;
+  if (DEVICE_OWNED_SOURCE_TYPES.has(sourceType)) return "device-owned";
+  if (OBSERVED_SOURCE_TYPES.has(sourceType)) return "observed";
+  return "device-managed";
 }
 
 /** Fields whose disagreement makes a line `differs` rather than `same`. */
@@ -168,15 +213,16 @@ export function diffReservationLines(
       verdict = COMPARED_FIELDS.every((f) => (o[f] ?? null) === (n[f] ?? null)) ? "same" : "differs";
     } else continue; // unreachable — a key comes from one side or the other
 
-    const deviceOwned = !!o && DEVICE_OWNED_SOURCE_TYPES.has(o.sourceType);
-    const migratable = !!o && !deviceOwned;
+    const refusal = o ? notMigratableReasonFor(o.sourceType) : null;
     out.push({
       ip,
       verdict,
       old: o,
       new: n,
-      migratable,
-      ...(o && deviceOwned ? { notMigratableReason: "device-owned" as const } : {}),
+      // No old line means nothing to carry forward — a different thing from
+      // being refused, so it carries no reason.
+      migratable: !!o && refusal === null,
+      ...(refusal ? { notMigratableReason: refusal } : {}),
     });
   }
   return out;
@@ -377,6 +423,191 @@ export async function rejectChassisReplacement(conflict: any, actor?: string): P
       : "Chassis-replacement conflict dismissed",
     details: payload ? { ...payload } : undefined,
   });
+}
+
+// ─── Migration: carry chosen old lines onto the new chassis ─────────────────
+//
+// The part that WRITES, and the reason raising is additive: an automatic
+// detection archives a copy and stops, and this is the explicit operator act
+// that changes live data.
+//
+// Every migrated row lands as `sourceType: "manual"` with `dhcpBinding: null`,
+// whatever the archived row was. Two reasons, and they agree:
+//   • Only a `manual` row is pushable at all — `pushReservations` pushes manual
+//     rows, and discovery flips one to `dhcp_reservation` when it later sees it
+//     on the device. Landing as `dhcp_reservation` would produce a row claiming
+//     the gate serves an address the gate has never heard of.
+//   • With push DISABLED the claim is Polaris's alone, which `manual` +
+//     `dhcpBinding: null` states exactly (business rule 23's split: sourceType
+//     is who owns it, dhcpBinding is how the gate hands it out — and no gate is
+//     handing this out).
+//
+// Pushing is DEFERRED, never inline: the row is queued (`pushStatus: "pending"`
+// + `pushQueuedAt`) and `retryQueuedReservationPushes` drains it. A brand-new
+// gate is exactly the device most likely to be unreachable for a few minutes,
+// and an operator's migrate must not fail on that.
+
+export interface MigrateOutcome {
+  created: number;
+  updated: number;
+  queuedForPush: number;
+  skipped: Array<{ ip: string; reason: string }>;
+}
+
+/**
+ * Carry the named addresses' OLD reservations onto the live (new-chassis)
+ * subnet.
+ *
+ * `only-old` lines are CREATED; `same` / `differs` lines UPDATE the live row in
+ * place — which is what the unique index on (subnetId, ipAddress, status)
+ * requires, and what "overwrite from the old subnet to the new one" means.
+ */
+export async function migrateArchivedReservations(
+  conflict: { id: string; subnetId: string | null; proposedSubnetFields: unknown },
+  ips: readonly string[],
+  opts: { actor?: string | null } = {},
+): Promise<MigrateOutcome> {
+  const payload = conflict.proposedSubnetFields as ChassisReplacedPayload | null;
+  if (!payload?.archivedSubnetId) {
+    throw new AppError(409, "This conflict carries no archived chassis snapshot to migrate from");
+  }
+  if (!conflict.subnetId) {
+    throw new AppError(409, "This conflict's subnet no longer exists, so there is nothing to migrate onto");
+  }
+
+  const subnet = await prisma.subnet.findUnique({
+    where: { id: conflict.subnetId },
+    include: { integration: { select: { type: true, config: true } } },
+  });
+  if (!subnet) throw new AppError(409, "This conflict's subnet no longer exists");
+
+  const archived = await getArchivedSubnet(payload.archivedSubnetId);
+  const archivedByIp = new Map(
+    archived.reservations.filter((r) => r.ipAddress).map((r) => [r.ipAddress as string, r]),
+  );
+
+  const requested = Array.from(new Set(ips.map((ip) => ip.trim()).filter(Boolean)));
+  if (requested.length === 0) throw new AppError(400, "No addresses were selected to migrate");
+
+  const liveRows = await prisma.reservation.findMany({
+    where: { subnetId: subnet.id, ipAddress: { in: requested }, status: "active" },
+    select: { id: true, ipAddress: true },
+  });
+  const liveByIp = new Map(liveRows.map((r) => [r.ipAddress as string, r]));
+
+  // Push eligibility is a property of the SUBNET's integration, resolved once.
+  const pushEligible =
+    integrationPushEnabled(subnet.integration) && !!subnet.fortigateDevice;
+  const pushFields = pushEligible
+    ? {
+        pushedToId: subnet.discoveredBy,
+        pushStatus: "pending",
+        pushQueuedAt: new Date(),
+        pushAttempts: 0,
+        pushLastAttemptAt: null,
+        pushError: null,
+        // The old chassis's pointers are never carried (they aren't even
+        // archived) — an entry id on a box that no longer exists.
+        pushedScopeId: null,
+        pushedEntryId: null,
+        pushedAt: null,
+      }
+    : {
+        pushedToId: null,
+        pushStatus: null,
+        pushQueuedAt: null,
+        pushAttempts: 0,
+        pushLastAttemptAt: null,
+        pushError: null,
+        pushedScopeId: null,
+        pushedEntryId: null,
+        pushedAt: null,
+      };
+
+  const out: MigrateOutcome = { created: 0, updated: 0, queuedForPush: 0, skipped: [] };
+  const ops: any[] = [];
+  const migratedIps: string[] = [];
+
+  for (const ip of requested) {
+    const old = archivedByIp.get(ip);
+    if (!old) {
+      out.skipped.push({ ip, reason: "not-in-archive" });
+      continue;
+    }
+    const refusal = notMigratableReasonFor(String(old.sourceType));
+    if (refusal) {
+      out.skipped.push({ ip, reason: refusal });
+      continue;
+    }
+
+    const carried = {
+      hostname: old.hostname,
+      owner: old.owner,
+      projectRef: old.projectRef,
+      notes: old.notes,
+      macAddress: old.macAddress,
+      expiresAt: old.expiresAt,
+      // See the block comment above: always manual, never a binding claim.
+      sourceType: "manual" as const,
+      dhcpBinding: null,
+      status: "active" as const,
+      ...pushFields,
+    };
+
+    const live = liveByIp.get(ip);
+    if (live) {
+      ops.push(prisma.reservation.update({ where: { id: live.id }, data: carried }));
+      out.updated += 1;
+    } else {
+      ops.push(
+        prisma.reservation.create({
+          data: {
+            subnetId: subnet.id,
+            ipAddress: ip,
+            createdBy: old.createdBy ?? opts.actor ?? null,
+            ...carried,
+          },
+        }),
+      );
+      out.created += 1;
+    }
+    migratedIps.push(ip);
+    if (pushEligible) out.queuedForPush += 1;
+  }
+
+  // Chunked so a whole-/24 migration doesn't build one enormous statement list.
+  for (const batch of chunkArray(ops, 100)) {
+    await prisma.$transaction(batch);
+  }
+
+  if (migratedIps.length > 0) {
+    void logEvent({
+      action: "subnet.chassis.reservations_migrated",
+      resourceType: "subnet",
+      resourceId: subnet.id,
+      resourceName: payload.cidr,
+      actor: opts.actor ?? undefined,
+      message:
+        `Migrated ${migratedIps.length} reservation(s) from FortiGate chassis ${payload.oldSerial} ` +
+        `onto ${payload.newSerial} for ${payload.cidr}` +
+        (pushEligible
+          ? ` — queued for push to "${subnet.fortigateDevice}"`
+          : " — Polaris-only (DHCP push is off for this integration)"),
+      details: {
+        ...payload,
+        conflictId: conflict.id,
+        created: out.created,
+        updated: out.updated,
+        queuedForPush: out.queuedForPush,
+        // One Event for the batch (the subnet.bulk-allocated convention), but
+        // it names every address so the audit trail is specific.
+        ips: migratedIps,
+        skipped: out.skipped,
+      },
+    });
+  }
+
+  return out;
 }
 
 /** Pending chassis conflicts, newest first — for the review surface. */

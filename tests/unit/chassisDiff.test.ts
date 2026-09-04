@@ -9,10 +9,12 @@
  *   1. A line's VERDICT. `only-old` is the interesting one — an address the
  *      replacement does not know about, which is exactly what an operator has
  *      to decide about. `only-new` is the new box's own config arriving.
- *   2. WHAT MAY BE MIGRATED. A `vip` or `interface_ip` row is owned by the
- *      device's own config (they are read-only in Polaris everywhere else), so
- *      "migrating" one would mean writing Polaris's memory of a dead box over a
- *      live device's truth. Those lines are shown and never offered.
+ *   2. WHAT MAY BE MIGRATED. Only `manual` and `dhcp_reservation` — the two
+ *      source types that represent an assignment somebody MADE and the new box
+ *      is missing. Everything else is refused for a reason of its own
+ *      (`device-owned` / `observed` / `device-managed`), and each refused line
+ *      is still SHOWN, because hiding it would leave an operator wondering
+ *      where an address they remember went.
  */
 
 import { describe, it, expect } from "vitest";
@@ -81,8 +83,20 @@ describe("diffReservationLines — verdicts", () => {
   });
 });
 
-describe("diffReservationLines — device-owned lines", () => {
-  it.each(["vip", "interface_ip"])("a %s line is never migratable", (sourceType) => {
+describe("diffReservationLines — what may be carried forward", () => {
+  // Migration answers "the new box does not know about an assignment somebody
+  // MADE". Only two source types are that; each exclusion below has its own
+  // reason, and collapsing them into one "not migratable" would lose it.
+  it.each(["manual", "dhcp_reservation"])("a %s line IS migratable", (sourceType) => {
+    const lines = diffReservationLines([row({ ipAddress: "10.1.1.65", sourceType })], []);
+    expect(lines[0]).toMatchObject({ migratable: true });
+    expect(lines[0]!.notMigratableReason).toBeUndefined();
+  });
+
+  it.each(["vip", "interface_ip"])("a %s line is device-owned and never migratable", (sourceType) => {
+    // Read-only in Polaris everywhere else; the NEW gate's own config states
+    // these, so carrying one forward would write Polaris's memory of a dead box
+    // over a live device's truth.
     const lines = diffReservationLines([row({ ipAddress: "10.1.1.70", sourceType })], []);
     expect(lines[0]).toMatchObject({
       verdict: "only-old",
@@ -91,10 +105,32 @@ describe("diffReservationLines — device-owned lines", () => {
     });
   });
 
-  it("a device-owned line still appears, so the card can show it", () => {
-    const lines = diffReservationLines([row({ ipAddress: "10.1.1.71", sourceType: "vip" })], []);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]!.old?.sourceType).toBe("vip");
+  it.each(["dhcp_lease", "dns_resolved"])("a %s line is observed, not assigned", (sourceType) => {
+    // A lease is a sighting of a client that may not even be there any more.
+    // Turning one into a reservation would invent an assignment nobody made.
+    const lines = diffReservationLines([row({ ipAddress: "10.1.1.75", sourceType })], []);
+    expect(lines[0]).toMatchObject({ migratable: false, notMigratableReason: "observed" });
+  });
+
+  it.each(["fortiswitch", "fortinap", "fortimanager", "fortigate"])(
+    "a %s line is device-managed infrastructure",
+    (sourceType) => {
+      // Those devices are still on the wire; the new gate re-discovers them
+      // within a cycle, and migrating fights rule 23's give-it-back lifecycle.
+      const lines = diffReservationLines([row({ ipAddress: "10.1.1.76", sourceType })], []);
+      expect(lines[0]).toMatchObject({ migratable: false, notMigratableReason: "device-managed" });
+    },
+  );
+
+  it("a refused line still APPEARS, so the card can show it", () => {
+    // Shown and not offered. Hiding them would leave an operator wondering
+    // where an address they remember went.
+    for (const sourceType of ["vip", "dhcp_lease", "fortiswitch"]) {
+      const lines = diffReservationLines([row({ ipAddress: "10.1.1.71", sourceType })], []);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.old?.sourceType).toBe(sourceType);
+      expect(lines[0]!.migratable).toBe(false);
+    }
   });
 
   it("notMigratableReason is absent on an ordinary non-migratable line", () => {

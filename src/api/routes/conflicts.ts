@@ -33,7 +33,10 @@ import {
   rejectConflict,
   type ConflictEntityType,
 } from "../../services/conflictResolutionService.js";
-import { buildChassisDiff } from "../../services/subnetChassisConflictService.js";
+import {
+  buildChassisDiff,
+  migrateArchivedReservations,
+} from "../../services/subnetChassisConflictService.js";
 import {
   reassignDuplicateIpAsset,
   mergeDuplicateIpAssets,
@@ -112,6 +115,51 @@ router.get("/:id/chassis-diff", async (req, res, next) => {
       throw new AppError(400, "This conflict is not a subnet chassis replacement");
     }
     res.json(await buildChassisDiff(conflict));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/conflicts/:id/migrate-reservations — subnet chassis conflicts
+// only. Body: `{ ips: [...], adopt?: boolean }`.
+//
+// Carries the named addresses' OLD (archived) reservations onto the live
+// subnet: `only-old` lines are created, `same`/`differs` lines update the live
+// row in place. Every migrated row lands `sourceType: "manual"` with
+// `dhcpBinding: null` and, where the integration's DHCP push is on, queued
+// (`pushStatus: "pending"`) for `retryQueuedReservationPushes` to send — never
+// pushed inline, because a brand-new gate is exactly the device most likely to
+// be briefly unreachable and an operator's migrate must not fail on that.
+//
+// CHAINED gate — `discoveryConflicts:write` AND `reservations:write` (the
+// /reassign-ip precedent): resolving conflict queue entries and creating
+// reservations are separable grants, and this verb needs both.
+//
+// `adopt: true` additionally runs the normal accept, closing the conflict and
+// stamping the new serial. Omitted, the conflict stays open on purpose — an
+// operator may migrate a few lines, look again, and migrate more.
+router.post("/:id/migrate-reservations", async (req, res, next) => {
+  try {
+    const conflict = await loadPendingConflict(req.params.id);
+    if (conflict.entityType !== "subnet") {
+      throw new AppError(400, "Reservation migration is only supported for subnet chassis conflicts");
+    }
+    if (!canResolve(req)) {
+      throw new AppError(403, "You do not have permission to resolve this conflict");
+    }
+    if (!hasPermission(req, "reservations", "write")) {
+      throw new AppError(403, "You do not have permission to create reservations");
+    }
+    const ips = Array.isArray(req.body?.ips)
+      ? req.body.ips.filter((v: unknown): v is string => typeof v === "string")
+      : [];
+    if (ips.length === 0) throw new AppError(400, "ips must be a non-empty array of addresses");
+
+    const actor = requestActor(req);
+    const outcome = await migrateArchivedReservations(conflict, ips, { actor });
+    if (req.body?.adopt === true) await acceptConflict(conflict, actor);
+
+    res.json({ ok: true, ...outcome, adopted: req.body?.adopt === true });
   } catch (err) {
     next(err);
   }

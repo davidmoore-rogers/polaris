@@ -29,6 +29,7 @@ import {
   raiseChassisReplacedConflict,
   acceptChassisReplacement,
   buildChassisDiff,
+  migrateArchivedReservations,
 } from "../../src/services/subnetChassisConflictService.js";
 import { createSubnetRowChecked } from "../../src/services/subnetService.js";
 
@@ -55,6 +56,8 @@ beforeEach(async () => {
   await prisma.reservation.deleteMany();
   await prisma.subnet.deleteMany();
   await prisma.ipBlock.deleteMany();
+  await prisma.integration.deleteMany();
+  await prisma.event.deleteMany({ where: { action: { startsWith: "subnet.chassis" } } });
 });
 
 async function seed(opts: { cidr?: string; serial?: string | null } = {}) {
@@ -278,5 +281,148 @@ d("chassis-replacement conflict", () => {
     await raise(subnet.id, block.id);
     const after = await prisma.subnet.findUniqueOrThrow({ where: { id: subnet.id } });
     expect(after.fortigateSerial).toBe(OLD_SN);
+  });
+});
+
+d("chassis-replacement — migrating reservations onto the new gate", () => {
+  /** Raise a conflict, then replace the live rows with what the new gate reports. */
+  async function replaced(opts: { push?: boolean } = {}) {
+    const { block, subnet } = await seed();
+    const snap = await snapshotSubnet(subnet.id, { reason: "chassis-replaced", actor: null });
+    await raiseChassisReplacedConflict({
+      subnetId: subnet.id,
+      cidr: "10.77.1.0/24",
+      blockId: block.id,
+      oldSerial: OLD_SN,
+      newSerial: NEW_SN,
+      archivedSubnetId: snap.archivedSubnetId,
+    });
+
+    if (opts.push) {
+      const integration = await prisma.integration.create({
+        data: {
+          name: "Test FMG",
+          type: "fortimanager",
+          config: { host: "fmg.invalid", pushReservations: true },
+        },
+      });
+      await prisma.subnet.update({
+        where: { id: subnet.id },
+        data: { discoveredBy: integration.id },
+      });
+    }
+
+    // The new gate knows about one of the old addresses (with a different
+    // hostname) and nothing else.
+    await prisma.reservation.deleteMany({ where: { subnetId: subnet.id } });
+    await prisma.reservation.create({
+      data: {
+        subnetId: subnet.id, ipAddress: "10.77.1.10", hostname: "whatever-the-new-box-says",
+        sourceType: "dhcp_lease", status: "active",
+      },
+    });
+
+    const conflict = await prisma.conflict.findFirstOrThrow({ where: { entityType: "subnet" } });
+    return { block, subnet, conflict };
+  }
+
+  it("creates an only-old line and updates a colliding one in place", async () => {
+    const { subnet, conflict } = await replaced();
+
+    const out = await migrateArchivedReservations(conflict, ["10.77.1.10", "10.77.1.11"], {
+      actor: "tester",
+    });
+    expect(out).toMatchObject({ created: 1, updated: 1 });
+
+    const rows = await prisma.reservation.findMany({
+      where: { subnetId: subnet.id }, orderBy: { ipAddress: "asc" },
+    });
+    const byIp = new Map(rows.map((r) => [r.ipAddress, r]));
+    // .10 existed, so it was updated in place — an insert would have violated
+    // the unique index on (subnetId, ipAddress, status).
+    expect(byIp.get("10.77.1.10")).toMatchObject({ hostname: "printer", sourceType: "manual" });
+    expect(byIp.get("10.77.1.11")).toMatchObject({ hostname: "cam", sourceType: "manual" });
+  });
+
+  it("lands every migrated row as manual with no DHCP binding claim", async () => {
+    // Only a manual row is pushable, and with push off the claim is Polaris's
+    // alone — which manual + dhcpBinding null states exactly (rule 23's split).
+    const { subnet, conflict } = await replaced();
+    await migrateArchivedReservations(conflict, ["10.77.1.11"], { actor: "tester" });
+    const row = await prisma.reservation.findFirstOrThrow({
+      where: { subnetId: subnet.id, ipAddress: "10.77.1.11" },
+    });
+    expect(row.sourceType).toBe("manual");
+    expect(row.dhcpBinding).toBeNull();
+  });
+
+  it("does not queue a push when the integration has DHCP push off", async () => {
+    const { subnet, conflict } = await replaced();
+    const out = await migrateArchivedReservations(conflict, ["10.77.1.11"], { actor: "tester" });
+    expect(out.queuedForPush).toBe(0);
+    const row = await prisma.reservation.findFirstOrThrow({
+      where: { subnetId: subnet.id, ipAddress: "10.77.1.11" },
+    });
+    expect(row.pushStatus).toBeNull();
+    expect(row.pushQueuedAt).toBeNull();
+  });
+
+  it("QUEUES rather than pushing inline when DHCP push is on", async () => {
+    // A brand-new gate is exactly the device most likely to be briefly
+    // unreachable; the operator's migrate must not fail on that.
+    const { subnet, conflict } = await replaced({ push: true });
+    const out = await migrateArchivedReservations(conflict, ["10.77.1.11"], { actor: "tester" });
+    expect(out.queuedForPush).toBe(1);
+    const row = await prisma.reservation.findFirstOrThrow({
+      where: { subnetId: subnet.id, ipAddress: "10.77.1.11" },
+    });
+    expect(row.pushStatus).toBe("pending");
+    expect(row.pushQueuedAt).not.toBeNull();
+    // Never the dead chassis's pointers.
+    expect(row.pushedScopeId).toBeNull();
+    expect(row.pushedEntryId).toBeNull();
+  });
+
+  it("refuses the non-migratable source types, with a reason each", async () => {
+    const { conflict } = await replaced();
+    // 10.77.1.1 is the old gate's interface address.
+    const out = await migrateArchivedReservations(conflict, ["10.77.1.1", "10.77.1.11"], {
+      actor: "tester",
+    });
+    expect(out.created).toBe(1);
+    expect(out.skipped).toEqual([{ ip: "10.77.1.1", reason: "device-owned" }]);
+  });
+
+  it("skips an address the archive never held", async () => {
+    const { conflict } = await replaced();
+    const out = await migrateArchivedReservations(conflict, ["10.77.1.222"], { actor: "tester" });
+    expect(out).toMatchObject({ created: 0, updated: 0 });
+    expect(out.skipped).toEqual([{ ip: "10.77.1.222", reason: "not-in-archive" }]);
+  });
+
+  it("refuses an empty selection", async () => {
+    const { conflict } = await replaced();
+    await expect(migrateArchivedReservations(conflict, [], {})).rejects.toMatchObject({
+      httpStatus: 400,
+    });
+  });
+
+  it("leaves the conflict OPEN so an operator can migrate in passes", async () => {
+    const { conflict } = await replaced();
+    await migrateArchivedReservations(conflict, ["10.77.1.11"], { actor: "tester" });
+    const after = await prisma.conflict.findUniqueOrThrow({ where: { id: conflict.id } });
+    expect(after.status).toBe("pending");
+  });
+
+  it("writes ONE Event for the batch, naming every address", async () => {
+    const { conflict } = await replaced();
+    await migrateArchivedReservations(conflict, ["10.77.1.10", "10.77.1.11"], { actor: "tester" });
+    // logEvent is fire-and-forget; give it a tick to land.
+    await new Promise((r) => setTimeout(r, 250));
+    const events = await prisma.event.findMany({
+      where: { action: "subnet.chassis.reservations_migrated" },
+    });
+    expect(events).toHaveLength(1);
+    expect((events[0]!.details as any).ips).toEqual(["10.77.1.10", "10.77.1.11"]);
   });
 });

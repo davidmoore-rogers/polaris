@@ -5806,24 +5806,29 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **What it owns:** The `chassis-replaced` Conflict flavour (business rule 41) — the first and only `entityType="subnet"` variant. Raise/refresh/suppress, the per-address diff, and the accept/reject handlers plus their `subnet.chassis.adopted` / `subnet.chassis.dismissed` Events.
 
-**Public API:** `raiseChassisReplacedConflict(input)` → `"raised" | "refreshed" | "suppressed"`, `buildChassisDiff(conflict)`, `diffReservationLines(oldRows, newRows)` (pure), `acceptChassisReplacement`, `rejectChassisReplacement`, `listChassisConflicts`, `CHASSIS_REPLACED_COLLISION_REASON`, and the `ChassisReplacedPayload` / `DiffSide` / `ChassisDiffLine` / `LineVerdict` types.
+**Public API:** `raiseChassisReplacedConflict(input)` → `"raised" | "refreshed" | "suppressed"`, `buildChassisDiff(conflict)`, `diffReservationLines(oldRows, newRows)` (pure), `notMigratableReasonFor(sourceType)` (pure), `migrateArchivedReservations(conflict, ips, opts)`, `acceptChassisReplacement`, `rejectChassisReplacement`, `listChassisConflicts`, `CHASSIS_REPLACED_COLLISION_REASON`, `MIGRATABLE_SOURCE_TYPES`, and the `ChassisReplacedPayload` / `DiffSide` / `ChassisDiffLine` / `LineVerdict` / `NotMigratableReason` / `MigrateOutcome` types.
 
-**Cross-service deps:** subnetArchiveService (`getArchivedSubnet`), reservationService (`DEVICE_OWNED_SOURCE_TYPES`), utils/chassisIdentity (`normalizeSerial`), eventLogService.
+**Cross-service deps:** subnetArchiveService (`getArchivedSubnet`), reservationService (`DEVICE_OWNED_SOURCE_TYPES`), reservationPushService (`integrationPushEnabled`), utils/chassisIdentity (`normalizeSerial`), utils/chunk (`chunkArray`), eventLogService.
 
-**Used by:** `src/services/discovery/discoveryEngine.ts` (raise, from the Phase 1 pass), `src/services/conflictResolutionService.ts` (the `entityType === "subnet"` branch of `acceptConflict` / `rejectConflict`), `src/api/routes/conflicts.ts` (`GET /conflicts/:id/chassis-diff`).
+**Used by:** `src/services/discovery/discoveryEngine.ts` (raise, from the Phase 1 pass), `src/services/conflictResolutionService.ts` (the `entityType === "subnet"` branch of `acceptConflict` / `rejectConflict`), `src/api/routes/conflicts.ts` (`GET /conflicts/:id/chassis-diff`, `POST /conflicts/:id/migrate-reservations`).
 
 **Invariants:**
 - **Dedup is keyed on the (oldSerial, newSerial) PAIR, not the subnet.** A pending row for the same pair refreshes, a REJECTED row for the same pair suppresses, and a different pair — the box swapped twice — raises anew.
 - **Raising never re-points `Subnet.fortigateSerial`.** The pending conflict is the unresolved state, and the stored serial is what keeps the detection derivable from the subnet row rather than dependent on the conflict row surviving. `acceptChassisReplacement` is what moves it; `verdictWritesSerial` returns null for `replaced` to enforce the same thing on the discovery side.
 - **The diff is computed ON READ, never snapshotted.** Discovery syncs subnets in Phase 1 and reservations in Phases 3–5, so a payload built at detection time would compare the old chassis against itself.
-- **`vip` / `interface_ip` lines are shown and never migratable.** They are the new gate's own config to state; migrating one would write Polaris's memory of a dead box over a live device's truth. Sourced from `DEVICE_OWNED_SOURCE_TYPES`, shared with `assertNotDeviceOwned`.
+- **Only `manual` and `dhcp_reservation` are migratable** (`MIGRATABLE_SOURCE_TYPES`) — the two source types that represent an assignment somebody MADE and the new box is missing. The three refusals carry DISTINCT reasons and must not be collapsed: `device-owned` (`vip`/`interface_ip`, from the shared `DEVICE_OWNED_SOURCE_TYPES` — the new gate's own config states them), `observed` (`dhcp_lease`/`dns_resolved` — a sighting is not an assignment), `device-managed` (the four Fortinet infra types — still on the wire, re-discovered within a cycle, and migrating fights rule 23). Refused lines are still returned by the diff, because hiding one leaves an operator hunting for an address they remember.
+- **A colliding address is UPDATED, never inserted.** `@@unique([subnetId, ipAddress, status])` makes an insert at a live address a constraint violation, so `same`/`differs` lines update the live row in place — which is also what "overwrite old onto new" means.
+- **Every migrated row lands `manual` with `dhcpBinding: null`.** Only a `manual` row is pushable (discovery flips it to `dhcp_reservation` once it sees it on the device), and with push off the claim is Polaris's alone — rule 23's split, stated exactly.
+- **The push is QUEUED, never inline** (`pushStatus: "pending"` + `pushQueuedAt`, drained by `retryQueuedReservationPushes`), and the dead chassis's push POINTERS are never carried. A freshly-installed gate is the device most likely to be briefly unreachable; a migrate must not fail on that.
+- **Migrating does not close the conflict.** An operator migrates in passes, so the diff has to stay reachable; `adopt: true` on the route runs the normal accept alongside.
 - **The dispatcher owns the conflict's status.** These handlers must NOT stamp `status`/`resolvedBy`/`resolvedAt` — `conflictResolutionService.acceptConflict`/`rejectConflict` do it after every handler returns, as for the reservation and asset variants.
 - Raise refuses equal or blank serials outright, so a caller cannot manufacture a self-conflict.
 
 **When changing this:**
 - Adding a compared field to the diff? It goes in `COMPARED_FIELDS`, and `tests/unit/chassisDiff.test.ts` has a table-driven case per field — extend it.
 - A second `entityType="subnet"` flavour must add its own `collisionReason` and its own branch in the two dispatchers; `CHASSIS_CONFLICT_WHERE` filters on the reason, not the entity type alone.
-- Migration (Phase 2) must null every push pointer on a carried row and re-queue it (`pushStatus: "pending"` + `pushQueuedAt`) rather than pushing inline — see the reservation-push-lifecycle entry.
+- Adding a source type to `MIGRATABLE_SOURCE_TYPES` is a claim that the new gate is MISSING an assignment somebody made — check it against the three refusal reasons first, and extend the table-driven cases in `tests/unit/chassisDiff.test.ts`.
+- The carried-field list is spelled out inline in `migrateArchivedReservations` (`hostname` / `owner` / `projectRef` / `notes` / `macAddress` / `expiresAt`), deliberately not a spread of the archived row — a spread would carry `status` and the push columns too. A new operator-meaningful `Reservation` column has to be added there by hand.
 
 ---
 
