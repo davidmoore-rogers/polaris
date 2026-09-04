@@ -1321,6 +1321,21 @@ export interface DiscoveryResult {
   switchInventoriedDevices?: string[];
   // Same as above, for the FortiAP managed_ap query.
   apInventoriedDevices?: string[];
+  // Per-gate managed-device MEMBERSHIP, read from the controller own CMDB.
+  // Answers "which switches / APs COULD hang off this gate", which is what
+  // bounds the dependency graph (dependencyTreeService). Deliberately its own
+  // field rather than a second reading of cmdbSwitchSerials: those exist to
+  // PROTECT assets from the decommission sweep, and membership must never
+  // influence any sweep. Optional by design -- absent = unknown = no
+  // constraint, which is what every pre-existing construction site means.
+  managedMembership?: {
+    switches: Array<{ device: string; serial: string }>;
+    aps: Array<{ device: string; serial: string }>;
+    // Gates whose roster read ANSWERED (incl. zero rows). Only for these is an
+    // empty member list the real answer "manages none" rather than "unknown".
+    switchDevices: string[];
+    apDevices: string[];
+  };
   // Devices whose firewall/vip query returned successfully (incl. empty
   // results). Used by syncDhcpSubnets Phase 5b to release stale VIP
   // reservations: a VIP row whose vipInfo.device is in this set but whose
@@ -1763,6 +1778,13 @@ interface FmgDeviceCtx {
     // separate from the row count so an empty-but-real neighbour cache still
     // replaces the stored table.
     didArpQuery: boolean;
+    // Whether each native CMDB roster read ANSWERED. Distinct from the row
+    // count on purpose: cmdbSwitchSerials/cmdbApSerials are empty both when the
+    // read failed and when the gate genuinely manages none, and the dependency
+    // membership constraint has to tell those apart -- an unreadable roster
+    // must mean unknown, never "manages nothing".
+    didSwitchCmdbRoster: boolean;
+    didApCmdbRoster: boolean;
   };
 }
 
@@ -2192,7 +2214,7 @@ async function fmgStepSwitches(ctx: FmgDeviceCtx): Promise<void> {
 
 // Step 3c.5: native-CMDB roster of configured FortiSwitches (decommission protection; runs offline too).
 async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
-  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbSwitchSerials } = ctx;
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbSwitchSerials, flags } = ctx;
     // Step 3c.5: CMDB roster of configured FortiSwitches for this device.
     // Native FMG CMDB read — no /sys/proxy/json wrapper, parallelizes
     // freely. Defensive: a switch that's authorized at FMG but currently
@@ -2216,6 +2238,9 @@ async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
       );
       const swCmdbList = swCmdbRes.result?.[0]?.data;
       if (Array.isArray(swCmdbList)) {
+        // The roster ANSWERED. Zero rows now means "manages no switches",
+        // which is a real answer; a throw below leaves this false = unknown.
+        flags.didSwitchCmdbRoster = true;
         for (const sw of swCmdbList) {
           // The mkey `switch-id` only DEFAULTS to the serial -- FortiLink setups
           // frequently rename it to the hostname, in which case reading it alone
@@ -2284,7 +2309,7 @@ async function fmgStepAps(ctx: FmgDeviceCtx): Promise<void> {
 
 // Step 3d.4: native-CMDB WTP roster (decommission protection + the AP admin-description join; runs offline too).
 async function fmgStepApCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
-  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbApSerials, localAps } = ctx;
+  const { baseUrl, apiUser, apiToken, verifySsl, signal, log, deviceName, localCmdbApSerials, localAps, flags } = ctx;
     // Step 3d.4: CMDB roster of configured FortiAPs (WTPs) for this device.
     // Mirror of Step 3c.5 — native FMG CMDB read, decommission protection
     // for configured-but-currently-offline APs. Best-effort. Also the only
@@ -2312,6 +2337,7 @@ async function fmgStepApCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
       );
       const apCmdbList = apCmdbRes.result?.[0]?.data;
       if (Array.isArray(apCmdbList)) {
+        flags.didApCmdbRoster = true;
         const descriptionBySerial = new Map<string, string>();
         for (const ap of apCmdbList) {
           // FortiAPs are keyed by serial as `wtp-id` in CMDB (matches what
@@ -2679,6 +2705,11 @@ export async function discoverDhcpSubnets(
   // Gates whose live ARP read answered — the delete-replace scope for
   // persistFortigateArpTables. See DiscoveryResult.arpQueriedDevices.
   const arpQueriedDevices = new Set<string>();
+  // Devices whose native CMDB roster read ANSWERED this run. Membership for the
+  // dependency graph is only authoritative for these -- a gate absent here has
+  // an unknown member list, which must never be read as "manages nothing".
+  const cmdbSwitchRosterDevices = new Set<string>();
+  const cmdbApRosterDevices = new Set<string>();
   const fortiSwitches: DiscoveredFortiSwitch[] = [];
   const fortiAps: DiscoveredFortiAP[] = [];
   const vips: DiscoveredVip[] = [];
@@ -2715,6 +2746,9 @@ export async function discoverDhcpSubnets(
     didDhcpReservationsQuery: boolean;
     didDhcpLeasesQuery: boolean;
     didArpQuery: boolean;
+    // Did the native CMDB roster read answer? See the FmgDeviceCtx note.
+    didSwitchCmdbRoster: boolean;
+    didApCmdbRoster: boolean;
   };
   // Top-level aggregates used by syncDhcpSubnets to decommission stale
   // switches/APs only when their controller was reachable.
@@ -2920,6 +2954,11 @@ export async function discoverDhcpSubnets(
             arpTable: fgResult.arpTable,
             cmdbSwitchSerials: fgResult.cmdbSwitchSerials,
             cmdbApSerials: fgResult.cmdbApSerials,
+            // Direct mode reads the gate itself, so its roster knowledge is
+            // whatever fortigateService reported -- carried through rather than
+            // re-derived, so membership means the same thing on both transports.
+            didSwitchCmdbRoster: (fgResult.managedMembership?.switchDevices.length ?? 0) > 0,
+            didApCmdbRoster: (fgResult.managedMembership?.apDevices.length ?? 0) > 0,
             // Direct mode delegates inventory to fortigateService — surface the
             // same per-device "did this query succeed" flags it returns so the
             // decommission sweep behaves identically across transport modes.
@@ -3015,6 +3054,7 @@ export async function discoverDhcpSubnets(
       // actually heard the gate disclaim.
       flags: {
         didInventory: false, didSwitchQuery: false, didApQuery: false,
+        didSwitchCmdbRoster: false, didApCmdbRoster: false,
         didVipQuery: false, didDhcpReservationsQuery: false, didDhcpLeasesQuery: false,
         didArpQuery: false,
       },
@@ -3067,6 +3107,15 @@ export async function discoverDhcpSubnets(
     // protection to assets whose recorded controller IS this gate — an
     // offline gate's cached roster (or a staged replacement gate's cloned
     // config) must never vouch for devices owned by other controllers.
+    // NOT cleared here, deliberately: didSwitchCmdbRoster / didApCmdbRoster.
+    // Those describe whether FMG's own config DB answered, which does not depend
+    // on the device being reachable -- the roster steps run for offline gates
+    // precisely so an unreachable gate still has a known member list. They feed
+    // the dependency membership constraint ONLY and can never authorize a
+    // decommission; the flags that can (didSwitchQuery / didApQuery) are cleared
+    // right below. An offline gate's roster may be stale, but a stale roster
+    // over- or under-lists members, and over-listing merely PERMITS an edge
+    // rather than creating one.
     if (offline) {
       flags.didInventory = false;
       flags.didSwitchQuery = false;
@@ -3081,7 +3130,7 @@ export async function discoverDhcpSubnets(
       flags.didArpQuery = false;
     }
 
-    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory: flags.didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery: flags.didSwitchQuery, didApQuery: flags.didApQuery, didVipQuery: flags.didVipQuery, didDhcpReservationsQuery: flags.didDhcpReservationsQuery, didDhcpLeasesQuery: flags.didDhcpLeasesQuery, didArpQuery: flags.didArpQuery };
+    return { device: localDevice, subnets: localSubnets, interfaceIps: localInterfaceIps, dhcpEntries: localDhcpEntries, deviceInventory: localInventory, didInventory: flags.didInventory, fortiSwitches: localSwitches, fortiAps: localAps, vips: localVips, switchMacTable: localSwitchMacTable, arpTable: localArpTable, cmdbSwitchSerials: localCmdbSwitchSerials, cmdbApSerials: localCmdbApSerials, didSwitchQuery: flags.didSwitchQuery, didApQuery: flags.didApQuery, didVipQuery: flags.didVipQuery, didDhcpReservationsQuery: flags.didDhcpReservationsQuery, didDhcpLeasesQuery: flags.didDhcpLeasesQuery, didArpQuery: flags.didArpQuery, didSwitchCmdbRoster: flags.didSwitchCmdbRoster, didApCmdbRoster: flags.didApCmdbRoster };
   }
 
   // Process up to `concurrency` FortiGates in parallel.
@@ -3155,6 +3204,8 @@ export async function discoverDhcpSubnets(
       if (chunk.didDhcpReservationsQuery)    dhcpReservationsInventoriedDevices.add(chunk.device.name);
       if (chunk.didDhcpLeasesQuery)          dhcpLeasesInventoriedDevices.add(chunk.device.name);
       if (chunk.didArpQuery)                 arpQueriedDevices.add(chunk.device.name);
+      if (chunk.didSwitchCmdbRoster)         cmdbSwitchRosterDevices.add(chunk.device.name);
+      if (chunk.didApCmdbRoster)             cmdbApRosterDevices.add(chunk.device.name);
 
       if (onDeviceComplete) {
         try {
@@ -3334,6 +3385,12 @@ export async function discoverDhcpSubnets(
     switchMacTable,
     arpTable,
     arpQueriedDevices: [...arpQueriedDevices],
+    managedMembership: {
+      switches: cmdbSwitchSerials,
+      aps: cmdbApSerials,
+      switchDevices: [...cmdbSwitchRosterDevices],
+      apDevices: [...cmdbApRosterDevices],
+    },
     cmdbSwitchSerials,
     cmdbApSerials,
     switchInventoriedDevices: [...switchInventoriedDevices],

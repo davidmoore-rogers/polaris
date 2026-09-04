@@ -294,14 +294,19 @@ async function fetchFortiswitchCmdbMeta(
   config: FortiGateConfig,
   queryBase: Record<string, string>,
   signal: AbortSignal | undefined,
-): Promise<Map<string, { uplinkPort: string | null; description: string | null }>> {
+): Promise<{ ok: boolean; meta: Map<string, { uplinkPort: string | null; description: string | null }> }> {
   const out = new Map<string, { uplinkPort: string | null; description: string | null }>();
+  // `ok` marks that the CMDB actually ANSWERED. The map alone cannot say so --
+  // it is empty both on failure and on a gate managing no switches -- and the
+  // dependency membership constraint has to tell those apart.
+  let ok = false;
   try {
     const rows = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/switch-controller/managed-switch", {
       query: { ...queryBase, datasource: "1" },
       signal,
     });
-    if (!Array.isArray(rows)) return out;
+    if (!Array.isArray(rows)) return { ok, meta: out };
+    ok = true;
     for (const row of rows) {
       const serial = String(row?.sn || row?.["switch-id"] || row?.name || "").trim();
       if (!serial) continue;
@@ -313,7 +318,7 @@ async function fetchFortiswitchCmdbMeta(
       });
     }
   } catch { /* best-effort — leave uplinkPhysicalPort/description null, fall back to LLDP */ }
-  return out;
+  return { ok, meta: out };
 }
 
 /**
@@ -332,24 +337,30 @@ async function fetchFortiapDescriptions(
   config: FortiGateConfig,
   queryBase: Record<string, string>,
   signal: AbortSignal | undefined,
-): Promise<Map<string, string>> {
+): Promise<{ ok: boolean; descriptions: Map<string, string>; serials: string[] }> {
   const out = new Map<string, string>();
+  // Every wtp-id seen, not just the ones carrying a description -- the
+  // description map is deliberately sparse, so it can never double as a roster.
+  const serials: string[] = [];
+  let ok = false;
   try {
     const rows = await fgRequest<any[]>(config, "GET", "/api/v2/cmdb/wireless-controller/wtp", {
       query: { ...queryBase, datasource: "1" },
       signal,
     });
-    if (!Array.isArray(rows)) return out;
+    if (!Array.isArray(rows)) return { ok, descriptions: out, serials };
+    ok = true;
     for (const row of rows) {
       const serial = String(row?.["wtp-id"] || "").trim();
       if (!serial) continue;
+      serials.push(serial);
       const location = typeof row?.location === "string" ? row.location.trim() : "";
       const comment = typeof row?.comment === "string" ? row.comment.trim() : "";
       const description = location || comment;
       if (description) out.set(serial.toUpperCase(), description);
     }
   } catch { /* best-effort — leave AP descriptions null */ }
-  return out;
+  return { ok, descriptions: out, serials };
 }
 
 /**
@@ -387,6 +398,15 @@ interface FgtChainCtx {
   switchMacTable: DiscoveredSwitchMacEntry[];
   arpTable: DiscoveredArpEntry[];
   dhcpInterfaceNames: string[];
+  // Per-gate managed-device membership from the gate's own CMDB. See
+  // DiscoveryResult.managedMembership -- this is the standalone half of the
+  // same concept the FMG path reads out of FortiManager's device DB.
+  membership: {
+    switches: Array<{ device: string; serial: string }>;
+    aps: Array<{ device: string; serial: string }>;
+    switchDevices: string[];
+    apDevices: string[];
+  };
   flags: {
     didSwitchQuery: boolean;
     didApQuery: boolean;
@@ -670,7 +690,7 @@ async function fgtChainInventory(ctx: FgtChainCtx): Promise<void> {
 
 // Chain C: managed FortiSwitches (3d) → FortiAPs (3e) → AP→switch-port map (3e.5), serial intra-chain.
 async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
-  const { config, queryBase, signal, log, deviceName, deviceHostname, deviceSerial, fortiSwitches, fortiAps, switchMacTable, flags } = ctx;
+  const { config, queryBase, signal, log, deviceName, deviceHostname, deviceSerial, fortiSwitches, fortiAps, switchMacTable, flags, membership } = ctx;
       // Step 3d: Managed FortiSwitches
       try {
         const swResults = await fgRequest<any[]>(config, "GET", "/api/v2/monitor/switch-controller/managed-switch/status", {
@@ -684,7 +704,19 @@ async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
     // run; serial → single uplink port (skip ambiguous multi-uplink switches,
     // leaving those to LLDP) + description (location codes). Best-effort: a
     // failure just leaves both null and the FG↔switch edge falls back.
-    const cmdbMetaBySerial = await fetchFortiswitchCmdbMeta(config, queryBase, signal);
+    const swCmdb = await fetchFortiswitchCmdbMeta(config, queryBase, signal);
+    const cmdbMetaBySerial = swCmdb.meta;
+    // Membership: the CMDB roster IS the gate's answer to "which switches are
+    // mine". Recorded only when the read answered, so an empty list means
+    // "manages none" rather than "we could not ask". Deliberately kept off
+    // cmdbSwitchSerials, which feeds the decommission sweep -- see the note on
+    // DiscoveryResult.managedMembership.
+    if (swCmdb.ok) {
+      membership.switchDevices.push(deviceName);
+      for (const serial of cmdbMetaBySerial.keys()) {
+        membership.switches.push({ device: deviceName, serial });
+      }
+    }
     let switchCount = 0;
     if (Array.isArray(swResults)) {
       for (const sw of swResults) {
@@ -727,7 +759,14 @@ async function fgtChainSwitchesAps(ctx: FgtChainCtx): Promise<void> {
     if (Array.isArray(apResults)) {
       // AP admin descriptions live in the wtp CMDB (`location`, `comment`
       // fallback), not the monitor endpoint — one extra best-effort read per run.
-      const descriptionBySerial = await fetchFortiapDescriptions(config, queryBase, signal);
+      const apCmdb = await fetchFortiapDescriptions(config, queryBase, signal);
+      const descriptionBySerial = apCmdb.descriptions;
+      if (apCmdb.ok) {
+        membership.apDevices.push(deviceName);
+        for (const serial of apCmdb.serials) {
+          membership.aps.push({ device: deviceName, serial });
+        }
+      }
       for (const ap of apResults) {
         // Shared parser — same shape across FMG proxy and standalone
         // FortiGate REST paths. See utils/fortiapMonitorRow.ts.
@@ -1125,11 +1164,15 @@ export async function discoverDhcpSubnets(
     didDhcpLeasesQuery: false,
     didArpQuery: false,
   };
+  const membership: FgtChainCtx["membership"] = {
+    switches: [], aps: [], switchDevices: [], apDevices: [],
+  };
   const ctx: FgtChainCtx = {
     config, queryBase, signal, log, skipGeoLog,
     deviceName, deviceHostname, deviceSerial, mgmtIfaceName,
     discovered, devices, interfaceIps, dhcpEntries, deviceInventory, inventoryDevices,
     fortiSwitches, fortiAps, vips, switchMacTable, arpTable, dhcpInterfaceNames,
+    membership,
     flags,
   };
 
@@ -1223,6 +1266,10 @@ export async function discoverDhcpSubnets(
     // DiscoveryResult shape; FMG mode uses the dedicated CMDB queries.
     cmdbSwitchSerials: [],
     cmdbApSerials: [],
+    // Membership is its own field precisely so populating it does not change
+    // what the decommission sweep vouches for -- cmdbSwitchSerials/cmdbApSerials
+    // stay empty here for exactly the reason documented above.
+    managedMembership: membership,
     switchInventoriedDevices: flags.didSwitchQuery ? [deviceName] : [],
     apInventoriedDevices:     flags.didApQuery     ? [deviceName] : [],
     vipInventoriedDevices:                 flags.didVipQuery                 ? [deviceName] : [],

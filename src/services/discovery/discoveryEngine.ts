@@ -2024,6 +2024,39 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
   const switchInventoriedDevices = new Set<string>(result.switchInventoriedDevices || []);
   const apInventoriedDevices     = new Set<string>(result.apInventoriedDevices     || []);
 
+  // ── Managed-device membership (dependency graph only) ────────────────────
+  // The controller's own CMDB answer to "which switches / APs are mine",
+  // keyed by FMG device name. Persisted onto the gate's own fortinetTopology
+  // below so `recomputeDependencyTree` can use it OUTSIDE a discovery run --
+  // the boot backfill has no DiscoveryResult to read.
+  //
+  // Deliberately independent of the cmdb*SerialsByDevice maps above: those
+  // vouch for assets against the decommission sweep, and membership must never
+  // influence a sweep. A gate absent from the *Known sets has an UNKNOWN member
+  // list, which is not the same as an empty one.
+  const membershipSwitchByDevice = new Map<string, Set<string>>();
+  const membershipApByDevice     = new Map<string, Set<string>>();
+  for (const e of result.managedMembership?.switches || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = membershipSwitchByDevice.get(key);
+    if (!set) { set = new Set(); membershipSwitchByDevice.set(key, set); }
+    set.add(e.serial.trim().toUpperCase());
+  }
+  for (const e of result.managedMembership?.aps || []) {
+    const key = (e.device || "").toLowerCase();
+    if (!key || !e.serial) continue;
+    let set = membershipApByDevice.get(key);
+    if (!set) { set = new Set(); membershipApByDevice.set(key, set); }
+    set.add(e.serial.trim().toUpperCase());
+  }
+  const membershipSwitchKnown = new Set<string>(
+    (result.managedMembership?.switchDevices || []).map((d) => d.toLowerCase()),
+  );
+  const membershipApKnown = new Set<string>(
+    (result.managedMembership?.apDevices || []).map((d) => d.toLowerCase()),
+  );
+
   // ── Pre-load all data in parallel (5 queries total) ──
   // Asset rows are hydrated with their macAddressRows so the in-memory MAC
   // pipeline (AssetIndex, MAC merges in DHCP / device-inventory / Intune
@@ -2884,6 +2917,25 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
         // targeted write paths (description sync, and any future push) can
         // build a transport without a dvmdb lookup; hostname stays the
         // display identity.
+        // Managed-device membership, stamped on EVERY cluster member: an HA pair
+        // is one logical controller and its switches/APs are cabled to both, so
+        // both rows must carry the same member list (which is also what removes
+        // any need for an HA carve-out in the dependency constraint).
+        //
+        // Only stamped when the roster ANSWERED. Absent means unknown, and the
+        // whole-object replace below is what makes that self-correcting: a run
+        // whose roster read failed simply omits the fields again.
+        const membershipKey = (device.name || fgHostname || "").toLowerCase();
+        const membershipStamp: Record<string, unknown> = {};
+        if (membershipSwitchKnown.has(membershipKey)) {
+          membershipStamp.managedSwitchSerials = [...(membershipSwitchByDevice.get(membershipKey) ?? [])];
+        }
+        if (membershipApKnown.has(membershipKey)) {
+          membershipStamp.managedApSerials = [...(membershipApByDevice.get(membershipKey) ?? [])];
+        }
+        if (Object.keys(membershipStamp).length > 0) {
+          membershipStamp.managedInventoryAt = new Date().toISOString();
+        }
         const memberTopology: Record<string, unknown> = haMembers
           ? {
               role: "fortigate" as const,
@@ -2902,8 +2954,9 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
               // IP-keyed dedup/probe/reservation path assumes one asset per
               // IP, and any probe of this IP reaches the ACTIVE member.
               ...(!member.isPrimary && device.mgmtIp ? { haClusterIp: device.mgmtIp } : {}),
+              ...membershipStamp,
             }
-          : { role: "fortigate" as const, deviceName: device.name || fgHostname };
+          : { role: "fortigate" as const, deviceName: device.name || fgHostname, ...membershipStamp };
         const memberHaCtx = haMembers && member.peerSerial
           ? {
               haMode: clusterMode as "a-p" | "a-a",
