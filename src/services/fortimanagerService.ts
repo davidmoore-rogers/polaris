@@ -14,7 +14,7 @@ import { parseRangeFirstIp, isValidIpv4 } from "../utils/cidr.js";
 import { parseFortiapMonitorRow, FORTIAP_MONITOR_FORMAT } from "../utils/fortiapMonitorRow.js";
 import { inventorySwitchAttribution, INVENTORY_QUERY_FORMAT } from "../utils/inventoryLocality.js";
 import type { ApLldpNeighborSample } from "../utils/fortiapLldp.js";
-import { findFortiswitchUplinkPorts } from "../utils/fortiswitchCmdb.js";
+import { findFortiswitchUplinkPorts, readManagedSwitchCmdbSerial } from "../utils/fortiswitchCmdb.js";
 import { processDetectedDeviceRows, processArpRows } from "../utils/fortinetDetectedDevice.js";
 import { getFmgWorker } from "./fmgWorker.js";
 import { primeArpCache, ARP_SETTLE_MS } from "./arpPrimeService.js";
@@ -2208,7 +2208,7 @@ async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
           method: "get",
           params: [{
             url: `/pm/config/device/${deviceName}/global/switch-controller/managed-switch`,
-            fields: ["switch-id", "name"],
+            fields: ["switch-id", "sn", "name"],
             loadsub: 0,
           }],
         },
@@ -2217,10 +2217,13 @@ async function fmgStepSwitchCmdbRoster(ctx: FmgDeviceCtx): Promise<void> {
       const swCmdbList = swCmdbRes.result?.[0]?.data;
       if (Array.isArray(swCmdbList)) {
         for (const sw of swCmdbList) {
-          // FortiSwitches are keyed by their serial as `switch-id` in CMDB
-          // (matches what the live query reports as `switch-id`). The
-          // optional `name` is the operator-set display label.
-          const serial = typeof sw["switch-id"] === "string" ? sw["switch-id"].trim() : "";
+          // The mkey `switch-id` only DEFAULTS to the serial -- FortiLink setups
+          // frequently rename it to the hostname, in which case reading it alone
+          // collects hostnames and the decommission protection below silently
+          // stops matching. `sn` carries the real serial; see
+          // readManagedSwitchCmdbSerial for the full note. `name` is the
+          // operator-set display label and is never a serial.
+          const serial = readManagedSwitchCmdbSerial(sw);
           if (serial) localCmdbSwitchSerials.push({ device: deviceName, serial });
         }
       }

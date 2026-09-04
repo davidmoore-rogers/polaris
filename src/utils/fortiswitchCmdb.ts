@@ -204,3 +204,30 @@ export function findFortiswitchUplinkPorts(ports: unknown): string[] {
   }
   return out;
 }
+
+// Read a managed FortiSwitch's SERIAL from one managed-switch CMDB row.
+//
+// The table's mkey is `switch-id`, and the long-standing assumption was that it
+// IS the serial. It is only the DEFAULT. FortiLink setups frequently rename it
+// to the switch's hostname -- confirmed on FortiOS 7.6.7, and already documented
+// at descriptionSyncService's matchManagedSwitchRow, which matches on
+// `switch-id` OR `sn` for exactly this reason.
+//
+// On a renamed fleet, reading the mkey alone yields HOSTNAMES. That silently
+// broke the FMG roster's decommission protection: the serials it collected were
+// compared against `Asset.serialNumber` by `isVouchedManagedDevice` and never
+// matched, so a switch authorized at FMG but missing from the live status query
+// was decommissioned instead of protected -- the precise failure that roster
+// exists to prevent (found 2026-09-03 against a live FMG).
+//
+// `sn` first, mkey as the fallback so a fleet that never renamed is unchanged.
+// `name` is deliberately NOT consulted: it is the operator's display label, and
+// accepting it here is how a hostname becomes a serial in the first place.
+export function readManagedSwitchCmdbSerial(row: unknown): string | null {
+  if (!row || typeof row !== "object") return null;
+  const r = row as Record<string, unknown>;
+  const sn = typeof r.sn === "string" ? r.sn.trim() : "";
+  if (sn) return sn;
+  const mkey = typeof r["switch-id"] === "string" ? r["switch-id"].trim() : "";
+  return mkey || null;
+}
