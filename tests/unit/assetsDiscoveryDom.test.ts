@@ -23,7 +23,12 @@
  *    per-group selections are keyed by it and a mismatch would silently pin
  *    nothing;
  *  - the saved-Discovery list's row verbs are gated per key, and a read-level
- *    caller gets Export only.
+ *    caller gets Export only;
+ *  - **a SHARED Discovery someone else owns is runnable but not editable** —
+ *    the visibility cutover's whole point. The Save button and the visibility
+ *    control are both absent on such a row (the route would 403), Delete drops
+ *    off its row menu, and Run stays, because publishing a Discovery exists so
+ *    that somebody else can run it.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
@@ -46,6 +51,8 @@ interface Api {
   emptyDraft: () => Record<string, unknown>;
   groupKeyForHit: (hit: unknown) => string;
   listRowItems: (scan: unknown) => { label?: string; separator?: boolean; onSelect?: () => void }[];
+  ownerCellHtml: (scan: unknown) => string;
+  canEditDraft: (draft: unknown) => boolean;
   METHOD_ORDER: string[];
 }
 
@@ -367,7 +374,7 @@ describe("PolarisAssetDiscovery — permission gating", () => {
 });
 
 describe("PolarisAssetDiscovery — saved list row verbs", () => {
-  const scan = { id: "s1", name: "Ashfield", targets: [], methods: [], latestRun: null };
+  const scan = { id: "s1", name: "Ashfield", targets: [], methods: [], latestRun: null, isOwner: true };
   const labels = (items: { label?: string; separator?: boolean }[]) =>
     items.filter((i) => !i.separator).map((i) => i.label);
 
@@ -391,5 +398,82 @@ describe("PolarisAssetDiscovery — saved list row verbs", () => {
     const D = load({ scan: "write" });
     delete (g.window as any).PolarisDiscoveryPortability;
     expect(labels(D.listRowItems(scan))).toEqual(["Open…", "Run now", "Delete"]);
+  });
+});
+
+describe("PolarisAssetDiscovery — visibility", () => {
+  const theirs = {
+    id: "s9",
+    name: "Ashfield management",
+    visibility: "public",
+    isOwner: false,
+    createdBy: "priya",
+    targets: [{ kind: "cidr", value: "10.4.0.0/29" }],
+    methods: [{ type: "icmp" }],
+  };
+
+  it("offers the visibility control on a new Discovery, defaulting to private", async () => {
+    const D = load({ scan: "write" });
+    await D.open();
+    const sel = doc.getElementById("nd-visibility") as HTMLSelectElement | null;
+    expect(sel).toBeTruthy();
+    // happy-dom mis-parses `<option selected>`, so the marker is read off the
+    // rendered markup rather than off `select.value` (the trap that made an
+    // earlier wizard suite collect the wrong metric).
+    expect(doc.getElementById("nd-step-1")!.innerHTML).toMatch(/value="private" selected/);
+    expect(D.emptyDraft().visibility).toBe("private");
+  });
+
+  it("renders someone else's SHARED Discovery read-only, naming its owner", async () => {
+    const D = load({ scan: "write" });
+    await D.open(theirs);
+    // No control that would be refused, and no Save button behind it.
+    expect(doc.getElementById("nd-visibility")).toBeNull();
+    expect(doc.getElementById("nd-save")).toBeNull();
+    const html = doc.getElementById("nd-step-1")!.innerHTML;
+    expect(html).toMatch(/Shared/);
+    expect(html).toMatch(/priya/);
+  });
+
+  it("still lets that caller RUN it — without saving first", async () => {
+    const D = load({ scan: "write" });
+    await D.open(theirs);
+    (doc.querySelector('#nd-stepper .stepper-step[data-step="4"]') as HTMLElement).click();
+    await new Promise((r) => setTimeout(r, 0));
+    const btn = doc.getElementById("nd-run-btn");
+    expect(btn).toBeTruthy();
+    // The copy has to stop claiming it saves: there is nothing of theirs to save.
+    expect(btn!.textContent).toBe("Start scan");
+    expect(doc.getElementById("nd-step-4")!.innerHTML).toMatch(/belongs to someone else/i);
+  });
+
+  it("hands fullwrite the editing affordances on someone else's row", async () => {
+    const D = load({ scan: "fullwrite" as never });
+    await D.open(theirs);
+    expect(doc.getElementById("nd-save")).toBeTruthy();
+    expect(doc.getElementById("nd-visibility")).toBeTruthy();
+  });
+
+  it("treats an ABSENT isOwner as yours rather than hiding Save", () => {
+    // The server always sends it; a payload without one is not a reason to
+    // silently remove a capability the route would have allowed.
+    const D = load({ scan: "write" });
+    expect(D.canEditDraft({ id: "s1" })).toBe(true);
+    expect(D.canEditDraft({ id: "s1", isOwner: false })).toBe(false);
+    expect(D.canEditDraft({ isOwner: false })).toBe(true); // unsaved: yours by construction
+  });
+
+  it("drops Delete from a shared row's menu but keeps Run", () => {
+    const D = load({ scan: "write" });
+    delete (g.window as any).PolarisDiscoveryPortability;
+    const labels = D.listRowItems({ ...theirs, latestRun: null }).filter((i) => !i.separator).map((i) => i.label);
+    expect(labels).toEqual(["Open…", "Run now"]);
+  });
+
+  it("names the owner in the list's Owner cell", () => {
+    const D = load({ scan: "write" });
+    expect(D.ownerCellHtml({ isOwner: true, visibility: "private", createdBy: "me" })).toBe("You");
+    expect(D.ownerCellHtml({ isOwner: false, visibility: "public", createdBy: "priya" })).toMatch(/^priya .*Shared/);
+    expect(D.ownerCellHtml({ isOwner: true, visibility: "public", createdBy: "me" })).toMatch(/^You .*Shared/);
   });
 });

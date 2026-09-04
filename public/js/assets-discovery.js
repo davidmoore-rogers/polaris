@@ -87,6 +87,11 @@
       id: null,
       name: "",
       description: null,
+      // Private until its author shares it — the saved-filter / saved-dashboard
+      // default. `isOwner` is true by construction on something not saved yet.
+      visibility: "private",
+      isOwner: true,
+      createdBy: null,
       targets: [{ kind: "cidr", value: "" }],
       methods: [{ type: "icmp", credentialIds: [] }],
       autoMonitor: {},
@@ -108,6 +113,24 @@
   }
 
   function canWrite() { return permAtLeast("networkScan", "write"); }
+
+  /**
+   * May the caller SAVE this draft? A new (or imported) Discovery is theirs by
+   * construction; a saved one is theirs only if they own it, with fullwrite as
+   * the housekeeping override — the same rule the route enforces. Mirrored here
+   * so a shared Discovery someone else owns opens with no Save button rather
+   * than with one that 403s.
+   *
+   * An ABSENT `isOwner` reads as yours — the server always sends it, so the
+   * only way here without one is a payload this code didn't shape, and hiding
+   * Save on a row that IS yours silently removes a capability where showing it
+   * merely surfaces the route's own 403. `listRowItems` defaults the same way.
+   */
+  function canEditDraft(draft) {
+    if (!canWrite()) return false;
+    if (!draft || !draft.id) return true;
+    return draft.isOwner !== false || permAtLeast("networkScan", "fullwrite");
+  }
   function canAdopt() { return canWrite() && permAtLeast("assets", "write"); }
   function portability() { return window.PolarisDiscoveryPortability || null; }
 
@@ -224,7 +247,40 @@
         '<div class="form-group">' +
           '<label for="nd-desc">Description <span class="hint" style="margin:0">(optional)</span></label>' +
           '<textarea id="nd-desc" class="form-input" rows="2" maxlength="2000">' + escapeHtml(draft.description || "") + '</textarea>' +
-        '</div>';
+        '</div>' +
+        visibilityHtml();
+    }
+
+    /**
+     * Who this Discovery is for. Private is the default — a half-built sweep of
+     * somebody else's address space is not a thing to publish by accident — and
+     * sharing is the whole reason the control exists: a Discovery one operator
+     * spent an afternoon scoping is one every operator should be able to run.
+     *
+     * Rendered as a read-only line when the caller can't save this row, so a
+     * shared Discovery states its own nature instead of offering a control that
+     * would be refused.
+     */
+    function visibilityHtml() {
+      var vis = draft.visibility === "public" ? "public" : "private";
+      if (!canEditDraft(draft)) {
+        return '<div class="form-group">' +
+          '<label>Visibility</label>' +
+          '<p class="hint" style="margin:0">' +
+            (vis === "public" ? "Shared" : "Private") +
+            (draft.createdBy ? " — created by " + escapeHtml(draft.createdBy) : "") +
+            '. You can run it and add what answers; only its owner can change it.' +
+          '</p></div>';
+      }
+      return '<div class="form-group">' +
+        '<label for="nd-visibility">Who can use this discovery?</label>' +
+        '<select id="nd-visibility" class="form-input">' +
+          '<option value="private"' + (vis === "private" ? " selected" : "") + '>Private — only you</option>' +
+          '<option value="public"' + (vis === "public" ? " selected" : "") + '>Shared — anyone who can run Discoveries</option>' +
+        '</select>' +
+        '<p class="hint" style="margin:0.35rem 0 0 0">Sharing lets other operators run it and adopt what answers. ' +
+          'Editing and deleting stay yours.</p>' +
+      '</div>';
     }
 
     function importNoteHtml() {
@@ -271,8 +327,11 @@
     function collectStep1() {
       var n = document.getElementById("nd-name");
       var d = document.getElementById("nd-desc");
+      var v = document.getElementById("nd-visibility");
       if (n) draft.name = n.value.trim();
       if (d) draft.description = d.value.trim() || null;
+      // Absent when the caller can't edit this row — leave the stored value be.
+      if (v) draft.visibility = v.value === "public" ? "public" : "private";
     }
 
     function validateStep1() {
@@ -532,14 +591,21 @@
       if (!panel) return;
       var run = state || null;
       var canRun = canWrite();
+      // Running a SHARED Discovery you don't own is the point of publishing
+      // one, so the run doesn't save first — there is nothing of yours to save.
+      var savesFirst = canEditDraft(draft);
 
       if (!run) {
         panel.innerHTML =
           stepHead("Run the scan",
-            'Starting saves the Discovery first, so you can re-run it later. You can close this window once it is ' +
-            'going — the scan keeps running, and reopening this step picks it back up.') +
+            savesFirst
+              ? 'Starting saves the Discovery first, so you can re-run it later. You can close this window once it is ' +
+                'going — the scan keeps running, and reopening this step picks it back up.'
+              : 'This Discovery belongs to someone else, so running it changes nothing about it. You can close this ' +
+                'window once it is going — the scan keeps running, and reopening this step picks it back up.') +
           (canRun
-            ? '<button type="button" class="btn btn-primary" id="nd-run-btn">Save &amp; start scan</button>'
+            ? '<button type="button" class="btn btn-primary" id="nd-run-btn">' +
+                (savesFirst ? "Save &amp; start scan" : "Start scan") + '</button>'
             : '<p class="hint" style="color:var(--color-warning)">You don\'t have permission to run a Discovery.</p>') +
           '<div id="nd-run-status" style="margin-top:1rem"></div>';
         var b = document.getElementById("nd-run-btn");
@@ -589,7 +655,7 @@
       var btn = document.getElementById("nd-run-btn");
       if (btn) btn.disabled = true;
       try {
-        await saveDraft({ quiet: true });
+        if (canEditDraft(draft)) await saveDraft({ quiet: true });
         var resp = await api.networkScans.run(draft.id);
         draft.runId = resp.run.id;
         draft.hits = [];
@@ -1003,6 +1069,7 @@
       return {
         name: draft.name,
         description: draft.description,
+        visibility: draft.visibility === "public" ? "public" : "private",
         targets: draft.targets.filter(function (t) { return t.value; }),
         methods: draft.methods,
         autoMonitor: Object.keys(draft.autoMonitor || {}).length ? draft.autoMonitor : null,
@@ -1012,13 +1079,16 @@
     async function saveDraft(o) {
       o = o || {};
       var payload = draftToInput();
-      if (draft.id) {
-        var updated = await api.networkScans.update(draft.id, payload);
-        draft.id = updated.scan.id;
-      } else {
-        var created = await api.networkScans.create(payload);
-        draft.id = created.scan.id;
-      }
+      var saved;
+      if (draft.id) saved = (await api.networkScans.update(draft.id, payload)).scan;
+      else saved = (await api.networkScans.create(payload)).scan;
+      draft.id = saved.id;
+      // Adopt the server's answer for the ownership facts. A brand-new draft
+      // only learns who owns it here, and that is what keeps the Save button
+      // and the visibility control correct for the rest of the session.
+      draft.visibility = saved.visibility === "public" ? "public" : "private";
+      draft.isOwner = saved.isOwner !== false;
+      draft.createdBy = saved.createdBy || draft.createdBy || null;
       if (!o.quiet) showToast(editing ? "Discovery saved." : "Discovery created.", "success");
       if (window._reloadDiscoveries) window._reloadDiscoveries();
     }
@@ -1102,7 +1172,7 @@
       '<button type="button" class="btn btn-secondary" id="nd-cancel">Close</button>' +
       '<button type="button" class="btn btn-secondary" id="nd-back" style="display:none">&larr; Back</button>' +
       '<button type="button" class="btn btn-primary" id="nd-next">Next &rarr;</button>' +
-      (canWrite()
+      (canEditDraft(draft)
         ? '<button type="button" class="btn btn-primary" id="nd-save" style="display:none">' +
             (editing ? "Save changes" : "Save discovery") + "</button>"
         : "");
@@ -1156,6 +1226,10 @@
    * none. Per-row verbs are a `showRowMenu` off the name, and below write level
    * the name renders as plain text rather than a trigger that opens an empty
    * menu (the automations.js convention).
+   *
+   * The list is own + shared (the server scopes it), so it carries an Owner
+   * column: without one, a Discovery somebody else published reads as one you
+   * forgot writing, and the row menu's missing Delete has no explanation.
    */
   async function openList() {
     var scans = [];
@@ -1168,7 +1242,7 @@
         (permAtLeast("networkScan", "write") ? 'Use "+ Add Asset(s) → New discovery" to create one.' : "") + '</p>';
     } else {
       body = '<div class="table-wrapper"><table class="data-table"><thead><tr>' +
-        '<th>Name</th><th>Targets</th><th>Last run</th><th>Result</th>' +
+        '<th>Name</th><th>Owner</th><th>Targets</th><th>Last run</th><th>Result</th>' +
         '</tr></thead><tbody>' +
         scans.map(function (s) {
           var run = s.latestRun;
@@ -1181,6 +1255,7 @@
             ? '<button type="button" class="row-menu-trigger nd-list-name" data-id="' + escapeHtml(s.id) + '" aria-haspopup="menu">' + escapeHtml(s.name) + '</button>'
             : escapeHtml(s.name);
           return '<tr><td>' + nameCell + '</td>' +
+            '<td class="hint">' + ownerCellHtml(s) + '</td>' +
             '<td class="hint">' + escapeHtml((s.targets || []).map(function (t) { return t.value; }).join(", ")) + '</td>' +
             '<td class="hint">' + escapeHtml(when) + '</td>' +
             '<td class="hint">' + escapeHtml(result) + '</td></tr>';
@@ -1200,10 +1275,29 @@
     });
   }
 
-  /** Pure: the per-row verbs, each gated by the key its own route checks. */
+  /**
+   * Who a row belongs to, in one cell: "You" for your own, the author's
+   * username for a shared one, and the word "Shared" as the badge that says
+   * why you can see it at all.
+   */
+  function ownerCellHtml(scan) {
+    var shared = scan && scan.visibility === "public";
+    var who = scan && scan.isOwner ? "You" : ((scan && scan.createdBy) || "unknown");
+    return escapeHtml(who) + (shared ? ' &middot; <span style="color:var(--color-text-tertiary)">Shared</span>' : "");
+  }
+
+  /**
+   * Pure: the per-row verbs, each gated by the key its own route checks — plus,
+   * since the visibility cutover, by whether the row is the caller's. Running
+   * someone else's SHARED Discovery is exactly what publishing one is for, so
+   * Run stays on `write` alone; editing and deleting it are the owner's, with
+   * fullwrite as the housekeeping override. A verb the caller can't use is
+   * OMITTED rather than shown disabled, the `_addAssetMenuItems` rule.
+   */
   function listRowItems(scan) {
     var items = [];
     var writable = permAtLeast("networkScan", "write");
+    var mine = !scan || scan.isOwner !== false || permAtLeast("networkScan", "fullwrite");
     if (writable) {
       items.push({ label: "Open…", onSelect: function () { open(scan).catch(function () {}); } });
       items.push({
@@ -1230,7 +1324,7 @@
         },
       });
     }
-    if (writable) {
+    if (writable && mine) {
       items.push({ separator: true });
       items.push({
         label: "Delete",
@@ -1256,6 +1350,8 @@
     emptyDraft: emptyDraft,
     groupKeyForHit: groupKeyForHit,
     listRowItems: listRowItems,
+    ownerCellHtml: ownerCellHtml,
+    canEditDraft: canEditDraft,
     METHOD_ORDER: METHOD_ORDER,
   };
 })();

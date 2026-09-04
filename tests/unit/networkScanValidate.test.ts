@@ -32,8 +32,11 @@ vi.mock("../../src/services/monitoringService.js", () => ({
 }));
 vi.mock("../../src/services/credentialService.js", () => ({ getCredential: async () => { throw new Error("unused"); } }));
 
-const { validateScanInput, assetTypeForHit, methodKeyForHit, MAX_CREDENTIALS_PER_METHOD, MAX_SCAN_TARGET_ROWS } =
-  await import("../../src/services/networkScanService.js");
+const {
+  validateScanInput, assetTypeForHit, methodKeyForHit,
+  normalizeVisibility, ownsScan, scanVisibleTo,
+  MAX_CREDENTIALS_PER_METHOD, MAX_SCAN_TARGET_ROWS,
+} = await import("../../src/services/networkScanService.js");
 import type { ScanHit } from "../../src/services/networkScanRunner.js";
 
 const base = {
@@ -167,5 +170,39 @@ describe("methodKeyForHit", () => {
 
   it("keys a responder with neither on `unknown` rather than crashing", () => {
     expect(methodKeyForHit({ address: "a", respondedTo: [] })).toBe("unknown");
+  });
+});
+
+describe("visibility predicates", () => {
+  it("treats anything but the literal \"public\" as private", () => {
+    // An unknown value must never OPEN a Discovery up: a typo, a half-written
+    // migration or a future third value all have to fail closed.
+    expect(normalizeVisibility("public")).toBe("public");
+    expect(normalizeVisibility("private")).toBe("private");
+    expect(normalizeVisibility("PUBLIC")).toBe("private");
+    expect(normalizeVisibility(undefined)).toBe("private");
+    expect(normalizeVisibility(null)).toBe("private");
+  });
+
+  it("gives a NULL owner to nobody", () => {
+    // An orphan (deleted account) or a token-created row is owned by no one —
+    // in particular not by the next caller who also happens to have no id,
+    // which is how a bearer token would have inherited every orphan.
+    expect(ownsScan({ ownerId: null }, null)).toBe(false);
+    expect(ownsScan({ ownerId: null }, "u1")).toBe(false);
+    expect(ownsScan({ ownerId: "u1" }, null)).toBe(false);
+    expect(ownsScan({ ownerId: "u1" }, "u1")).toBe(true);
+    expect(ownsScan({ ownerId: "u1" }, "u2")).toBe(false);
+  });
+
+  it("shows a row to its owner and to everyone once it is shared", () => {
+    const mine = { ownerId: "u1", visibility: "private" };
+    const shared = { ownerId: "u1", visibility: "public" };
+    expect(scanVisibleTo(mine, "u1")).toBe(true);
+    expect(scanVisibleTo(mine, "u2")).toBe(false);
+    expect(scanVisibleTo(mine, null)).toBe(false);
+    expect(scanVisibleTo(shared, "u2")).toBe(true);
+    // The session-less caller (a bearer token) sees the public set and no more.
+    expect(scanVisibleTo(shared, null)).toBe(true);
   });
 });

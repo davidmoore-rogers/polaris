@@ -327,8 +327,17 @@ model DiscoveryRun {
 // the /integrations/discoveries progress UI as an integration that isn't one.
 model NetworkScan {
   id          String  @id @default(uuid())
-  name        String  @unique
+  // Not globally unique since the private/public cutover: two operators may
+  // each keep a private "Plant 3 sweep", and a 409 naming a row the caller
+  // cannot see is both a dead end and a disclosure. Unique per OWNER instead.
+  name        String
   description String?
+
+  // Who may see and use it. "private" = the owner alone; "public" = every
+  // caller holding networkScan:read, which is what lets one operator build a
+  // Discovery another one runs. The SavedDashboard / SavedTableFilter model.
+  // Editing or deleting someone else's is networkScan:fullwrite housekeeping.
+  visibility String @default("private")
 
   // ScanTarget[] — [{ kind: "cidr" | "range" | "single", value: string }].
   // Expanded to an ordered, deduped host list by expandScanTargets (utils/cidr).
@@ -345,6 +354,14 @@ model NetworkScan {
   // integration Monitoring tab, so the pure resolvers are reused verbatim.
   autoMonitor Json?
 
+  // ownerId is the identity ownership is decided on; createdBy is the username
+  // SNAPSHOT that survives the account (SavedDashboard's `ownerName`, reusing
+  // the column that already held exactly that). SetNull, not Cascade: a shared
+  // Discovery outlives the account that published it. NULL owner = an orphan,
+  // or a row a bearer token created (a token has no user identity), and either
+  // way it is manageable only at fullwrite.
+  ownerId   String?
+  owner     User?     @relation(fields: [ownerId], references: [id], onDelete: SetNull)
   createdBy String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -352,6 +369,8 @@ model NetworkScan {
 
   runs NetworkScanRun[]
 
+  @@unique([ownerId, name])
+  @@index([visibility])
   @@map("network_scans")
 }
 
@@ -3118,6 +3137,7 @@ model User {
   updatedAt DateTime @updatedAt
 
   dashboard         UserDashboard?
+  networkScans      NetworkScan[]
   pushSubscriptions PushSubscription[]
   savedDashboards   SavedDashboard[]
   savedTableFilters SavedTableFilter[]

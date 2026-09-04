@@ -8,14 +8,14 @@
  * topology regardless of role. A Discovery's targets and results are the same
  * kind of recon material.
  *
- *   GET    /                    networkScan:read    (list + each one's newest run)
+ *   GET    /                    networkScan:read    (own + public, each one's newest run)
  *   POST   /preview-targets     networkScan:read    (pure IP math, no packets)
  *   GET    /runs/:runId         networkScan:read    (progress + hits)
  *   GET    /:id                 networkScan:read
  *   POST   /                    networkScan:write
- *   PUT    /:id                 networkScan:write
- *   DELETE /:id                 networkScan:write
- *   POST   /:id/run             networkScan:write   (202 + the run)
+ *   PUT    /:id                 networkScan:write   (own; else fullwrite)
+ *   DELETE /:id                 networkScan:write   (own; else fullwrite)
+ *   POST   /:id/run             networkScan:write   (202 + the run; any VISIBLE one)
  *   POST   /runs/:runId/cancel  networkScan:write
  *   POST   /runs/:runId/adopt   networkScan:write + assets:write  (CHAINED)
  *
@@ -32,11 +32,35 @@
  * the pure `expandScanTargets` plus one indexed read, touches no network, and
  * gating it at write would block the wizard's target preview for a role that is
  * allowed to look at Discoveries.
+ *
+ * **Visibility (the SavedDashboard / SavedTableFilter model).** A Discovery is
+ * `private` (its owner alone) or `public` (every caller holding
+ * `networkScan:read`), which is what lets one operator build a sweep another
+ * one runs. Three consequences here:
+ *
+ *   - every route resolves the caller's user id and hands it to the service,
+ *     which scopes the read; an invisible row answers **404, not 403** — a
+ *     private Discovery's existence is not other operators' business;
+ *   - RUNNING is gated on visibility, not ownership. Publishing one exists
+ *     precisely so somebody else can run it;
+ *   - EDIT and DELETE are the owner's, with `networkScan:fullwrite` as the
+ *     housekeeping override for someone else's row (including an orphan left
+ *     by a deleted account). That check lives here rather than in the service
+ *     because it needs the caller's permission level.
+ *
+ * PUBLISHING deliberately requires nothing beyond the `write` every mutation
+ * here already needs — unlike saved filters and dashboards, whose mounts sit at
+ * `read` and use `write` to mark the publish. `networkadmin` and `assetsadmin`
+ * hold `write`, not `fullwrite`, and they are exactly the roles that author
+ * Discoveries; requiring more would put sharing out of reach of everyone it is
+ * for.
  */
 
 import { Router } from "express";
 import { z } from "zod";
-import { requirePermission } from "../middleware/permissions.js";
+import type { Request } from "express";
+import { AppError } from "../../utils/errors.js";
+import { hasPermission, requirePermission } from "../middleware/permissions.js";
 import { requestActor } from "../middleware/auth.js";
 import {
   adoptHits,
@@ -45,7 +69,9 @@ import {
   deleteScan,
   getRun,
   getScan,
+  getScanForWrite,
   listScans,
+  ownsScan,
   previewTargets,
   triggerScan,
   updateScan,
@@ -53,6 +79,7 @@ import {
   MAX_CREDENTIALS_PER_METHOD,
   MAX_SCAN_TARGET_ROWS,
   type SaveScanInput,
+  type ScanViewer,
 } from "../../services/networkScanService.js";
 import { SCAN_METHODS } from "../../services/networkScanRunner.js";
 
@@ -91,6 +118,10 @@ const autoMonitorSchema = z.record(z.string(), z.unknown()).nullable().optional(
 const saveSchema = z.object({
   name: z.string().min(1).max(200),
   description: z.string().max(2000).nullable().optional(),
+  // Optional, defaulting to the safe end: an imported `.discovery.json` carries
+  // no visibility (it is an ownership fact about ONE install, not portable
+  // configuration), and an older API client sending neither must not publish.
+  visibility: z.enum(["private", "public"]).optional().default("private"),
   targets: z.array(targetSchema).min(1).max(MAX_SCAN_TARGET_ROWS),
   methods: z.array(methodSchema).min(1).max(SCAN_METHODS.length),
   autoMonitor: autoMonitorSchema,
@@ -104,14 +135,35 @@ const adoptSchema = z.object({
   addresses: z.array(z.string().min(1).max(45)).min(1).max(MAX_ADOPT_PER_CALL),
 });
 
+/**
+ * Who is asking, for the visibility scope. `id` is null for a bearer token —
+ * it has no user identity, so it sees the public set and owns nothing.
+ * `username` still comes from `requestActor` so audit rows name the token.
+ */
+function viewer(req: Request): ScanViewer {
+  return { id: req.session?.userId ?? null, username: requestActor(req) ?? "unknown" };
+}
+
+/**
+ * May this caller EDIT this row? Its owner may; anyone else needs fullwrite,
+ * which is the housekeeping level (someone else's Discovery, or an orphan left
+ * by a deleted account). Visibility has already been asserted by the load, so
+ * the refusal here is a real 403 rather than a disclosure.
+ */
+function assertMayEditScan(req: Request, row: { ownerId: string | null }, verb: string): void {
+  if (ownsScan(row, req.session?.userId ?? null)) return;
+  if (hasPermission(req, "networkScan", "fullwrite")) return;
+  throw new AppError(403, `Forbidden — ${verb} a Discovery someone else created requires networkScan:fullwrite`);
+}
+
 /** Router-wide floor. Every route needs at least this. */
 router.use(requirePermission("networkScan", "read"));
 
 // ─── Reads ──────────────────────────────────────────────────────────────────
 
-router.get("/", async (_req, res, next) => {
+router.get("/", async (req, res, next) => {
   try {
-    res.json({ scans: await listScans() });
+    res.json({ scans: await listScans(viewer(req).id) });
   } catch (err) { next(err); }
 });
 
@@ -124,7 +176,7 @@ router.post("/preview-targets", async (req, res, next) => {
 
 router.get("/runs/:runId", async (req, res, next) => {
   try {
-    res.json({ run: await getRun((req.params.runId as string)) });
+    res.json({ run: await getRun((req.params.runId as string), viewer(req).id) });
   } catch (err) { next(err); }
 });
 
@@ -132,7 +184,7 @@ router.get("/runs/:runId", async (req, res, next) => {
 
 router.post("/runs/:runId/cancel", requirePermission("networkScan", "write"), async (req, res, next) => {
   try {
-    res.json({ run: await cancelRun((req.params.runId as string), requestActor(req)) });
+    res.json({ run: await cancelRun((req.params.runId as string), viewer(req)) });
   } catch (err) { next(err); }
 });
 
@@ -148,7 +200,7 @@ router.post(
   async (req, res, next) => {
     try {
       const body = adoptSchema.parse(req.body ?? {});
-      res.json(await adoptHits((req.params.runId as string), body.addresses, requestActor(req)));
+      res.json(await adoptHits((req.params.runId as string), body.addresses, viewer(req)));
     } catch (err) { next(err); }
   },
 );
@@ -156,7 +208,7 @@ router.post(
 router.post("/", requirePermission("networkScan", "write"), async (req, res, next) => {
   try {
     const body = saveSchema.parse(req.body ?? {}) as SaveScanInput;
-    res.status(201).json({ scan: await createScan(body, requestActor(req)) });
+    res.status(201).json({ scan: await createScan(body, viewer(req)) });
   } catch (err) { next(err); }
 });
 
@@ -164,20 +216,24 @@ router.post("/", requirePermission("networkScan", "write"), async (req, res, nex
 // never read as ids.
 router.get("/:id", async (req, res, next) => {
   try {
-    res.json({ scan: await getScan((req.params.id as string)) });
+    res.json({ scan: await getScan((req.params.id as string), viewer(req).id) });
   } catch (err) { next(err); }
 });
 
 router.put("/:id", requirePermission("networkScan", "write"), async (req, res, next) => {
   try {
     const body = saveSchema.parse(req.body ?? {}) as SaveScanInput;
-    res.json({ scan: await updateScan((req.params.id as string), body, requestActor(req)) });
+    const row = await getScanForWrite((req.params.id as string), viewer(req).id);
+    assertMayEditScan(req, row, "editing");
+    res.json({ scan: await updateScan(row, body, viewer(req)) });
   } catch (err) { next(err); }
 });
 
 router.delete("/:id", requirePermission("networkScan", "write"), async (req, res, next) => {
   try {
-    await deleteScan((req.params.id as string), requestActor(req));
+    const row = await getScanForWrite((req.params.id as string), viewer(req).id);
+    assertMayEditScan(req, row, "deleting");
+    await deleteScan(row.id, requestActor(req));
     res.status(204).end();
   } catch (err) { next(err); }
 });
@@ -188,7 +244,7 @@ router.delete("/:id", requirePermission("networkScan", "write"), async (req, res
  */
 router.post("/:id/run", requirePermission("networkScan", "write"), async (req, res, next) => {
   try {
-    res.status(202).json({ run: await triggerScan((req.params.id as string), requestActor(req)) });
+    res.status(202).json({ run: await triggerScan((req.params.id as string), viewer(req)) });
   } catch (err) { next(err); }
 });
 

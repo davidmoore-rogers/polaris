@@ -5414,9 +5414,9 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ## services/networkScanService.ts
 
-**What it owns:** The saved network **Discovery** (`NetworkScan`) — CRUD, validation, run dispatch, cancellation, target preview, and adoption. Owns the operator-facing caps (`MAX_SCAN_TARGET_ROWS` 50, `MAX_CREDENTIALS_PER_METHOD` 10, `MAX_ADOPT_PER_CALL` 500, `SCAN_RUN_STALE_MS` 3 min) and the `ScanAutoMonitor` shape (auto-monitor selection keyed by POLLING METHOD).
+**What it owns:** The saved network **Discovery** (`NetworkScan`) — CRUD, validation, run dispatch, cancellation, target preview, adoption, and (since 2026-09) the private/public **visibility** scope. Owns the operator-facing caps (`MAX_SCAN_TARGET_ROWS` 50, `MAX_CREDENTIALS_PER_METHOD` 10, `MAX_ADOPT_PER_CALL` 500, `SCAN_RUN_STALE_MS` 3 min) and the `ScanAutoMonitor` shape (auto-monitor selection keyed by POLLING METHOD).
 
-**Public API:** `listScans` / `getScan` / `createScan` / `updateScan` / `deleteScan`, `triggerScan` / `cancelRun` / `getRun` / `isScanRunning`, `previewTargets`, `adoptHits`, plus the pure `validateScanInput` / `assetTypeForHit` / `methodKeyForHit`.
+**Public API:** `listScans(viewerId)` / `getScan(id, viewerId)` / `getScanForWrite(id, viewerId)` / `createScan(input, viewer)` / `updateScan(row, input, viewer)` / `deleteScan`, `triggerScan(id, viewer)` / `cancelRun(runId, viewer)` / `getRun(runId, viewerId)` / `isScanRunning`, `previewTargets`, `adoptHits(runId, addresses, viewer)`, plus the pure `validateScanInput` / `assetTypeForHit` / `methodKeyForHit` / `normalizeVisibility` / `ownsScan` / `scanVisibleTo`. Note `updateScan` takes the ROW, not an id — the route has already loaded it to run its ownership check, and reading it twice is how the two would drift.
 
 **Reads:** `NetworkScan`, `NetworkScanRun`, and (via `loadKnownAddresses` in the runner) `Asset.ipAddress` + `AssetAssociatedIp.ip`.
 
@@ -5434,11 +5434,20 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - `ScanAutoMonitor` is keyed by polling METHOD because what can be pinned depends on what answered; one flat selection would mean something different per group.
 - `assetTypeForHit` is deliberately shallow — only a device saying what it is in as many words gets a type. Guessing from a vendor name is right often enough to look correct and wrong the rest of the time.
 - `deleteScan` refuses while a run is in flight (a stalled heartbeat does not count as in flight); the run rows cascade, being history OF this Discovery.
+- **Visibility is the service's job; ownership is the route's** (business rule 34g). Every by-id read goes through `loadVisible` → `assertScanVisible`, which throws **404, not 403** — a private Discovery's name is a site name. Owner-or-fullwrite for EDIT/DELETE lives in `networkScans.ts` because it needs `req.permissionLevel`, which the service has no access to.
+- **`triggerScan` checks visibility, never ownership.** Running somebody else's SHARED Discovery is the entire point of publishing one; gating the run on ownership would make the feature do nothing.
+- **A run inherits its Discovery's visibility** (`loadVisibleRun`, used by `getRun` / `cancelRun` / `adoptHits`). The hits ARE the recon material, so a run id must not be a way around a private row.
+- **`normalizeVisibility` fails closed** — anything that is not literally `"public"` is private, so a typo, a half-applied migration or a future third value can never open a Discovery up.
+- **A NULL `ownerId` is owned by NOBODY** — in particular not by the next caller who also has no id, which is how a bearer token would otherwise have inherited every orphan. Two consequences guard the "a row nobody can see is a row nobody can fix" case: a viewer with no id may not create a PRIVATE Discovery, and an orphan may not be made private.
+- **Names are unique per OWNER** (`assertNameFree`), checked against the ROW's owner on update so an admin editing someone else's Discovery can't collide it with their own.
 
 **When changing this:**
 - Keep `validateScanInput` the single authority for semantics — the route's Zod is shape only, and the import path has no route at all.
 - If adoption grows a field, check it against the manual `POST /assets` create rather than inventing a second convention, and do NOT add an AssetSource kind without also adding projection rules (see the invariant above).
 - Never widen the adopt route to a single gate. "May scan" and "may create assets" being separable is the reason the `networkScan` key exists.
+- Any NEW by-id read or run-scoped verb must go through `loadVisible` / `loadVisibleRun` rather than a bare `findUnique`. That is the only thing keeping a private Discovery private, and a bare read fails open.
+- Do NOT move publishing to `fullwrite` to match saved filters/dashboards. Those mounts sit at `read` and spend `write` on the publish; this one is already at `write` for any change, and `networkadmin` / `assetsadmin` hold `write` — the escalation would put sharing out of reach of the roles that author Discoveries.
+- Keep `visibility` out of the `.discovery.json` export (`stripForExport` whitelists fields, so this holds by construction). It is an ownership fact about one install; an import lands private.
 
 ---
 

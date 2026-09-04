@@ -15,6 +15,13 @@
  *     to inventory.
  *   - **Adoption is the only writer of assets here**, and its route chains
  *     `assets:write` on top of `networkScan:write`.
+ *
+ * A third boundary since the visibility cutover: a Discovery is **private or
+ * public**, the SavedDashboard / SavedTableFilter model. Every read and every
+ * run resolves through `assertScanVisible`, and an invisible row answers 404
+ * rather than 403 (the `GET /alerts/:id` posture — that an id exists is itself
+ * something the caller has no business learning). Ownership for EDIT and
+ * DELETE is decided by the route, which is where `req.permissionLevel` lives.
  */
 
 import { prisma } from "../db.js";
@@ -54,14 +61,21 @@ export interface ScanAutoMonitor {
   } | undefined;
 }
 
+export type ScanVisibility = "private" | "public";
+
 export interface ScanRecord {
   id: string;
   name: string;
   description: string | null;
+  visibility: ScanVisibility;
   targets: ScanTarget[];
   methods: ScanMethod[];
   autoMonitor: ScanAutoMonitor | null;
+  ownerId: string | null;
+  /** Username snapshot of the author — survives the account (SetNull owner). */
   createdBy: string | null;
+  /** True when the CALLER owns it. Drives the UI's edit/delete affordances. */
+  isOwner: boolean;
   createdAt: Date;
   updatedAt: Date;
   lastRunAt: Date | null;
@@ -70,9 +84,21 @@ export interface ScanRecord {
 export interface SaveScanInput {
   name: string;
   description?: string | null;
+  visibility?: ScanVisibility;
   targets: ScanTarget[];
   methods: ScanMethod[];
   autoMonitor?: ScanAutoMonitor | null;
+}
+
+/**
+ * Who is asking. `id` is null for a bearer token (no user identity) and for
+ * any caller resolved outside a session — such a caller sees public rows only
+ * and owns nothing, which is also why it may not create a PRIVATE Discovery
+ * (it would be writing a row it could never read back).
+ */
+export interface ScanViewer {
+  id: string | null;
+  username: string;
 }
 
 // ─── Caps ───────────────────────────────────────────────────────────────────
@@ -98,23 +124,68 @@ function normalizeActor(actor?: string): string {
 
 // ─── Shaping ────────────────────────────────────────────────────────────────
 
-function toRecord(row: {
-  id: string; name: string; description: string | null;
+type ScanRow = {
+  id: string; name: string; description: string | null; visibility: string;
   targets: unknown; methods: unknown; autoMonitor: unknown;
-  createdBy: string | null; createdAt: Date; updatedAt: Date; lastRunAt: Date | null;
-}): ScanRecord {
+  ownerId: string | null; createdBy: string | null;
+  createdAt: Date; updatedAt: Date; lastRunAt: Date | null;
+};
+
+function toRecord(row: ScanRow, viewerId: string | null): ScanRecord {
   return {
     id: row.id,
     name: row.name,
     description: row.description,
+    visibility: normalizeVisibility(row.visibility),
     targets: parseStoredTargets(row.targets),
     methods: parseStoredMethods(row.methods),
     autoMonitor: (row.autoMonitor as ScanAutoMonitor | null) ?? null,
+    ownerId: row.ownerId,
     createdBy: row.createdBy,
+    isOwner: ownsScan(row, viewerId),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     lastRunAt: row.lastRunAt,
   };
+}
+
+// ─── Visibility ─────────────────────────────────────────────────────────────
+//
+// Pure and exported: the three predicates below are the whole access model,
+// and they are the part worth unit-testing without a database.
+
+/** Anything not literally "public" is private — an unknown value never opens up. */
+export function normalizeVisibility(raw: unknown): ScanVisibility {
+  return raw === "public" ? "public" : "private";
+}
+
+/**
+ * Does `viewerId` own this row? A NULL owner (orphan, or a token-created row)
+ * is owned by NOBODY — never by the caller who also happens to have no id.
+ */
+export function ownsScan(row: { ownerId: string | null }, viewerId: string | null): boolean {
+  return row.ownerId != null && viewerId != null && row.ownerId === viewerId;
+}
+
+/** Own it, or it is published. */
+export function scanVisibleTo(
+  row: { ownerId: string | null; visibility: string },
+  viewerId: string | null,
+): boolean {
+  return normalizeVisibility(row.visibility) === "public" || ownsScan(row, viewerId);
+}
+
+/**
+ * 404, not 403, for a row the caller cannot see (the `GET /alerts/:id`
+ * posture): a private Discovery's existence is itself something another
+ * operator has no business learning, and the message must not differ from the
+ * one a genuinely absent id gets.
+ */
+function assertScanVisible(
+  row: { ownerId: string | null; visibility: string },
+  viewerId: string | null,
+): void {
+  if (!scanVisibleTo(row, viewerId)) throw new AppError(404, "Discovery not found");
 }
 
 /**
@@ -165,8 +236,18 @@ export function validateScanInput(input: SaveScanInput): string | null {
 
 // ─── CRUD ───────────────────────────────────────────────────────────────────
 
-export async function listScans(): Promise<(ScanRecord & { latestRun: RunSummary | null })[]> {
-  const rows = await prisma.networkScan.findMany({ orderBy: { name: "asc" } });
+/**
+ * Discoveries one caller may see: everything they own (private and public)
+ * plus every OTHER operator's public one. A viewer with no id (bearer token)
+ * gets the public set, and nothing reads as owned.
+ */
+export async function listScans(
+  viewerId: string | null,
+): Promise<(ScanRecord & { latestRun: RunSummary | null })[]> {
+  const rows = await prisma.networkScan.findMany({
+    where: viewerId ? { OR: [{ ownerId: viewerId }, { visibility: "public" }] } : { visibility: "public" },
+    orderBy: { name: "asc" },
+  });
   // One query for every Discovery's newest run rather than N+1 — the list is
   // small but this is also the reattach path, which runs on every list open.
   const runs = await prisma.networkScanRun.findMany({
@@ -176,31 +257,74 @@ export async function listScans(): Promise<(ScanRecord & { latestRun: RunSummary
   const newest = new Map<string, (typeof runs)[number]>();
   for (const run of runs) if (!newest.has(run.scanId)) newest.set(run.scanId, run);
   return rows.map((row) => ({
-    ...toRecord(row),
+    ...toRecord(row, viewerId),
     latestRun: newest.has(row.id) ? summarizeRun(newest.get(row.id)!) : null,
   }));
 }
 
-export async function getScan(id: string): Promise<ScanRecord> {
-  const row = await prisma.networkScan.findUnique({ where: { id } });
-  if (!row) throw new AppError(404, "Discovery not found");
-  return toRecord(row);
+/** One Discovery, scoped to what the caller may see. */
+export async function getScan(id: string, viewerId: string | null): Promise<ScanRecord> {
+  return toRecord(await loadVisible(id, viewerId), viewerId);
 }
 
-export async function createScan(input: SaveScanInput, actor?: string): Promise<ScanRecord> {
-  const who = normalizeActor(actor);
+/** Load a row the caller may see, or 404. The read every other verb starts from. */
+async function loadVisible(id: string, viewerId: string | null): Promise<ScanRow> {
+  const row = await prisma.networkScan.findUnique({ where: { id } });
+  if (!row) throw new AppError(404, "Discovery not found");
+  assertScanVisible(row, viewerId);
+  return row;
+}
+
+/**
+ * Load a row for a MUTATION the route has already gated. Returns the raw row so
+ * the route can apply its own ownership rule (`ownsScan` or fullwrite) — that
+ * decision needs `req.permissionLevel`, which only the route has.
+ */
+export async function getScanForWrite(id: string, viewerId: string | null): Promise<ScanRow> {
+  return loadVisible(id, viewerId);
+}
+
+/**
+ * A name is unique within ONE owner's set. Checked against the caller's own
+ * rows only, so a private Discovery someone else keeps can neither block a
+ * name nor be inferred from a 409.
+ */
+async function assertNameFree(name: string, ownerId: string | null, exceptId?: string): Promise<void> {
+  const clash = await prisma.networkScan.findFirst({
+    where: { name, ownerId, ...(exceptId ? { id: { not: exceptId } } : {}) },
+    select: { id: true },
+  });
+  if (clash) throw new AppError(409, `You already have a Discovery named "${name}".`);
+}
+
+/**
+ * A caller with no user identity (a bearer token) has no private bucket: a
+ * row it created as `private` would be one it could never read back, and no
+ * other caller could see it either. Refuse rather than silently publish.
+ */
+function assertVisibilityStorable(visibility: ScanVisibility, viewer: ScanViewer): void {
+  if (visibility === "private" && viewer.id === null) {
+    throw new AppError(400, "A private Discovery needs a signed-in owner — save it as shared instead.");
+  }
+}
+
+export async function createScan(input: SaveScanInput, viewer: ScanViewer): Promise<ScanRecord> {
+  const who = normalizeActor(viewer.username);
   const problem = validateScanInput(input);
   if (problem) throw new AppError(400, problem);
+  const visibility = normalizeVisibility(input.visibility ?? "private");
+  assertVisibilityStorable(visibility, viewer);
   const name = input.name.trim();
-  const clash = await prisma.networkScan.findUnique({ where: { name } });
-  if (clash) throw new AppError(409, `A Discovery named "${name}" already exists.`);
+  await assertNameFree(name, viewer.id);
   const row = await prisma.networkScan.create({
     data: {
       name,
       description: input.description?.trim() || null,
+      visibility,
       targets: input.targets as unknown as object,
       methods: input.methods as unknown as object,
       autoMonitor: (input.autoMonitor ?? null) as unknown as object,
+      ownerId: viewer.id,
       createdBy: who,
     },
   });
@@ -210,28 +334,40 @@ export async function createScan(input: SaveScanInput, actor?: string): Promise<
     resourceId: row.id,
     resourceName: row.name,
     actor: who,
-    message: `Discovery "${row.name}" created`,
-    details: { targets: input.targets.length, methods: input.methods.map((m) => m.type) },
+    message: `Discovery "${row.name}" created (${visibility})`,
+    details: { targets: input.targets.length, methods: input.methods.map((m) => m.type), visibility },
   });
-  return toRecord(row);
+  return toRecord(row, viewer.id);
 }
 
-export async function updateScan(id: string, input: SaveScanInput, actor?: string): Promise<ScanRecord> {
-  const who = normalizeActor(actor);
-  const existing = await prisma.networkScan.findUnique({ where: { id } });
-  if (!existing) throw new AppError(404, "Discovery not found");
+/**
+ * Update. The route has already established that the caller may write THIS row
+ * (owner, or fullwrite housekeeping); `existing` is passed in so it isn't read
+ * twice. The name check runs against the ROW'S owner, not the caller's — an
+ * admin editing someone else's Discovery must not collide it with their own.
+ */
+export async function updateScan(
+  existing: ScanRow,
+  input: SaveScanInput,
+  viewer: ScanViewer,
+): Promise<ScanRecord> {
+  const who = normalizeActor(viewer.username);
   const problem = validateScanInput(input);
   if (problem) throw new AppError(400, problem);
-  const name = input.name.trim();
-  if (name !== existing.name) {
-    const clash = await prisma.networkScan.findUnique({ where: { name } });
-    if (clash) throw new AppError(409, `A Discovery named "${name}" already exists.`);
+  const visibility = normalizeVisibility(input.visibility ?? existing.visibility);
+  // Un-sharing an ORPHAN would strand it: nobody owns it, so nobody could see
+  // it again. Only a row with a real owner can go private.
+  if (visibility === "private" && existing.ownerId === null) {
+    throw new AppError(400, "This Discovery has no owner, so it cannot be made private.");
   }
+  const name = input.name.trim();
+  if (name !== existing.name) await assertNameFree(name, existing.ownerId, existing.id);
   const row = await prisma.networkScan.update({
-    where: { id },
+    where: { id: existing.id },
     data: {
       name,
       description: input.description?.trim() || null,
+      visibility,
       targets: input.targets as unknown as object,
       methods: input.methods as unknown as object,
       autoMonitor: (input.autoMonitor ?? null) as unknown as object,
@@ -244,8 +380,14 @@ export async function updateScan(id: string, input: SaveScanInput, actor?: strin
     resourceName: row.name,
     actor: who,
     message: `Discovery "${row.name}" updated`,
+    details: {
+      visibility,
+      previousVisibility: existing.visibility !== visibility ? existing.visibility : undefined,
+      previousName: existing.name !== name ? existing.name : undefined,
+      owner: existing.createdBy ?? undefined,
+    },
   });
-  return toRecord(row);
+  return toRecord(row, viewer.id);
 }
 
 export async function deleteScan(id: string, actor?: string): Promise<void> {
@@ -336,10 +478,14 @@ export async function isScanRunning(scanId: string): Promise<boolean> {
  * `Setting.monitor.queueMode` defaults to cursor, so on a default install
  * nothing would ever execute without it.
  */
-export async function triggerScan(scanId: string, actor?: string): Promise<RunSummary> {
-  const who = normalizeActor(actor);
-  const scan = await prisma.networkScan.findUnique({ where: { id: scanId } });
-  if (!scan) throw new AppError(404, "Discovery not found");
+export async function triggerScan(
+  scanId: string,
+  viewer: ScanViewer,
+): Promise<RunSummary> {
+  const who = normalizeActor(viewer.username);
+  // Visibility, NOT ownership: running someone else's SHARED Discovery is the
+  // whole point of publishing one. Ownership only governs editing it.
+  const scan = await loadVisible(scanId, viewer.id);
 
   const problem = validateScanInput({
     name: scan.name,
@@ -368,10 +514,9 @@ export async function triggerScan(scanId: string, actor?: string): Promise<RunSu
 }
 
 /** Ask a run to stop. The worker notices on its next throttle tick. */
-export async function cancelRun(runId: string, actor?: string): Promise<RunSummary> {
-  const who = normalizeActor(actor);
-  const run = await prisma.networkScanRun.findUnique({ where: { id: runId }, include: { scan: true } });
-  if (!run) throw new AppError(404, "Run not found");
+export async function cancelRun(runId: string, viewer: ScanViewer): Promise<RunSummary> {
+  const who = normalizeActor(viewer.username);
+  const run = await loadVisibleRun(runId, viewer.id);
   if (run.status !== "queued" && run.status !== "running") {
     // Not an error: the operator clicked Cancel as it finished.
     return summarizeRun(run);
@@ -397,9 +542,20 @@ export interface RunDetail extends RunSummary {
   scanName: string;
 }
 
-export async function getRun(runId: string): Promise<RunDetail> {
+/**
+ * A run inherits its Discovery's visibility — the hits ARE the recon material,
+ * so a run row must never be a way around a private Discovery. 404 like its
+ * parent, and for the same reason.
+ */
+async function loadVisibleRun(runId: string, viewerId: string | null) {
   const run = await prisma.networkScanRun.findUnique({ where: { id: runId }, include: { scan: true } });
   if (!run) throw new AppError(404, "Run not found");
+  if (!scanVisibleTo(run.scan, viewerId)) throw new AppError(404, "Run not found");
+  return run;
+}
+
+export async function getRun(runId: string, viewerId: string | null): Promise<RunDetail> {
+  const run = await loadVisibleRun(runId, viewerId);
   return {
     ...summarizeRun(run),
     hits: Array.isArray(run.hits) ? (run.hits as unknown as ScanHit[]) : [],
@@ -524,11 +680,10 @@ export function methodKeyForHit(hit: ScanHit): string {
 export async function adoptHits(
   runId: string,
   addresses: string[],
-  actor?: string,
+  viewer: ScanViewer,
 ): Promise<AdoptResult> {
-  const who = normalizeActor(actor);
-  const run = await prisma.networkScanRun.findUnique({ where: { id: runId }, include: { scan: true } });
-  if (!run) throw new AppError(404, "Run not found");
+  const who = normalizeActor(viewer.username);
+  const run = await loadVisibleRun(runId, viewer.id);
   const wanted = Array.from(new Set((addresses ?? []).map((a) => a.trim()).filter(Boolean)));
   if (!wanted.length) throw new AppError(400, "Select at least one address to add.");
   if (wanted.length > MAX_ADOPT_PER_CALL) {

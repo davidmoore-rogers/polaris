@@ -156,7 +156,7 @@ polaris/
 │   │       ├── notificationRules.ts # Automation (rule) CRUD + /schema (builder vocabulary, with `dimensionPickers` merged in from notificationDimensionService — merged HERE, not inside buildSchemaCatalog, because notificationTypes importing the dimension service would cycle through the engine — plus `stateProbes` from manufacturerProfileService.listStateProbes(), merged here for the same reason: the builder needs each state probe's NAME and its two state LABELS so a 0/1 condition renders as "is Alarm" instead of "== 1") + POST /dimension-values (values the draft's own scoped devices report for one metric dimension; automationManagement:read) + /preview (dry-run). Gated automationManagement; POST/PUT carrying any script action (top-level or escalation tier) additionally require automationScripts=fullwrite (assertScriptActionPermission). Canonical mount /automations; deprecated alias /notification-rules. Validates via ruleInputSchema; logic in notificationRuleService + notificationEngine.previewRule.
 │   │       ├── maintenanceSchedules.ts # Maintenance-schedule CRUD (Assets → Maintenance modal) + POST /preview (target-filter dry-run → capped device list + total, monitored-only) + GET /occurrences?from&to (calendar tab: every schedule's occurrences expanded over a day range). Gated maintenanceManagement (read for list + occurrences, fullwrite for CRUD/preview). Thin: Zod outer shape here; recurrence + criteria validation and the inline reconcile live in maintenanceScheduleService.
 │   │       ├── contacts.ts        # Address-book CRUD (Automations → Address Book) + GET /search (the unified recipient typeahead: Polaris users ∪ contacts) + POST /preview (device-filter dry-run). Reads gated `contacts:read`; writes use `requireOwnership("contacts")` + `assertOwnership` so a write-level caller edits/deletes only rows they created. `/search` + `/preview` declared BEFORE `/:id` so the literal paths aren't captured as ids. Thin: criteria validation, email normalization and audit Events live in contactService.
-│   │       ├── networkScans.ts    # Saved network **Discovery** CRUD + runs, mounted /api/v1/network-scans behind a `networkScan:read` FLOOR on the whole router (the `/map` precedent — three of its read routes were auth-only until 2026-08, and a Discovery's targets and results are the same kind of recon material). `POST /runs/:runId/adopt` is the one route with a CHAINED gate — `networkScan:write` AND `assets:write` — which is the whole permission design: running creates nothing, so a role may be allowed to find out what is on a range without being allowed to add it. `/preview-targets` is read-level on purpose (pure IP math plus one indexed read; gating it at write would block the wizard's target preview for a role allowed to look at Discoveries), and it plus `/runs/...` are declared BEFORE `/:id` so the literal paths aren't captured as ids. Schemas are SHAPE only — the semantic rules live in `networkScanService.validateScanInput`. `POST /:id/run` answers 202: the sweep takes minutes and the wizard watches the run row. Tests: tests/integration/networkScans.test.ts
+│   │       ├── networkScans.ts    # Saved network **Discovery** CRUD + runs, mounted /api/v1/network-scans behind a `networkScan:read` FLOOR on the whole router (the `/map` precedent — three of its read routes were auth-only until 2026-08, and a Discovery's targets and results are the same kind of recon material). `POST /runs/:runId/adopt` is the one route with a CHAINED gate — `networkScan:write` AND `assets:write` — which is the whole permission design: running creates nothing, so a role may be allowed to find out what is on a range without being allowed to add it. `/preview-targets` is read-level on purpose (pure IP math plus one indexed read; gating it at write would block the wizard's target preview for a role allowed to look at Discoveries), and it plus `/runs/...` are declared BEFORE `/:id` so the literal paths aren't captured as ids. Schemas are SHAPE only — the semantic rules live in `networkScanService.validateScanInput`. `POST /:id/run` answers 202: the sweep takes minutes and the wizard watches the run row. Every route also resolves the caller's user id (`viewer(req)` — null for a bearer token, which therefore sees the PUBLIC set and owns nothing) and hands it to the service, which scopes the read; `assertMayEditScan` is the route-side owner-or-fullwrite check on PUT/DELETE, and `POST /:id/run` deliberately has no such check because running a shared Discovery is what sharing is for (business rule 34g). Tests: tests/integration/networkScans.test.ts
 │   │       ├── notificationChannels.ts # NotificationChannel CRUD (Delivery tab) + per-channel Test send + VAPID generate (web_push). Gated automationManagement. Canonical mount /delivery-channels; deprecated alias /notification-channels. Backed by notificationChannelService + the channel senders.
 │   │       ├── pushSubscriptions.ts  # Per-user Web Push subscription management + VAPID public-key handoff: GET /push-subscriptions/key (reads the web_push channel), POST/DELETE /push-subscriptions. Gated alerts:read (any viewer may opt in). Subscription owned by the session user; the web_push delivery channel routes to a user's endpoints. Since business rule 39 these are driven by `polarisPush.syncToPreference` reconciling a browser against `User.notificationPreference` at boot, not by an operator-facing on/off switch — there no longer is one.
 │   │       ├── pwa.ts               # Web app manifest + home-screen icons for the MOBILE SPA. Mounted OUTSIDE /api/v1 in app.ts, before express.static. GET /manifest.webmanifest (built from branding, no-cache + weak ETag) and GET /icons/:file (strict ICON_SPECS allowlist → appIconService, ?v=<ver> immutable / bare max-age=300). UNAUTHENTICATED by design: a <link rel="manifest"> without crossorigin is fetched with credentials omitted, so a gated manifest 401s for everyone. Desktop pages carry no manifest link — the install identity is mobile-only.
@@ -707,12 +707,17 @@ DiscoveryRun
 
 NetworkScan
   id          UUID PK
-  name        String  @unique   -- the operator's handle; round-trips through the .discovery.json filename
+  name        String            -- the operator's handle; round-trips through the .discovery.json filename. UNIQUE PER OWNER (@@unique([ownerId, name])), not globally: two operators may each keep a private "Plant 3 sweep", and a 409 naming a row the caller cannot see is both a dead end and a disclosure
   description String?
+  visibility  String            -- "private" (the owner alone) | "public" (every networkScan:read holder). Default private; existing rows migrated public
   targets     Json              -- ScanTarget[]: [{ kind: "cidr"|"range"|"single", value }]
   methods     Json              -- ScanMethod[]: [{ type: "icmp"|"snmp"|"restapi"|"ssh"|"winrm", credentialIds[] }], tried in array order
   autoMonitor Json?             -- per-polling-method { interfaces?, storage? } selection applied to adopted assets; NULL = pin nothing
+  ownerId     String?           -- FK -> User, ON DELETE SET NULL. What ownership is DECIDED on. NULL = an orphan (deleted account) or a bearer-token-created row: owned by nobody, manageable only at fullwrite
   createdBy / createdAt / updatedAt / lastRunAt
+  -- createdBy doubles as SavedDashboard's `ownerName` -- the username snapshot
+  -- that survives the account -- rather than a second column holding the same
+  -- string.
   runs        NetworkScanRun[]
   -- A saved, re-runnable ACTIVE SCAN of operator-supplied IP ranges.
   -- Operator-facing name: a **Discovery**. Named NetworkScan* so nothing
@@ -730,6 +735,26 @@ NetworkScan
   -- rather than reimplemented. Gated by the `networkScan` RBAC key; ADOPTING
   -- the results chains `assets:write` on top, so "may find out what is on the
   -- network" and "may add it to inventory" stay separable.
+  --
+  -- PRIVATE OR PUBLIC since 2026-09 (migration
+  -- 20260904060000_network_scan_visibility), the SavedDashboard /
+  -- SavedTableFilter model, because scoping a sweep is real work and the only
+  -- way to hand it to a colleague was exporting a file. The split is
+  -- VISIBILITY vs OWNERSHIP and the two answer different questions: visibility
+  -- decides who may SEE and RUN one (running somebody else's shared Discovery
+  -- is what publishing one is FOR, so triggerScan asks only whether the caller
+  -- can see the row), while ownership decides who may EDIT or DELETE it, with
+  -- `networkScan:fullwrite` as the housekeeping override -- a check that lives
+  -- in the route because it needs req.permissionLevel. An invisible row
+  -- answers 404, not 403 (the GET /alerts/:id posture: a private Discovery's
+  -- name is a site name), and a NetworkScanRun inherits its Discovery's
+  -- visibility because the hits ARE the recon material. Publishing costs
+  -- nothing above the `write` every mutation here already needs -- the one
+  -- divergence from saved filters/dashboards, whose mounts sit at `read` --
+  -- since networkadmin/assetsadmin hold write and author most Discoveries.
+  -- The .discovery.json export deliberately carries NO visibility: it is an
+  -- ownership fact about one install, not portable configuration, so an
+  -- import lands private. See business rule 34g.
 
 NetworkScanRun
   id       UUID PK

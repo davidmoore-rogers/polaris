@@ -47,13 +47,20 @@ describe("networkScan function key — lockstep", () => {
     expect(FUNCTION_KEYS.map((f) => f.key)).toContain("networkScan");
   });
 
-  it("carries no ownership dimension", () => {
-    // Unlike subnets / reservations / contacts, a Discovery has no per-row
-    // owner filter — `write` means write, so a stray hasOwnershipDimension
-    // would make requireOwnership filter by createdBy and hide other
-    // operators' Discoveries from the list.
+  it("carries the ownership dimension", () => {
+    // Since the private/public cutover a Discovery HAS a per-row owner:
+    // `write` creates and runs, and edits/deletes only your own; `fullwrite`
+    // reaches anyone's. The flag is what puts the "(Read-Write = own · Full
+    // Read-Write = any)" note on the roles matrix, and its absence made the
+    // matrix claim fullwrite bought nothing over write.
+    //
+    // Note the ONE way this key differs from subnets / reservations /
+    // contacts: PUBLISHING is not the escalated level. Those keys gate a
+    // shared write at fullwrite; here sharing is the point of the feature and
+    // rides plain `write`, because networkadmin and assetsadmin hold write and
+    // are exactly the roles that author Discoveries.
     const def = FUNCTION_KEYS.find((f) => f.key === "networkScan")!;
-    expect(def.hasOwnershipDimension).toBeUndefined();
+    expect(def.hasOwnershipDimension).toBe(true);
   });
 
   it("has a migration that defaults the key to none for any role missing it", () => {

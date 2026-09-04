@@ -16,7 +16,13 @@
  *    captured as `/:id` — the literal paths are declared first, which is the
  *    kind of ordering that breaks silently;
  *  - the semantic validations answer 400 with the operator-facing reason from
- *    the service, not a Zod dump.
+ *    the service, not a Zod dump;
+ *  - **private vs shared** (business rule 34g), which is the half of the model
+ *    no unit test can reach: two real sessions, two real rows. A private
+ *    Discovery is INVISIBLE to another operator — 404, never 403, on the by-id
+ *    read and on its run — while a shared one is listed, readable and
+ *    RUNNABLE by anyone with `write`, and still editable only by its owner
+ *    unless the caller holds `fullwrite`.
  *
  * Skips cleanly when DATABASE_URL isn't reachable; see _helpers.ts.
  */
@@ -74,6 +80,8 @@ let noneUser = "";
 let readUser = "";
 let writeUser = "";
 let scanOnlyUser = ""; // networkScan:write but assets:read — the chained-gate case
+let otherWriteUser = ""; // a SECOND write-level operator — the visibility cases
+let fullWriteUser = ""; // networkScan:fullwrite — the housekeeping override
 const madeScanIds: string[] = [];
 
 beforeAll(async () => {
@@ -81,6 +89,8 @@ beforeAll(async () => {
   readUser = await createRoleUser("read", matrix("read", { networkScan: "read" }));
   writeUser = await createRoleUser("write", matrix("read", { networkScan: "write", assets: "write" }));
   scanOnlyUser = await createRoleUser("scanonly", matrix("read", { networkScan: "write", assets: "read" }));
+  otherWriteUser = await createRoleUser("other", matrix("read", { networkScan: "write", assets: "write" }));
+  fullWriteUser = await createRoleUser("full", matrix("read", { networkScan: "fullwrite", assets: "write" }));
 }, 60_000);
 
 afterAll(async () => {
@@ -221,5 +231,118 @@ d("network-scans — adoption is a SEPARATE grant", () => {
     // 404 from the run lookup rather than 403 from the gate — which is how we
     // know both gates passed.
     expect(resp.status).toBe(404);
+  });
+});
+
+d("network-scans — private vs shared", () => {
+  /** Create one owned by `username`, remembered for cleanup. */
+  async function createAs(username: string, name: string, visibility: "private" | "public") {
+    const agent = await loginAs(username);
+    const resp = await agent
+      .post("/api/v1/network-scans")
+      .set("x-csrf-token", await csrfFor(agent))
+      .send({ ...body(name), visibility });
+    expect(resp.status).toBe(201);
+    madeScanIds.push(resp.body.scan.id);
+    return resp.body.scan as { id: string; visibility: string; isOwner: boolean; createdBy: string };
+  }
+
+  it("keeps a private Discovery out of another operator's list and answers 404 by id", async () => {
+    const scan = await createAs(writeUser, `${PFX}-private-a`, "private");
+    expect(scan.visibility).toBe("private");
+    expect(scan.isOwner).toBe(true);
+
+    const other = await loginAs(otherWriteUser);
+    const list = await other.get("/api/v1/network-scans");
+    expect(list.status).toBe(200);
+    expect(list.body.scans.map((x: { id: string }) => x.id)).not.toContain(scan.id);
+
+    // 404, not 403: that a private Discovery exists is not other operators'
+    // business, and its name is a site name.
+    expect((await other.get(`/api/v1/network-scans/${scan.id}`)).status).toBe(404);
+    const run = await other
+      .post(`/api/v1/network-scans/${scan.id}/run`)
+      .set("x-csrf-token", await csrfFor(other))
+      .send({});
+    expect(run.status).toBe(404);
+  });
+
+  it("lets any write-level operator RUN a shared one they did not create", async () => {
+    const scan = await createAs(writeUser, `${PFX}-shared-a`, "public");
+    const other = await loginAs(otherWriteUser);
+
+    const list = await other.get("/api/v1/network-scans");
+    const row = list.body.scans.find((x: { id: string }) => x.id === scan.id);
+    expect(row).toBeTruthy();
+    // The list has to say whose it is, or a colleague's Discovery reads as one
+    // you forgot writing.
+    expect(row.isOwner).toBe(false);
+    expect(row.createdBy).toBe(writeUser);
+
+    expect((await other.get(`/api/v1/network-scans/${scan.id}`)).status).toBe(200);
+    const run = await other
+      .post(`/api/v1/network-scans/${scan.id}/run`)
+      .set("x-csrf-token", await csrfFor(other))
+      .send({});
+    // 202 + a run row — running someone else's shared Discovery is the entire
+    // point of publishing one.
+    expect(run.status).toBe(202);
+    await prisma.networkScanRun.deleteMany({ where: { scanId: scan.id } }).catch(() => {});
+  });
+
+  it("refuses to let that operator EDIT or DELETE it, at 403 rather than 404", async () => {
+    const scan = await createAs(writeUser, `${PFX}-shared-b`, "public");
+    const other = await loginAs(otherWriteUser);
+    const csrf = await csrfFor(other);
+
+    // Visible, so the refusal is an honest 403 — there is nothing to conceal.
+    const put = await other
+      .put(`/api/v1/network-scans/${scan.id}`)
+      .set("x-csrf-token", csrf)
+      .send({ ...body(`${PFX}-shared-b-renamed`), visibility: "public" });
+    expect(put.status).toBe(403);
+    expect((await other.delete(`/api/v1/network-scans/${scan.id}`).set("x-csrf-token", csrf)).status).toBe(403);
+  });
+
+  it("lets fullwrite edit someone else's — the housekeeping override", async () => {
+    const scan = await createAs(writeUser, `${PFX}-shared-c`, "public");
+    const admin = await loginAs(fullWriteUser);
+    const put = await admin
+      .put(`/api/v1/network-scans/${scan.id}`)
+      .set("x-csrf-token", await csrfFor(admin))
+      .send({ ...body(`${PFX}-shared-c2`), visibility: "public" });
+    expect(put.status).toBe(200);
+    // Editing someone else's row must not TAKE it: ownership is unchanged.
+    expect(put.body.scan.createdBy).toBe(writeUser);
+    expect(put.body.scan.isOwner).toBe(false);
+  });
+
+  it("scopes name collisions to the owner, so two operators may reuse a name", async () => {
+    await createAs(writeUser, `${PFX}-samename`, "private");
+    // Same name, different owner — allowed. A 409 here would both be a dead end
+    // and disclose a row the caller cannot see.
+    const mine = await createAs(otherWriteUser, `${PFX}-samename`, "private");
+    expect(mine.id).toBeTruthy();
+
+    // The SAME owner reusing it is still refused.
+    const agent = await loginAs(otherWriteUser);
+    const dupe = await agent
+      .post("/api/v1/network-scans")
+      .set("x-csrf-token", await csrfFor(agent))
+      .send({ ...body(`${PFX}-samename`), visibility: "private" });
+    expect(dupe.status).toBe(409);
+  });
+
+  it("defaults to private when the payload says nothing", async () => {
+    // An older client — and an imported .discovery.json, which carries no
+    // visibility at all — must not publish by omission.
+    const agent = await loginAs(writeUser);
+    const resp = await agent
+      .post("/api/v1/network-scans")
+      .set("x-csrf-token", await csrfFor(agent))
+      .send(body(`${PFX}-default-vis`));
+    expect(resp.status).toBe(201);
+    madeScanIds.push(resp.body.scan.id);
+    expect(resp.body.scan.visibility).toBe("private");
   });
 });
