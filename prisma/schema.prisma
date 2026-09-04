@@ -3119,6 +3119,7 @@ model User {
 
   dashboard         UserDashboard?
   pushSubscriptions PushSubscription[]
+  savedDashboards   SavedDashboard[]
   savedTableFilters SavedTableFilter[]
   tableTabs         UserTableTabs[]
 
@@ -3197,6 +3198,38 @@ model UserDashboard {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   @@map("user_dashboards")
+}
+
+// A named, shareable snapshot of ONE dashboard — the SavedTableFilter pattern
+// applied to the dashboard canvas. `layout` is a single dashboard's column
+// stack ({ columns: [...] } — one entry of UserDashboard.layout.dashboards
+// minus its id/name), NOT a whole multi-tab layout: a published dashboard is
+// one screen, which is what the Dash wallboard shows and what the Dashboard
+// page loads as one new tab.
+//
+// `visibility` decides reach: "private" is offered to its owner alone, "public"
+// to every caller who can read the registry — INCLUDING the unauthenticated
+// Dash wallboard, which is why publishing is gated a level higher
+// (savedDashboards:write) than keeping one. Dash viewers can only ever read:
+// that listener is GET-only app-wide, so their own layout stays in localStorage.
+//
+// ownerId is SetNull (the SavedTableFilter rule, not UserDashboard's Cascade) —
+// a public dashboard outlives the account that published it, and `ownerName` is
+// the username snapshot that survives it.
+model SavedDashboard {
+  id         String   @id @default(uuid())
+  name       String
+  ownerId    String?
+  owner      User?    @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  ownerName  String // username snapshot; survives owner deletion
+  visibility String   @default("private") // "private" | "public"
+  layout     Json // { columns: [ { id, width, widgets: [ { id, type, height, config } ] } ] }
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([ownerId, name])
+  @@index([visibility])
+  @@map("saved_dashboards")
 }
 
 // Shared (server-persisted) Device Map topology layout — the hand-tuned node

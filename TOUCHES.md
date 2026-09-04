@@ -2532,6 +2532,39 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 
 ---
 
+## services/savedDashboardService.ts
+
+**What it owns:** Saved dashboards — the `SavedDashboard` table (one row per named canvas: `name` + owner + `visibility` + a `layout` blob holding ONE dashboard's column stack). The server-side half of "keep the dashboard I built, and let others use it". `savedFilterService`'s model applied to the dashboard, with one consequence that has no parallel there: a `public` row is also what the UNAUTHENTICATED Dash wallboard reads, so publishing is gated a level above keeping.
+
+**Public API:** MAX_SAVED_DASHBOARDS_PER_USER, SavedDashboardVisibility, SavedDashboardLayout, SavedDashboardDto, SaveDashboardInput, sanitizeDashboardLayout, countWidgets, normalizeName (RE-EXPORTED from savedFilterService), listSavedDashboards, readSavedDashboard, createSavedDashboard, updateSavedDashboard, deleteSavedDashboard, getSavedDashboard.
+
+**Cross-service deps:** `prisma.savedDashboard`, `eventLogService.logEvent`, `savedFilterService.normalizeName`, `utils/dashboardLayout.ts` (`ColumnsSchema` — shared with `routes/userDashboard.ts`).
+
+**Used by:**
+- `src/api/routes/savedDashboards.ts` — the whole surface, mounted TWICE: `/api/v1/saved-dashboards` (main router) and `/dash/api/v1/saved-dashboards` (the wallboard listener). The `savedDashboards:read` floor lives in the route file so both mounts carry it; `write` is checked per request from the payload's `visibility`.
+- `src/dash/dashServer.ts` — the second mount + the two paths it adds to `API_PATH_ALLOWLIST` / `API_PREFIX_ALLOWLIST`.
+- `src/api/routes/users.ts` — `DELETE /users/:id` drops the doomed user's PRIVATE dashboards before the user row (public ones survive with `ownerId` NULL), same as saved filters.
+- `public/js/dashboard-saved.js` — the "Dashboards ▾" menu on BOTH index.html and dash.html, via `api.savedDashboards.*`.
+- `public/js/dashboard.js` — `window.PolarisDashboard` is the seam: `snapshot()` produces what gets stored, `loadAsNewTab` / `viewPublished` consume it.
+
+**Invariants:**
+- **A session-less caller (`viewerId === null`) sees PUBLIC rows only.** That is the wallboard path, and it is the one thing in this service that must never widen — the listener is unauthenticated. It also means nothing reads as `isOwner` there.
+- **The stored `layout` is untrusted input replayed into other operators' browsers and onto wallboards.** Every write goes through `sanitizeDashboardLayout`, which accepts only `utils/dashboardLayout.ts`'s column/widget shape. That schema is SHARED with `/me/dashboard` on purpose: whichever surface accepted the wider blob would decide what the other has to render.
+- Level split: read = list + keep your own (private); `write` = publish or keep public; `fullwrite` = delete someone else's. Keeping a PRIVATE dashboard is deliberately only `read`, because the ungated `/me/dashboard` already stores the same layout — there would be nothing to withhold.
+- `readSavedDashboard` answers **404, not 403**, for a row the caller can't see (the `GET /alerts/:id` posture): an anonymous wallboard viewer must not learn that an id exists.
+- Mutations are session callers only; the wallboard mount is GET-only app-wide, so a wallboard's inability to save is STRUCTURAL rather than a check in here.
+- Same `(owner, name)` POST **updates** — the UI's overwrite flow depends on it, and the unique index makes a duplicate impossible anyway.
+- `ownerId` is `SET NULL`, never cascade: a published dashboard may be on a wallboard right now. `ownerName` is the display snapshot for exactly that case.
+- One row is ONE dashboard, not a whole layout. A published dashboard is one screen — what a wallboard shows, and what the Dashboard page loads as one new tab.
+- A loaded dashboard is a **copy** on the signed-in page (fresh widget instance ids, no reference back to the row) and a **live view** on the wallboard (which is why the wallboard re-reads it on a timer). Don't unify those: an operator editing a tab must never rewrite someone else's row, and a wallboard must follow the publisher.
+
+**When changing this:**
+- Widening the layout shape means widening `utils/dashboardLayout.ts` — which changes `/me/dashboard` too, by design. Check `dropUnknownWidgets` in `public/js/dashboard.js`, the only thing standing between a published blob and a viewer who can't render part of it.
+- The RBAC key is a SIX-part lockstep like any other: `FUNCTION_KEYS`, the migration that seeds it on every role, the route gate, the frontend `permAtLeast` checks in `dashboard-saved.js`, the dash listener's readonly identity, and the fixtures in `tests/integration/dashServer.test.ts`.
+- Tests: `tests/unit/savedDashboardService.test.ts` (validators), `tests/unit/savedDashboardsRbacLockstep.test.ts` (key ↔ migration), `tests/integration/savedDashboards.test.ts` (RBAC + visibility + ownership + the WALLBOARD mount), `tests/unit/dashboardSavedDom.test.ts` (both menus).
+
+---
+
 ## services/savedFilterService.ts
 
 **What it owns:** Saved table-filter presets — the `SavedTableFilter` table (one row per named preset: `scope` + `name` + owner + `visibility` + the `state` blob). The server-side half of "save the filters I use on this table"; unlike the per-browser `polaris-prefs-assets-<user>` localStorage blob (which holds the LIVE filter state), a preset is named, durable, and optionally shared with everyone.
@@ -2545,6 +2578,7 @@ Also note the two storage conventions: user/role/group `regionTags` are stored *
 - `src/api/routes/users.ts` — `DELETE /users/:id` deletes the doomed user's PRIVATE presets before the user row (their public ones survive with `ownerId` NULL).
 - `public/js/assets-filters.js` — the only frontend consumer today (Assets header → Filters ▾), via `api.savedFilters.*` in `public/js/api.js`.
 - `public/js/table-sf.js` — `TableSF.prototype.getPrefs` produces the stored `state`; `applyState` consumes it (wholesale replace, unlike `setPrefs`'s merge).
+- `src/services/savedDashboardService.ts` — imports `normalizeName`, so both lists of named presets share ONE name rule (trim + collapse whitespace, no control characters, 60 chars). Changing it changes both.
 
 **Invariants:**
 - **The stored `state` is untrusted input replayed into other operators' browsers.** Every write goes through `sanitizeFilterState`, which accepts only the shapes `table-sf.js` emits and bounds size (60 columns × 200 values × 300 chars). Widening what the table can filter by means widening this in lockstep, or presets silently 400.
@@ -6133,13 +6167,15 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 **Used by:** `src/api/routes/userDashboard.ts` (GET + PUT `/me/dashboard`).
 
+**Sibling:** `services/savedDashboardService.ts` stores a NAMED, optionally PUBLIC snapshot of one dashboard. The two share the column/widget schema in `utils/dashboardLayout.ts` — the route's `LayoutSchema` composes `ColumnsSchema` rather than restating it — so a canvas saved on one surface is always renderable on the other.
+
 **Invariants:**
 - Absent row = empty dashboard (no defaults seeded; fresh sign-in is a clean slate so the "Use the + Widget button to get started" empty-state renders).
 - Layout JSON is round-tripped untouched — the service does NOT validate shape. Validation lives at the route layer via Zod (`LayoutSchema` in `src/api/routes/userDashboard.ts`); never call `saveLayoutForUser` with un-validated input.
 - Per-user only; admins do NOT have an override path (UI preference, not security-relevant). No Event audit log.
 
 **When changing this:**
-- If you add fields to the layout shape, bump `version` and add a migration path in the route (currently `z.literal(1)`).
+- If you add fields to the layout shape, bump `version` and add a migration path in the route (currently `z.literal(3)`; the column/widget half lives in `utils/dashboardLayout.ts` and is shared with the saved-dashboard registry, so widening it widens both).
 - The User model has a `dashboard UserDashboard?` back-relation — drop-on-cascade is handled by the Prisma FK, no extra cleanup needed when a user is deleted.
 
 ---

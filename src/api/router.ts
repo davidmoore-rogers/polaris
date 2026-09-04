@@ -41,6 +41,7 @@ import apiTokensRouter from "./routes/apiTokens.js";
 import dashboardRouter from "./routes/dashboard.js";
 import userDashboardRouter from "./routes/userDashboard.js";
 import savedFiltersRouter from "./routes/savedFilters.js";
+import savedDashboardsRouter from "./routes/savedDashboards.js";
 import tableTabsRouter from "./routes/tableTabs.js";
 import notificationPreferenceRouter from "./routes/notificationPreference.js";
 import { agentsEnrollRouter, agentsRouter, agentsBinaryRouter } from "./routes/agents.js";
@@ -135,6 +136,11 @@ router.use("/me/notification-preference", notificationPreferenceRouter);
 // Saved table filters (Assets page → Filters ▾). Gated per-request on the
 // function key that owns the requested scope — see routes/savedFilters.ts.
 router.use("/saved-filters", savedFiltersRouter);
+// Saved dashboards (Dashboard page → Dashboards ▾) — named canvases, private
+// or PUBLIC. The same router is mounted on the Dash wallboard listener, which
+// is session-less and GET-only, so a public dashboard is what a wallboard can
+// load; its own read floor lives inside the route file so both mounts share it.
+router.use("/saved-dashboards", savedDashboardsRouter);
 router.use("/users", requirePermission("users", "read"), usersRouter);
 router.use("/roles", rolesRouter);
 router.use("/group-mappings", requirePermission("users", "fullwrite"), groupMappingsRouter);

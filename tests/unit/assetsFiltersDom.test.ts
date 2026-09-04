@@ -46,7 +46,7 @@ const STATE_A = { sfFilters: { assetType: ["firewall"] }, sortKey: "hostname", s
 const TABLE_HTML =
   '<div class="page-header-actions">' +
     '<button id="btn-saved-filters">Filters</button>' +
-    '<div class="btn-dropdown-menu saved-filters-menu" id="saved-filters-menu"></div>' +
+    '<div class="btn-dropdown-menu sfl-menu" id="saved-filters-menu"></div>' +
   "</div>" +
   '<div id="assets-table-wrapper"><table><thead><tr>' +
     '<th data-sf-key="hostname"><div class="sf-header"><span class="sf-label">Hostname</span></div></th>' +
@@ -143,7 +143,7 @@ beforeEach(() => {
   };
   doc.querySelectorAll(".modal").forEach((m) => m.remove());
   (doc.getElementById("saved-filters-menu") as unknown as { className: string }).className =
-    "btn-dropdown-menu saved-filters-menu";
+    "btn-dropdown-menu sfl-menu";
 });
 
 async function openMenu() {

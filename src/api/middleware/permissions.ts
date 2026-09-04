@@ -98,6 +98,7 @@ export const FUNCTION_KEYS: readonly FunctionKeyDef[] = [
   { key: "apiTokens", label: "API Tokens", description: "Long-lived bearer tokens for external callers (SIEM quarantine, etc.)." },
   { key: "users", label: "Users", description: "User CRUD + role assignment + TOTP reset." },
   { key: "roles", label: "Roles", description: "Manage this permission matrix itself. Granting Full Read-Write effectively grants admin-equivalent control." },
+  { key: "savedDashboards", label: "Saved Dashboards", description: "Named dashboard layouts saved on the server. Read = load a published dashboard + keep private ones of your own (the same thing the ungated per-user dashboard already allows); Read-Write = publish a PUBLIC dashboard, which reaches every operator and the unauthenticated Dash wallboard; Full Read-Write = delete anyone's." },
   { key: "serverSettingsSystem", label: "Server Settings — System", description: "HTTPS / branding / DNS / NTP / certificates / capacity advisor." },
   { key: "serverSettingsData", label: "Server Settings — Data", description: "Database backup / restore, queue mode, security tokens, in-app updates." },
 ] as const;

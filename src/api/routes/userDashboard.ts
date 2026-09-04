@@ -25,39 +25,22 @@ import {
   saveLayoutForUser,
   type DashboardLayout,
 } from "../../services/userDashboardService.js";
+// The column/widget shape + its caps are shared with the saved-dashboard
+// registry (src/api/routes/savedDashboards.ts) — one definition, so a blob one
+// surface accepts can always be rendered by the other. See utils/dashboardLayout.ts.
+import {
+  ColumnsSchema,
+  MAX_DASHBOARDS,
+  MAX_DASHBOARD_NAME_LEN,
+} from "../../utils/dashboardLayout.js";
 
 const router = Router();
 
-// Layout caps. Generous but bounded so a malicious caller can't push a huge blob.
-const MAX_WIDGETS = 64;          // per dashboard
-const MAX_COLUMNS = 12;          // per dashboard
-const MAX_DASHBOARDS = 24;
-
-const WidgetInstanceSchema = z.object({
-  id:     z.string().uuid("widget id must be a uuid"),
-  type:   z.string().min(1).max(64),
-  height: z.union([z.literal(1), z.literal(2), z.literal(3)]),
-  config: z.record(z.unknown()).default({}),
+const DashboardSchema = z.object({
+  id:      z.string().uuid("dashboard id must be a uuid"),
+  name:    z.string().min(1).max(MAX_DASHBOARD_NAME_LEN),
+  columns: ColumnsSchema,
 });
-
-const ColumnSchema = z.object({
-  id:      z.string().uuid("column id must be a uuid"),
-  width:   z.union([z.literal(3), z.literal(4), z.literal(6), z.literal(12)]),
-  widgets: z.array(WidgetInstanceSchema).max(MAX_WIDGETS),
-});
-
-const DashboardSchema = z
-  .object({
-    id:      z.string().uuid("dashboard id must be a uuid"),
-    name:    z.string().min(1).max(60),
-    columns: z.array(ColumnSchema).max(MAX_COLUMNS),
-  })
-  .superRefine((dash, ctx) => {
-    const total = dash.columns.reduce((n, c) => n + c.widgets.length, 0);
-    if (total > MAX_WIDGETS) {
-      ctx.addIssue({ code: "custom", message: `too many widgets (max ${MAX_WIDGETS})` });
-    }
-  });
 
 const LayoutSchema = z
   .object({

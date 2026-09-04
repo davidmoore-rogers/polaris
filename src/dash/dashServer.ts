@@ -43,6 +43,7 @@ import dashboardRouter from "../api/routes/dashboard.js";
 import reservationsRouter from "../api/routes/reservations.js";
 import mapRouter from "../api/routes/map.js";
 import weatherRouter from "../api/routes/weather.js";
+import savedDashboardsRouter from "../api/routes/savedDashboards.js";
 import { errorHandler } from "../api/middleware/errorHandler.js";
 import { requirePermission } from "../api/middleware/permissions.js";
 import { dashWeatherLimiter, makeRateLimiter } from "../api/middleware/rateLimits.js";
@@ -76,6 +77,10 @@ const API_PATH_ALLOWLIST = new Set<string>([
   "/reservations/alerts",
   "/reservations/alerts/count",
   "/map/sites",
+  // Published (public) dashboards a wallboard can be pinned to. The read
+  // routes only; every write verb is already 405'd app-wide, and with no
+  // session the list answers with public rows alone.
+  "/saved-dashboards",
 ]);
 
 /**
@@ -83,7 +88,7 @@ const API_PATH_ALLOWLIST = new Set<string>([
  * parameterized weather-proxy paths (/weather/radar/:frame/:z/:x/:y). Keep
  * this list to read-only, parameter-validated surfaces.
  */
-const API_PREFIX_ALLOWLIST = ["/weather/"];
+const API_PREFIX_ALLOWLIST = ["/weather/", "/saved-dashboards/"];
 
 /**
  * Is this source IP allowed under the current scope? "all" → always; "custom"
@@ -265,6 +270,11 @@ export function buildDashApp(opts: BuildDashAppOptions = {}): express.Express {
   // and fails closed if an operator ever edits that role down.
   api.use("/map", requirePermission("deviceMap", "read"), mapRouter);
   api.use("/weather", weatherRouter);
+  // Published dashboards. The router carries its own savedDashboards=read
+  // floor, satisfied by the built-in readonly role this listener answers as,
+  // and hands a session-less caller PUBLIC rows only — a wallboard viewer can
+  // load a published screen and, being GET-only here, can never save one.
+  api.use("/saved-dashboards", savedDashboardsRouter);
 
   app.use("/dash/api/v1", api);
 

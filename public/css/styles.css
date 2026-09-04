@@ -1523,30 +1523,32 @@ code {
 }
 .table-tab-add:hover { color: var(--color-accent); background: var(--color-bg-secondary); }
 
-/* ─── Saved filter presets menu (Assets → Filters ▾) ───────────────────────
+/* ─── Named-preset menu (Assets → Filters ▾, Dashboard → Dashboards ▾) ─────
    A dropdown whose list rows carry a trailing delete button, so each row is a
-   flex pair rather than the plain full-width buttons the base menu renders. */
-.saved-filters-menu { min-width: 280px; max-width: 380px; max-height: 60vh; overflow-y: auto; }
-.saved-filters-menu .sfl-row {
+   flex pair rather than the plain full-width buttons the base menu renders.
+   `.sfl-menu` is the shared hook — saved filters and saved dashboards are the
+   same list read two ways, and styling them apart is how they drift. */
+.sfl-menu { min-width: 280px; max-width: 380px; max-height: 60vh; overflow-y: auto; }
+.sfl-menu .sfl-row {
   display: flex;
   align-items: stretch;
 }
-.saved-filters-menu .sfl-row:hover { background: var(--color-bg-secondary); }
-.saved-filters-menu .sfl-row button { background: none; }
-.saved-filters-menu .sfl-row:hover button { background: none; }
-.saved-filters-menu .sfl-load {
+.sfl-menu .sfl-row:hover { background: var(--color-bg-secondary); }
+.sfl-menu .sfl-row button { background: none; }
+.sfl-menu .sfl-row:hover button { background: none; }
+.sfl-menu .sfl-load {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.saved-filters-menu .sfl-name {
+.sfl-menu .sfl-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.saved-filters-menu .sfl-badge {
+.sfl-menu .sfl-badge {
   flex-shrink: 0;
   font-size: 0.62rem;
   font-weight: 600;
@@ -1557,21 +1559,21 @@ code {
   background: color-mix(in srgb, var(--color-primary) 18%, transparent);
   color: var(--color-primary);
 }
-.saved-filters-menu .sfl-owner {
+.sfl-menu .sfl-owner {
   flex-shrink: 0;
   margin-left: auto;
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
 }
-.saved-filters-menu .sfl-newtab {
+.sfl-menu .sfl-newtab {
   width: auto !important;
   flex: 0 0 auto;
   padding: 0.5rem 0.35rem !important;
   color: var(--color-text-tertiary);
   line-height: 0;
 }
-.saved-filters-menu .sfl-newtab:hover { color: var(--color-accent); }
-.saved-filters-menu .sfl-star {
+.sfl-menu .sfl-newtab:hover { color: var(--color-accent); }
+.sfl-menu .sfl-star {
   width: auto !important;
   flex: 0 0 auto;
   padding: 0.5rem 0.3rem !important;
@@ -1579,12 +1581,12 @@ code {
   font-size: 0.85rem;
   line-height: 1;
 }
-.saved-filters-menu .sfl-star:hover { color: var(--color-accent); }
+.sfl-menu .sfl-star:hover { color: var(--color-accent); }
 /* Pinned: stays lit without a hover, since it is now state rather than an offer. */
-.saved-filters-menu .sfl-star.active { color: var(--color-accent); }
-.saved-filters-menu .sfl-row-base { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
-.saved-filters-menu .sfl-row-base:hover { background: color-mix(in srgb, var(--color-accent) 16%, transparent); }
-.saved-filters-menu .sfl-del {
+.sfl-menu .sfl-star.active { color: var(--color-accent); }
+.sfl-menu .sfl-row-base { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.sfl-menu .sfl-row-base:hover { background: color-mix(in srgb, var(--color-accent) 16%, transparent); }
+.sfl-menu .sfl-del {
   width: auto !important;
   flex: 0 0 auto;
   padding: 0.5rem 0.7rem !important;
@@ -1592,8 +1594,8 @@ code {
   font-size: 1rem;
   line-height: 1;
 }
-.saved-filters-menu .sfl-del:hover { color: var(--color-danger); }
-.saved-filters-menu .sfl-empty {
+.sfl-menu .sfl-del:hover { color: var(--color-danger); }
+.sfl-menu .sfl-empty {
   padding: 0.5rem 0.85rem;
   font-size: 0.8rem;
   color: var(--color-text-tertiary);

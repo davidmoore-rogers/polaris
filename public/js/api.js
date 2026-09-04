@@ -554,6 +554,16 @@ const api = {
     update: (id, b)   => request("PUT",    `/saved-filters/${id}`, b),
     delete: (id)      => request("DELETE", `/saved-filters/${id}`),
   },
+  // Saved dashboards (Dashboard page → Dashboards ▾). The two reads are the
+  // only ones the Dash wallboard mounts — it is session-less, so they answer
+  // with PUBLIC rows only, and it is GET-only, so the writes don't exist there.
+  savedDashboards: {
+    list:   ()        => request("GET",    "/saved-dashboards"),
+    get:    (id)      => request("GET",    `/saved-dashboards/${id}`),
+    create: (body)    => request("POST",   "/saved-dashboards", body),
+    update: (id, b)   => request("PUT",    `/saved-dashboards/${id}`, b),
+    delete: (id)      => request("DELETE", `/saved-dashboards/${id}`),
+  },
   assets: {
     list:      (params) => request("GET", "/assets" + toQuery(params)),
     get:       (id)     => request("GET", `/assets/${id}`),

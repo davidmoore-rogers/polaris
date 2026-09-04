@@ -50,6 +50,9 @@ const READONLY_IDENTITY: DashRoleIdentity = {
       ipBlocks: "read",
       reservations: "read",
       deviceMap: "read",
+      // Published dashboards: the wallboard's "load a public dashboard" menu
+      // reads /saved-dashboards through the same floor.
+      savedDashboards: "read",
     },
     updatedAt: "2026-01-01T00:00:00.000Z",
   },

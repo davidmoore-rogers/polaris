@@ -34,12 +34,23 @@
     saving: false,
     saveTimer: null,
     unmounts: {},  // widget instance id → cleanup fn
+    // A PUBLISHED (public) saved dashboard being viewed instead of the
+    // viewer's own layout — the Dash wallboard's "load a public dashboard"
+    // mode (dashboard-saved.js). While set, the canvas renders THIS and
+    // nothing here may be edited or persisted: the wallboard has no session
+    // to save with, and its own local layout must survive being looked away
+    // from. { id, name, ownerName, columns }.
+    external: null,
   };
 
   // The currently-shown dashboard. All column/widget logic operates on its
   // .columns; switching tabs just repoints activeId. Always returns an object
   // (falls back to the first, or a fresh empty one) so callers never null-check.
   function activeDash() {
+    // Viewing a published dashboard: one screen, no tabs, nothing to switch to.
+    if (state.external) {
+      return { id: "published:" + state.external.id, name: state.external.name, columns: state.external.columns };
+    }
     var d = state.layout.dashboards;
     if (!d || !d.length) {
       state.layout.dashboards = [{ id: PolarisWidgets.uuid(), name: "Dashboard 1", columns: [] }];
@@ -59,6 +70,9 @@
   var doneBtn = null;
   var createBtn = null;
   var openPopover = null;
+  // The empty-state prompt as the page shipped it — restored when a published
+  // dashboard is closed, since viewing an EMPTY published one rewrites it.
+  var emptyDefaultHTML = "";
 
   // Drag stashes — dataTransfer.getData() is unreadable during dragover, so
   // the dragged type/id are stashed module-level at dragstart, cleared at
@@ -79,6 +93,7 @@
     createBtn    = document.getElementById("dashboard-create");
 
     if (!canvasEl || !emptyEl || !customizeBtn) return;
+    emptyDefaultHTML = emptyEl.innerHTML;
 
     customizeBtn.addEventListener("click", enterEditMode);
     if (addWidgetsBtn) addWidgetsBtn.addEventListener("click", function () { WidgetLibrary.open(handleTapToAdd); });
@@ -127,7 +142,15 @@
   async function bootstrap() {
     var loaded;
     if (window.POLARIS_DASH_LOCAL) {
+      // A wallboard pinned to a published dashboard restores THAT, not its own
+      // layout — a kiosk that reboots must come back to the same screen. The
+      // local layout is still read (it is what "My layout" returns to), and a
+      // published dashboard that has since been deleted or unpublished falls
+      // back to it rather than leaving the wallboard blank.
       loaded = readLocalLayout();
+      if (window.PolarisSavedDashboards && typeof window.PolarisSavedDashboards.restorePinned === "function") {
+        try { await window.PolarisSavedDashboards.restorePinned(); } catch (_err) { /* falls back to local */ }
+      }
     } else {
       try {
         loaded = await api.me.dashboard.get();
@@ -277,7 +300,10 @@
 
   // ─── Edit mode ────────────────────────────────────────────────────────────
 
-  function enterEditMode() { state.editing = true; setHeaderMode(); renderRoot(); }
+  function enterEditMode() {
+    if (state.external) return;
+    state.editing = true; setHeaderMode(); renderRoot();
+  }
   function exitEditMode() {
     state.editing = false;
     setHeaderMode();
@@ -286,10 +312,15 @@
     renderRoot();
   }
   function setHeaderMode() {
-    if (customizeBtn)   customizeBtn.hidden   = state.editing;
-    if (addWidgetsBtn)  addWidgetsBtn.hidden  = !state.editing;
-    if (doneBtn)        doneBtn.hidden        = !state.editing;
-    canvasEl.classList.toggle("is-editing", state.editing);
+    // A published dashboard belongs to whoever published it: the viewer gets
+    // no Customize / Add Widgets / Create, so there is no way to build an edit
+    // that could not be saved.
+    var viewingPublished = !!state.external;
+    if (customizeBtn)   customizeBtn.hidden   = state.editing || viewingPublished;
+    if (addWidgetsBtn)  addWidgetsBtn.hidden  = !state.editing || viewingPublished;
+    if (doneBtn)        doneBtn.hidden        = !state.editing || viewingPublished;
+    if (createBtn)      createBtn.hidden      = viewingPublished;
+    canvasEl.classList.toggle("is-editing", state.editing && !viewingPublished);
   }
 
   // ─── Render ─────────────────────────────────────────────────────────────
@@ -316,6 +347,7 @@
   // switch; in edit mode each tab can be renamed (double-click) and removed (×).
   function renderTabs() {
     if (!tabsEl) return;
+    if (state.external) { tabsEl.hidden = true; tabsEl.innerHTML = ""; return; }
     var dashes = state.layout.dashboards || [];
     if (dashes.length <= 1) { tabsEl.hidden = true; tabsEl.innerHTML = ""; return; }
     tabsEl.hidden = false;
@@ -454,6 +486,11 @@
   }
 
   function showEmpty() {
+    if (state.external) {
+      emptyEl.textContent = 'The published dashboard "' + state.external.name + '" has no widgets on it.';
+    } else if (emptyDefaultHTML) {
+      emptyEl.innerHTML = emptyDefaultHTML;
+    }
     emptyEl.hidden = false;
     canvasEl.hidden = true;
     canvasEl.innerHTML = "";
@@ -639,11 +676,14 @@
   }
 
   function queueSave() {
+    // Viewing a published dashboard is not editing one.
+    if (state.external) return;
     if (state.saveTimer) clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(saveNow, SAVE_DEBOUNCE_MS);
   }
   async function saveNow() {
     state.saveTimer = null;
+    if (state.external) return;
     state.saving = true;
     try {
       if (window.POLARIS_DASH_LOCAL) {
@@ -977,4 +1017,106 @@
     if (window.CSS && CSS.escape) return CSS.escape(s);
     return String(s).replace(/[^a-zA-Z0-9_-]/g, function (c) { return "\\" + c; });
   }
+
+  // ─── Saved dashboards seam ────────────────────────────────────────────────
+  //
+  // What public/js/dashboard-saved.js (the "Dashboards ▾" menu) is allowed to
+  // know about this file. Two directions:
+  //   - read  — a snapshot of the canvas on screen, to publish or keep;
+  //   - write — load a saved dashboard as a NEW TAB (the signed-in page: a
+  //             copy, so editing it never writes back to a preset that may be
+  //             someone else's — the UserTableTabs rule), or VIEW a published
+  //             one read-only (the wallboard, which has nothing to save with).
+  //
+  // Every layout arriving from the server passes through dropUnknownWidgets:
+  // a published dashboard is another operator's blob, and it may name a widget
+  // type this viewer's build doesn't register or their role can't read.
+
+  function dropUnknownWidgets(columns) {
+    return (Array.isArray(columns) ? columns : [])
+      .map(function (col) {
+        return {
+          id: col && col.id ? col.id : PolarisWidgets.uuid(),
+          width: snapWidth(col && col.width ? col.width : 6),
+          widgets: ((col && col.widgets) || []).filter(function (w) {
+            return w && PolarisWidgets.getByType(w.type) != null;
+          }).map(function (w) {
+            return {
+              id: PolarisWidgets.uuid(),   // fresh instance ids: the same widget may already be on the viewer's own canvas
+              type: w.type,
+              height: HEIGHT_STEPS.indexOf(w.height) === -1 ? 1 : w.height,
+              config: w.config && typeof w.config === "object" ? w.config : {},
+            };
+          }),
+        };
+      })
+      .filter(function (col) { return col.widgets.length > 0; });
+  }
+
+  window.PolarisDashboard = {
+    /** True on the Dash wallboard (no session, localStorage layout). */
+    isWallboard: function () { return !!window.POLARIS_DASH_LOCAL; },
+
+    /** The canvas on screen, as a saved-dashboard payload. Null while viewing a published one. */
+    snapshot: function () {
+      if (state.external) return null;
+      var dash = activeDash();
+      return { name: dash.name || "", layout: { columns: JSON.parse(JSON.stringify(dash.columns || [])) } };
+    },
+
+    /** Widgets on the canvas — what the save modal reports it is about to store. */
+    widgetCount: function () { return totalWidgets(); },
+
+    /** Id of the published dashboard being viewed, or null. */
+    publishedId: function () { return state.external ? state.external.id : null; },
+
+    /**
+     * Load a saved dashboard as a new TAB of the viewer's own layout, and
+     * switch to it. A copy by construction — the tab carries no reference back
+     * to the row, so editing it can never rewrite someone else's dashboard.
+     */
+    loadAsNewTab: function (saved) {
+      if (!saved) return false;
+      var columns = dropUnknownWidgets(saved.layout && saved.layout.columns);
+      var id = PolarisWidgets.uuid();
+      state.external = null;
+      state.layout.dashboards.push({ id: id, name: (saved.name || "Dashboard").slice(0, 60), columns: columns });
+      state.layout.activeId = id;
+      setHeaderMode();
+      renderRoot();
+      queueSave();
+      return true;
+    },
+
+    /** Render a published dashboard read-only, in place of the local layout. */
+    viewPublished: function (saved) {
+      if (!saved) return false;
+      state.external = {
+        id: saved.id,
+        name: saved.name || "Published dashboard",
+        ownerName: saved.ownerName || "",
+        columns: dropUnknownWidgets(saved.layout && saved.layout.columns),
+      };
+      state.editing = false;
+      closePopover();
+      WidgetLibrary.close();
+      setHeaderMode();
+      renderRoot();
+      return true;
+    },
+
+    /** Back to the viewer's own layout. */
+    clearPublished: function () {
+      if (!state.external) return false;
+      state.external = null;
+      // Restore the page's own prompt HERE rather than leaving it to
+      // showEmpty: the viewer's layout usually HAS widgets, so the empty state
+      // just hides — and would still be stamped with the published
+      // dashboard's name the next time it showed.
+      if (emptyDefaultHTML) emptyEl.innerHTML = emptyDefaultHTML;
+      setHeaderMode();
+      renderRoot();
+      return true;
+    },
+  };
 })();

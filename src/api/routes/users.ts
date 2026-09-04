@@ -360,6 +360,10 @@ router.delete("/:id", requirePermission("users", "write"), async (req, res, next
     // survive them (other operators are using those). Their private ones would
     // be orphaned rows nobody can ever see, so drop those first.
     await prisma.savedTableFilter.deleteMany({ where: { ownerId: id, visibility: "private" } });
+    // Same rule for saved dashboards, for the same reason — a published one may
+    // be on a wallboard right now, a private one is unreachable once its owner
+    // is gone.
+    await prisma.savedDashboard.deleteMany({ where: { ownerId: id, visibility: "private" } });
 
     await prisma.user.delete({ where: { id } });
     logEvent({
