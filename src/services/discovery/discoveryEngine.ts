@@ -75,6 +75,7 @@ import { createSubnetRowChecked } from "../subnetService.js";
 import { snapshotSubnet } from "../subnetArchiveService.js";
 import { raiseChassisReplacedConflict } from "../subnetChassisConflictService.js";
 import { classifyChassis, verdictWritesSerial } from "../../utils/chassisIdentity.js";
+import { findCoveringExclusion } from "../../utils/subnetExclusion.js";
 import { isMergeableEndpointGhost, mergeEndpointGhostIntoAsset } from "../assetGhostMergeService.js";
 import { recordDiscovery, observeDiscoveryPhase } from "../../metrics.js";
 import { getAdMonitorProtocol, persistManagedApLldpNeighbors, invalidateLldpMatchCache } from "../monitoringService.js";
@@ -2073,7 +2074,10 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
   // that asset to project it, which was one round trip per device per run —
   // hundreds on a Fortinet estate. `infraSources` is that projection input,
   // kept in step with the loops' own writes by applyInfraSourceInMemory.
-  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRawWithRows, allInfraSourceRows] = await Promise.all([
+  // The exclusion list rides this same read: it is tiny, and Phase 1 needs it
+  // per SUBNET, so loading it once per run is what keeps business rule 42 free
+  // of a per-create round trip at 2000-asset fleet size.
+  const [blocks, allSubnetsRaw, allReservationsRaw, allAssetsRawWithRows, allInfraSourceRows, subnetExclusions] = await Promise.all([
     prisma.ipBlock.findMany(),
     prisma.subnet.findMany(),
     prisma.reservation.findMany({ where: { status: "active" } }),
@@ -2081,6 +2085,7 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     prisma.assetSource.findMany({
       select: { assetId: true, sourceKind: true, externalId: true, inferred: true, observed: true, lastSeen: true },
     }),
+    prisma.subnetExclusion.findMany({ select: { cidr: true, name: true } }),
   ]);
   const infraSources = new Map<string, EntraSourceEntry[]>();
   for (const r of allInfraSourceRows) {
@@ -2373,6 +2378,21 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
       continue;
     }
 
+    // ── Excluded address space (business rule 42) ────────────────────────────
+    // The operator has declared this CIDR out of scope for the networks list,
+    // which is how a subnet several sites serve identically stops being one
+    // row every site fights over. The entry is skipped WHOLE — before the
+    // existing-row branch, not just the create — because the conflict this
+    // exists to stop is raised by the UPDATE side: each site's gate answers
+    // with its own serial, so the chassis check on a shared row reads
+    // `replaced` on every run. No create, no update, no chassis comparison,
+    // and (Phase 2) no stale sweep either.
+    const excludedBy = findCoveringExclusion(cidr, subnetExclusions);
+    if (excludedBy) {
+      skipped.push(`${cidr} (excluded as "${excludedBy.name}")`);
+      continue;
+    }
+
     // Check if a non-deprecated subnet with this CIDR already exists (in-memory)
     const existing = subnetByCidr.get(cidr);
     if (existing) {
@@ -2475,7 +2495,9 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
         lastDiscoveredAt: new Date(),
         tags: ["dhcp-discovered", integrationType],
         ...(entry.vlan != null ? { vlan: entry.vlan } : {}),
-      });
+      // Hand the seam this run's already-loaded exclusion set so its business
+      // rule 42 backstop costs no read per created subnet.
+      }, { exclusions: subnetExclusions });
       // Update in-memory state so later phases can find this subnet
       allSubnets.push(newSubnet);
       subnetByCidr.set(cidr, newSubnet);
@@ -2594,9 +2616,15 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
     // Roster check is case-insensitive: a subnet's fortigateDevice can carry
     // FortiOS-cased casing while the FMG roster carries FMG-cased casing
     // (same device, different source).
+    // An excluded CIDR is out of discovery's hands in BOTH directions
+    // (business rule 42): Phase 1 no longer re-stamps it, so its
+    // `fortigateDevice` is frozen at whichever site claimed it first, and
+    // deprecating the row the moment that one gate leaves the roster would be
+    // discovery acting on a subnet the operator told it to leave alone.
     const staleSubnets = allSubnets.filter(
       (s) => s.discoveredBy === integrationId && s.status !== "deprecated" &&
-             s.fortigateDevice && !knownDeviceNamesLc.has(s.fortigateDevice.toLowerCase())
+             s.fortigateDevice && !knownDeviceNamesLc.has(s.fortigateDevice.toLowerCase()) &&
+             !findCoveringExclusion(s.cidr, subnetExclusions)
     );
     if (staleSubnets.length > 0) {
       const staleIds = staleSubnets.map((s) => s.id);

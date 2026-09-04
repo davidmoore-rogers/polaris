@@ -4451,6 +4451,26 @@ label.tag-picker-chip.selected::before { content: "✓"; font-weight: 700; }
   border: 1px solid rgba(255,23,68,0.30);
 }
 
+/* ─── Excluded address space (business rule 42) ───────────────────────────── */
+/* Add row in the Networks -> Exclusions dialog: name grows, CIDR is a fixed
+   monospace-width field, the button never shrinks. */
+.excl-add-row {
+  display: grid;
+  grid-template-columns: 1fr 190px auto;
+  gap: 6px;
+  align-items: center;
+}
+.excl-add-row input { margin: 0; }
+.excl-add-row #excl-cidr { font-family: var(--font-mono, monospace); }
+.excl-name-edit {
+  width: 100%;
+  margin: 0;
+}
+/* "N already listed" is a statement of fact, not a fault — an exclusion never
+   removes a network already in the list. Amber says look, red would say fix. */
+.excl-match { color: var(--color-warning, #ffc107); }
+.excl-clear { color: var(--color-text-tertiary); }
+
 /* ─── Dashboard widget canvas ─────────────────────────────────────────────── */
 
 .dashboard-empty {

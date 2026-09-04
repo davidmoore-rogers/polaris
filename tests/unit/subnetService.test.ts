@@ -19,6 +19,12 @@ const prisma = {
   ipBlock:     { findUnique: vi.fn(), findMany: vi.fn() },
   subnet:      { create: vi.fn(), findUnique: vi.fn(), findMany: vi.fn(), update: vi.fn(), delete: vi.fn() },
   reservation: { count: vi.fn() },
+  // Business rule 42: createSubnetRowChecked asks the exclusion registry before
+  // it inserts, and both allocators fold excluded ranges into their taken-space
+  // list. Default empty = nothing excluded, so every test below reads as it did
+  // before the rule existed; the exclusion behaviour itself is covered against a
+  // real database in tests/integration/subnetExclusions.test.ts.
+  subnetExclusion: { findMany: vi.fn(async () => []), findUnique: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() },
   $executeRaw: vi.fn(async () => 1),
   $transaction: vi.fn(async (arg: any) =>
     typeof arg === "function" ? arg(prisma) : Promise.all(arg),
@@ -33,6 +39,7 @@ const { createSubnet, deleteSubnet, allocateNextSubnet } = await import(
 beforeEach(() => {
   vi.clearAllMocks();
   prisma.$executeRaw.mockResolvedValue(1);
+  prisma.subnetExclusion.findMany.mockResolvedValue([]);
   prisma.$transaction.mockImplementation(async (arg: any) =>
     typeof arg === "function" ? arg(prisma) : Promise.all(arg),
   );

@@ -717,6 +717,42 @@
             Archived entries are read-only — they exist for review, and no write
             path can reach them.</p>
         </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-get">GET</span> /subnets/exclusions
+            <span class="gate">subnets:read</span></div>
+          <p>CIDRs declared out of scope for the networks list. An excluded
+            range is never recorded as a network and never raises a conflict
+            &mdash; it is how address space several sites serve identically (a
+            management VLAN, an out-of-band range) stops being one row every
+            site fights over. Each row carries <code>matchCount</code> plus up
+            to 20 <code>matches</code> naming the live networks it covers:
+            adding an exclusion reports those and deliberately leaves them in
+            place.</p>
+        </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-post">POST</span> /subnets/exclusions
+            <span class="gate">subnets:fullwrite</span></div>
+          <p>Body <code>{ cidr, name, notes? }</code>. IPv4 only; the CIDR is
+            normalized (host bits zeroed) and a duplicate returns
+            <code>409</code>. An exclusion covers itself and anything inside
+            it, so a <code>/16</code> excludes the <code>/24</code>s within it
+            &mdash; a WIDER network is deliberately not covered. Returns the
+            created row including <code>matchCount</code> / <code>matches</code>.</p>
+        </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-put">PUT</span> /subnets/exclusions/:id
+            <span class="gate">subnets:fullwrite</span></div>
+          <p>Body <code>{ name?, notes? }</code>. There is no <code>cidr</code>
+            field: the CIDR is the exclusion&rsquo;s identity, and re-pointing
+            one in place would silently un-exclude the space it was created
+            for. To change the range, delete the exclusion and add the new one.</p>
+        </div>
+        <div class="endpoint">
+          <div class="endpoint-head"><span class="method m-delete">DELETE</span> /subnets/exclusions/:id
+            <span class="gate">subnets:fullwrite</span></div>
+          <p>Stop excluding. Discovery may record that address space as a
+            network again on its next run.</p>
+        </div>
       </section>
 
       <section id="ipam-reservations">

@@ -372,6 +372,15 @@ const api = {
     refresh:       (id)     => request("POST", `/subnets/${id}/refresh`),
     update:        (id, b)  => request("PUT", `/subnets/${id}`, b),
     delete:        (id)     => request("DELETE", `/subnets/${id}`),
+    // Address space declared out of scope for the networks list (business rule
+    // 42). No `cidr` on update — it is the exclusion's identity; changing which
+    // space is excluded is a delete plus an add.
+    exclusions: {
+      list:   ()      => request("GET",    "/subnets/exclusions"),
+      create: (body)  => request("POST",   "/subnets/exclusions", body),
+      update: (id, b) => request("PUT",    `/subnets/exclusions/${id}`, b),
+      delete: (id)    => request("DELETE", `/subnets/exclusions/${id}`),
+    },
   },
   allocationTemplates: {
     list:   ()        => request("GET",    "/allocation-templates"),

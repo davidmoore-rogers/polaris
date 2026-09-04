@@ -7,6 +7,7 @@ import { z } from "zod";
 import * as subnetService from "../../services/subnetService.js";
 import { refreshSubnet } from "../../services/subnetRefreshService.js";
 import * as subnetArchiveService from "../../services/subnetArchiveService.js";
+import * as subnetExclusionService from "../../services/subnetExclusionService.js";
 import { requirePermission, requireOwnership, assertOwnership } from "../middleware/permissions.js";
 import { AppError } from "../../utils/errors.js";
 
@@ -47,6 +48,21 @@ const BulkAllocateSchema = z.object({
   entries: z.array(BulkEntrySchema).min(1, "At least one entry is required"),
   tags:         z.array(z.string()).optional(),
   anchorPrefix: z.number().int().min(8).max(32).optional(),
+});
+
+// Subnet exclusions (business rule 42). Shape only — CIDR validity, IPv4-only
+// and the already-excluded refusal live in subnetExclusionService, so an
+// exclusion created by any caller passes exactly the same checks.
+const CreateExclusionSchema = z.object({
+  cidr:  z.string().min(1, "CIDR is required"),
+  name:  z.string().min(1, "Exclusion name is required"),
+  notes: z.string().nullish(),
+});
+
+// No `cidr` here on purpose — see the PUT's comment.
+const UpdateExclusionSchema = z.object({
+  name:  z.string().min(1, "Exclusion name is required").optional(),
+  notes: z.string().nullish(),
 });
 
 const UpdateSubnetSchema = z.object({
@@ -123,6 +139,73 @@ router.post("/bulk-allocate", requireOwnership("subnets"), async (req, res, next
       actor: req.session?.username,
     });
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── Subnet exclusions (business rule 42) ────────────────────────────────────
+//
+// A CIDR the operator has declared out of scope for the networks list — the
+// address space several sites serve identically, which Polaris' one-row-per-CIDR
+// model can only record once and which since rule 41 raises a `chassis-replaced`
+// conflict on every run because each site's gate answers with its own serial.
+//
+// These MUST stay declared before `/:id`, or `/subnets/exclusions` is captured
+// as a subnet id. Reads are `subnets:read` (any operator who can see the list
+// can see what is excluded from it); the three mutations are `fullwrite`, the
+// archive's reasoning — an exclusion is fleet-wide and applies to discovered
+// rows nobody owns, so the ownership-aware `write` tier could never be the
+// right gate for it.
+
+// GET /subnets/exclusions — every exclusion + the live networks each covers.
+router.get("/exclusions", requirePermission("subnets", "read"), async (_req, res, next) => {
+  try {
+    res.json(await subnetExclusionService.listExclusions());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /subnets/exclusions
+router.post("/exclusions", requirePermission("subnets", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = CreateExclusionSchema.parse(req.body);
+    const created = await subnetExclusionService.createExclusion({
+      ...input,
+      createdBy: req.session?.username ?? undefined,
+      actor: req.session?.username,
+    });
+    res.status(201).json(created);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PUT /subnets/exclusions/:id — name / notes only. The CIDR is the exclusion's
+// identity: re-pointing one in place would silently un-exclude the space the
+// operator excluded, so changing address space is a delete plus an add.
+router.put("/exclusions/:id", requirePermission("subnets", "fullwrite"), async (req, res, next) => {
+  try {
+    const input = UpdateExclusionSchema.parse(req.body);
+    const saved = await subnetExclusionService.updateExclusion(req.params.id as string, {
+      ...input,
+      actor: req.session?.username,
+    });
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /subnets/exclusions/:id
+router.delete("/exclusions/:id", requirePermission("subnets", "fullwrite"), async (req, res, next) => {
+  try {
+    await subnetExclusionService.deleteExclusion(
+      req.params.id as string,
+      req.session?.username ?? undefined,
+    );
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

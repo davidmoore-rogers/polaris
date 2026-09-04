@@ -5836,13 +5836,41 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 
 ---
 
+## services/subnetExclusionService.ts
+
+**What it owns:** The exclusion registry (business rule 42) — `SubnetExclusion` CRUD, the `subnet.exclusion.created` / `.updated` / `.deleted` Events, and `assertNotExcluded`, the 409 every subnet-creating path meets.
+
+**Public API:** `listExclusions()` (rows decorated with the live networks each covers), `loadExclusions()` (bare — THE read for enforcement paths), `loadExclusionsOverlapping(scopeCidr)`, `assertNotExcluded(cidr, known?)`, `createExclusion`, `updateExclusion` (name/notes only), `deleteExclusion`, plus the `SubnetExclusionRow` / `SubnetExclusionDto` / `ExclusionMatch` types.
+
+**Cross-service deps:** eventLogService, utils/cidr (`isValidCidr` / `normalizeCidr` / `detectIpVersion`), utils/subnetExclusion (the pure containment half).
+
+**Used by:** `src/api/routes/subnets.ts` (`GET|POST /subnets/exclusions`, `PUT|DELETE /subnets/exclusions/:id`), `src/services/subnetService.ts` (`assertNotExcluded` inside `createSubnetRowChecked`; `loadExclusions` + `exclusionsOverlapping` in `allocateNextSubnet` / `bulkAllocate` / `previewBulkAllocate`), `src/services/discovery/discoveryEngine.ts` (reads `prisma.subnetExclusion` directly into its own per-run Promise.all and matches with `findCoveringExclusion` — Phases 1 and 2), `public/js/subnets.js` (the Networks → Exclusions dialog).
+
+**Invariants:**
+- **`createSubnetRowChecked` is the single enforcement seam for creation.** Manual create, auto-allocate, bulk allocate and the discovery create all pass through it, which is what makes "an excluded CIDR is never added to the networks list" true of all of them from one check. A new subnet-creating path that bypasses that seam bypasses this too — the same trap business rule 20a describes for the overlap lock.
+- **Excluded space is TAKEN space to an allocator, never a refusal.** `allocateNextSubnet` / `bulkAllocate` / `previewBulkAllocate` append the overlapping exclusions' CIDRs to the taken list handed to `findNextAvailableSubnet` / `packIntoAnchor`, so the allocator steps over the range. A caller asking for "any free /N" must not get a 409 naming an exclusion — that turns a policy into an obstacle the operator has to notice and route around. The preview must use the SAME list as the write, or it shows a plan the write then refuses.
+- **Containment is one-directional and lives in `utils/subnetExclusion`.** An exclusion covers itself and anything narrower; a WIDER discovered CIDR is not excluded (excluding one /24 must not swallow a /8). The allocator's question is different and uses plain overlap. Never collapse the two.
+- **Adding an exclusion destroys nothing.** Live networks it covers are reported (`matchCount` / `matches`) and left in place; retiring one stays `subnetArchiveService.archiveSubnet`. A config write must not delete address-space records as a side effect.
+- **`cidr` is the identity and is frozen after create.** `updateExclusion` accepts name/notes only and the route schema carries no `cidr` — re-pointing an exclusion in place would silently un-exclude the space the operator excluded. Changing the range is a delete plus an add.
+- **Discovery skips a covered entry WHOLE, not just the create.** The conflict this feature exists to stop (rule 41's `chassis-replaced`, raised because every site's gate reports a different serial for the shared row) comes from the UPDATE side, so the Phase 1 skip sits ABOVE the existing-row branch. Phase 2's stale sweep skips them too: their `fortigateDevice` is frozen at whichever site claimed the row first.
+- **IPv4 only**, refused at the door. The containment math is netmask-backed, so a stored v6 exclusion would match nothing while looking like it worked.
+- Mutations are gated `subnets:fullwrite`, reads `subnets:read` — the `POST /subnets/:id/archive` reasoning: an exclusion is fleet-wide and covers discovered rows whose `createdBy` is null, so the ownership-aware `write` tier could never be the right gate.
+
+**When changing this:**
+- Adding a subnet-creating path? Route it through `createSubnetRowChecked` (or call `assertNotExcluded` yourself) — and pass an already-loaded exclusion list where the path is a loop, the way discovery does, so the check costs no read per row.
+- Making exclusions per-block would defeat the feature: the CIDR needs excluding precisely because several sites serve it.
+- If a "retire the networks this covers" action is ever added, it belongs on the exclusion's own row as an explicit verb — not on create.
+- `tests/integration/subnetExclusions.test.ts` pins the four load-bearing claims (seam refuses, allocators skip, existing rows survive and are counted, CIDR frozen); `tests/unit/subnetExclusion.test.ts` pins the containment asymmetry.
+
+---
+
 ## services/subnetService.ts
 
 **What it owns:** Subnet creation, allocation, bulk templates, and lifecycle (manual vs discovered), plus the `subnet.created` / `subnet.updated` / `subnet.deleted` / `subnet.bulk-allocated` audit Events (emitted in-service; inputs carry `actor?`, and `via: "auto-allocate"` discriminates the allocateNextSubnet message from a manual create).
 
 **Public API:** listSubnets, getSubnet, createSubnet, allocateNextSubnet, bulkAllocate, previewBulkAllocate, updateSubnet, getSubnetIps, deleteSubnet, buildIpContexts + IpContext (batched IP → most-specific containing subnet + active-reservation summary; THE single implementation of the `cidr >>= ip` / `masklen DESC` containment SQL).
 
-**Cross-service deps:** ipService (indirectly via cidrContains/cidrOverlaps from utils/cidr.ts).
+**Cross-service deps:** ipService (indirectly via cidrContains/cidrOverlaps from utils/cidr.ts), subnetExclusionService (`assertNotExcluded` inside `createSubnetRowChecked`; `loadExclusions` + `exclusionsOverlapping` in the two allocators — business rule 42).
 
 **Used by:** src/api/routes/subnets.ts (all operations), src/api/routes/assets.ts (buildIpContexts — per-row `ipContext` for the asset table's View Lease button), src/services/dnsResolvedReservationService.ts (buildIpContexts — target-subnet resolution in the reconciler), src/services/ipContextService.ts (buildIpContexts — the containing network behind the Add Asset IP cross-reference; deliberately reuses this rather than re-implementing the `cidr >>= ip` / `masklen DESC` query), src/services/reservationService.ts (subnet lookups, status checks), src/services/utilizationService.ts (subnet status grouping).
 
@@ -5860,6 +5888,7 @@ Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFir
 - Verify bulkAllocate's anchor-aligned packing (all-or-nothing transaction)
 - Check updateSubnet does not allow status changes that violate reservation constraints
 - Review overlapping-sibling check performance for large blocks
+- **`createSubnetRowChecked` is also where the exclusion list is enforced** (business rule 42), for the same reason the overlap lock lives there: it is the one seam manual create, auto-allocate, bulk allocate and the discovery create all pass through, so one check covers every path. Its `opts.exclusions` escape hatch exists so a loop that already loaded the set (discovery, once per run) pays no read per created subnet. The two ALLOCATORS treat excluded ranges as taken space instead — appended to the list handed to `findNextAvailableSubnet` / `packIntoAnchor` — because a caller asking for "any free /N" must be stepped past an exclusion, not refused by it; `previewBulkAllocate` must build that list identically or the preview shows a plan `bulkAllocate` rejects
 - **`createSubnetRowChecked`'s sibling re-read is status-BLIND on purpose** — it counts deprecated rows, which is what makes them block a same-CIDR create. Do not add a status filter to make room for a replacement subnet; that is the archive's job, and filtering here would leave two live rows racing the unique index instead
 - **bulkAllocate's single `subnet.bulk-allocated` Event must stay AFTER the `$transaction` resolves** (an event from inside would be a phantom on rollback), and the per-subnet `tx.subnet.create` calls must stay event-free — `tests/integration/subnets.test.ts` asserts one-bulk-event + zero-per-subnet-events. allocateNextSubnet delegates to createSubnet, so it must keep passing `via: "auto-allocate"` rather than emitting its own event.
 
@@ -6295,6 +6324,7 @@ Only diverge from a canonical when the new surface genuinely needs something it 
 - **Lock, THEN read.** The advisory lock must be the FIRST statement inside the transaction, before the read whose result the decision depends on. A lock taken after the read is decorative. Assert the ordering in a test (`prisma.$executeRaw.mock.invocationCallOrder[0] < prisma.x.findMany.mock.invocationCallOrder[0]`) — it is the kind of thing a later refactor silently reorders.
 - **`pg_advisory_xact_lock(classid, objid)`, not the session form.** The xact form releases on commit OR rollback with no unlock bookkeeping to leak. `classid` partitions namespaces so two unrelated lock users can never collide on a coincidentally-equal objid — allocate a new one per feature and comment it next to the existing values (`0x504c5253` "PLRS" = retention prune in `monitoringService.ts`, `0x504c5254` "PLRT" = subnet writes). `objid = hashtext(scopeId)`; a hash collision only makes two unrelated scopes briefly serialize, which is harmless.
 - **Lock the narrowest scope that makes the invariant safe.** Per-block, not global — unrelated blocks stay fully parallel.
+- **A policy that says "this row may not exist" belongs at the same seam.** The exclusion check (business rule 42) sits inside `createSubnetRowChecked` for exactly the reason the overlap re-read does: every writer already comes through it, so one check is every path. Give it an optional pre-loaded set (`opts.exclusions`) so a batch caller does not pay a read per row.
 - **Add a DB constraint as the backstop, even a partial one.** A UNIQUE index catches the exact-duplicate case (which is the usual race outcome) even from a future path that forgets the lock. Where the full invariant is not expressible as a constraint, say so in the migration and the service header rather than leaving the reader to wonder: stock PostgreSQL has no GiST-indexable `&&` for `inet`/`cidr`, so a general overlap exclusion constraint does not build without a third-party extension.
 - **A constraint that existing data violates must not fail the migration.** Detect the violation, `RAISE WARNING` naming the offending rows, skip creation, and ship a NOT-marker-guarded startup job that retries every boot so the constraint appears on its own once an operator cleans up. Failing the migration blocks the whole upgrade over historical data.
 - **Translate the constraint violation into the service's normal error.** Catch `err.code === "P2002"` at the seam and rethrow the same `AppError(409, …)` the in-transaction check raises, so callers see one error shape.

@@ -4883,3 +4883,43 @@ model SshHostKey {
   @@unique([host, port])
   @@map("ssh_host_keys")
 }
+
+// A CIDR the operator has declared OUT OF SCOPE for the networks list
+// (business rule 42).
+//
+// WHY THIS EXISTS
+// Some address space is the same at every site: a management VLAN, an
+// out-of-band range, a vendor appliance's fixed subnet. Every site's FortiGate
+// reports it, and Polaris' model of a subnet is a SINGLE row per CIDR
+// (`@@unique([blockId, cidr])`), so the first site to be discovered creates the
+// row and every other site collides with it. Post-rule-41 that collision is
+// louder than noise: each site's gate answers with its own serial, so the row's
+// chassis identity reads as REPLACED on every run and discovery raises a
+// `chassis-replaced` Conflict about a box nobody swapped.
+//
+// An exclusion says "this CIDR is not one network — do not try to record it."
+// Discovery skips it whole: no create, no update, no chassis check, and it is
+// left out of the Phase 2 stale sweep, so nothing about an excluded CIDR can
+// raise a conflict or move a row.
+//
+// GLOBAL, NOT PER BLOCK, deliberately. The whole point is that the CIDR is
+// shared across sites, and blocks are how Polaris carves ITS space; scoping an
+// exclusion to one block would let the same CIDR be recorded through another.
+//
+// `cidr` is the identity and is FROZEN after create (PUT accepts name/notes
+// only) — re-pointing an exclusion at different address space in place would
+// silently un-exclude what the operator excluded, so that is a delete plus an
+// add. Normalized on write, so 10.1.1.5/24 and 10.1.1.0/24 are one row.
+model SubnetExclusion {
+  id    String @id @default(uuid())
+  cidr  String @unique
+  name  String
+  notes String? @db.Text
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([cidr])
+  @@map("subnet_exclusions")
+}

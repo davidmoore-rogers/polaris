@@ -54,6 +54,11 @@ import {
   enumerateSubnetIps,
   packIntoAnchor,
 } from "../utils/cidr.js";
+import {
+  assertNotExcluded,
+  loadExclusions,
+} from "./subnetExclusionService.js";
+import { exclusionsOverlapping, type ExclusionLike } from "../utils/subnetExclusion.js";
 
 /**
  * The client handed to an interactive `$transaction` callback.
@@ -109,11 +114,20 @@ export async function lockBlockForSubnetWrites(
  * pre-check and this call, which is exactly the race that used to slip through.
  * A P2002 from the (blockId, cidr) unique index is translated to the same 409
  * so callers see one error shape.
+ *
+ * It is ALSO the one place every subnet-creating path meets the exclusion list
+ * (business rule 42), which is why the check lives here rather than in each
+ * caller: manual create, auto-allocate and the discovery create all come
+ * through this seam, so an excluded CIDR cannot be recorded by any of them.
+ * `opts.exclusions` lets a caller that already loaded the set (discovery, which
+ * loads it once per run) skip the read.
  */
 export async function createSubnetRowChecked(
   data: Prisma.SubnetUncheckedCreateInput,
+  opts?: { exclusions?: readonly ExclusionLike[] },
 ) {
   const { blockId, cidr } = data;
+  await assertNotExcluded(cidr, opts?.exclusions);
   try {
     return await prisma.$transaction(async (tx) => {
       await lockBlockForSubnetWrites(tx, blockId);
@@ -365,6 +379,13 @@ export async function allocateNextSubnet(
   // more concurrency than this endpoint will ever see. Only the overlap/dup 409
   // is retried — a genuine "block full" 409 is raised by the pick itself and
   // returns immediately.
+  // Excluded ranges (business rule 42) are TAKEN space here, not a refusal.
+  // The caller asked for "any free /N", so an excluded candidate has to be
+  // skipped over the way an allocated one is — 409-ing on it would turn an
+  // exclusion into a wall the operator has to notice and work around.
+  const excludedCidrs = exclusionsOverlapping(block.cidr, await loadExclusions())
+    .map((ex) => ex.cidr);
+
   const MAX_ATTEMPTS = 5;
   for (let attempt = 1; ; attempt++) {
     const existing = await prisma.subnet.findMany({
@@ -374,7 +395,7 @@ export async function allocateNextSubnet(
 
     const nextCidr = findNextAvailableSubnet(
       block.cidr,
-      existing.map((s) => s.cidr),
+      [...existing.map((s) => s.cidr), ...excludedCidrs],
       prefixLength
     );
 
@@ -488,16 +509,22 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
   // anchor region and both commit. The advisory lock is what makes the re-read
   // authoritative, and it is the same lock createSubnetRowChecked takes, so
   // batch and single-row writers serialize against each other too.
+  // Excluded ranges are unavailable space for the packer, same as an allocated
+  // sibling (business rule 42) — so a template can never land an entry inside a
+  // CIDR the operator excluded, and the anchor search moves past it instead.
+  const excluded = exclusionsOverlapping(block.cidr, await loadExclusions());
+
   const result = await prisma.$transaction(async (tx) => {
     await lockBlockForSubnetWrites(tx, input.blockId);
     const existing = await tx.subnet.findMany({
       where: { blockId: input.blockId },
       select: { cidr: true },
     });
+    const taken = [...existing.map((s) => s.cidr), ...excluded.map((ex) => ex.cidr)];
 
     const packed = packIntoAnchor(
       block.cidr,
-      existing.map((s) => s.cidr),
+      taken,
       input.entries,
       requestedAnchor
     );
@@ -516,6 +543,13 @@ export async function bulkAllocate(input: BulkAllocateInput): Promise<BulkAlloca
       const overlap = existing.find((s) => cidrOverlaps(s.cidr, a.cidr));
       if (overlap) {
         throw new AppError(409, `Computed subnet ${a.cidr} overlaps existing ${overlap.cidr}`);
+      }
+      const excludedHit = excluded.find((ex) => cidrOverlaps(ex.cidr, a.cidr));
+      if (excludedHit) {
+        throw new AppError(
+          409,
+          `Computed subnet ${a.cidr} falls inside excluded range ${excludedHit.cidr} ("${excludedHit.name}")`,
+        );
       }
     }
 
@@ -644,10 +678,14 @@ export async function previewBulkAllocate(
     where: { blockId: input.blockId },
     select: { cidr: true },
   });
+  // Same taken-space list bulkAllocate packs against, or the preview would show
+  // a plan the mutating call then refuses (business rule 42).
+  const excludedCidrs = exclusionsOverlapping(block.cidr, await loadExclusions())
+    .map((ex) => ex.cidr);
 
   const packed = packIntoAnchor(
     block.cidr,
-    existing.map((s) => s.cidr),
+    [...existing.map((s) => s.cidr), ...excludedCidrs],
     input.entries,
     requestedAnchor
   );

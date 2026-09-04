@@ -45,6 +45,11 @@ async function _initSubnetsPage() {
   if (addBtn) addBtn.addEventListener("click", openSubnetCreateModal);
   var allocBtn = document.getElementById("btn-auto-alloc");
   if (allocBtn) allocBtn.addEventListener("click", openAllocateModal);
+  // Ungated in the markup on purpose: read-level operators may LOOK at what is
+  // excluded from the list they are reading (the dialog gates its own add /
+  // rename / remove controls on subnets:fullwrite, matching the route).
+  var exclBtn = document.getElementById("btn-exclusions");
+  if (exclBtn) exclBtn.addEventListener("click", openExclusionsModal);
   // Row verbs live behind the name. "Open" is what the name click used to do on
   // its own; Edit / Delete are per-ROW (canEditSubnet honours the ownership
   // dimension — write-level callers only manage networks they created), so the
@@ -292,6 +297,224 @@ async function openSubnetCreateModal() {
       btn.disabled = false;
     }
   });
+}
+
+/* ─── Exclusions: address space kept OUT of the networks list ─────────────── */
+//
+// Business rule 42. Some address space is the same at every site — a management
+// VLAN, an out-of-band range, an appliance's fixed subnet — and a Polaris subnet
+// is ONE row per CIDR, so the first site discovered claims it and every other
+// site collides with it. Since rule 41 that collision reads as a chassis
+// REPLACEMENT (each site's gate answers with its own serial) and raises a
+// conflict on every discovery run about a box nobody swapped.
+//
+// An exclusion says "this CIDR is not one network". Discovery then skips it
+// whole: no create, no update, no chassis check, no stale sweep.
+//
+// The CIDR is the exclusion's identity and is deliberately NOT editable — this
+// dialog offers a name field per row and nothing else, because re-pointing an
+// exclusion at different address space in place would silently un-exclude what
+// the operator excluded. That is a Remove plus an Add.
+
+var _exclusions = [];
+
+async function openExclusionsModal() {
+  // subnets:fullwrite, matching the route gate — an exclusion is fleet-wide and
+  // covers discovered rows nobody owns, so the ownership-aware write tier can't
+  // be the right gate. Read-level operators still SEE the list: what is missing
+  // from the networks page is exactly the thing worth being able to look up.
+  var canEdit = canManageNetworks();
+
+  var body =
+    infoBox(
+      "Excluded address space is <strong>never added to the networks list</strong> and " +
+      "<strong>never raises a conflict</strong>. Use it for a subnet that is the same at " +
+      "every site — a management VLAN, an out-of-band range — which Polaris can otherwise " +
+      "only record once, leaving every other site's FortiGate looking like a replacement " +
+      "of the first."
+    ) +
+    (canEdit
+      ? '<div class="form-group">' +
+          sectionHeading("Add an exclusion") +
+          '<div class="excl-add-row">' +
+            '<input type="text" id="excl-name" placeholder="Name — e.g. Site Management VLAN">' +
+            '<input type="text" id="excl-cidr" placeholder="Subnet — e.g. 10.255.0.0/24">' +
+            '<button type="button" class="btn btn-primary btn-sm" id="excl-add">Add</button>' +
+          "</div>" +
+          '<p class="hint">IPv4 only. Host bits are normalized away, so <code>10.255.0.5/24</code> ' +
+          'is stored as <code>10.255.0.0/24</code>. An exclusion also covers everything ' +
+          'inside it, so a <code>/16</code> excludes the <code>/24</code>s within it.</p>' +
+        "</div>" +
+        formDivider()
+      : "") +
+    '<div id="excl-list" class="empty-state">Loading…</div>';
+
+  openModal(
+    "Excluded Address Space",
+    body,
+    '<button class="btn btn-secondary" onclick="closeModal()">Close</button>',
+    { large: true }
+  );
+
+  if (canEdit) {
+    var addBtn = document.getElementById("excl-add");
+    if (addBtn) addBtn.addEventListener("click", _submitExclusion);
+    ["excl-name", "excl-cidr"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); _submitExclusion(); }
+      });
+    });
+  }
+  await _reloadExclusions();
+}
+
+async function _reloadExclusions() {
+  var el = document.getElementById("excl-list");
+  if (!el) return;
+  try {
+    var rows = await api.subnets.exclusions.list();
+    _exclusions = Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    el.innerHTML = '<div class="empty-state">' +
+      escapeHtml(err.message || "Failed to load exclusions") + "</div>";
+    return;
+  }
+  _renderExclusions();
+}
+
+function _renderExclusions() {
+  var el = document.getElementById("excl-list");
+  if (!el) return;
+  var canEdit = canManageNetworks();
+
+  if (!_exclusions.length) {
+    el.className = "";
+    el.innerHTML = '<div class="empty-state">' +
+      (canEdit
+        ? "Nothing is excluded. Add a subnet above to keep it out of the networks list."
+        : "Nothing is excluded.") +
+      "</div>";
+    return;
+  }
+
+  var rows = _exclusions.map(function (ex) {
+    // matchCount is REPORTED, never acted on: adding an exclusion stops future
+    // recording and leaves rows already in the list alone, so an operator who
+    // wants one gone retires it themselves.
+    var matches = ex.matchCount > 0
+      ? '<span class="excl-match" title="' +
+          escapeHtml(ex.matches.map(function (m) { return m.cidr + " — " + m.name; }).join("\n")) +
+          '">' + ex.matchCount + " already listed</span>"
+      : '<span class="excl-clear">none listed</span>';
+    return "<tr>" +
+      '<td style="white-space:nowrap"><code>' + escapeHtml(ex.cidr) + "</code></td>" +
+      "<td>" + (canEdit
+        ? '<input type="text" class="excl-name-edit" data-id="' + escapeHtml(ex.id) + '" value="' +
+            escapeHtml(ex.name) + '" aria-label="Exclusion name">'
+        : escapeHtml(ex.name)) + "</td>" +
+      '<td style="white-space:nowrap">' + matches + "</td>" +
+      '<td style="white-space:nowrap">' + escapeHtml(ex.createdBy || "—") + "</td>" +
+      (canEdit
+        ? '<td style="white-space:nowrap"><button type="button" class="btn btn-danger btn-sm excl-remove" ' +
+            'data-id="' + escapeHtml(ex.id) + '">Remove</button></td>'
+        : "<td></td>") +
+      "</tr>";
+  }).join("");
+
+  el.className = "";
+  el.innerHTML =
+    '<table class="data-table"><thead><tr style="white-space:nowrap">' +
+      '<th>Subnet</th><th>Name</th>' +
+      '<th title="Networks already in the list that this exclusion covers. Adding an exclusion never removes them — retire one from its own row menu if you want it gone.">Existing</th>' +
+      "<th>Added by</th><th></th>" +
+    "</tr></thead><tbody>" + rows + "</tbody></table>" +
+    '<p class="hint" style="margin-top:8px">The subnet is an exclusion’s identity and cannot be ' +
+    'changed — remove it and add the new range instead. Removing an exclusion lets discovery ' +
+    'record that address space again on its next run.</p>';
+
+  // Name commits on Enter or on blur, and only when it actually changed.
+  el.querySelectorAll(".excl-name-edit").forEach(function (input) {
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+      if (e.key === "Escape") {
+        var row = _exclusions.find(function (x) { return x.id === input.getAttribute("data-id"); });
+        if (row) input.value = row.name;
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", function () { _commitExclusionName(input); });
+  });
+
+  el.querySelectorAll(".excl-remove").forEach(function (btn) {
+    btn.addEventListener("click", function () { _removeExclusion(btn.getAttribute("data-id")); });
+  });
+}
+
+async function _submitExclusion() {
+  var nameEl = document.getElementById("excl-name");
+  var cidrEl = document.getElementById("excl-cidr");
+  var addBtn = document.getElementById("excl-add");
+  if (!nameEl || !cidrEl) return;
+  var name = (nameEl.value || "").trim();
+  var cidr = (cidrEl.value || "").trim();
+  if (!name) { showToast("Name is required", "error"); nameEl.focus(); return; }
+  if (!cidr) { showToast("Subnet is required", "error"); cidrEl.focus(); return; }
+
+  if (addBtn) { addBtn.disabled = true; addBtn.textContent = "Adding…"; }
+  try {
+    var created = await api.subnets.exclusions.create({ name: name, cidr: cidr });
+    nameEl.value = "";
+    cidrEl.value = "";
+    showToast(
+      created.matchCount > 0
+        ? created.cidr + " excluded — " + created.matchCount +
+            " network(s) already in the list were left in place"
+        : created.cidr + " excluded"
+    );
+    await _reloadExclusions();
+    nameEl.focus();
+  } catch (err) {
+    showToast(err.message, "error");
+  } finally {
+    if (addBtn) { addBtn.disabled = false; addBtn.textContent = "Add"; }
+  }
+}
+
+async function _commitExclusionName(input) {
+  var id = input.getAttribute("data-id");
+  var row = _exclusions.find(function (x) { return x.id === id; });
+  if (!row) return;
+  var name = (input.value || "").trim();
+  if (!name) { input.value = row.name; showToast("Name is required", "error"); return; }
+  if (name === row.name) return;
+  try {
+    var saved = await api.subnets.exclusions.update(id, { name: name });
+    row.name = saved.name;
+    input.value = saved.name;
+    showToast("Exclusion renamed");
+  } catch (err) {
+    input.value = row.name;
+    showToast(err.message, "error");
+  }
+}
+
+async function _removeExclusion(id) {
+  var row = _exclusions.find(function (x) { return x.id === id; });
+  if (!row) return;
+  var ok = await showConfirm(
+    'Stop excluding "' + row.name + '" (' + row.cidr + ')? Discovery may record this ' +
+    "address space as a network again on its next run."
+  );
+  if (!ok) return;
+  try {
+    await api.subnets.exclusions.delete(id);
+    showToast("Exclusion removed");
+    await _reloadExclusions();
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 /* ─── Auto-Allocate: template-driven bulk modal ──────────────────────────── */

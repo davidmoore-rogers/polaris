@@ -42,6 +42,7 @@ place if it stops being true, and give a new rule the next free number.
 - [Rule 35 — The GAL is a mirror, not a source of truth — and Polaris only ever deletes what it wrote](#rule-35)
 - [Rule 36 — The automation decides what "down" means; a device no automation covers is never judged](#rule-36)
 - [Rule 37 — An automation only fires about a device Polaris is actually polling](#rule-37)
+- [Rule 42 — Some address space is not one network, and the way to say so is to exclude it](#rule-42)
 
 ---
 
@@ -522,3 +523,61 @@ Raising archives a copy and stops. Carrying chosen addresses forward onto the ne
 **Migrating does not close the conflict.** An operator may migrate a few lines, look again, and migrate more, so the diff has to stay reachable; adopting the chassis is the separate act that closes it (`adopt: true` on the same call does both in one round trip). The route carries a CHAINED gate — `discoveryConflicts:write` AND `reservations:write`, the `/reassign-ip` precedent — because resolving a queue entry and creating reservations are separable grants and this needs both.
 
 One Event per batch (`subnet.chassis.reservations_migrated`, the `subnet.bulk-allocated` convention) rather than one per row, but it names every address migrated and every one skipped, so the audit trail stays specific.
+
+---
+
+<a id="rule-42"></a>
+## Rule 42 — Some address space is not one network, and the way to say so is to exclude it
+
+**The invariant.** A `SubnetExclusion` is a CIDR the operator has declared out of scope for the networks list. It is **global, not per block**; its `cidr` is its **identity**, normalized on write and **frozen after create** (the PUT takes `name` / `notes` only); it is **IPv4-only**; and it **covers itself and anything narrower, in that direction only**. Nothing may record excluded space and nothing may raise a conflict about it: `createSubnetRowChecked` — the one seam every subnet-creating path passes through — refuses it 409, the two allocators fold excluded ranges into their taken-space list so auto-allocate STEPS OVER them rather than failing on them, and discovery skips a covered scope WHOLE in Phase 1 (no create, no update, no chassis comparison) and exempts the row from the Phase 2 stale sweep. **Adding an exclusion destroys nothing** — networks already in the list that it covers are reported back (`matchCount` / `matches`) and left in place. Managed on IPAM → Networks → **Exclusions**, gated `subnets:read` to look and `subnets:fullwrite` to change.
+
+### What went wrong
+
+Polaris models a subnet as ONE row per CIDR — `@@unique([blockId, cidr])`, which is exactly right for address space an operator allocates and carves. But a large fleet has address space that is the *same at every site*: a management VLAN, an out-of-band range, the fixed subnet a vendor appliance ships with. Every site's FortiGate reports it as its own DHCP scope, so discovery arrives with the same CIDR from forty different gates.
+
+Before rule 41 that was noise. The first site discovered created the row, every other site's copy matched by CIDR and fell into the update branch, and the row's `fortigateDevice` was re-stamped to whichever gate happened to be processed last — a subnet whose "Sources" column named an arbitrary site, and which therefore inherited an arbitrary site's `region:` tag through `mapRegionService`. Wrong, but quiet.
+
+Rule 41 made it loud. The row now carries the serving chassis's SERIAL, and a serial that is neither the stored one nor a member of the reporting device's HA cluster is by definition a replacement. Forty sites means forty serials for one row, so:
+
+- every discovery run reads `replaced` on the shared subnet — correctly, by the rule's own definition;
+- each one archives a snapshot of the subnet plus its reservations (`snapshotSubnet`), so the archive fills with copies of a subnet nobody retired;
+- each one raises a `chassis-replaced` Conflict, and because dedup is keyed on the (old, new) serial PAIR, a fleet cycling through forty gates raises a *different* pair each run — the dedup marker never matches, so the queue grows one card per run per site;
+- and the card describes a chassis swap that never happened, which is the worst kind of alert: it is not a false positive in the mechanism, it is the mechanism working correctly on data that was never one subnet to begin with.
+
+Rule 41 is not wrong. The premise it rests on — that a subnet row corresponds to one piece of address space served by one chassis — is simply not true of a subnet several sites serve identically, and no amount of chassis-identity logic can fix a row that should never have existed.
+
+### Why an exclusion rather than a smarter conflict
+
+Three alternatives were available and each is worse.
+
+**Make the subnet key (blockId, cidr, gate).** This is the "model it properly" answer, and it is a schema change reaching every reservation, every push pointer, `findSubnetForIp`, the IP panel, utilization, region tags and rule 41 itself — to represent something the operator does not want represented at all. Nobody is asking to see forty copies of a management VLAN in the networks list. They are asking not to see it.
+
+**Suppress the conflict when the CIDR looks shared.** Any heuristic here ("more than N gates report it") decides on Polaris' guess rather than the operator's statement, and it stays wrong for the case that matters: a genuinely shared /24 that TWO sites serve looks exactly like an RMA swap. The distinction is not in the data — it is in what the operator intends, so it has to be stated.
+
+**Let the operator delete the row.** Deleting solves nothing, because the next discovery run recreates it. There was no way to say "and stay gone".
+
+An exclusion is the operator's statement, and it is the smallest one that works: this CIDR is not one network, so do not try to record it.
+
+### The decisions that carry it
+
+**Global, not per block.** The entire reason a CIDR needs excluding is that several sites serve it; scoping the exclusion to one block would let the same CIDR be recorded through another block and reproduce the problem one level up.
+
+**Containment is one-directional.** An exclusion covers itself and everything inside it, so excluding a /16 excludes the /24s within it — which is how an operator excludes a whole management range in one row. It deliberately does NOT cover a WIDER discovered CIDR: excluding one /24 must never silently swallow a /8 someone discovers, because that would remove far more address space from the list than the operator named, and it would do it invisibly. When several exclusions cover the same CIDR the MOST SPECIFIC one is reported, so the refusal names the row an operator would actually delete to let the subnet through.
+
+**Excluded space is TAKEN space to an allocator, not a refusal.** `allocateNextSubnet`, `bulkAllocate` and `previewBulkAllocate` append the overlapping exclusions to the same list of taken CIDRs they already hand `findNextAvailableSubnet` / `packIntoAnchor`. A caller asking for "any free /24" gets the next one that is genuinely free; a 409 naming an exclusion would turn a policy into an obstacle the operator has to notice and route around by hand. The preview builds that list identically to the write, or it would show a plan the write then rejects — the same trap the two paths already share for sibling overlap.
+
+**One enforcement seam for creation.** The check lives inside `createSubnetRowChecked` for exactly the reason the overlap re-read does: manual create, auto-allocate, bulk allocate and the discovery create all pass through it, so one check covers every path and a future path inherits it for free. Its `opts.exclusions` parameter exists so a caller that already loaded the set — discovery, once per run, in the same `Promise.all` as its other prologue reads — pays no round trip per created subnet. The scale reasoning is the usual one: at 100 assets nobody notices, at 2000 a per-row read inside a discovery phase is a phase that got slower for no reason.
+
+**Discovery skips the entry WHOLE, and where that skip sits is the point.** It is placed ABOVE the existing-row branch, not just before the create, because the conflict this feature exists to prevent is raised by the UPDATE side. Skipping only creation would have left every site still re-stamping the shared row and still tripping the chassis check. Phase 2 exempts covered rows for a second-order reason: with Phase 1 no longer re-stamping them their `fortigateDevice` is frozen at whichever site claimed the row first, so the moment that ONE gate leaves the roster the stale sweep would deprecate a subnet the operator told discovery to leave alone — and `deprecated` is precisely the state rule 41 exists to keep subnets out of.
+
+**Adding an exclusion never destroys anything.** A network already in the list that the exclusion covers is reported on the response (`matchCount`, plus up to twenty named `matches`) and left exactly where it is; the create Event says so too. An exclusion is a statement about what gets recorded from now on, not a delete. Retiring the row that is already there stays the operator's explicit `POST /subnets/:id/archive`, which is the verb that actually preserves its reservations — having a config write silently archive or delete address-space records as a side effect is how an operator loses data to a checkbox. The count is reported rather than hidden for the same reason the Network Discovery preview reports how many targets inventory already carries: "nothing happened" and "something happened that I did not tell you about" must not look alike.
+
+**The CIDR is frozen; only the name moves.** Re-pointing an exclusion at different address space in place would un-exclude what the operator excluded and exclude something they never named, in one edit, with no trace beyond an audit line — so changing the range is a delete plus an add, two acts that each say what they do. The name is editable because a typo in a label is not a change in policy. The route schema carries no `cidr` at all, so this is a property of the API and not just of the dialog.
+
+**IPv4 only, refused at the door.** The containment math is `netmask`-backed like everything in `utils/cidr.ts`, and the address space this exists for — site management VLANs published by FortiGate DHCP — is v4. Storing a v6 exclusion that could never match anything would look like it worked, which is worse than a 400 that says it is not supported.
+
+### What it does not do
+
+It does not hide an excluded CIDR from anything except the networks list and discovery's writers. An asset addressed inside excluded space is still an asset, `dns_resolved` reservations still cannot be created there (there is no subnet to hold them, which is the same answer as before), and `findSubnetForIp` simply finds nothing — leases, DHCP reservations, VIPs and interface IPs inside an excluded range are not recorded, which is the intended consequence of the range not being a network in Polaris.
+
+It is also not a retention entity, not per-integration, and carries no FK to anything: an exclusion outlives the integration, block and gate that made it necessary.
