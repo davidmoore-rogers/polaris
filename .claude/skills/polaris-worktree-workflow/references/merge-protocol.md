@@ -49,9 +49,53 @@ For each selected worktree:
    by keeping both entries.
 4. Continue with the next selection only after the previous merge is clean.
 
-## 4. Verify main
+## 4. Review what landed against the skills
 
-After the last merge: `npm run check:docs`, `npm run typecheck`, and the unit suite
+A merge is the last moment a unit of work is visible as one diff. `/polaris-docs-sync` already
+refreshed the entries each individual commit touched; this pass asks the wider question a
+per-commit review cannot: **does what just landed change what a future session has to be told,
+and is there an entry that tells it?**
+
+For each worktree merged, read the whole branch as one diff — capture
+`git merge-base main worktree-<slug>` *before* the merge, then after it
+`git diff <base>..HEAD --stat` plus `git log <base>..HEAD --format=%s` — and walk this list:
+
+- **A new invariant, or an incident the code now guards against** → a numbered business rule
+  (`polaris-business-rules`: next free number + its narrative section), cited from the code.
+- **A new subsystem, integration type, external system or workflow** → does it fit an existing
+  skill, or does it warrant a new one (criteria below)?
+- **Routing drift** — does each owning skill's `description:` still name the phrases someone
+  would actually type to reach this material? A change that moves a topic between skills moves
+  its trigger phrases too.
+- **Stale prose the routing table never pointed at**: an entry that *describes* behaviour this
+  diff contradicts, in a file no commit in the branch touched. These are the ones check-docs
+  cannot see.
+- **Reference files that grew** past ~1500 lines / ~100 KB → split by heading.
+- **Traps found while doing the work** — anything that cost this chat time and would cost the
+  next one the same (a tool that mangles a file, a test that flakes, a hook that fires
+  unexpectedly) → the owning skill's notes, or a memory file if it is about this machine.
+- **The always-loaded floor**: did the change alter one of the conventions in `CLAUDE.md`?
+
+### Extend a skill, or create a new one
+
+Create a **new** skill only when: the material is a coherent body worth ≥ ~2 reference files,
+**and** no existing skill's `description:` would ever pull it into context, **or** the natural
+owner's `SKILL.md` is already at its ~200-line ceiling / its description is being stretched to
+cover two unrelated jobs. Otherwise **extend**: a new reference file under the owning skill plus
+a row in its `SKILL.md` routing table (an orphaned reference file fails check-docs). A new skill
+also needs its row in the `CLAUDE.md` skills table.
+
+### What to do with the result
+
+Report it as part of the merge summary — either "skills current" or a concrete list of entries
+to add or change. Do **not** edit skills on `main`: skill edits are a change like any other, so
+they go in their own worktree, follow the authoring constraints in `polaris-docs-sync`
+(SKILL.md ≤ ~200 lines, `name:` = directory, `path/file.ts → symbol()` refs, prose moved
+verbatim), pass `npm run check:docs`, and merge separately.
+
+## 5. Verify main
+
+After the last merge and the skill review: `npm run check:docs`, `npm run typecheck`, and the unit suite
 (`npx vitest run tests/unit --no-file-parallelism`) on `main`. Report the results. Do not push;
 the user says "push" separately, which runs `push-protocol.md`.
 
@@ -63,6 +107,6 @@ and want to merge:
 1. `podman compose -f compose.dev.yml -p polaris-<slug> down -v`
 2. `rm DEVLOCK` (and `WORKLOCK` if still present)
 3. commit anything pending in the worktree
-4. merge it to main as in step 3 above, verify as in step 4.
+4. merge it to main as in step 3 above, review as in step 4, verify as in step 5.
 
 Then offer the numbered menu for any OTHER unlocked worktrees before finishing.
