@@ -453,8 +453,8 @@
       // Mark the sign-out first: with "Skip login page" on, the login screen
       // redirects to SSO, and a silent (prompt=none) provider would sign the
       // operator straight back in. The marker buys one render of the local
-      // form, matching the desktop, whose logout lands on
-      // /login.html?signed_out=1.
+      // form, matching the desktop, whose logout lands on the form-less
+      // /signed-out.html.
       PolarisAuth.markSignedOut();
       fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() })
         .finally(function () { window.PolarisMobile.boot(); });

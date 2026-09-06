@@ -519,10 +519,10 @@ app.use(async (req, res, next) => {
         if (req.path.startsWith("/api/")) {
           return res.status(401).json({ error: "Session expired due to inactivity" });
         }
-        // ?signed_out=1: an idle timeout has to END on the form, not on a
-        // silent SSO round-trip that hands the unattended screen a fresh
-        // session (see the /login.html middleware below).
-        return res.redirect("/login.html?signed_out=1");
+        // An idle timeout has to END somewhere — on the form-less signed-out
+        // page, not on /login.html, which under "Skip login page" would hand
+        // the unattended screen a fresh session via a silent SSO round-trip.
+        return res.redirect("/signed-out.html?reason=inactivity");
       }
     }
     req.session.lastActivity = Date.now();
@@ -635,25 +635,28 @@ async function skipLoginSsoTarget(): Promise<string | null> {
 // typed URL away for anyone, on any network — "skip" read as "hide from
 // navigation", and operators expected "hide". So an unauthenticated GET of
 // /login.html now goes to SSO too, UNLESS the request says why the form has
-// to be drawn. Three query keys do that, and each exists to stop a loop or a
+// to be drawn. Two query keys do that, and each exists to stop a loop or a
 // lockout:
 //   ?error=…      an SSO attempt just failed and bounced here (every SAML /
 //                 OIDC / App Proxy failure redirect carries it) — redirecting
 //                 again would ping-pong between Polaris and the IdP forever.
-//   ?signed_out=1 the desktop logout landings (account menu, inactivity
-//                 timer, the server-side idle check) — a silent prompt=none
-//                 provider would otherwise sign the operator straight back
-//                 in and Logout would look broken. The phone's counterpart is
-//                 the one-shot sessionStorage marker in mobile/auth.js.
 //   ?local=1      the anti-lockout path: local and LDAP accounts, and the way
 //                 back in when the IdP is down. The Session tab's hint names
 //                 this URL — it is deliberately guessable, not a secret; the
 //                 source-IP gate above is what restricts WHO can reach the
 //                 form, and it runs first, so an out-of-scope visitor is
 //                 dropped before this redirect can tell them anything.
+// A LOGOUT never lands here at all. Every desktop logout landing — account
+// menu, inactivity timer, the server-side idle check above — is
+// /signed-out.html, a page with no form whose Sign in button opens the bare
+// /login.html, so this middleware decides what happens next: SSO when skip
+// is on, the form when it is off. Landing a logout on /login.html directly
+// would let a silent prompt=none provider sign the operator straight back in
+// and make Logout look broken. The phone's counterpart is the one-shot
+// sessionStorage marker in mobile/auth.js.
 // /login.html stays out of protectedPages: it must never be gated on a
 // session, and the SSO failure routes rely on it being reachable.
-const LOGIN_FORM_QUERY_KEYS = ["error", "signed_out", "local"];
+const LOGIN_FORM_QUERY_KEYS = ["error", "local"];
 app.use(async (req, res, next) => {
   if (req.path !== "/login.html" || req.session?.userId) return next();
   if (LOGIN_FORM_QUERY_KEYS.some(k => Object.prototype.hasOwnProperty.call(req.query, k))) return next();

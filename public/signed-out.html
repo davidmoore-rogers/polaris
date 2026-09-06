@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script src="/js/theme-init.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Polaris — Signed out</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-light.png">
+  <link rel="icon" type="image/png" href="/img/brand/polaris-symbol-dark.png" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/css/styles.css">
+  <style>
+    /* The logout landing. Deliberately NO sign-in fields: a page that ends a
+       session must not be the page that starts one, or a silent (prompt=none)
+       SSO provider signs the operator straight back in and Logout looks
+       broken. The single button opens the BARE /login.html, so what happens
+       next is the "Skip login page" setting's call — SSO when it is on, the
+       form when it is off — decided in one place (src/app.ts), not here.
+       Shell copied from login.html (UI-CANON → Standalone task page). */
+    .login-wrapper {
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem 0;
+      background: var(--color-bg-secondary);
+    }
+    .login-card {
+      background: var(--color-bg-primary);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-lg);
+      padding: 2rem 2.5rem;
+      width: 100%;
+      max-width: 380px;
+      box-shadow: var(--shadow-md);
+      text-align: center;
+    }
+    .login-card h2 {
+      margin-bottom: 0.25rem;
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .login-card .subtitle {
+      color: var(--color-text-tertiary);
+      font-size: 0.8rem;
+      margin-bottom: 1.5rem;
+      letter-spacing: 0.5px;
+    }
+    .login-logo {
+      display: block;
+      margin: 0 auto 1rem;
+      max-width: 160px;
+      border-radius: 8px;
+    }
+    .login-logo.brand-mark {
+      max-width: 240px;
+      width: 100%;
+      border-radius: 0;
+      margin-bottom: 1.25rem;
+    }
+    .signed-out-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      margin: 0 0 0.5rem;
+    }
+    .signed-out-msg {
+      font-size: 0.88rem;
+      color: var(--color-text-secondary);
+      margin: 0 0 1.5rem;
+      line-height: 1.5;
+    }
+    /* Opened from a phone often enough to want a real touch target. */
+    .login-card .btn-primary {
+      width: 100%;
+      justify-content: center;
+      min-height: 44px;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-card">
+      <img src="/img/brand/polaris-horiz-dark.png" alt="" class="login-logo brand-mark brand-mark-login" style="visibility:hidden">
+      <h2 style="visibility:hidden;display:none">Polaris</h2>
+      <p class="subtitle" style="visibility:hidden">Network Management Tool</p>
+      <p class="signed-out-title" id="signed-out-title">You're signed out</p>
+      <p class="signed-out-msg" id="signed-out-msg">You have signed out of Polaris.</p>
+      <a class="btn btn-primary" id="btn-sign-in" href="/login.html">Sign in</a>
+    </div>
+  </div>
+  <script src="/js/brand-logo.js"></script>
+  <script src="/js/auth-flow.js"></script>
+  <script src="/js/signed-out.js"></script>
+</body>
+</html>

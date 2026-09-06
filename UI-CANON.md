@@ -796,6 +796,8 @@ column of numbers to compare by eye.
 
 **When adding a new one:** copy the shell from `alert-ack.html`, then work through the state list above before writing the happy path — on a page reached by a link, the unhappy states are most of the traffic.
 
+**The logout-landing variant:** `public/signed-out.html` + `public/js/signed-out.js` — the same one-card shell, deliberately NOT in `protectedPages` (it is where a session ENDS) and deliberately carrying no sign-in fields: its one control is a plain `<a>` to the BARE `/login.html`, so "Skip login page" in `src/app.ts` decides SSO-or-form and the page never has to know the setting. Its only state is the reason line (`?reason=` from a closed set, selecting a sentence — the value is never rendered), because it acts on nothing. Every desktop logout landing points at it; the phone keeps its own in-app login screen and marker instead.
+
 **The reading-page variant:** `public/api.html` (the developer API docs at `/api`) is the same shell philosophy — theme-init.js first, tokens only, robots noindex, no app shell — widened from one card to a sticky-TOC + content column layout for a page someone READS rather than acts on. Two deltas from the task-page rules: it is deliberately NOT in `protectedPages` (no login — its gate is the `apiDocsConfig` source-IP scope enforced in `src/app.ts`, which also intercepts `/api.html` so static can't serve the file around it), and because CSP forbids inline `<script>`, its behavior lives in `public/js/api-docs.js`, which must stay GENERIC — the ungated static mount serves every /js asset, so the sensitive content (the endpoint enumeration) belongs only in the gated HTML.
 
 ---

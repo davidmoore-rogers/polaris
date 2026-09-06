@@ -386,6 +386,7 @@ Vanilla JavaScript SPA served from `/public/`. **No build step** — plain ES mo
 | Server Settings | `server-settings.html` | `serverSettingsSystem:read` floor |
 | Dash wallboard | `dash.html` | unauthenticated, source-IP scoped |
 | Acknowledge alert | `alert-ack.html` | `alerts:read` |
+| Signed out | `signed-out.html` | unauthenticated (the desktop logout landing — no form; its Sign in button opens the bare `/login.html`) |
 | API documentation | `api.html` (served at `/api`) | unauthenticated, source-IP scoped (`apiDocsConfig`) |
 | Mobile PWA | `mobile.html` | in-app mobile login |
 | First-run wizard | `setup.html` | unauthenticated (pre-provision) |

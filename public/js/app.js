@@ -1567,7 +1567,7 @@ function openUserMenu(anchor) {
     onSelect: function () {
       fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() })
         .catch(function () { /* log out locally regardless */ })
-        .then(function () { window.location.href = "/login.html?signed_out=1"; });
+        .then(function () { window.location.href = "/signed-out.html"; });
     },
   });
 
@@ -3793,7 +3793,7 @@ function _resetAutoLogoutTimer() {
   _autoLogoutTimer = setTimeout(function () {
     // Session expired client-side — logout
     fetch("/api/v1/auth/logout", { method: "POST", headers: _csrfHeaders() }).catch(function () {});
-    window.location.href = "/login.html?signed_out=1";
+    window.location.href = "/signed-out.html?reason=inactivity";
   }, _autoLogoutMs);
 }
 

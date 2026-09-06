@@ -3,11 +3,12 @@
  *
  * The setting used to redirect PROTECTED pages only, so /login.html loaded the
  * password form for anyone who typed the URL, on any network. It now redirects
- * the bare login page too, and three query keys are the only ways to draw the
- * form: `?error=` (an SSO failure just bounced here — anti-loop), `?signed_out=1`
- * (the desktop logout landings — a silent prompt=none provider must not sign
- * the operator straight back in) and `?local=1` (the anti-lockout path for
- * local / LDAP accounts and an IdP outage).
+ * the bare login page too, and two query keys are the only ways to draw the
+ * form: `?error=` (an SSO failure just bounced here — anti-loop) and `?local=1`
+ * (the anti-lockout path for local / LDAP accounts and an IdP outage). A logout
+ * lands on /signed-out.html instead — a page with no form, served regardless of
+ * the setting, whose Sign in button opens the bare /login.html so THIS redirect
+ * decides SSO-or-form.
  *
  * End-to-end over the real app with a fake-but-complete SAML config (the
  * redirect decision only tests the fields for presence; nothing here reaches
@@ -65,6 +66,11 @@ d("skip off (the default)", () => {
     const res = await request(app).get("/login.html");
     expect(res.status).toBe(200);
   });
+
+  it("serves the signed-out page", async () => {
+    const res = await request(app).get("/signed-out.html");
+    expect(res.status).toBe(200);
+  });
 });
 
 d("skip on with SAML configured", () => {
@@ -90,11 +96,6 @@ d("skip on with SAML configured", () => {
     expect(res.status).toBe(200);
   });
 
-  it("draws the form after a logout (?signed_out=1)", async () => {
-    const res = await request(app).get("/login.html?signed_out=1");
-    expect(res.status).toBe(200);
-  });
-
   it("draws the form on the anti-lockout path (?local=1)", async () => {
     const res = await request(app).get("/login.html?local=1");
     expect(res.status).toBe(200);
@@ -104,6 +105,13 @@ d("skip on with SAML configured", () => {
     const res = await request(app).get("/login.html?utm=x");
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe(SAML_TARGET);
+  });
+
+  it("serves the signed-out page untouched — a logout must END somewhere", async () => {
+    const res = await request(app).get("/signed-out.html?reason=inactivity");
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('href="/login.html"');
+    expect(res.text).not.toMatch(/<form\b/i);
   });
 });
 
