@@ -33,9 +33,9 @@ In-place references the skills point at: `.env.example` (runtime variables, with
 `design/POLARIS-UI-GUIDE.md` (the portable UI contract — a drop-in zone, never edited here),
 `agent/README.md`, `CONTRIBUTING.md`.
 
-External plugins (own repos beside this checkout, loaded with `claude --plugin-dir <path>`):
-`fortinet-api-conventions` (FortiManager / FortiOS / FortiSwitch / FortiAP API traps) and
-`polaris-api-conventions` (the client guide to this app's `/api/v1`, generated from `public/api.html`).
+External plugins (separate repos; clone, then `claude --plugin-dir <clone>`):
+`fortinet-api-conventions` — https://github.com/davidmoore-rogers/fortinet-api-conventions (FortiManager / FortiOS / FortiSwitch / FortiAP API traps) and
+`polaris-api-conventions` — https://github.com/rogers-group-inc/polaris-api-conventions (the client guide to this app's `/api/v1`, generated from `public/api.html`; regenerate it there when that page changes).
 
 ---
 

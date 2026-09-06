@@ -252,7 +252,7 @@ curl examples against the install's own base URL.
 | Dashboard | `/dashboard/summary` |
 | Server Settings | `/server-settings` (incl. MIBs, capacity, backups) |
 
-Authentication is session-based for the UI; external callers use long-lived bearer tokens (`polaris_<32-char-base64url>`, minted on Server Settings → API Tokens), each bound to a Role and passing the same permission gates as a logged-in user. See `<polaris-url>/api` for the developer reference (also packaged as the `polaris-api-conventions` Claude Code plugin, a sibling repository generated from that page). The internal endpoint catalogue and domain model live in the project skills under `.claude/skills/` (`polaris-api-rbac`, `polaris-domain-model`).
+Authentication is session-based for the UI; external callers use long-lived bearer tokens (`polaris_<32-char-base64url>`, minted on Server Settings → API Tokens), each bound to a Role and passing the same permission gates as a logged-in user. See `<polaris-url>/api` for the developer reference (also packaged as the [`polaris-api-conventions`](https://github.com/rogers-group-inc/polaris-api-conventions) Claude Code plugin, generated from that page). The internal endpoint catalogue and domain model live in the project skills under `.claude/skills/` (`polaris-api-rbac`, `polaris-domain-model`).
 
 ## Integrations
 

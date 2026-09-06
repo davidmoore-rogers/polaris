@@ -35,6 +35,6 @@ and "the CLAUDE.md Environment Variables block" means `polaris-deploy/references
 | integration type | the `cross-cutting/integration-type-onboarding.md` checklist; `discovery-overview.md` + the matching `discovery-*.md`; `routes-overview.md`; the integration-modal entry in `polaris-ui-canon` |
 | UI pattern, shared module, page or gate | `polaris-ui-canon/references/canon-*.md`; the pages / shared-modules tables in `polaris-ui-canon/SKILL.md`; `frontend-*.md` for a surface |
 | business rule | `polaris-business-rules/SKILL.md` (rules 1–11) or `invariants-*.md` + `narrative-*.md` (12+); cite the number in code |
-| `public/api.html` | regenerate `polaris-api-conventions` (own repo: `node polaris-api-conventions/scripts/import-api-html.mjs <polaris>/public/api.html`) and bump its `plugin.json` version |
+| `public/api.html` | regenerate `polaris-api-conventions` (repo https://github.com/rogers-group-inc/polaris-api-conventions: `node polaris-api-conventions/scripts/import-api-html.mjs <polaris>/public/api.html`), bump its `plugin.json` version, push |
 | deploy artifact, Dockerfile, systemd unit, nginx template | `polaris-deploy/references/*`, `docs/INSTALL.md`, `README.md` |
 | the session workflow, lock files, hook | `polaris-worktree-workflow/*`, the CLAUDE.md "Session workflow" paragraph |
