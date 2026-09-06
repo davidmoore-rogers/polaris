@@ -51,7 +51,8 @@ External plugins (separate repos; clone, then `claude --plugin-dir <clone>`):
 3. **A dev environment = a `DEVLOCK` file at the worktree root + one podman stack per worktree**
    (`podman compose -f compose.dev.yml -p polaris-<slug>`; podman, never docker).
 4. **"merge"** → list every worktree WITHOUT a lock file as a numbered menu, merge the chosen
-   ones to `main` with `--no-ff`, never push. **"push"** → audit deploy surfaces, push `main`,
+   ones to `main` with `--no-ff`, never push; then review what landed against the skills
+   (update an entry, or add a skill, when the work changed what a future session needs told). **"push"** → audit deploy surfaces, push `main`,
    then remove the merged worktrees and branches. Both protocols are in `/polaris-worktree-workflow`.
 5. `WORKLOCK` / `DEVLOCK` are gitignored and never committed.
 

@@ -25,7 +25,7 @@ description: "Polaris session workflow: start every task in its own git worktree
 |---|---|
 | creating and preparing a worktree (own `npm install`, `prisma generate`, no junctions), committing safely beside other sessions | [references/worktree-setup.md](references/worktree-setup.md) |
 | bringing up / tearing down the per-worktree podman stack (`podman machine start`, `-p polaris-<slug>`, port offsets, `.env`, seed) | [references/dev-environment.md](references/dev-environment.md) |
-| the merge menu and merge steps, including the DEVLOCK variant | [references/merge-protocol.md](references/merge-protocol.md) |
+| the merge menu, the merge steps, the post-merge skill review, the DEVLOCK variant | [references/merge-protocol.md](references/merge-protocol.md) |
 | the push and clean-up steps | [references/push-protocol.md](references/push-protocol.md) |
 | the enforcement hook and how it is registered | [scripts/require-worklock.mjs](scripts/require-worklock.mjs) |
 
@@ -55,8 +55,14 @@ Report the branch name and say the worktree is ready to merge. Do not merge or p
    subject · dirty?) and, un-numbered, the locked ones with each lock's age.
 3. The user picks numbers. For each pick, in order: commit anything pending in that worktree;
    from the main checkout `git merge --no-ff worktree-<slug>`; on conflict stop and report.
-4. After the last merge: `npm run check:docs` + `npm run typecheck` on main. **Do not push.**
-5. If the chat's own worktree holds a `DEVLOCK` and the user asks to merge it: tear the stack
+4. **Review what landed against the skills**: read each merged branch as one diff and ask what
+   a future session must now be told — a new invariant → a numbered business rule; a new
+   subsystem → an entry in the owning skill, or a new skill when nothing's `description:`
+   would ever reach it; drifted trigger phrases; prose the diff contradicts in a file no commit
+   touched; traps that cost this chat time. Report "skills current" or the concrete list; make
+   the edits in their own worktree, never on main.
+5. After the last merge: `npm run check:docs` + `npm run typecheck` on main. **Do not push.**
+6. If the chat's own worktree holds a `DEVLOCK` and the user asks to merge it: tear the stack
    down (`podman compose -p polaris-<slug> down -v`), delete `DEVLOCK`, commit pending, then merge.
 
 ## "push" (short form; full steps in push-protocol.md)
@@ -73,5 +79,7 @@ Report the branch name and say the worktree is ready to merge. Do not merge or p
 Two or three chats work this repo at once. A worktree per chat keeps their indexes apart
 (the shared-tree landing incidents of 2026-08 are in `worktree-setup.md`); the lock files let
 a merge session tell "finished" from "someone is still typing" without asking; the numbered
-menu keeps the merge decision human; and cleaning up on push, not on merge, leaves a merged
-worktree inspectable until the code has actually left the machine.
+menu keeps the merge decision human; the skill review happens at merge because that is the
+first time a unit of work is legible as one diff rather than a string of commits; and cleaning
+up on push, not on merge, leaves a merged worktree inspectable until the code has actually left
+the machine.
