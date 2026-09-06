@@ -2,7 +2,7 @@
  * tests/unit/pollingCompatibility.test.ts
  *
  * Locks down the compatibility matrix between asset sources and polling
- * methods. The matrix is operator-confirmed (see CLAUDE.md) and has
+ * methods. The matrix is operator-confirmed (see polaris-monitoring-discovery -> polling-methods-streams.md) and has
  * direct UX consequences — getting a value wrong here would silently
  * disable a working method on the asset edit modal or class-override
  * editor.

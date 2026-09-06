@@ -2,10 +2,12 @@
 
 This is the short, practical version of the working agreements. The
 authoritative, always-loaded source is **[CLAUDE.md](CLAUDE.md)** — when this
-file and CLAUDE.md disagree, CLAUDE.md wins. Deeper material lives in
-[ARCHITECTURE.md](ARCHITECTURE.md), [TOUCHES.md](TOUCHES.md), the UI canon in
-[UI-CANON.md](UI-CANON.md), and the portable design system it builds on in
-[design/POLARIS-UI-GUIDE.md](design/POLARIS-UI-GUIDE.md).
+file and CLAUDE.md disagree, CLAUDE.md wins. Deeper material lives in the ten
+project skills under [.claude/skills/](.claude/skills/) (each `SKILL.md` routes to
+its `references/`): the domain model, business rules, API + RBAC, the change-impact
+(touches) index, the UI canon, monitoring + discovery, the agent, deployment, the
+docs-sync review and the worktree workflow — and in the portable design system the
+UI canon builds on, [design/POLARIS-UI-GUIDE.md](design/POLARIS-UI-GUIDE.md).
 
 ## Getting started
 
@@ -64,21 +66,25 @@ and the integration suite against a `postgres:15` service container
 - **FortiManager ↔ standalone FortiGate parity** — a feature added to one
   integration usually applies to the other; ship both unless it's structurally
   FMG-only.
-- Model new work after the canonical implementation — UI patterns in
-  [UI-CANON.md](UI-CANON.md), backend
-  patterns in TOUCHES.md → Canonical backend patterns — rather than inventing
-  a parallel pattern.
+- Model new work after the canonical implementation — UI patterns in the
+  `polaris-ui-canon` skill, backend patterns in `polaris-change-impact` →
+  `references/patterns/` — rather than inventing a parallel pattern.
 
 ## Commits, docs, and pushing
 
+- **Work in a worktree.** Every task runs in its own git worktree under
+  `.claude/worktrees/<slug>` with a `WORKLOCK` file at its root (a `DEVLOCK` while a
+  per-worktree podman dev stack is up); the end-of-work commit deletes the lock. Merging
+  to `main` and pushing are separate, explicit steps — see the
+  `polaris-worktree-workflow` skill.
 - **One logical change per commit.** Don't batch unrelated work.
-- **Before every commit, re-read CLAUDE.md / ARCHITECTURE.md / TOUCHES.md /
-  UI-CANON.md** and update anything the change moved, broke, or
-  invalidated —
-  in the same commit. The pre-commit hook + `npm run check:docs` enforce the
-  *structural* half (every model/service/job/route named, no `file:line` or
-  `(line N)` refs, every service has a TOUCHES entry, doc-referenced paths
-  exist), but they can't judge prose accuracy — that's on you.
+- **Before every commit, run the docs-sync review** (`/polaris-docs-sync`): re-read the
+  skill reference entries your change touched and update anything it moved, broke, or
+  invalidated — in the same commit. The pre-commit hook + `npm run check:docs` enforce
+  the *structural* half (every model/service/job/route named, no `file:line` or
+  `(line N)` refs, every service has a touches entry, every referenced path exists,
+  every reference file linked and under size), but they can't judge prose accuracy —
+  that's on you.
 - **Version is automatic** — patch = git commit count (`src/utils/version.ts`).
   Never edit the patch in `package.json`; bump the minor only when cutting a
   named release.
@@ -91,8 +97,9 @@ Production is split-role + nginx-fronted (`polaris.target` + `polaris-web` +
 `polaris-monitor@N` + `polaris-discovery`); the legacy single-process service is
 gone. Updates land via the in-app updater (Server Settings → Maintenance), which
 also syncs shipped systemd units and the nginx config. See
-[docs/INSTALL.md](docs/INSTALL.md). Operational incident playbooks live in
-[docs/runbooks/](docs/runbooks/).
+[docs/INSTALL.md](docs/INSTALL.md). Operational incident playbooks live in the
+`polaris-monitoring-discovery` skill under
+[.claude/skills/polaris-monitoring-discovery/references/runbooks/](.claude/skills/polaris-monitoring-discovery/references/runbooks/).
 
 ## Security expectations
 

@@ -108,7 +108,7 @@ export async function getMonitorAlertRows(cap: number) {
 // copy that misses a name silently makes that type unfilterable — which is how
 // `hypervisor` and `kubernetes_cluster` stayed off the filter after being added
 // to the registry. The widgets' own copy (public/js/widgets/index.js) is the
-// third member of this lockstep; see TOUCHES.md -> services/assetTypeService.ts.
+// third member of this lockstep; see polaris-change-impact -> services/assets-inventory.md (assetTypeService).
 const BUILTIN_ASSET_TYPES: readonly string[] = BUILT_IN_ASSET_TYPES;
 
 // Sentinel the widgets send in ?fortigates= for the "(No FortiGate)" picker

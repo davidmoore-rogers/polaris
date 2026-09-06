@@ -65,7 +65,7 @@ export function runtimeIsContainer(): boolean {
     cachedRuntimeIsContainer = true;
     return cachedRuntimeIsContainer;
   }
-  // POLARIS_STATE_DIR is set by Polaris's own Docker image (CLAUDE.md). Strong
+  // POLARIS_STATE_DIR is set by Polaris's own Docker image (polaris-deploy -> env-vars.md). Strong
   // proxy when the other two miss.
   if (process.env.POLARIS_STATE_DIR) {
     cachedRuntimeIsContainer = true;

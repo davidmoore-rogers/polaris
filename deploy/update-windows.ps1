@@ -102,7 +102,7 @@ function Invoke-Rollback {
     # Regenerate Prisma client + wipe stale dist so the rolled-back process
     # comes up with a client matching the rolled-back schema. Same rationale
     # as the forward-update path below; both are documented in
-    # cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
+    # cross-cutting/schema-migrations-and-prisma-client-lifecycle in the polaris-change-impact skill.
     & npx prisma generate 2>$null
     if (Test-Path (Join-Path $AppDir "dist")) {
         Remove-Item -Recurse -Force (Join-Path $AppDir "dist") -ErrorAction SilentlyContinue
@@ -262,7 +262,7 @@ if ($auditOutput -match "critical|high") {
 # etc.) leaves the generated client stale; then step 7's `migrate deploy`
 # drops columns the running client still selects, and every Asset read/write
 # crashes with `column "<name>" does not exist`. See
-# cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
+# cross-cutting/schema-migrations-and-prisma-client-lifecycle in the polaris-change-impact skill.
 Write-Step "5/8  Generating Prisma client..."
 
 & npx prisma generate

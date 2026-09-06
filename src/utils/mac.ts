@@ -102,7 +102,7 @@ export function normalizeMacsDistinct(raws: Array<string | null | undefined>): s
 // The IP panel's "Generate" button synthesizes one; these helpers give it a
 // recognizable operator-settable prefix so discovery can later tell it apart
 // from an observed MAC and adopt the real one (see
-// services/placeholderMacAdoptionService.ts and the business rule in CLAUDE.md).
+// services/placeholderMacAdoptionService.ts and business rule 26 in polaris-business-rules).
 //
 // The prefix is the ONLY marker — there is no boolean column on Reservation
 // saying "this one is fake". That's deliberate: the prefix is visible on the

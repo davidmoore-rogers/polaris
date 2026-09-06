@@ -50,7 +50,7 @@ enum ConflictStatus {
 
 // UserRole enum retired — replaced by the Role table below. Role identity
 // + permission matrix now live in `Role` and are joined into User via
-// `User.roleId`. See "Roles / RBAC" in CLAUDE.md for the access semantics.
+// `User.roleId`. See polaris-api-rbac -> auth-rbac.md for the access semantics.
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
@@ -317,7 +317,7 @@ model DiscoveryRun {
 // A saved, re-runnable active scan of operator-supplied IP ranges. Operator-
 // facing name: a **Discovery**. The models are `NetworkScan*` so nothing here
 // collides with the integration-discovery machinery (DiscoveryRun /
-// discoveryEngine / discoveryRunState) — the same split CLAUDE.md documents for
+// discoveryEngine / discoveryRunState) — the same split polaris-monitoring-discovery documents for
 // Automation/NotificationRule.
 //
 // This is deliberately NOT an 8th Integration type and NOT a DiscoveryRun row.
@@ -559,7 +559,7 @@ model MonitorClassOverride {
   // tier (or the manual tier when integrationId is null). Accepted values:
   // "rest_api" | "snmp" | "winrm" | "ssh" | "icmp". The compatibility-aware
   // resolver silently falls through when the chosen method isn't valid for
-  // the asset's source — see CLAUDE.md "Polling-method compatibility matrix".
+  // the asset's source — see polaris-monitoring-discovery -> polling-methods-streams.md.
   responseTimePolling           String?
   cpuMemoryPolling              String?
   temperaturePolling            String?
@@ -650,7 +650,7 @@ enum AssetStatus {
 // tree, fortinetTopology, polling source defaults, topology rendering,
 // inferAssetTypeFromOs) only special-cases the eight built-ins —
 // custom types fall through to "other"-like generic behavior by design.
-// See "Asset type registry" in CLAUDE.md.
+// See AssetTypeDef in polaris-domain-model -> assets-core.md.
 
 model Asset {
   id                    String      @id @default(uuid())
@@ -3327,7 +3327,7 @@ model ApplicationMapLayout {
 // editable list in the UI; the other built-ins are editable. Custom
 // roles are operator-created with isBuiltIn = false. Permission shape:
 //   { [functionKey]: "none" | "read" | "write" | "fullwrite" }
-// See "Roles / RBAC" in CLAUDE.md for the function-key catalogue + the
+// See polaris-api-rbac -> auth-rbac.md for the function-key catalogue + the
 // access-level ordering. `updatedAt` doubles as the cache-version
 // stamp the session snapshot compares against on each request.
 // AssetTypeDef: operator-extensible asset-type registry. Replaces the
@@ -3344,7 +3344,7 @@ model ApplicationMapLayout {
 // in dependency tree, fortinetTopology, polling source defaults,
 // topology rendering, inferAssetTypeFromOs) only fire for the eight
 // `isBuiltIn=true` rows — custom types fall through to "other"-like
-// generic behavior. Documented as a known limitation in CLAUDE.md.
+// generic behavior. Documented as a known limitation in polaris-domain-model -> assets-core.md.
 //
 // Built-in rows are NOT renameable (FK rows on Asset.assetType reference
 // `name` literally) and NOT deletable. Custom rows are deletable only
@@ -4070,7 +4070,7 @@ model AssetSource {
   integrationId String?
   integration   Integration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
 
-  // Source-shaped raw observation blob — see CLAUDE.md "Per-source observed
+  // Source-shaped raw observation blob — see polaris-monitoring-discovery -> discovery-fortinet.md "Per-source observed
   // shapes." Stays as the source said it; the Asset row is the merged
   // projection across all sources.
   observed Json @default("{}")
@@ -4311,7 +4311,7 @@ model ManagedAgent {
   // After the operator confirms uptake (every agent has heartbeated with the
   // new pin), the rotation finishes by promoting the new pin to
   // serverCertFingerprint and clearing this array. See cross-cutting/polaris-agent
-  // "Cert pin rotation" in TOUCHES.md.
+  // "Cert pin rotation" in polaris-agent -> cross-cutting-polaris-agent.md.
   additionalServerCertFingerprints String[] @default([])
 
   createdAt DateTime @default(now())
@@ -4443,7 +4443,7 @@ model GeocodeCache {
 // driven by the evaluateNotificationRules job) reads collected data —
 // telemetry/sample tables, current Asset state, host-metrics samples, the
 // Event audit log — and inserts Notification rows when a rule's condition is
-// met. See "Notifications" in CLAUDE.md / ARCHITECTURE.md.
+// met. See NotificationRule in polaris-domain-model -> alerting.md.
 
 // A flexible alert definition. `trigger` is a discriminated JSON union
 // (asset_metric | asset_state | host_metric | event | change) validated by Zod

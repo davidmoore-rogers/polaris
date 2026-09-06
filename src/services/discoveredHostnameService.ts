@@ -5,7 +5,7 @@
  *
  * `Asset.hostnameOverride` makes the pinned value THE hostname: the assets PUT
  * handler writes both columns and the Prisma extension in src/db.ts re-asserts
- * the pin over every later projection write (see business rule / CLAUDE.md
+ * the pin over every later projection write (see polaris-domain-model -> assets-core.md
  * "three operator pins"). So the discovered name is not stored anywhere on the
  * Asset row — it only exists inside the `AssetSource.observed` blobs, which is
  * where the pin-clear path in assets.ts already goes to recover it

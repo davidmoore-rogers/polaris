@@ -11,7 +11,7 @@
  * filters by min-severity + dedupes + caps, but this layer defends in depth —
  * re-filters by min-level, collapses identical entries, applies a per-push cap,
  * and a per-asset hourly rate cap (overflow collapses into one
- * `os_event.suppressed` event). See CLAUDE.md "OS event log" business rule.
+ * `os_event.suppressed` event). See polaris-agent -> cross-cutting-polaris-agent.md (OS event log).
  *
  * The pure helpers (mapOsLevelToAudit / dedupeEntries / sanitizeChannel /
  * buildAuditInputs) are exported for unit tests; ingestOsEventLog wires them to

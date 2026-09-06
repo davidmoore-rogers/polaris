@@ -10,7 +10,7 @@
 -- only consults it on enroll + /config (both already read the canonical pin
 -- and gracefully fall through when the array is empty).
 --
--- See cross-cutting/polaris-agent → "Cert pin rotation" in TOUCHES.md for
+-- See polaris-agent → cross-cutting-polaris-agent.md "Cert pin rotation" for
 -- the full rotation workflow.
 
 ALTER TABLE "managed_agents"

@@ -5,7 +5,7 @@
  * Read is open to any role with `credentials=read` so the Asset Monitoring
  * tab can populate its credential picker and label (secrets masked).
  *
- * Writes carry the OWNERSHIP dimension (see CLAUDE.md "Ownership model"),
+ * Writes carry the OWNERSHIP dimension (see polaris-api-rbac -> auth-rbac.md "Ownership model"),
  * the fourth key to do so after subnets / reservations / contacts:
  *
  *   write     — create; edit / delete / test-with ONLY rows you created

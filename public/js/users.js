@@ -207,7 +207,7 @@ function renderUsersBody() {
       totpCell = '<span style="color:var(--color-text-tertiary)">Not set</span>';
     }
     var roleId = u.role ? u.role.id : "";
-    // Row verbs moved behind the username (UI-CANON.md → "Row context menu").
+    // Row verbs moved behind the username (polaris-ui-canon → "Row context menu").
     // The conditional set is unchanged — which items exist is decided in
     // _userMenuItems so the render and the menu can't drift apart.
     var nameCell = '<button type="button" class="row-menu-trigger user-menu"' +

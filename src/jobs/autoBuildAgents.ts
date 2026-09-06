@@ -7,7 +7,7 @@
  * land via in-app updates that restart the process anyway.
  *
  * Trigger logic (load-bearing comment; reflects the §12 plan and the
- * TOUCHES.md rebuild contract):
+ * polaris-agent skill rebuild contract):
  *
  *   1. Skip if `<STATE_DIR>/data/agents/manifest.json` is missing.
  *      Fresh installs shouldn't fire a ~60 s CPU-pegging build for a

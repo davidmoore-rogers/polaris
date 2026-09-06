@@ -390,7 +390,7 @@ export function resolveIconUrl(input: IconResolutionInput, cache: Map<string, st
 }
 
 // Build the ordered candidate list for resolution. Priority (per project
-// decision, see CLAUDE.md "Device Icons"):
+// decision, see polaris-domain-model -> platform.md "DeviceIcon"):
 //   1. manufacturer-model: <manufacturer>/<model>     (specific chassis)
 //   2. manufacturer-type:  <manufacturer>/<assetType> (vendor + role)
 // Both require a manufacturer — there is no plain-type / plain-model

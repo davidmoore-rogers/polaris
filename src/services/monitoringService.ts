@@ -13366,7 +13366,7 @@ export async function runMonitorPass(opts?: { concurrency?: number; cadences?: M
   // is null (full resolver fidelity would require the class-override +
   // tier-3 lookup but that's overkill for a metric label).
   //
-  // Source defaults (from CLAUDE.md): fortimanager/fortigate → rest_api on
+  // Source defaults (from polaris-monitoring-discovery -> polling-methods-streams.md): fortimanager/fortigate → rest_api on
   // probe / telemetry / interfaces; everything else → icmp on probe and
   // null (= "not delivered") on the other streams. The publishDueWork +
   // canTelemetry/canSystemInfo gates already block work items whose stream

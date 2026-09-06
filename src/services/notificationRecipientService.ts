@@ -739,7 +739,7 @@ export async function expandDeliveries(
     // `matchSet` recipientDeviceRegion uses, because these names come from the
     // region catalogue by construction — the same reasoning recipientRegions
     // already carries. The asymmetry with recipientDeviceRegion is deliberate
-    // and documented in TOUCHES.md; do NOT "unify" them, that changes who
+    // and documented in polaris-change-impact (services/alerting-delivery.md); do NOT "unify" them, that changes who
     // existing rules deliver to.
     if (t.recipientDeviceRegionLevels?.length && assetRegionTags?.length) {
       const names = deviceRegionsAtLevels(assetRegionTags, t.recipientDeviceRegionLevels, await regionLevels());

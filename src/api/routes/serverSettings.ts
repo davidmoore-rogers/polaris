@@ -2920,7 +2920,7 @@ router.delete(
 // re-narrow trust. The pin set lives on each ManagedAgent row across the
 // `serverCertFingerprint` (canonical / first) + `additionalServerCertFingerprints`
 // (staged) columns; the union is checked at enroll and pushed to agents via
-// /config. See cross-cutting/polaris-agent → "Cert pin rotation" in TOUCHES.md.
+// /config. See polaris-agent → cross-cutting-polaris-agent.md "Cert pin rotation".
 
 const PinFingerprintSchema = z.string().regex(/^sha256:[0-9a-f]{64}$/i, "fingerprint must be sha256:<64 hex chars>");
 

@@ -1160,7 +1160,7 @@ func wsLoop(ctx context.Context, cfg *config.Config, client *transport.Client) {
 			// post-restart establishes new TLS with the updated pin set,
 			// which is what lets the agent survive a cert rotation initiated
 			// by the operator AFTER the staging push. See cross-cutting/
-			// polaris-agent → "Cert pin rotation" in TOUCHES.md.
+			// polaris-agent → "Cert pin rotation" in the polaris-agent skill (cross-cutting-polaris-agent.md).
 			if resp != nil && len(resp.CertFingerprints) > 0 {
 				if cfg.SetPins(resp.CertFingerprints) {
 					if err := cfg.Save(); err != nil {

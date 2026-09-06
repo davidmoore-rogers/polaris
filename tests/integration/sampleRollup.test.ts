@@ -29,7 +29,7 @@ import { rollupHourly, rollupDaily } from "../../src/services/sampleRollupServic
 const d = dbDescribe;
 
 // A fixed asset id keeps the rollup GROUP BY deterministic. The sample tables
-// carry assetId but no FK to Asset (TimescaleDB hypertables — see CLAUDE.md
+// carry assetId but no FK to Asset (TimescaleDB hypertables — see polaris-domain-model -> samples-rollups.md
 // tiered-sample-retention), so we don't need a real Asset row.
 const ASSET = "00000000-0000-0000-0000-0000000000aa";
 

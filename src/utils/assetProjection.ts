@@ -37,7 +37,7 @@
  *   hostname, serialNumber, manufacturer, model, os, osVersion,
  *   learnedLocation, ipAddress, latitude, longitude
  *
- * See the "Asset projection priority table" section in CLAUDE.md for
+ * See the "Asset projection priority table" section in polaris-monitoring-discovery -> discovery-fortinet.md for
  * the full per-field × per-source-kind priority matrix.
  *
  * Fields the projection deliberately does NOT own (for now):

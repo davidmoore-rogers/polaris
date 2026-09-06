@@ -295,7 +295,7 @@ describe("tag auto-assign filter — listener binding", () => {
 describe("tag auto-assign filter — load order", () => {
   it("every page hosting a condition-builder consumer loads the module", () => {
     // A missing or late <script> doesn't error visibly — the modal just fails to
-    // open. See UI-CANON.md → Nested condition tree.
+    // open. See polaris-ui-canon → Nested condition tree.
     for (const page of ["server-settings", "assets", "automations", "appmap", "index", "map"]) {
       const html = readFileSync(resolve(__dirname, `../../public/${page}.html`), "utf8");
       expect(html, `${page}.html must load condition-builder.js`).toContain("/js/condition-builder.js");
