@@ -66,12 +66,14 @@ function walk(dir, out = []) {
 }
 const docText = {};
 if (!exists("CLAUDE.md")) fail("docs-present", "CLAUDE.md is missing from the repo root.");
-else docText["CLAUDE.md"] = read("CLAUDE.md");
+else docText["CLAUDE.md"] = read("CLAUDE.md").replace(/\r\n/g, "\n");
 for (const s of SKILLS) {
   if (!exists(`${SKILLS_DIR}/${s}/SKILL.md`)) fail("docs-present", `${SKILLS_DIR}/${s}/SKILL.md is missing.`);
 }
 for (const abs of walk(r(SKILLS_DIR))) {
-  if (abs.endsWith(".md")) docText[rel(abs)] = readFileSync(abs, "utf8");
+  // Normalize CRLF: Windows checkouts (core.autocrlf) hand us \r\n, and the frontmatter and
+  // heading regexes below anchor on \n. Without this every SKILL.md read as "no frontmatter".
+  if (abs.endsWith(".md")) docText[rel(abs)] = readFileSync(abs, "utf8").replace(/\r\n/g, "\n");
 }
 const DOCS = Object.keys(docText);
 const ALL = DOCS.map((d) => docText[d]).join("\n");
