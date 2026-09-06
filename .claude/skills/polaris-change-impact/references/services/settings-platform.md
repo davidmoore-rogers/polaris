@@ -1,0 +1,507 @@
+# Services — settings, branding, backup/update, events, nginx, dash, icons
+
+Per-service touches (What it owns / Public API / Cross-service deps / Used by / Invariants / When changing this), verbatim from TOUCHES.md. Code references are `path/file.ts → symbolName()` — grep the symbol.
+
+## services/appIconService.ts
+
+**What it owns:** The PWA home-screen icon set, rasterized from the branding logo with `@resvg/resvg-js` (an SVG canvas of the target size embeds the source bitmap as a `data:` URI). Also owns `ICON_SPECS` — the allowlist `routes/pwa.ts` matches request paths against — and the icon-set version stamp used as the manifest's `?v=` cache-buster and the icon ETag.
+
+**Public API:** `ICON_SPECS`, `findIconSpec`, `renderAppIcon`, `getIconSetVersion`, `resolveBrandingLogoFile`, `__resetIconCacheForTests`
+
+**Cross-service deps:** `brandingService.getBranding` (source logo + defaults), `utils/imageMagic.detectImageMagic` (re-sniff on read), `utils/paths` (`UPLOADS_DIR`, `PUBLIC_DIR`), lazy `@resvg/resvg-js`.
+
+**Used by:** `src/api/routes/pwa.ts` only (`GET /manifest.webmanifest` for the version, `GET /icons/:file` for the bytes).
+
+**Invariants:**
+- **Nothing here throws.** Every failure rung — unresolvable `logoUrl`, path outside `UPLOADS_DIR`, missing file, non-image bytes, WebP, resvg failure — degrades to the shipped `public/img/brand/polaris-symbol-dark.png` (the light-inked mark — the icon canvas is dark). A branding mistake must not break the manifest or the icon a push notification renders with.
+- The cache key includes the logo file's **mtime**. The upload route writes a FIXED filename (`custom-logo.png`), so `logoUrl` never changes on re-upload — mtime is the only invalidation signal and is load-bearing.
+- `resolveBrandingLogoFile` takes the **basename** and then asserts the resolved path is still inside `UPLOADS_DIR`. The `branding` Setting row is operator-writable and is the only untrusted input in this service.
+- The `@resvg/resvg-js` import is **lazy** (inside `renderAppIcon`) so a missing per-platform native binding degrades to the raw logo instead of failing module load and taking every route in the process with it.
+- resvg cannot decode an embedded **WebP**, and the branding upload route accepts WebP — that fallback is expected behavior, not an error.
+
+**When changing this:**
+- Adding a variant/size means adding to `ICON_SPECS` (the route allowlist) AND to the manifest's `icons` array in `routes/pwa.ts`. Never let the route accept a caller-supplied size — resvg would allocate an unbounded canvas.
+- The cache is process-local and assumes `POLARIS_ROLE=web` stays single-instance (`deploy/polaris-web.service` is not a templated unit). If web ever becomes multi-replica, this is still correct — just N caches instead of one.
+
+---
+
+## services/brandLogoService.ts
+
+**What it owns:** The composite of the operator's logo with the Polaris symbol on its bottom-right corner (`branding.logoAccent`) — the geometry, the rasterization, and the in-process cache. Same `@resvg/resvg-js` embed-a-bitmap-in-an-SVG technique as `appIconService`.
+
+**Public API:** `accentGeometry` (pure), `normalizeBrandTheme` (pure), `renderAccentedLogo(theme)`, `ACCENT_SYMBOL_PATHS`, `ACCENT_FRACTION`, `MAX_RENDER_PX`, `BrandTheme`, `__resetBrandLogoCacheForTests`
+
+**Cross-service deps:** `brandingService` (`getBranding`, `hasCustomLogo`), `appIconService.resolveBrandingLogoFile` (the basename + inside-UPLOADS_DIR assertion — one definition of "which file is the logo"), `utils/imageMagic.detectImageMagic`, `utils/imageSize.imageSize`, `utils/paths.PUBLIC_DIR`, lazy `@resvg/resvg-js`.
+
+**Used by:** `src/api/router.ts` only — the PUBLIC `GET /server-settings/branding/logo-accent.png`, declared above `requireAuth` because the login page renders the mark with no session. The frontends reach it through `public/js/brand-logo.js`, never by building the path themselves.
+
+**Invariants:**
+- **Nothing here throws.** Accent off, default logo, missing/unreadable file, WebP, resvg failure, dimensions unparseable → `null`, and the route 302s to the plain `logoUrl`. This feeds an `<img>` on an unauthenticated login page; an accent is decoration and must never be why a login page renders without a mark.
+- **Compositing is server-side on purpose.** A CSS overlay would need its own absolute positioning and its own fraction-of-what arithmetic on the desktop login, the mobile login, the sidebar and the settings preview — four chances to disagree. One PNG, one URL.
+- The cache key is the logo's **and** the symbol's mtime **and the theme** — the upload route writes a FIXED filename, so mtime is the only invalidation signal (the `appIconService` rule, for the same reason), and the ETag is derived from that same key so the two theme variants can never revalidate into each other.
+- **The symbol is theme-paired, so the render takes a theme — a FAMILY, not a theme id.** `normalizeBrandTheme` narrows to `light` | `dark`, and `public/js/brand-logo.js:currentTheme()` sends the current theme's family, which is what keeps the three browser themes (`morning` / `noon` / `nightfall`) mapping onto the two shipped art sets with no third asset and no server change. Its wedges are white on `polaris-symbol-dark.png` and navy on `polaris-symbol-light.png`; against the wrong background half the mark vanishes and the star reads as four loose arms. `normalizeBrandTheme` narrows the query value to the two known keys before it indexes `ACCENT_SYMBOL_PATHS` — this is an unauthenticated route selecting a filesystem path.
+- `accentGeometry` clamps to half the SHORTEST side. Without it a wide banner logo would get an accent taller than the logo itself, since `ACCENT_FRACTION` (0.5) is measured on the longest side.
+- Rendering caps at `MAX_RENDER_PX`. The route is unauthenticated, so the canvas size must not be a function of what an operator uploaded.
+
+**When changing this:**
+- Changing the geometry changes what operators already saved — `accentGeometry` is pure and unit-tested (`tests/unit/brandLogoService.test.ts`) precisely so the placement promise ("bottom-right, roughly half the logo") is a test, not a comment. The Customization tab's checkbox hint states the same number; move both together.
+- The frontend's `logoAccent` → URL mapping lives in `public/js/brand-logo.js` (which appends `?theme=`), plus the Customization tab's preview `src` in `public/js/server-settings.js`; a path or query change is a three-file change.
+- WebP is deliberately unsupported (resvg can't decode it in an embedded `<image>`) — a WebP-branded install shows its logo un-accented, which is the same fallback `appIconService` already makes.
+
+---
+
+## services/brandingService.ts
+
+**What it owns:** The `branding` Setting row — `appName` / `subtitle` / `logoUrl` / `logoAccent` / `logoOnLogin` / `logoOnSidebar` / `temperatureUnit` — plus `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, `normalizeBrandingFlag`, `hasCustomLogo` and `displayAppName`. Read-side only; the writers stay in the serverSettings routes.
+
+**Public API:** `getBranding`, `BRANDING_DEFAULTS`, `normalizeTemperatureUnit`, `normalizeBrandingFlag`, `hasCustomLogo`, `displayAppName`, the `BrandingSettings` + `TemperatureUnit` types
+
+**Cross-service deps:** `prisma` (the `Setting` table), `utils/version.getAppVersion` (the `version` field on the response).
+
+**Used by:** `src/api/routes/serverSettings.ts` (`GET|PUT /branding`, `POST|DELETE /branding/logo` — it also **re-exports `getBranding`** so the public `/branding` alias in `src/api/router.ts` keeps working via its dynamic import), `src/api/routes/pwa.ts`, `src/services/appIconService.ts`, `src/services/brandLogoService.ts`. Browser-side, `public/js/brand-logo.js` is the only reader of the logo/placement fields — surfaces call it rather than branching on the payload themselves.
+
+**Invariants:**
+- Extracted from `routes/serverSettings.ts` precisely so services can read branding without importing a route module — do not reintroduce the reverse dependency.
+- `getBranding` never throws on a missing row; it returns defaults.
+- Writers (logo upload/delete, name/subtitle PUT) still live in the route and each **replaces the whole row**, so a writer that omits a field silently resets it — the logo upload/delete routes carry `temperatureUnit` AND the three logo flags forward for exactly that reason (the typechecker caught it when each field was added; keep every `BrandingSettings` field non-optional so it keeps catching it).
+- **`appName` may be empty.** Read with `!== undefined`, written without a `|| BRANDING_DEFAULTS.appName`: blanking it is how an operator whose uploaded logo already carries their wordmark says "no text beside the logo". Anything that must PRINT a name — page titles, the PWA manifest's `name`, the acknowledge page — goes through `displayAppName`, never `.appName` raw. `shortNameFor` in `routes/pwa.ts` already had its own fallback and keeps it.
+- **The three logo flags are read through `normalizeBrandingFlag`, not `||`.** `logoOnLogin`/`logoOnSidebar` default ON, so a `||` would resurrect a stored `false` on every read and quietly re-enable a logo the operator had switched off for that surface. Only `undefined`/`null` take the default.
+- `hasCustomLogo` is the single definition of "the operator uploaded something", surfaced on the GET payload as the derived `customLogo` so no frontend has to compare against a default path. It judges against `DEFAULT_LOGO_URLS` — the current default AND the retired `/logo.png`, which pre-cutover installs still have stored; comparing against the current default alone would read those rows as an operator upload and paint a 404 on every surface. The three write routes include it in their responses too — the Customization tab renders straight off the PUT/POST result.
+- The placement + accent flags are **inert without a custom logo** and are deliberately NOT reset by `DELETE /branding/logo`: an operator who re-uploads gets their choices back verbatim.
+- **`temperatureUnit` is DISPLAY-ONLY and rides this row deliberately.** Hardware-sensor samples are always stored, rolled up, and alerted on in Celsius (`SENSOR_CLASS_UNITS`); the frontends convert at render through `public/js/temp-unit.js` (`window.PolarisTempUnit`, unit-tested in `tests/unit/tempUnit.test.ts`). Branding is the only presentation channel every surface already has: the `/branding` alias is unauthenticated, `applyBranding` in app.js mirrors the payload into `localStorage["polaris-branding"]` (which is what lets the converter be SYNCHRONOUS for the sync string-building renderers), `PolarisAuthFlow.fetchBranding` primes the same cache for the mobile SPA, and the Dash wallboard — no user identity, so a per-user preference could never reach it — serves the same route. Readers that must convert TOGETHER or a chart contradicts itself: `_hwReadingText` (the Hardware Sensors table), `_loadSensorHistoryFor` (series + stats + the °C automation thresholds behind the severity shading), the mobile asset sheet's sensor list, and `widgets/temperature.js` (rows AND its 80/65 °C color breakpoints). Conversion is gated on each reading's OWN stored unit, never its class, so fan RPM and voltage rails pass through untouched. Never plumb it into the automation builder or any threshold input — those stay °C.
+
+**When changing this:**
+- Adding a branding field means updating the route's PUT schema too — and consider whether it belongs in the PWA manifest (`buildManifest` in `routes/pwa.ts`).
+- Changing `logoUrl` semantics (e.g. non-fixed filenames) breaks `appIconService`'s AND `brandLogoService`'s mtime-based cache keys — read those invariants first.
+- Which mark each surface paints is `public/js/brand-logo.js`'s call, not the surface's: desktop login (`js/login.js`), mobile login (`js/mobile/auth.js`), the sidebar (`applyBranding` in `js/app.js`) and the Customization tab preview (`js/server-settings.js`) all go through `PolarisBrandLogo.resolve/applyTo`. Adding a fifth surface means calling it too, not re-deriving the rule.
+- The shipped art lives in `public/img/brand/` as one file per (orientation, theme) — those names are in `brand-logo.js`'s `ASSETS` map and nowhere else.
+
+---
+
+## services/certInfo.ts
+
+**What it owns:** Single source of truth for the leaf cert nginx serves (`POLARIS_PROXY_CERT_PATH`). Layered cache (keyed on raw-file SHA-256) + last-known-good fallback tolerates the atomic-rename window during rotation. Exposes the SHA-256 fingerprint (agent pin), cert hostnames (URL inference), and expiry.
+
+**Public API:** `getServerCertFingerprint`, `getServerCertHostnames`, `getServerCertExpiry`, `invalidateCache`, `__resetCertInfoCacheForTests`
+
+**Cross-service deps:** none (node:fs, node:crypto, logger).
+
+**Used by:** `src/api/routes/proxySettings.ts` + `src/api/routes/serverSettings.ts` (fingerprint/expiry display), `src/api/routes/assets.ts`, `src/services/agentInstallService.ts` + `src/services/agentAutoDeployService.ts` (stamp the pin into `agent.conf`), `src/services/nginxApplyService.ts` (post-rotate cache invalidation).
+
+**Invariants:**
+- All accessors are synchronous — 20+ callers rely on sync reads; never make them async.
+- Read failures retry briefly and fall back to last-good so a transient read during rotation doesn't break agents mid-connection; repeat-failure warn logs are suppressed until success resumes.
+- Fingerprint is `sha256:<hex>` of the cert DER, stable for agent pinning.
+
+**When changing this:**
+- If `POLARIS_PROXY_CERT_PATH` ever becomes mutable at runtime, the setter must call `invalidateCache`.
+- `__resetCertInfoCacheForTests` is test-only — never call it from production code.
+
+---
+
+## services/deviceIconService.ts
+
+**What it owns:** Operator-uploaded device icons (PNG/JPEG/WebP/SVG; 256KB cap raster, 32KB cap SVG; magic-byte check for raster, pattern-reject validation for SVG); bytes-in-DB storage. Every icon is keyed to (manufacturer, type-or-model); resolution priority is `manufacturer-model: <mfr>/<model>` → `manufacturer-type: <mfr>/<assetType>`. Manufacturer values canonicalized through `manufacturerAlias` map at both upload and resolution time.
+
+**Public API:** `uploadIcon(), listIcons(), getIconImage(), deleteIcon(), loadIconResolutionCache(), resolveIconUrl(), validateUpload()`
+
+**Cross-service deps:** `utils/manufacturerNormalize.normalizeManufacturer()` for alias-canonicalization of manufacturer values (both the standalone manufacturer scope and the manufacturer half of model:<mfr>/<model> keys).
+
+**Used by:** `src/api/routes/deviceIcons.ts,56,83,105 — upload/list/delete CRUD + image serve`, `src/services/topologyGraphService.ts — icon resolution for topology switches/APs/firewalls/remote nodes (icon cache preloaded once per buildSiteTopology call)`
+
+**Invariants:**
+- Scope: "manufacturer-type" (asset type key, enum: server/switch/router/firewall/workstation/printer/access_point/other) or "manufacturer-model" (vendor-specific chassis/model). Both require a manufacturer; standalone type/model/manufacturer uploads are not supported.
+- Canonical key form: `"<canonicalManufacturer>/<typeOrModel>"`. Manufacturer half always runs through normalizeManufacturer (alias map). Type tail lowercased; model tail preserved as typed.
+- Upload validation: mimeType must be PNG/JPEG/WebP/SVG; raster size ≤256KB, SVG size ≤32KB; raster requires magic-byte prefix matching declared mimeType; SVG is reject-on-pattern (refused if it contains <script>, <foreignObject>, <iframe>, <object>, <embed>, <!DOCTYPE>, <!ENTITY>, <?xml-stylesheet>, on*= event handlers, javascript: URLs, any non-#fragment href/xlink:href/src, @import, or external url()).
+- SVG uploads that pass validation are **rasterized to a 512×512 PNG via `@resvg/resvg-js` (`rasterizeSvgToPng`)** before storage, and the row is written with mimeType `image/png` + a `.png` filename suffix. Background: Cytoscape's `background-image` pipeline loads SVGs via `new Image()` and design-tool exports (Adobe Illustrator etc.) typically omit `width`/`height` and declare only `viewBox`, so the browser falls back to a tiny default natural size and the topology icon visually anchors upper-left at a fixed pixel size at every zoom. Server-side rasterization gives the renderer a bitmap with intrinsic dimensions and side-steps the whole class of bug. The one-shot `rasterizeStoredSvgIcons` startup job migrates pre-existing `image/svg+xml` rows the same way; idempotent via the mimeType filter.
+- Resolution is most-specific-wins: manufacturer-model → manufacturer-type → null (frontend leaves node as a plain status circle). Assets with no manufacturer resolve to null directly — no fallback to "any vendor".
+- `resolveIconUrl()` is synchronous (used in hot topology path); operates against pre-loaded cache from `loadIconResolutionCache()`. Both call sites share `buildResolutionCandidates()` so the priority order can't drift between sync and async paths.
+- Topology renderer overlays the icon at ~70% of the visual diameter centered. The recipe is `background-fit: contain` with NO `background-width`/`background-height` override (so Cytoscape scales the image to fill the model-space node bounds, maintaining aspect ratio AND scaling with zoom), and a per-role thick `border-width` so the colored ring eats the outer ~15% of the visual diameter on each side. Both percentage and pixel `background-width` were tried in earlier attempts and both have Cytoscape 3.30 quirks: percentage causes zoom-dependent overflow; pixel is treated as render pixels (icon stops scaling with zoom) and breaks centering. Letting contain do the work alone is the predictable recipe. See `public/js/topology-render.js` `node[hasIcon=1]` style + the per-role border-width selectors directly below it.
+- Bytes stored as Uint8Array in DeviceIcon.data column; `/api/v1/device-icons/:id/image` serves raw bytes with Content-Type + Cache-Control. (Defense-in-depth: any `image/svg+xml` row — only legacy rows predating the rasterize-on-upload change, since new SVG uploads are stored as PNG — is served with X-Content-Type-Options: nosniff + a strict CSP `default-src 'none'; style-src 'unsafe-inline'; img-src data:; sandbox`.)
+
+**When changing this:**
+- Check magic-byte prefixes (PNG/JPEG/WebP) if adding new raster formats; ensure length matches actual file signatures.
+- SVG_REJECT_PATTERNS is the security boundary — adding a new tag/attribute reject pattern is fine, but loosening one needs careful review (every entry maps to a known XSS / XXE / SSRF vector).
+- Sync VALID_TYPE_KEYS set against `BUILT_IN_ASSET_TYPES` in `src/utils/assetTypes.ts` if new built-ins are added. Custom operator-added AssetTypeDef rows don't automatically get icon-resolution coverage — device icons keyed by manufacturer-type only resolve for built-in type names.
+- Verify Prisma DeviceIcon schema: unique constraint on (scope, key), Bytes column type for data. Scope is a String column — no DB migration needed when adding new scope values.
+- Review topologyGraphService.ts topology rendering (resolveIconUrl call sites) if icon resolution priority changes — but priority is built once in `buildResolutionCandidates()`, so updates land in both sync and async paths together.
+- Ensure upload route multer fileSize limit (256KB) stays at or above the raster MAX_ICON_BYTES constant. SVG's tighter MAX_SVG_BYTES is enforced inside validateUpload after multer accepts.
+- Image-serve route: any new mimeType added to ALLOWED_MIME_TYPES that could execute (script-bearing text formats) needs the same CSP/nosniff treatment as SVG.
+- Topology renderer style for `node[hasIcon=1]` in `public/js/topology-render.js` fills the node interior with white (`background-color: #ffffff`) so vendor logos pop against any basemap, and carries the status signal via a 5px `border-color: data(nodeColor)` ring instead of the fill. If you change the icon to full-bleed, drop the white fill and restore `background-color: data(nodeColor)` so the status hue isn't lost.
+- Per-role `border-width` for `node[hasIcon=1]` must stay roughly 15% of the role's node `width` so the visible image lands at ~70% of the overall visual diameter. Today: fortigate 10/64, fortiswitch+remote-asset 7/44, fortiap 6/36. Change one without the other and the colored ring is either invisibly thin or so thick the logo disappears.
+
+---
+
+## services/eventArchiveService.ts
+
+**What it owns:** All outbound Event flows (syslog/SFTP archival), event retention/prune configuration, and asset auto-decommission settings. Events created anywhere flow through here via job (pruneEvents) + optional real-time forwarders.
+
+**Public API:** `getArchiveSettings`, `updateArchiveSettings`, `testConnection`, `archiveAndExport`, `getSyslogSettings`, `updateSyslogSettings`, `testSyslogConnection`, `getRetentionSettings`, `getCachedRetentionSettings`, `updateRetentionSettings`, `getAssetDecommissionSettings`, `updateAssetDecommissionSettings`.
+
+**Cross-service deps:** none (reads Settings, spawns sftp/scp/nc, uses prisma Event table).
+
+**Used by:** `src/jobs/pruneEvents.ts,25 — scheduled archive/export`; `src/jobs/decommissionStaleAssets.ts — inactivity threshold`; `src/api/routes/events.ts — admin CRUD endpoints`; `capacityService.ts — capacity transition Event creation`. ~8 call sites.
+
+**Invariants:**
+- All successful Events are written to `prisma.event.create()` by callers (routes, services, jobs); eventArchiveService does not write Events, only manages their export/retention. The canonical helper is `logEvent` in [src/services/eventLogService.ts](src/services/eventLogService.ts) (re-exported from `src/api/routes/events.ts` for legacy importers) — it consults `getCachedRetentionSettings().minLevel` to drop sub-threshold events, and stamps the numeric `levelRank` (0=info, 1=warning, 2=error) at write time so the Events list endpoint's `sortBy=level` can dispatch to `orderBy: { levelRank }` for severity-ordered sort. Direct `prisma.event.create()` callers must stamp `levelRank` themselves; nothing in-tree bypasses `logEvent` today.
+- Archive export (SFTP/SCP) reads Events older than cutoff, writes JSON file, transfers via ssh/sftp spawn, then deletes from DB (via pruneEvents job).
+- Retention cache (1 min TTL) avoids DB read on every Event write; callers using `getCachedRetentionSettings()` must accept stale data.
+- Asset decommission threshold (0 = disabled) is in months; lastSeen older than that triggers `decommissioned` status in a separate 24h job.
+- Syslog (UDP/TCP/TLS) sends test messages synchronously; real event forwarding NOT in this service (would be added as a background job).
+- SFTP batch-file injection prevention: paths with quotes/newlines rejected before spawn.
+
+**When changing this:**
+- Test archiveAndExport with large Event payloads (>10k rows); verify SFTP/SCP progress.
+- Verify retention cache doesn't mask rapid setting changes; 60s may be too long for some ops.
+- Check asset decommission query doesn't accidentally mark live assets as stale (lastSeen >= cutoff).
+- Confirm syslog test messages arrive with the right facility/severity/format.
+- Validate SFTP injection prevention doesn't reject legitimate Windows paths with backslashes.
+
+---
+
+## services/eventLogService.ts
+
+**What it owns:** The shared audit-event writer. `logEvent` (never throws; drops rows below the operator-configured min level; stamps `levelRank` at write time), `buildChanges` (before/after diff for `.updated` events), `LogEventInput`. Plus the discovery per-asset audit helpers: `snapshotMaterialAssetFields` (capture material fields before a discovery branch mutates the in-memory asset), `computeMaterialAssetChanges` (pure diff over the material-field whitelist), `logDiscoveryAssetCreated` (`asset.discovered`), `logDiscoveryAssetUpdated` (`asset.discovery_updated` — fires only when a material field changed), `DiscoveryAuditContext`.
+
+Plus the per-asset **change-event builders** (`computeFirmwareChange`, `buildFirmwareChangedEvent`, `buildConnectionChangedEvent`, `buildFirewallChangedEvent`, `AssetChangeEventContext`) behind `asset.firmware.changed` / `asset.switch_port.changed` / `asset.wireless_ap.changed` / `asset.gateway_firewall.changed`.
+
+**Public API:** `logEvent`, `logEventsBatch`, `buildChanges`, `LogEventInput`, `snapshotMaterialAssetFields`, `computeMaterialAssetChanges`, `logDiscoveryAssetCreated`, `logDiscoveryAssetUpdated`, `DiscoveryAuditContext`, `computeFirmwareChange`, `buildFirmwareChangedEvent`, `buildConnectionChangedEvent`, `buildFirewallChangedEvent`, `AssetChangeEventContext`.
+
+**Cross-service deps:** `eventArchiveService.getCachedRetentionSettings` (cached min-level read).
+
+**Used by:** ~42 modules across routes / services / jobs. Most import via the back-compat re-export in `src/api/routes/events.ts`; new code should import from here directly so services never depend on the route layer. The discovery audit helpers are called from every asset create/update site in `discoveryEngine.ts` (firewall / FortiSwitch / FortiAP / Entra / AD update + create, plus FortiGate device-inventory endpoint create).
+
+**Invariants:**
+- `logEvent` must never throw — event logging can't be allowed to break the operation it audits. Failures are swallowed.
+- `levelRank` is stamped here (0=info, 1=warning, 2=error); the Events list endpoint's `sortBy=level` depends on it.
+- Sub-`minLevel` events are dropped silently (cached settings read, 60s TTL — accept staleness).
+- The discovery audit MATERIAL_ASSET_FIELDS whitelist is the flood guard: discovery bumps `lastSeen` / fetched-at / monitor stamp every cycle on nearly every asset, so diffing those would write an event per asset per cycle (catastrophic at 2000 assets vs. 7-day Event retention). Only identity/classification/location fields are diffed; an unchanged pass emits nothing. The endpoint **update** path is intentionally NOT instrumented (it reassigns `macAddress` to the most-recently-sorted MAC each cycle → spurious diffs); only endpoint **create** is.
+
+**When changing this:**
+- The events.ts re-export must stay in lockstep (same symbol names) until the legacy importers are migrated. (It deliberately does NOT re-export the change-event builders — new code imports them from here.)
+- Anything that makes `logEvent` throw or block breaks every mutating route in the app — keep it best-effort.
+
+---
+
+## services/nginxApplyService.ts
+
+**What it owns:** Orchestrator that combines config persistence, rendering, the privileged sysadmin wrapper, and cert-info invalidation into the operator-facing operations: apply config, rotate cert, bootstrap, and report drift.
+
+**Public API:** `applyProxyConfig`, `rotateCertAndKey`, `preflightCertRotation`, `bootstrapProxyConfig`, `getDriftStatus`
+
+**Cross-service deps:** `nginxRenderer.renderNginxConfig`, `nginxConfigParser.parseNginxConfig`, `privilegedSysadmin` (stage + apply + wrapper-available), `proxyConfigService` (get/save/row-exists), `certInfo` (invalidate + fingerprint), `apiDocsAccessService` (`getApiDocsSettings` + `deriveApiDocsNginxAllow` — the /api docs allow block renders from that Setting, not proxyConfig).
+
+**Used by:** `src/api/routes/proxySettings.ts` (apply / rotate-cert), `src/jobs/bootstrapProxyConfig.ts` (startup bootstrap), `src/api/routes/serverSettings.ts` (`PUT /server-settings/api-docs` best-effort re-apply — guarded on proxy mode + wrapper + managedMode + no drift, never failing the docs-scope save).
+
+**Invariants:**
+- Cert-pair validation is SPKI-only and happens before any graceful-reload attempt; the privileged wrapper owns the atomic rename + `nginx -t` + reload.
+- The rendered config's SHA-256 is matched against `lastAppliedHash` for drift; `preflightCertRotation` is validation-only (touches no disk).
+- `managedMode=false` blocks apply and surfaces the adopt-required flow.
+
+**When changing this:**
+- Hash computation must be byte-for-byte identical across platforms (CRLF normalization in the renderer).
+
+---
+
+## services/nginxConfigParser.ts
+
+**What it owns:** Best-effort regex parse of the six operator-settable directives from a live nginx config; used at bootstrap to seed `proxyConfig` and to detect customization beyond those six (drift markers). Deliberately does NOT parse the /api docs block's allow-list — `apiDocsConfig` is app-authoritative and never seeded from nginx.
+
+**Public API:** `parseNginxConfig`, `parseNginxConfigText`
+
+**Cross-service deps:** none (proxyConfig types only).
+
+**Used by:** `src/services/nginxApplyService.ts` (bootstrap + drift status), `tests/unit/nginxConfigParser.test.ts`.
+
+**Invariants:**
+- Whole-line comments are stripped before matching so comment text doesn't trip drift detection; drift reports unknown `proxy_pass` targets, unknown `add_header` keys, or a location-block count ≠ `EXPECTED_LOCATION_BLOCKS` (9).
+- Missing file returns defaults with `managedMode=false`; `KNOWN_PROXY_PASS_PATTERNS` + `KNOWN_ADD_HEADERS` define the template's expected schema.
+- `allow` lines are collected ONLY from `/metrics*` location blocks (`extractLocationBlocks`, brace-matched) — a file-global scan would merge the /api block's RFC1918 allows into `prometheusAllowIps` at bootstrap, silently widening the metrics allow-list. `tests/unit/nginxConfigParser.test.ts` pins this.
+
+**When changing this:**
+- Update the KNOWN_* sets in lockstep with the nginx template, and keep regexes tight to avoid false-positive drift.
+- Any new location block carrying its own `allow` lines must keep the metrics-scoped collection honest — see cross-cutting/deployment's location-count rule.
+
+---
+
+## services/nginxRenderer.ts
+
+**What it owns:** Renders `proxyConfig` + env-derived values + the API-docs allow posture into a complete nginx server config (from `deploy/nginx/polaris.conf.template`), with a deterministic SHA-256 so the updater and apply service can detect drift.
+
+**Public API:** `renderNginxConfig`, `RenderInput`
+
+**Cross-service deps:** none (reads the on-disk template at runtime; the `apiDocsAllow` input is COMPUTED BY CALLERS via `apiDocsAccessService.deriveApiDocsNginxAllow` so the renderer stays I/O-free and deterministic).
+
+**Used by:** `src/services/nginxApplyService.ts` (apply + drift status), `src/services/updateService.ts` (restart-time re-render), `tests/unit/nginxRenderer.test.ts`.
+
+**Invariants:**
+- Rendered bytes are identical for a given input (deterministic hash — no timestamps/random); CRLF is normalized at read time so Windows checkouts match Linux renders.
+- Placeholders are `{{TOKEN}}` substituted by split/join (never regex); togglable directives are whole-line replacements.
+- `RenderInput.apiDocsAllow` is REQUIRED so the compiler finds every call site — a new render caller that forgets it would ship a template with an unsubstituted `{{API_DOCS_ALLOW_BLOCK}}`. Disabled renders as `deny all;` alone (off means off at the edge too).
+
+**When changing this:**
+- Verify the template path resolves in both `src/` (tsx dev) and `dist/` (tsc prod) layouts; substitution token names must match the template exactly.
+
+---
+
+## services/settingsStore.ts
+
+**What it owns:** The generic TTL-cached accessor for JSON-blob Setting rows — `createSettingStore<T>({key, ttlMs, parse})` returning `{get, peek, save, invalidate}`. The store owns the read cache, the row I/O, and cache priming on save; callers keep their parse (defaults merge) and write-side validation/merge rules.
+
+**Public API:** `createSettingStore`, `SettingStore<T>`.
+
+**Cross-service deps:** `prisma` (settings) only.
+
+**Used by:** `azureAuthService` (key `sso`; `peek` backs the synchronous `isAzureSsoConfigured` fast path), `entraProxyAuthService` (key `entraProxy`), `dashSettingsService` (key `dashConfig`, 10s TTL = the cross-process propagation delay to the dash listener). Other Setting-blob sites still hand-roll the pattern — migrate them onto this as they're touched.
+
+**Invariants:**
+- The cache is per-process, exactly like the hand-rolled copies it replaced — a write in one role propagates to other roles only after their ttlMs expires. Don't shorten a TTL without checking what read frequency it implies (dash consults its store on every request).
+- `save` primes the cache with the written value (it does not invalidate) — callers that need a post-save DB re-read must call `invalidate()` themselves.
+- `parse` runs on every cache miss and must be total (handle `undefined` = missing row).
+
+**When changing this:** anything altering cache semantics changes every adopter at once — check each adopter's TTL expectation (auth gates, the dash listener's per-request read) before touching expiry behavior.
+
+---
+
+## services/dashSettingsService.ts
+
+**What it owns:** Persistence of the Dash wallboard operator config — the `dashConfig` Setting row `{ enabled (default false), ipScope ("rfc1918"|"all"|"custom", default "rfc1918"), allowedCidrs (canonical IPv4 CIDRs for the custom scope) }` — with a ~10s TTL in-process cache. The TTL is the **cross-process propagation delay**: the web process writes the row (Server Settings → Web Server → Dash Wallboard), the dash process (`POLARIS_ROLE=dash`) reads it on every request through the cache, so a toggle lands within ~10s with no restart.
+
+**Public API:** `getDashSettings`, `saveDashSettings`, `invalidateDashSettingsCache`, `defaultDashSettings`, `DASH_SETTING_KEY`, `DashSettings`, `DashIpScope`
+
+**Cross-service deps:** `src/utils/cidr.ts` (`normalizeAllowlistCidr`), `AppError` (prisma otherwise).
+
+**Used by:** `src/dash/dashServer.ts` (per-request kill-switch + `isSourceAllowed` scope decision), `src/api/routes/serverSettings.ts` (`GET/PUT /server-settings/dash`).
+
+**Invariants:**
+- `enabled` defaults FALSE — a new unauthenticated surface must never silently appear on upgrade; the operator flips it on once.
+- Parsing is tolerant: a garbage/wrong-typed row falls back per-field to the safe defaults (never throws on read); a legacy `rfc1918Only` boolean migrates to `ipScope` (true→rfc1918, false→all). Invalid stored CIDRs are dropped on parse.
+- `saveDashSettings` validates + normalizes custom CIDRs (throws 400 on an invalid entry) and REJECTS an enabled+custom+empty list (would lock every viewer out). Disabling is the way to turn the surface off.
+- Writes invalidate the cache synchronously in the writing process; the OTHER process converges via TTL expiry — don't assume immediate cross-process visibility.
+
+**When changing this:**
+- New fields need a default + tolerant parse + merge handling, AND the Web-Server-tab card (`public/js/server-settings.js` `dashCardHtml`/`handleDashSave`) + the `PUT /server-settings/dash` Zod schema updated in lockstep.
+- Don't lengthen the TTL casually — it's the operator-visible latency of the kill-switch.
+- The gate DROPS unauthorized sources (socket destroy in dashServer, not a 403) — keep that stealth posture in mind when touching the scope decision.
+
+---
+
+## services/dashRoleSnapshotService.ts
+
+**What it owns:** The Dash wallboard's permission identity: loads the seeded built-in `readonly` Role and materializes it via `snapshotFromRole()` (60s TTL cache) so `dashServer` can stamp `req.roleSnapshot` and every existing `requirePermission` / `hasPermission` / `ensureRoleSnapshot` gate resolves the anonymous caller as a readonly user with zero changes to `permissions.ts`.
+
+**Public API:** `getReadonlyRoleIdentity` (→ `{ snapshot, regionTags }`), `invalidateDashRoleSnapshotCache`, `DashRoleIdentity`
+
+**Cross-service deps:** `src/api/middleware/permissions.ts` (`snapshotFromRole`, `SessionRoleSnapshot`).
+
+**Used by:** `src/dash/dashServer.ts` (snapshot injector middleware + the synthetic `GET /dash/api/v1/auth/me`).
+
+**Invariants:**
+- The `readonly` role is `isProtected` (uneditable), so the 60s TTL is defense-in-depth, not a freshness requirement.
+- Missing `readonly` row ⇒ AppError 500 ("mis-seeded") — never a silent empty-permission fallback.
+- `resolveSnapshot()` in permissions.ts returns `req.roleSnapshot` when already set — that contract is what makes injection work; if permissions.ts ever stops short-circuiting on a pre-set `req.roleSnapshot`, the whole Dash permission model breaks.
+
+**When changing this:**
+- If Dash ever becomes role-configurable (not hardcoded `readonly`), route the choice through dashSettingsService and keep the snapshot provider injectable (dashServer's `identityProvider` test seam).
+
+---
+
+## services/proxyConfigService.ts
+
+**What it owns:** Persistence + validation of the operator-settable `proxyConfig` (single Setting row) with a short-TTL in-process cache — httpsPort, TLS protocols, HTTP/3 toggle, HSTS, Prometheus allow-list, and `managedMode`.
+
+**Public API:** `getProxyConfig`, `proxyConfigRowExists`, `saveProxyConfig`, `invalidateProxyConfigCache`
+
+**Cross-service deps:** none (prisma, proxyConfig types, AppError).
+
+**Used by:** `src/services/nginxApplyService.ts` (apply / bootstrap / drift), `src/api/routes/proxySettings.ts`.
+
+**Invariants:**
+- Single cached row per process with a short TTL; `invalidateProxyConfigCache()` clears it synchronously and writes always invalidate.
+- Validation: httpsPort 1–65535, TLS protocols a non-empty subset of {TLSv1.2, TLSv1.3}, HTTP/3 requires TLSv1.3, allow-list entries parse as IPs; partial updates merge into current state.
+
+**When changing this:**
+- Port/IP/protocol validation is security-relevant; new fields need defaults + merge/validate handling. Don't change the Setting key without a migration.
+
+---
+
+## services/privilegedSysadmin.ts
+
+**What it owns:** Thin TypeScript wrapper around the `sudo /usr/local/sbin/polaris-nginx-apply` shell script — stages files into the run dir and spawns the privileged wrapper with bounded output capture. The wrapper (not this module) is the entire privileged surface.
+
+**Public API:** `NginxApplySubcommand`, `WrapperResult`, `runNginxApply`, `stageNginxConfig`, `stageCertAndKey`, `isWrapperAvailable`
+
+**Cross-service deps:** none (node spawn/fs, AppError, logger).
+
+**Used by:** `src/services/nginxApplyService.ts` (config apply + cert rotation).
+
+**Invariants:**
+- All subcommand/arg validation lives in the shell script — this module only stages files + spawns; captured output is size-capped with a truncation flag.
+- Stage dir/files are written with restrictive modes; `ensureStageDir` is a defensive fallback when systemd-tmpfiles didn't run.
+
+**When changing this:**
+- `isWrapperAvailable()` lets route handlers short-circuit on dev boxes that lack the wrapper.
+
+---
+
+## services/queueService.ts
+
+**What it owns:** Monitor work queue mode dispatch (cursor vs. pg-boss) and pg-boss runtime lifecycle. Boot-time mode capture ensures the running process's queue strategy is frozen at startup despite subsequent Setting writes.
+
+**Public API:** `detectPgboss`, `isPgbossInstalled`, `getQueueMode`, `setQueueMode`, `getBootTimeMode`, `initializeQueue`, `startPgbossWorkers`, `stopPgbossWorkers`, `isPgbossRunning`, `publishMonitorJob`, `QUEUE_NAMES`, `QueueMode`.
+
+**Cross-service deps:** `monitoringService.ts`.
+
+**Used by:** `src/app.ts` — queue initialization and pg-boss worker lifecycle; `src/jobs/monitorAssets.ts` — queue mode dispatch and job publishing; `src/api/routes/serverSettings.ts` — queue mode write; `src/services/capacityService.ts` — capacity snapshot input (queue mode + pg-boss status).
+
+**Invariants:**
+- **Boot-time mode capture:** mode read once at startup into `bootTimeMode`; `setQueueMode()` updates Setting + cache but never affects running process. New mode takes effect on next restart only.
+- **Six queue names (Phase 2):** `polaris-monitor-probe`, `polaris-monitor-fastfiltered`, `polaris-monitor-telemetry`, `polaris-monitor-systeminfo`, `polaris-monitor-lldp`, `polaris-monitor-storage` (jobs prefixed `polaris-monitor-*`). LLDP and Storage each get their own dedicated worker pool (default 12 workers, env `POLARIS_MONITOR_LLDP_WORKERS` / `POLARIS_MONITOR_STORAGE_WORKERS`) running `runLldpFor` / `runStorageFor` from monitoringService. Floating priority order: probe > fastFiltered > lldp > storage > telemetry > systemInfo. The publisher in `monitorAssets.ts` gates LLDP/Storage on `Asset.lastLldpAt + lldpIntervalSeconds` / `Asset.lastStorageAt + storageIntervalSeconds`; the legacy `collectSystemInfo` still walks both as session-coalesced side effects on the same SNMP session and the persist paths are idempotent against double-walks.
+- **Stalled-worker watchdog:** monitors pgboss.job for >50 created jobs with 0 active; auto-recovers up to 3 times per hour; logs every minute after cap hit.
+- **Singleton job policy:** queues are created with `policy: "singleton"` + `singletonKey: ${assetId}:${cadence}` on publish so duplicate `(assetId, cadence)` sends are absorbed while a job is queued or active. `publishDueWork()` can fire every tick without piling stale work, and distinct assetIds run in parallel up to `localConcurrency`. (An earlier iteration passed `policy: "exclusive"` here, which is not a documented pg-boss policy and silently capped each queue to ~1 active job globally regardless of `localConcurrency` — turning a 16-worker pool into a serial consumer and diluting effective probe/telemetry cadence by 10×+ on large fleets. If you see queue depth sustained in the hundreds with active count stuck at 1-2, check this value first.)
+- **Two pools per queue:** dedicated `boss.work()` subscriptions own a flat 24 slots per queue (env `POLARIS_MONITOR_PROBE_WORKERS` / `_FAST_WORKERS` / `_HEAVY_WORKERS`); a single floating loop (`startFloatingWorkers`, default 32 via `POLARIS_MONITOR_FLOATING_WORKERS`) polls all four queues in `FLOAT_PRIORITY` order via `boss.fetch()` and dispatches manually with `boss.complete(name, id)` / `boss.fail(name, id, ...)`. Floating capacity flows to whichever queue has backlog. Singleton-key dedup at the publish layer prevents floating ↔ dedicated collisions on the same `(assetId, cadence)`. The loop is shut down via `floatingLoopRunning = false` in both `stopPgbossWorkers` and the auto-recovery path BEFORE calling `boss.stop()` so it doesn't try to fetch against a dead boss instance.
+- **Per-queue handler timeout (`EXPIRE_BY_QUEUE`):** pg-boss kills handlers that exceed `expireInSeconds` with `handler execution exceeded Ns` and marks them failed before the in-handler try/catch can stamp an error. The values are sized per cadence to the worst-case real work — probe 30s (single network call), fastFiltered 60s (one collector round-trip), telemetry 180s (SNMP CPU/mem/sensor walks), systemInfo 300s (full interface + storage + IPsec + LLDP walk). A uniform 60s cap was killing telemetry/systemInfo jobs mid-walk on slow SNMP devices, producing queue backlog that workers couldn't drain (every kill re-published the job on the next tick, looking like worker shortage when actually each slot was burning 60s per zombie). Raising the cap doesn't add parallelism — it reduces it by letting slow jobs finish on the first attempt instead of cycling through worker slots.
+- **Discovery queue payload:** `DiscoveryJobPayload` is `{ integrationId, actor, scopeDeviceName? }` — the optional third field is the single-FortiGate scoped re-discovery (threaded `publishDiscoveryJob(id, actor, scope?)` → consumer → `DiscoveryJobHandler(id, actor, scope?)` → `runDiscovery`). `singletonKey` stays `integrationId` regardless of scope: a scoped run and a full run for the same integration must coalesce, never run concurrently (they'd double-write the same device's rows).
+
+**When changing this:**
+- Verify boot initialization runs before monitor ticks fire (happens in `app.ts` startup order).
+- If tuning worker counts, check `POLARIS_MONITOR_*_WORKERS` env vars align with concurrency in `monitorAssets.ts`.
+- Test pg-boss fallback to cursor when extension/role permissions fail silently.
+- Ensure graceful pg-boss shutdown on SIGTERM drains in-flight jobs before process exit.
+
+---
+
+## services/serverSettingsService.ts
+
+**What it owns:** Server-wide configuration: NTP (servers, timezone) and CA certificate management (upload, list, delete). Server-leaf certs are managed externally (nginx reads `POLARIS_PROXY_CERT_PATH`).
+
+**Public API:** `getNtpSettings`, `updateNtpSettings`, `testNtpSync`, `listCertificates`, `addCertificate`, `deleteCertificate`.
+
+**Cross-service deps:** none.
+
+**Used by:** `src/api/routes/serverSettings.ts — CA upload/list/delete + NTP settings`. Server-cert mutation routes (`POST /certificates` category=server, `DELETE` of a server cert) return 409 unconditionally — handled directly in the route handler, doesn't reach the service.
+
+**Invariants:**
+- NTP and certificate lists persist in Settings table under `key: "ntp"` and `"certificates"`.
+- Certificate store is a single JSON array in the "certificates" Setting; each cert carries id, category (ca/server), type (cert/key), PEM, and metadata. The route surface only handles `category="ca"`; the cleanup migration `20260608000000_drop_legacy_server_certs` strips any legacy `category="server"` entries on upgrade.
+- Backup/restore flows NOT in this service (they live in updateService).
+
+**When changing this:**
+- Test CA upload validation (PEM parsing, magic-byte checks if added).
+- Confirm cert list dedup handles UUID collisions.
+
+---
+
+## services/updateService.ts
+
+**What it owns:** In-app software update check, availability detection (Docker vs git checkout), update application pipeline (backup→pull→npm ci→prisma generate→tsc→migrate→restart), and progress tracking.
+
+**Public API:** `initUpdateStatus`, `getUpdateStatus`, `isUpdateMechanismAvailable`, `clearUpdateStatus`, `checkForUpdates`, `applyUpdate`, `getRecentCommits`, `restartService`.
+
+**Cross-service deps:** none (spawns git/npm/prisma, reads/writes .update-status.json, creates DB backup).
+
+**Used by:** `src/api/routes/serverSettings.ts,1143,1151,1159 — Application Updates card endpoints`; `src/api/routes/serverSettings.ts — POST /restart` (Capacity Advisor "Restart Polaris to apply" button uses `restartService` standalone, without the update pipeline); `src/jobs/updateCheck.ts,31 — hourly check job`. ~7 call sites.
+
+**Invariants:**
+- Update mechanism disabled in Docker (`/.dockerenv` present, `.git/` absent) or when no `.git/` checkout exists; `getUpdateStatus()` returns `state: "disabled"` with a human-readable reason.
+- Status persists in `.update-status.json` at APP_DIR root; survives restarts.
+- applyUpdate() runs background; only one apply in flight at a time (`_applying` flag).
+- Backup is optional (skippable via Setting "update.skip_backup"); pre-update backups registered in "backup_history" Setting.
+- Encryption: backup password → AES-256-GCM ciphertext wrapped in `[POLARIS\0][salt][iv][authTag][ct]` envelope.
+- **Seven-step pipeline (order is load-bearing):** (1) backup, (2) git pull, (3) `npm ci --production=false`, (4) **explicit `npx prisma generate`**, (5) **clean `dist/` then `npm run build`** (= `tsc` + the post-tsc asset copy in `scripts/copy-build-assets.mjs`; never bare `npx tsc`, or the bundled std MIB `.txt` files never reach `dist/` and std SNMP-walks break), (6) `npx prisma migrate deploy`, (7) restart (NSSM on Windows, systemd exit(1) on Linux). Steps 4 + 5's `rm -rf dist` are defenses against the failure mode in `cross-cutting/schema-migrations-and-prisma-client-lifecycle` — never collapse them back into "trust npm ci postinstall."
+- **Update source repo is configurable.** `ensureUpdateRemote()` runs before the fetch in `checkForUpdates()` AND before the pull in `applyUpdate()`. When `POLARIS_UPDATE_REPO` (env) is SET it repoints the `origin` remote at that URL (idempotent — only rewrites when the URL differs; `git remote add`s if origin is missing; non-fatal). When UNSET it's a no-op — the install's existing `origin` is left as-is (updates come from wherever it was cloned). `getUpdateRepoInfo()` reports the active repo + source (`"env"` vs `"origin"`) and is exposed at `GET /server-settings/updates/repo` for the Application Updates card's "Update source" row. The two fallback scripts (`deploy/update-linux.sh`, `deploy/update-windows.ps1`) read the same `.env` var and repoint origin only when set, in lockstep — keep all three in sync when changing the env-var name or the set/unset semantics.
+- Generate-then-build-then-migrate order matters: client must be generated against the NEW schema BEFORE tsc compiles consumers, and migrations apply LAST so the client and DB are in sync at restart. Reversing any of these breaks the next start of the process.
+
+**When changing this:**
+- Test update path on both git-backed and Docker installs; verify "disabled" message is clear.
+- Check backup encryption round-trip: verify restored backup is valid SQL.
+- Confirm npm ci timeout (5 min) doesn't kill slow installs; adjust if needed.
+- Test git pull fallback chain (origin/HEAD → origin/main → origin/master).
+- Verify restart doesn't kill in-flight requests; 1.5s delay before exit(1) should be enough.
+- **Do not reorder steps 3–6** without re-reading `cross-cutting/schema-migrations-and-prisma-client-lifecycle`. A reorder that puts migrate before generate-then-tsc reintroduces the failure mode where dropped columns crash the running client.
+- The `rm -rf dist` between steps 4 and 5 is non-negotiable when Prisma client file layout could have changed between versions. Without it, stale `dist/generated/prisma/*.js` files can shadow the regenerated client and the running process selects columns the schema no longer has.
+
+---
+
+## services/backupService.ts
+
+**What it owns:** The whole database backup + restore mechanism. Extracted from `src/api/routes/serverSettings.ts` (2026-08) so the routes are thin and the pipeline is testable.
+
+**Public API:** `createBackup({password, kind, actor}) -> {record, path}`, `restoreBackup({filePath, password})`, `listBackups`, `getBackupRecord`, `deleteBackup`, `backupFilePath`, `isEncryptedBackupFile`, `timescaleInstalled`, plus the format constants `BACKUP_MAGIC` / `ENCRYPTED_HEADER_LEN`.
+
+**Cross-service deps:** `utils/pgEnv.ts` (libpq PG* env), `utils/dbConnections.ts` (`getDirectDatabaseUrl`), `utils/paths.ts` (`BACKUP_DIR`), `utils/version.ts`, `services/eventLogService.ts`. Spawns `pg_dump` / `psql`.
+
+**Used by:** `src/api/routes/serverSettings.ts — POST /database/backup, POST /database/restore, GET /database/backups, DELETE /database/backups/:id, GET /database/backups/:id/download`; `src/services/updateService.ts — the pre-update backup step`; `src/jobs/scheduledBackup.ts — the automatic-backup cadence`. Three writers of `backup_history`, all through this service.
+
+**Invariants:**
+- **Nothing is buffered.** `pg_dump` stdout streams through gzip (and the cipher when encrypting) straight to disk, and the route streams the finished file to the client. Peak memory is a few stream watermarks regardless of database size. The pre-2026-08 version did `execSync` + `readFileSync` + `gzipSync` + in-memory cipher + `res.end(payload)` — three copies of a multi-GB dump in the heap, with the event loop blocked for the whole dump.
+- **No wall-clock cap.** The old fixed 120 s `execSync` timeout failed a healthy dump the moment the database outgrew two minutes. A dump still emitting bytes is making progress; the watchdog (`NO_OUTPUT_TIMEOUT_MS`, 10 min) kills only a SILENT child.
+- **The connection never appears in argv.** `pg_dump`/`psql` get PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE from the environment via `pgChildEnv`. Putting the URL on the command line exposed the DB password to `ps aux`, and (because the command was an interpolated shell string) Node's `Command failed: <command>` message was being returned in the HTTP response body. Child-process stderr is logged, never echoed to the caller.
+- **Restore is TimescaleDB-aware.** On a database with the extension, restore runs `SELECT timescaledb_pre_restore();` → the dump → `SELECT timescaledb_post_restore();` in THREE SEPARATE psql sessions (pre_restore sets the flag at database level and only affects sessions started afterwards). `post_restore` is in a `finally`: a database left in restoring mode rejects normal hypertable writes, which is worse than the failed restore that caused it. `timescaleInstalled()` fails toward TRUE — running the gates on a non-Timescale DB is a benign, detectable error; skipping them on a Timescale DB corrupts the restore.
+- **Every connection is stale after a restore.** `--clean --if-exists` DROPs and recreates every table, so any connection opened before the restore holds cached relation OIDs that no longer exist and fails its next query with `XX000 could not open relation with OID <n>`. `restoreBackup` therefore recycles the pool (`prisma.$disconnect()`) in its `finally` — in the finally, not the success path, because a failure after the inner commit leaves the same situation. That is a MITIGATION, not a cure: a dump from a different schema version also leaves the process with a generated Prisma client that no longer matches the database, which reconnecting cannot fix, and the monitor/discovery roles have their own pools this call cannot touch. Hence `restartRequired: true` on the route response and the restart banner in the UI. Found by actually running the round trip against a real database — the pre-2026-08 code had the same defect and the route reported plain success.
+- **File format is a compatibility contract.** `"POLARIS\0" | salt(32) | iv(16) | authTag(16) | AES-256-GCM(gzip(sql))`, unchanged across the rewrite so operators' existing `.enc.gz` files still restore. Pinned by `tests/unit/backupEnvelope.test.ts`.
+- A failed backup deletes its partial file — never leave a truncated file masquerading as a usable backup.
+- Backup ids are server-generated (`bk-` / `bk-pre-update-` / `bk-scheduled-` + timestamp) but the delete/download routes accept them from the URL, so `backupFilePath` requires containment under `BACKUP_DIR` before any filesystem access.
+- History lives in the `backup_history` Setting row, capped at 50 entries. A history-write failure is logged but does NOT fail the backup — the file on disk is valid, only the index entry is missing.
+
+**When changing this:**
+- Run `tests/integration/backupRestore.test.ts` on a host with `pg_dump`/`psql` AND the timescaledb extension installed. It skips silently otherwise, so a green local run is not coverage of the Timescale gates — the test logs which branch it took.
+- Never reintroduce `readFileSync` / `gzipSync` / `execSync` on this path, and never size a backup with `readFileSync(f).length` (use `statSync(f).size`).
+- If you change the envelope layout, bump the magic header — do not silently reinterpret bytes, or every existing encrypted backup becomes unrestorable with no error the operator can act on.
+- Keep `post_restore` in a `finally`. Any early return between `pre_restore` and it strands the database in restoring mode.
+
+---
+
+## services/backupScheduleService.ts
+
+**What it owns:** The operator-configured automatic-backup cadence — the `backupSchedule` Setting row, its validation/merge rules, the pure due-check, and the off-host copy helper.
+
+**Public API:** `getBackupSchedule` (full, INCLUDING the passphrase — internal callers only), `getBackupScheduleMasked` (API shape), `saveBackupSchedule`, `recordScheduledBackupOutcome`, `isScheduledBackupDue(schedule, now)` (pure), `copyBackupOffHost`, `invalidateBackupScheduleCache`, `defaultBackupSchedule`, plus the bounds constants.
+
+**Cross-service deps:** `services/settingsStore.ts` (TTL-cached Setting accessor), `utils/secretMask.ts`, `utils/backupPassword.ts`.
+
+**Used by:** `src/jobs/scheduledBackup.ts — the 5-minute tick`; `src/api/routes/serverSettings.ts — GET|PUT /database/backup-schedule`.
+
+**Invariants:**
+- **Default `enabled: false`.** Many sites already back this Postgres up with an enterprise product, and an in-app update must not start writing gigabytes unasked. Turning it on is an operator action.
+- **Never-run means due immediately.** Enabling the feature must produce a recovery point now, not `intervalHours` later.
+- **A missed pinned hour is not skipped forever.** `hourUtc` holds an otherwise-due run until that hour, but past 2× the interval it runs anyway — a host that is down through 03:00 every night would otherwise never back up.
+- `lastRunAt` advances only on SUCCESS, so a failing schedule keeps retrying rather than silently marking itself done. `lastError` carries the most recent failure for the settings card.
+- Run bookkeeping (`lastRunAt`, `lastError`) is owned by the job, never by operator input — `saveBackupSchedule` preserves both.
+- Passphrase handling follows the shared secret convention: masked on read, a masked echo preserves the stored value, an empty string clears it, a new value is strength-checked by `validateBackupPassword`.
+- `copyToDir` must be ABSOLUTE. A relative path would resolve against the service's cwd, which is not something an operator can reason about.
+- The off-host copy is best-effort: the local backup already succeeded, and a full or unmounted share must not mark the run failed (it writes a warning Event instead).
+- Retention prunes ONLY `kind === "scheduled"` backups. A cadence must never delete the manual backup an operator took deliberately, or a pre-update recovery point.
+
+**When changing this:**
+- `isScheduledBackupDue` is pure precisely so the cadence is testable without a clock — keep it that way and extend `tests/unit/backupSchedule.test.ts`.
+- The passphrase lives in a Setting row, so it is covered by the secret-at-rest sealing in `db.ts` (`Setting.value`, key `passphrase`). Do not rename the field without adding the new name to `SECRET_CONFIG_KEYS`.
+- If you add a cadence dimension, decide explicitly what it does when the host was down through the window — silently skipping is the failure mode this service is designed against.
+
+---
+
+## services/weatherProxyService.ts
+
+**What it owns:** Server-side proxy + cache for the Status Map widget's weather overlay: RainViewer radar frame index (5 min TTL, serve-stale ≤30 min on upstream failure), radar tile PNGs (immutable per frame-id content hash → size-bounded FIFO cache, ~48 MB / 4000 entries, no TTL), and Open-Meteo current temperature (20 min TTL per 1.5° grid cell).
+
+**Public API:** `getRadarFrames()`, `getRadarTile(frameId, z, x, y)`, `getTemperature(lat, lng)`, `__resetWeatherProxyCachesForTests()`.
+
+**Cross-service deps:** None (global fetch to api.rainviewer.com / tilecache / api.open-meteo.com; `getAppVersion()` for the User-Agent). No DB, no Events — public weather data only.
+
+**Used by:** src/api/routes/weather.ts (mounted on the main router at `/weather` under requireAuth AND on the Dash listener via its `/weather/` prefix allowlist + `dashWeatherLimiter`). The consumer is public/js/widgets/siteMap.js (proxy-first, direct-CDN fallback).
+
+**Invariants:**
+- Tile requests validate the frame id against the union of the last TWO index generations — grace so an animation started just before an index rotation keeps resolving, and a hard gate so the endpoint can't be used as an open proxy to arbitrary upstream paths.
+- Frame ids are content hashes → a cached tile can never go stale; the route serves `Cache-Control: public, max-age=86400, immutable` (deliberately overriding the Dash listener's blanket no-store).
+- Temperature grid rounding (1.5°) must match siteMap.js loadTemps' grid key, or every viewer becomes a cache miss.
+- Transport failures throw AppError 502 and never poison any cache (geocoderService precedent); the widget interprets non-200 as "fall back to the CDN for this cycle/cell".
+- Tile render options (256px, color scheme 6, "1_1") are hardcoded to match the widget's direct-CDN URL template — a mismatch would make proxy and fallback look different.
+- In-flight dedupe on the index and per-tile fetches — a 14-frame layer add must not stampede upstream.
+
+**When changing this:**
+- Keep the CSP fallback hosts (api.rainviewer.com / *.rainviewer.com / api.open-meteo.com in securityHeaders.ts) as long as the widget's CDN fallback exists.
+- If tile URL options change, change siteMap.js's fallback template in the same commit.
+- The dash rate limiter (`dashWeatherLimiter`, 4000/5min) is sized to radar bursts (~14 frames × viewport tiles); revisit if frame count or tile size assumptions change.
+- Scale check: cache is per-process; in the split-role layout only the web + dash processes serve this (no monitor/discovery involvement).
+
+---
