@@ -16,7 +16,9 @@
 
 # Project name — overrides the default (which would be the directory name
 # "ip-management"). Containers become polaris-app-1 / polaris-postgres-1
-# and named volumes become polaris_*.
+# and named volumes become polaris_*. A per-worktree stack passes `-p polaris-<slug>`
+# (which wins over this line) plus POLARIS_DEV_PG_PORT / POLARIS_DEV_APP_PORT — see
+# .claude/skills/polaris-worktree-workflow/references/dev-environment.md.
 name: polaris
 
 services:
@@ -51,7 +53,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      # Host port is overridable so a second stack (one per git worktree, `-p polaris-<slug>`)
+      # can run beside the main one; the default keeps the documented 5432.
+      - "127.0.0.1:${POLARIS_DEV_PG_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U polaris -d polaris"]
       interval: 3s
@@ -94,7 +98,7 @@ services:
       # container's Linux native modules.
       - node_modules:/app/node_modules
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${POLARIS_DEV_APP_PORT:-3000}:3000"
     command: sh -c "test -d node_modules/.bin && test -f node_modules/.bin/tsx || npm install && npm run dev"
 
 volumes:

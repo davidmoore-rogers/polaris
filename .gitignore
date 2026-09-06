@@ -16,8 +16,15 @@ data/backups/
 # First-run setup marker — written per-host after setup finalizes
 .setup-complete
 
-# Per-developer Claude Code settings (permissions, hook config) — local
-.claude/
+# Per-developer Claude Code settings (permissions, hook config) and scratch worktrees are
+# local; the project SKILLS under .claude/skills/ are tracked project memory and must NOT be
+# ignored (git cannot re-include a child of an excluded directory, hence the `/*` + `!` pair).
+.claude/*
+!.claude/skills/
+
+# Session-workflow lock files (a worktree in use / a dev stack running) — never committed
+WORKLOCK
+DEVLOCK
 
 # Windows Explorer / OneDrive folder metadata
 desktop.ini
