@@ -785,7 +785,7 @@ const api = {
     // asset rows so those values can carry verbs.
     upstream:             (id) => request("GET", `/assets/${id}/upstream`),
     virtualization:       (id) => request("GET", `/assets/${id}/virtualization`),
-    // Polaris Agent — operator-facing endpoints (see CLAUDE.md "Polaris
+    // Polaris Agent — operator-facing endpoints (see the polaris-agent skill "Polaris
     // Agent API surface"). `agent.get` returns 404 when no agent is
     // installed yet; the caller should treat that as "no install" rather
     // than an error, so this helper resolves null on the "No agent

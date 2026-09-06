@@ -113,7 +113,7 @@ afterAll(async () => {
   await prisma.ipBlock.deleteMany({
     where: { OR: [{ name: { startsWith: PFX } }, { cidr: { in: Object.values(MARKER_CIDRS) } }] },
   });
-  // Safe to row-delete despite the compressed-chunk rule in CLAUDE.md: this row
+  // Safe to row-delete despite the compressed-chunk rule in polaris-domain-model -> samples-rollups.md: this row
   // was written seconds ago, so it is in the newest uncompressed chunk.
   await prisma.assetMonitorSample.deleteMany({ where: { assetId: `${PFX}-asset` } });
   await prisma.$disconnect();

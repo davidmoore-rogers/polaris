@@ -13,7 +13,7 @@
  * max_connections and PostgreSQL tuning are display-only because they require
  * a PostgreSQL restart Polaris can't trigger.
  *
- * Calc chain (see CLAUDE.md "Capacity Advisor"):
+ * Calc chain (see polaris-change-impact -> services/samples-timeseries.md "capacityAdvisorService"):
  *
  *   For each cadence c in {probe, fastFiltered, telemetry, systemInfo}:
  *     workersNeeded[c] = ceil(applicable × p90 / cadenceInterval × 1.5)

@@ -270,7 +270,7 @@ rollback() {
   # Regenerate Prisma client + wipe stale dist so the rolled-back process
   # comes up with a client matching the rolled-back schema. Same rationale
   # as the forward-update path below; both are documented in
-  # cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
+  # cross-cutting/schema-migrations-and-prisma-client-lifecycle in the polaris-change-impact skill.
   sudo -u "$APP_USER" npx prisma generate 2>/dev/null
   sudo -u "$APP_USER" rm -rf "$APP_DIR/dist" 2>/dev/null
   # `npm run build` (not bare tsc) so the post-tsc asset copy runs and the
@@ -324,7 +324,7 @@ fi
 # etc.) leaves the generated client stale; then step 7's `migrate deploy`
 # drops columns the running client still selects, and every Asset read/write
 # crashes with `column "<name>" does not exist`. See
-# cross-cutting/schema-migrations-and-prisma-client-lifecycle in TOUCHES.md.
+# cross-cutting/schema-migrations-and-prisma-client-lifecycle in the polaris-change-impact skill.
 step "5/9  Generating Prisma client..."
 
 sudo -u "$APP_USER" npx prisma generate || rollback "prisma generate"

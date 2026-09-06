@@ -165,7 +165,7 @@ For capacity planning, watch the gap between **current DB size** and **projected
 
 ## Keeping the dashboard in sync with `/metrics`
 
-The dashboard is intended to cover every `polaris_*` metric Polaris emits. When a metric is added, renamed, gains a label, or is removed, this JSON has to be updated in the same change — Prometheus itself picks up the new/dropped series automatically, but Grafana panel queries pin specific metric names and labels and will quietly go blank or break otherwise. The contract is encoded in [TOUCHES.md → cross-cutting/observability-metrics](../../TOUCHES.md#cross-cuttingobservability-metrics) under "When changing this."
+The dashboard is intended to cover every `polaris_*` metric Polaris emits. When a metric is added, renamed, gains a label, or is removed, this JSON has to be updated in the same change — Prometheus itself picks up the new/dropped series automatically, but Grafana panel queries pin specific metric names and labels and will quietly go blank or break otherwise. The contract is encoded in [polaris-change-impact → cross-cutting/observability-metrics](../../.claude/skills/polaris-change-impact/references/cross-cutting/observability-metrics.md) under "When changing this."
 
 The full list of Polaris-emitted metric names lives in [src/metrics.ts](../../src/metrics.ts); the helpers there also document what's recorded where.
 

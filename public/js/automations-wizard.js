@@ -19,7 +19,7 @@
  *   Step 6  Summary — review grid + the list of devices the automation
  *           affects (live scope preview)
  *
- * Mechanics: shared stepper CSS from styles.css (see UI-CANON.md → "Wizard
+ * Mechanics: shared stepper CSS from styles.css (see polaris-ui-canon → "Wizard
  * (stepper modal)"); free navigation to visited steps (all steps unlocked in
  * edit mode); one module-scope draft (`_aw`, rule-shape v2) collected on every
  * navigation, hard-validated only on Next/Save.

@@ -1,0 +1,185 @@
+# Services — OID registry, MIB database, vendor telemetry and manufacturer profiles
+
+Per-service touches (What it owns / Public API / Cross-service deps / Used by / Invariants / When changing this), verbatim from TOUCHES.md. Code references are `path/file.ts → symbolName()` — grep the symbol.
+
+## services/manufacturerAliasService.ts
+
+**What it owns:** Manufacturer alias CRUD (IEEE legal name → marketing name), in-memory alias map cache synced to Prisma extension, background backfill of normalized strings in Asset and MibFile rows, and idempotent default seed.
+
+**Public API:** `listAliases`, `createAlias`, `updateAlias`, `deleteAlias`, `refreshAliasCache`, `seedDefaultAliases`, `applyAliasesToExistingRows`, `ManufacturerAliasRow`.
+
+**Cross-service deps:** None (consumed by routes and jobs).
+
+**Used by:** `src/api/routes/manufacturerAliases.ts — admin CRUD endpoints`, `src/jobs/normalizeManufacturers.ts — startup seeding and backfill`, `src/db.ts — Prisma extension normalizer hook`.
+
+**Invariants:**
+- In-memory map (`setAliasMap()` in `manufacturerNormalize.ts`) must be refreshed after every mutation.
+- `seedDefaultAliases()` is idempotent; only inserts missing rows (no overwrites).
+- `applyAliasesToExistingRows()` respects (manufacturer, model, moduleName) uniqueness; logs warnings when normalization would create duplicates.
+- Prisma extension hooks `normalizeManufacturer()` on all Asset/MibFile create/update/upsert calls.
+
+**When changing this:**
+- Update `DEFAULT_ALIASES` constants when IEEE-registered names change or new vendor aliases are discovered.
+- Verify `createAlias()` uniqueness check is case-insensitive (alias is lowercased).
+- Test `applyAliasesToExistingRows()` backfill with duplicate-collapse edge cases (two rows collapsing to same canonical).
+- Confirm `refreshAliasCache()` is called after every CRUD mutation (create/update do this; delete does not since no rows change).
+- Inspect `src/db.ts` Prisma extension to ensure normalizer is wired to all manufacturer-write paths.
+
+---
+
+## services/manufacturerProfileService.ts
+
+**What it owns:** CRUD + cached resolver for the editable per-manufacturer telemetry profiles (metric rows, per-metric overrides, custom widgets). A synchronous `getProfileFor` serves the hot probe path after a boot warm-up.
+
+**Public API:** `MetricKey`, `MetricRowType`, `MetricOverrideRow`, `MetricRow`, `CustomWidgetRow`, `StateProbeSummary`, `ProfileSummary`, `ProfileFull`, `ManufacturerSuggestion`, `ManufacturerSuggestionSource`, `refreshProfileCache`, `getProfileFor`, `listProfiles`, `listStateProbes`, `listManufacturerSuggestions`, `mergeManufacturerSuggestions`, `getProfile`, `createProfile`, `updateMetricRow`, `createOverride`, `updateOverride`, `deleteOverride`, `createWidget`, `updateWidget`, `deleteWidget`, `deleteProfile`, `STD_MIB_KEYS`, `METRIC_KEYS`
+
+**Cross-service deps:** `prisma`, `normalizeManufacturer`, transform/combiner-kind guards, `AppError`, `logger`, `stateProbes` (`normalizeStateMap` / `validateStateMap`), `ouiService.getOuiOverrides` (dynamic import, suggestions only).
+
+**Used by:** `src/api/routes/manufacturerProfiles.ts` (full CRUD), `src/api/routes/assets.ts` (profile read + the Custom MIB tab's state rows), `src/services/monitoringService.ts` (metric resolver + the state-probe collector), `src/services/notificationDimensionService.ts` + `src/api/routes/notificationRules.ts` (`listStateProbes` — probe names/labels for the automation builder), `src/jobs/seedManufacturerProfiles.ts` + `src/jobs/backfillManufacturerProfileMemoryComposition.ts`.
+
+**Invariants:**
+- Metric row type gates transform validity (scalar/table take a unary transform; double_scalar takes a combiner); override rows always carry a symbol while metric rows may be unconfigured (null = use built-in seed).
+- `defaultMibId` and `defaultMibStdKey` are mutually exclusive; `modelPattern` is operator regex (validated + length-capped).
+- The cache `getProfileFor` reads is keyed by normalized-lowercase manufacturer and returns null until the boot warm-up completes.
+- **State-probe fields track the EFFECTIVE widgetType, both directions.** `stateFieldsForWrite` requires a valid `stateMap` on a `widgetType="state"` write (a probe with no mapping has no definition of true and would silently record nothing) and forces both columns to NULL on every non-state write — so flipping a probe to a gauge clears the mapping rather than leaving a stale one for a later flip back to resurrect. On a PARTIAL update the type comes from the posted value else the stored one, so an edit that doesn't mention `widgetType` keeps the probe's mapping.
+- **`shapeWidget` is the single shaping seam.** The cached read path (`shapeProfile`) and both write paths return through it, so a just-written row and the cache can't disagree. It reads `stateMap` through `normalizeStateMap` (which never throws) rather than trusting it verbatim — a row written before a mode existed, or hand-edited in SQL, must still yield a usable mapping on the telemetry hot path instead of throwing per scrape.
+- **FOUR of the seven metric rows are read at probe time; the other three are descriptive.** `pickVendorProfileMerged` in `monitoringService.ts` plucks `cpu` / `memory` / `temperature` / `storage` and layers each over the hardcoded `VENDOR_TELEMETRY_PROFILES` entry. `interfaces` / `lldp` / `wirelessStations` are deliberately absent — those are table walks with no symbol to swap. This is a hand-maintained claim about code elsewhere, exactly like `pollingCapability.ts`: the profile page renders all seven identically and validates all seven on save, so a row the runtime doesn't read is an operator edit that saves cleanly, reports success, and changes nothing. `storage` was in that state until 2026-08 — it seeded from the hardcoded `disk` block, matched it exactly, and was read by nothing, so nobody could tell. **Adding a row to the plucked set means the merge AND a `*QueryFromMetricPick` translator** (`diskQueryFromMetricPick` is the pattern: the row's combiner is interpreted, and a shape it can't express returns null so the hardcoded baseline survives a half-finished edit rather than being cleared).
+
+**When changing this:**
+- `touchProfile` (updatedAt bump) is best-effort and must not fail the operation.
+- Adding a `StateMapMode` means `src/utils/stateProbes.ts` (evaluate + describe + the needs-values set) AND the two client mirrors: `STATE_MODE_LABELS`/`STATE_MODES_WITH_VALUES`/`_stateMapSummary` in `public/js/server-settings.js`.
+- `listManufacturerSuggestions` is the "+ Add Manufacturer" typeahead and must offer only values `createProfile` would actually store — every contributor goes through `normalizeManufacturer` and profiles that already exist are excluded. Adding a contributor means adding it to `mergeManufacturerSuggestions` (the pure half, unit-tested) and to `_MFG_SUGGEST_SOURCE_LABELS` in `public/js/server-settings.js` so the dropdown can say where a value came from. The raw IEEE OUI database is deliberately NOT a contributor (~35k legal names, none of them canonical).
+- `listStateProbes` reads the cache only, so it returns `[]` before the boot warm-up. That's deliberate (nothing has produced a sample yet either), but any new caller must degrade rather than assume a probe resolves — the wizard falls back to generic "true/false" wording.
+
+---
+
+## services/mibParserUtils.ts
+
+**What it owns:** Shared ASN.1/SMI comment stripper — collapses comments to whitespace (preserving line numbers) and is string-literal aware.
+
+**Public API:** `stripComments`
+
+**Cross-service deps:** none.
+
+**Used by:** `src/services/mibService.ts` and `src/services/oidRegistry.ts` (SMI text parsing).
+
+**Invariants:**
+- Comments become space/newline equivalents (not deleted) so line numbers stay correct for parser errors; both `--…<newline>` and `--…--` styles handled; `--` inside quoted strings is preserved.
+
+**When changing this:**
+- Test pathological cases: nested/escaped quotes, comment at EOF.
+
+---
+
+## services/mibService.ts
+
+**What it owns:** Parsing, validation, and CRUD for uploaded SNMP MIB modules. The light validator (`parseMib`) gates uploads (1MB cap, rejects binaries, extracts moduleName + IMPORTS). The heavier peer (`parseMibStructured`) drives the Browse + MIB-aware Walk surface — extracts SYNTAX, INTEGER enum value labels, ACCESS, STATUS, DESCRIPTION, INDEX clauses, and SEQUENCE OF table structure. Per-(manufacturer, model, moduleName) uniqueness is enforced at create.
+
+**Public API:** `parseMib`, `parseMibStructured`, `listMibs`, `getMib`, `createMib`, `deleteMib`, `getMibFacets`, `getProfileStatus`, `ParsedMib`, `ParsedMibStructured`, `MibSymbol`, `MibTable`, `MibBaseType`, `MibAccess`, `MibStatus`, `MibSymbolKind`, `MibEnumValue`, `MibSummary`, `MibFilter`, `CreateMibInput`, `ProfileStatus`, `ProfileSymbolStatus`.
+
+**Cross-service deps:** `oidRegistry` (refreshRegistry, resolveSymbolAtVendorScope, listModelOverrides), `vendorTelemetryProfiles` (VENDOR_TELEMETRY_PROFILES), `mibParserUtils` (stripComments).
+
+**Used by:** `src/api/routes/mibs.ts — list/get/upload/delete + Browse `/structure` + MIB-aware `/walk``, `src/services/oidRegistry.ts — refreshes the symbol table on create/delete`, `src/services/monitoringService.ts — via oidRegistry for vendor profile matching`.
+
+**Invariants:**
+- SMI parser validates UTF-8 text only (rejects NUL and control chars <0x20 except tab/CR/LF).
+- Module header required: `<NAME> DEFINITIONS ::= BEGIN`; footer required: `END`. The module-name regex tolerates **mixed-case** identifiers (`[A-Z][A-Za-z0-9-]*`) — RFC-canonical names like `SNMPv2-MIB`, `SNMPv2-SMI`, `SNMPv2-TC` carry a lowercase `v` for version segments, matching the same tolerance the IMPORTS-parser uses below. An uppercase-only regex would capture the trailing `MIB` after `SNMPv2-` as the module name.
+- Duplicate check on (manufacturer, model, moduleName) tuple catches generics via explicit query (NULL handling).
+- Successful create/delete always refreshes oidRegistry immediately.
+- `parseMibStructured` is a peer of `parseMib`, NOT a superset call. A regression in the structured parser must not be reachable from the upload hot path. Per-symbol parse failures degrade fields to null rather than dropping symbols.
+
+**When changing this:**
+- Verify `createMib` duplicate-check logic handles NULL fields in your test data.
+- Confirm `parseMib` rejects binary/non-text files (test with fixture files).
+- Run `getProfileStatus()` against your vendor MIBs to ensure symbol resolution still works.
+- Update `DEFAULT_ALIASES` in `manufacturerAliasService.ts` if adding new vendor facets.
+- Check `src/api/routes/mibs.ts` (NOT `serverSettings.ts`) for upload/list/delete endpoint compliance — the MIB routes were extracted there to take precedence over `/server-settings`'s blanket `requireAdmin`.
+- Re-run `tests/unit/mibParseStructured.test.ts` — covers IF-MIB-style table detection, INTEGER enum extraction, multi-line DESCRIPTION, embedded `""` quote escapes, and comment-tolerant enum bodies.
+- `stdMibLibrary.ts` re-uses `parseMibStructured` against bundled standard-MIB text files — any change to the parser must keep the 16 cases in `tests/unit/stdMibLibrary.test.ts` (SNMPv2-MIB / IF-MIB / HOST-RESOURCES-MIB / ENTITY-MIB / ENTITY-SENSOR-MIB / LLDP-MIB spot-checks) green.
+
+---
+
+## services/oidRegistry.ts
+
+**What it owns:** Per-asset scoped OID symbol resolution from MIBs (device → vendor → generic → seed), layered SCOPED symbol caching with per-symbol provenance, and lazy cache warmup at app startup. Also exports the low-level building blocks (`BUILT_IN_OIDS`, `parseObjectAssignments`, `tryResolveParts`) that `stdMibLibrary.ts` re-uses to resolve std MIBs against the seed only — no DB layering.
+
+**Public API:** `resolveOid`, `resolveOidSync`, `ensureRegistryLoaded`, `refreshRegistry`, `resolveSymbolAtVendorScope`, `listModelOverrides`, `getMibSymbolCount`, `resolveSymbolsForMib`, `resolveSymbolForMib`, `findUnresolvedRootSymbols`, `parseObjectAssignments`, `tryResolveParts`, `BUILT_IN_OIDS`, `ResolveScope`, `SymbolStatus`.
+
+**Cross-service deps:** `mibService` (via import in mibService for refreshRegistry calls), `mibParserUtils` (stripComments).
+
+**Used by:** `src/app.ts — startup warmup`, `src/services/monitoringService.ts — telemetry probe resolution`, `src/services/mibService.ts — profile status introspection`, `src/api/routes/mibs.ts — Browse modal OID resolution + MIB-aware walk symbol → numeric OID lookup`, `src/services/stdMibLibrary.ts — std MIB symbol resolution against the seed`.
+
+**Invariants:**
+- Resolution is scoped per (manufacturer, model) tuple; both cached and layer-resolved case-insensitively.
+- Cache rebuilt entirely on any `refreshRegistry()` call (no partial updates).
+- Built-in seed (BUILT_IN_OIDS) always acts as final fallback; vendor OIDs override generic MIBs.
+- Seed currently covers Cisco / Juniper / HP-Aruba / Dell-RADLAN / Fortinet FortiGate / FortiSwitch / FortiAP — each vendor seed includes the vendor-specific telemetry symbols (CPU / memory and, where applicable, disk / temperature) so probes work without uploading the proprietary MIB.
+- Seed also covers the **IEEE 802.1 anchor chain** (`std` 1.0, `iso8802` 1.0.8802, `ieee802dot1` 1.0.8802.1, `ieee802dot1mibs` 1.0.8802.1.1). LLDP-MIB does not need it (its anchor spells every arc with an inline number), but the IEEE8021-* family does: IEEE8021-MSTP-MIB anchors at `::= { ieee802dot1mibs 6 }` with that symbol IMPORTed from IEEE8021-TC-MIB. Without the seed the module ROOT is unresolvable and every symbol chained off it fails too — the operator-visible symptom is an uploaded MIB where **nothing** resolves, not a few gaps. Cross-checked against the bundled LLDP-MIB (`1.0.8802.1.1.2` == `ieee802dot1mibs.2`).
+- `findUnresolvedRootSymbols(rawText, resolved)` reports the distinct EXTERNAL names a MIB references but nothing defines — the actionable cause behind an unresolved count. Locally-defined-but-unresolved names are skipped (symptoms, not causes). **`resolved` is the `resolveSymbolsForMib` shape, which keys every symbol with `null` for the unresolved ones — so resolution is `get(n) != null`, never `has(n)`.** A `has()` test reports zero root causes on exactly the broken MIBs the helper exists to explain; `tests/unit/oidRegistry.test.ts` pins that case.
+- `resolveOidSync()` returns null until `ensureRegistryLoaded()` has completed and the scope has been accessed.
+- `tryResolveParts` accepts three token shapes per OID part: pure integers (`"42"`), known symbols (looked up in the seed/scope map), and **ASN.1 named-number syntax** (`name(digit)` → uses the digit). The named-number form is required by LLDP-MIB's root anchor `{ iso std(0) iso8802(8802) ieee802dot1(1) ieee802dot1mibs(1) 2 }` and benefits any uploaded vendor MIB that uses the same idiom. Strict additive change — strings the legacy code resolved still resolve identically.
+
+**When changing this:**
+- Add coverage to BUILT_IN_OIDS if new standard SMI roots or vendor enterprise prefixes are needed.
+- Test scope layering with overlapping (manufacturer, model) MIBs to verify override order.
+- Verify cache key normalization (case-insensitive) handles mixed-case manufacturer input correctly.
+- Run `resolveSymbolAtVendorScope()` after updates to confirm vendor-floor symbol availability.
+- Profile performance: cache rebuild is O(mibs × entries × resolution-passes); log timings on large uploads.
+- Any change to `tryResolveParts` token-handling must keep `tests/unit/stdMibLibrary.test.ts` "resolves LLDP-MIB through ASN.1 named-number syntax" green AND not regress the 102 cases in `tests/unit/mibParseStructured.test.ts`.
+
+---
+
+## services/stdMibLibrary.ts
+
+**What it owns:** Browse-tree + MIB-aware walk for the eleven bundled standard MIBs (SNMPv2-MIB, IF-MIB, HOST-RESOURCES-MIB, ENTITY-MIB, ENTITY-SENSOR-MIB, LLDP-MIB, POWER-ETHERNET-MIB, BRIDGE-MIB, Q-BRIDGE-MIB, RSTP-MIB; IF-MIB backs both `std:interfaces` and `std:if-ext`). Read-only — std MIBs are immutable at runtime. Loads text files from `src/services/stdMibs/<MODULE>.txt` lazily on first request via `parseMibStructured`, resolves every symbol's `fullOid` against the BUILT_IN_OIDS seed only (no DB MIB layering), and caches the result module-level for the process lifetime.
+
+**Public API:** `STD_MIBS`, `StdMibDef`, `listStdMibs`, `getStdMibDef`, `getStdMibStructure`, `resolveStdSymbol`.
+
+**Cross-service deps:** `mibService` (parseMibStructured, types), `oidRegistry` (BUILT_IN_OIDS, parseObjectAssignments, tryResolveParts).
+
+**Used by:** `src/api/routes/mibs.ts — GET /std, GET /std/:key/structure, POST /std/:key/walk routes`.
+
+**Invariants:**
+- The 12 dropdown keys (`std:system`, `std:interfaces`, `std:if-ext`, `std:host-resources`, `std:entity`, `std:entity-sensor`, `std:lldp`, `std:poe`, `std:bridge`, `std:q-bridge`, `std:rstp`, `std:ip`) are owned in BOTH the backend `STD_MIBS` constant AND the frontend `_SNMP_STANDARD_MIBS` constant in `public/js/assets.js`. The frontend hardcodes the dropdown today; `GET /std` is for tooling parity. Adding/removing/renaming a std key requires updating both lists in lockstep + the bundled text file in `stdMibs/` + `STD_MIB_KEYS` in `manufacturerProfileService.ts` + `STD_MIB_LABELS`/`STD_MIB_ORDER` in `public/js/server-settings.js` + the `MIBS` table in `scripts/fetch-std-mibs.mjs` + the `EXPECTED` table in `scripts/smoke-std-mibs.ts` + `tests/unit/stdMibLibrary.test.ts` (which asserts the module COUNT, so it fails loudly on a half-done addition).
+- **Check a new module's IMPORTS for symbols used as OID parents.** Resolution is per-module against `BUILT_IN_OIDS` with no cross-MIB visibility, so bundling a module's dependency alongside it does NOT make it resolve — the anchor must be seeded in `oidRegistry`. Measured: Q-BRIDGE-MIB anchors on BRIDGE-MIB's `dot1dBridge` and resolves 0 of 129 assignments without the seed; RSTP-MIB anchors on `dot1dStp` and resolves 9 of 19. Both are seeded now. The failure mode is silent-and-total, and `smoke-std-mibs.ts` only catches it if the new module carries `EXPECTED` entries.
+- `dist/` copy is by extension glob in `scripts/copy-build-assets.mjs` (`services/stdMibs`, `.txt`), so a new bundled file needs no change there — but a new file with a different extension would.
+- `parseObjectAssignments` (re-imported from `oidRegistry`) is the canonical extractor — the structured parser drops some `OBJECT IDENTIFIER` shorthand assignments that the regex resolver picks up. The std resolver calls both extractors and intersects: structured parse for the displayed symbol tree; raw assignments for OID resolution.
+- Cache is permanent (process lifetime). No invalidation API — files change only via redeploy.
+- The `.txt` files are read at runtime relative to the COMPILED module location (`STD_MIBS_DIR` = `dirname(import.meta.url)/stdMibs`), i.e. `dist/services/stdMibs/` in a built install. `tsc` does NOT copy them — `scripts/copy-build-assets.mjs` (the second half of `npm run build`) mirrors them into `dist/`. A new `.txt` dropped in `stdMibs/` is auto-covered (the copy globs `*.txt`), but if you ever read a non-`.txt` asset from here, add its extension to that script. Dev (`npm run dev` via tsx) reads from `src/`, so a missing-from-`dist/` regression is invisible until you ship — see `cross-cutting/deployment`.
+- Bundle refresh is operator-initiated via `node scripts/fetch-std-mibs.mjs` which writes SHA-256 + source URL into `stdMibs/SOURCES.md`. Commit the regenerated text files + SOURCES.md together so the audit trail stays in sync.
+
+**When changing this:**
+- Run `npx tsx scripts/smoke-std-mibs.ts` to verify all 27 spot-checks still pass.
+- Run `npx vitest run tests/unit/stdMibLibrary.test.ts` for the formal 17 cases (includes a guard that every declared std MIB `.txt` exists on disk).
+- If adding a new std MIB: extend `STD_MIBS`, drop the text file in `stdMibs/`, add it to `MIBS` in `scripts/fetch-std-mibs.mjs`, add 2-4 spot-checks to `EXPECTED` in the smoke script, add at least one resolved-OID assertion to the unit test, and add the matching `{ id, label, oid }` entry to `_SNMP_STANDARD_MIBS` in `public/js/assets.js`.
+- The IEEE LLDP-MIB carries an IEEE copyright header (preserved verbatim in the file). Re-read the header text on every refresh per the operator's "legal/compliance language requires human review" policy.
+
+---
+
+## services/vendorTelemetryProfiles.ts
+
+**What it owns:** Built-in vendor telemetry profiles (Cisco, Juniper, Mikrotik, Fortinet FortiSwitch, Fortinet FortiAP, Fortinet FortiGate, HP-Aruba, Dell) matching assets by manufacturer + OS + model regex and exposing symbolic OID queries for CPU / memory / disk / temperature — plus, on FortiSwitch, a `model` identity query — via oidRegistry resolution.
+
+**Public API:** `VENDOR_TELEMETRY_PROFILES`, `pickVendorProfile`, `memoryQueryToDoubleScalar`, `VendorTelemetryProfile`, `CpuQuery`, `MemoryQuery`, `DiskQuery`, `TemperatureQuery`, `ModelQuery` (symbol + parse fn; FortiSwitch `fsSysVersion` → `utils/fortiswitchModel.ts` — consumed by `collectSystemInfoSnmp`, adopted onto `Asset.model` by `recordSystemInfoResult` only while the stored model is empty/generic; NOT part of the editable ManufacturerProfile surface — `pickVendorProfileMerged` only overrides cpu/memory/temperature, so the hardcoded profile is the model query's only source). `memoryQueryToDoubleScalar(mem)` translates a hardcoded `MemoryQuery` into the editable Manufacturer Profile's double-scalar shape (`{type, symbol, symbolB, transform}` with the matching `CombinerKind`) — consumed by `seedManufacturerProfiles` and `backfillManufacturerProfileMemoryComposition`. Returns null for empty memory blocks.
+
+**Cross-service deps:** None (vendorTelemetryProfiles is leaf; consumed by monitoringService + mibService).
+
+**Used by:** `src/services/monitoringService.ts — probe strategy selection for telemetry`, `src/services/mibService.ts — profile status reporting in MIB database UI`.
+
+**Invariants:**
+- `match` regex is tested against `"${manufacturer ?? ''} ${os ?? ''} ${model ?? ''}".trim()` (all three fields optional).
+- Entries ordered in priority; first match wins (no fallback after). Both FortiSwitch and FortiAP must precede the generic Fortinet entry because all three match `manufacturer="Fortinet"`; the model-specific regexes (`/fortiswitch/i`, `/fortiap/i`) sit before the broad `/fortinet|fortigate|fortios/i` so FortiSwitches/FortiAPs don't fall into the FortiGate OID tree.
+- CPU/memory/temperature symbols resolve from one of three layers (in priority order): an uploaded MIB at the asset's scope, an entry in `oidRegistry`'s `BUILT_IN_OIDS` seed (currently covers Cisco / Juniper / HP-Aruba / Dell-RADLAN / Fortinet FortiGate + FortiSwitch + FortiAP — these vendors show "READY" out of the box), or — when neither resolves — the HOST-RESOURCES-MIB fallback inside the probe.
+- `TemperatureQuery.mode` is `"scalar" | "table"`. `pickVendorProfileMerged` maps the manufacturer-profile `temperature` metric's `type`: `table` → `mode: "table"` (the SNMP collector runs the full `fgHwSensorTable` hardware-sensor walk via `collectHardwareSensorsFortinetSnmp`), `scalar` → `mode: "scalar"` (single `.0` reading, used by FortiAP `fapTemperature` after the fgHwSensorTable + ENTITY-SENSOR walks both come back empty). This is what makes the operator's `table` / `fgHwSensorTable` profile override actually populate (it was silently coerced to a broken scalar GET before the Hardware Sensors work).
+- Profile selection is read-only; no runtime mutations. (The `model` identity query's DOWNSTREAM write — `recordSystemInfoResult` stamping `Asset.model` — is guarded: only while the stored model is empty or matches /^fortiswitch\b/i, so operator-typed models survive and a hardware swap self-heals.)
+- The parsed model value must keep matching /fortiswitch/i (the `"FortiSwitch <token>"` prefix from `fortiswitchModelFromFsSysVersion`) — the profile `match` haystack includes the model and FortiSwitch assets carry no `os`, so a bare token would drop the asset into the generic Fortinet/FortiGate profile whose 12356.101 OIDs a FortiSwitch doesn't expose. The persisted ManufacturerProfile override's `modelPattern: "FortiSwitch"` regex relies on the same prefix.
+
+**When changing this:**
+- Verify new `match` regex pattern against real asset manufacturer/OS values (case-insensitive).
+- Confirm CPU/memory/temperature symbol names match the MIB files referenced in CLAUDE.md SNMP stack section.
+- Test `pickVendorProfile()` with mixed-case inputs and edge cases (null manufacturer with os set).
+- Add model-specific profile entries (e.g. FortiSwitch, FortiAP) BEFORE the generic vendor entry — order is the precedence mechanism.
+- Update CLAUDE.md narrative if renaming or reordering built-in profiles.
+- If adding a new temperature query, ensure the matching OID is seeded into `oidRegistry.BUILT_IN_OIDS` or upload coverage is required from the operator.
+
+---

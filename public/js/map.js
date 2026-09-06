@@ -2926,7 +2926,7 @@
 
   // Cross-site asset clicks + topology right-bar links pivot to the canonical
   // asset details slide-over (openViewModal in assets.js, the canonical
-  // Slide-over implementation — UI-CANON.md). assets.js + its UI deps are loaded
+  // Slide-over implementation — polaris-ui-canon). assets.js + its UI deps are loaded
   // on map.html for this; each file's DOMContentLoaded handler self-guards
   // so the Assets-page UI doesn't try to bootstrap here.
 

@@ -3362,7 +3362,7 @@ function renderPageControls(containerId, total, pageSize, currentPage, onPageCha
   // Left cell empty, center = pagination, right cell = action buttons + the
   // page-size ("Show N") selector (rendered when onSizeChange is supplied).
   // Replaces the older absolute-positioned action-button cluster. Documented
-  // in UI-CANON.md → "Paginated list controls row".
+  // in polaris-ui-canon → "Paginated list controls row".
   var pageSizes = (opts && opts.pageSizes) || [15, 25, 50, 100];
   var hasTop = !!topEl; // render the size selector only once (top row when present)
 

@@ -1270,7 +1270,7 @@ async function batchSettled<T>(items: T[], fn: (item: T) => Promise<any>): Promi
 
 // Source-shaped observed blob written to the "fortigate-firewall" AssetSource
 // row for each discovered FortiGate. Mirrors the per-source JSON shape
-// sketched in CLAUDE.md ("Per-source observed shapes / sourceKind:
+// sketched in polaris-monitoring-discovery -> discovery-fortinet.md ("Per-source observed shapes / sourceKind:
 // fortigate-firewall"). The firewall's lookup mechanism stays serial-number
 // based on Asset.serialNumber (in-memory `findBySerial` index) — this row
 // captures the source perspective for the asset details modal without
@@ -1415,7 +1415,7 @@ async function upsertFortigateFirewallAssetSource(
 }
 
 // Source-shaped observed blob for managed FortiSwitch assets. Mirrors the
-// per-source JSON shape sketched in CLAUDE.md ("Per-source observed shapes
+// per-source JSON shape sketched in polaris-monitoring-discovery -> discovery-fortinet.md ("Per-source observed shapes
 // / sourceKind: fortiswitch"). Companion to the firewall blob above.
 function buildFortiswitchObservedBlob(
   sw: { device?: string; deviceSerial?: string; name?: string; serial?: string; ipAddress?: string; fgtInterface?: string; osVersion?: string; joinTime?: number; state?: string; connected?: boolean; baseMac?: string; description?: string | null },
@@ -6499,7 +6499,7 @@ export async function syncDhcpSubnets(integrationId: string, integrationName: st
   //
   // Skips fields the projection deliberately doesn't own (lastSeenSwitch,
   // lastSeenAp, status, mac, operator-owned fields — see the priority
-  // table in CLAUDE.md). Only writes when the projected value is non-null
+  // table in polaris-monitoring-discovery -> discovery-overview.md). Only writes when the projected value is non-null
   // AND differs from the current Asset value, so quiet syncs skip the
   // round-trip entirely.
   let projectionCorrected = 0;
@@ -8551,7 +8551,7 @@ function isAdManagedTag(t: string): boolean {
 }
 
 // Build the source-shaped observed blob written to AssetSource for an AD
-// discovery. Mirrors the per-source JSON shape sketched in CLAUDE.md
+// discovery. Mirrors the per-source JSON shape sketched in polaris-monitoring-discovery -> discovery-fortinet.md
 // ("Per-source observed shapes / sourceKind: ad").
 function buildAdObservedBlob(
   dev: activeDirectory.DiscoveredAdDevice,

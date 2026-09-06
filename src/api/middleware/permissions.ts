@@ -552,7 +552,7 @@ export function requireOwnership(functionKey: string) {
 
 /**
  * Ownership-dimension row check for `subnets` / `reservations` (see
- * CLAUDE.md "Ownership model"): a `write`-level caller may only touch rows
+ * polaris-api-rbac -> auth-rbac.md "Ownership model"): a `write`-level caller may only touch rows
  * whose createdBy matches their username; `fullwrite` bypasses the filter.
  * Call after loading the row, on routes behind requireOwnership (which
  * stamps req.permissionLevel). `action` reads as "you can only <action>

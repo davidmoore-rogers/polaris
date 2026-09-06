@@ -1,0 +1,31 @@
+## cross-cutting/asset-tag-mutators
+
+**What it is:** Anything in the codebase that writes `Asset.tags`. The `tags: String[]` column is used by humans (assets-page filtering, search) AND by features that "stamp" managed tags (e.g. `region:<name>` from map regions). Two writer classes coexist: **operator-driven** (asset edit modal, bulk-edit) and **system-driven** (auto-tagging features). The latter must be careful not to step on operator-set values.
+
+**Operator writers:**
+- `src/api/routes/assets.ts:PUT /assets/:id` — primary edit path; accepts `tags: string[]` and writes it as-is.
+- `src/api/routes/assets.ts:POST /assets/:id/sources/:sourceId/split` — clones tag set when splitting an asset.
+- `src/services/assetMergeService.ts` (`POST /assets/:id/merge`) — union-merges the absorbed asset's tags onto the survivor (operator merge).
+- `public/js/assets.js` bulk-edit modal — calls `PUT /assets/:id` per row with "Add" / "Replace" semantics.
+
+**System writers (managed namespaces):**
+- `src/services/mapRegionService.ts` — owns the `region:` prefix. Adds `region:<name>` to in-polygon firewalls + cascaded FortiSwitches/FortiAPs + subnet-propagated assets, **and to the `Subnet` rows an enclosed gate serves** (the only writer of region tags onto `Subnet.tags`); strips on rename/delete wholesale, on drift where a `RegionTagAssignment` provenance row permits, and — on the map-save review only — from pinned FIREWALLS sitting outside the named polygon regardless of provenance (`stripOutOfRegionFirewallTags`). Sees its own tags via the prefix; never touches operator-set tags on non-gates. Mirrored to the `Tag` registry under category "Map Regions".
+- ~~`firewall:` prefix~~ — retired 2026-08 (firewallTagService deleted after its DISABLED hold; leftover `firewall:*` tags on existing installs are plain operator-managed tags now, visible and deletable in the picker).
+- `src/services/tagAssignmentService.ts` — owns criteria-based auto-assigned tags. Unlike `region:`/`firewall:`, these use NO reserved prefix (they're ordinary operator-named tags), so collision is policed by the `TagAutoAssignment` provenance table instead: a tag is added/removed only on assets matching a `Tag.criteria` rule set, and removed only where the engine itself applied it (provenance row exists) — hand-applied copies survive. Managed sync (add AND remove on drift), fired inline on tag CRUD + asset writes + end-of-discovery (Phase 13.65) + a 6h job. NOT prefix-hidden in the manual picker.
+- Discovery breadcrumb tags — `src/services/discovery/discoveryEngine.ts` legacy paths still write `entra-disabled`, `ad-disabled`, `prev-*` markers. Some of these (sid:, ad-guid:) are being retired by the multi-source asset model.
+
+**Tag registry mirror (`prisma.tag` rows):**
+- `public/js/users.js`'s tag picker (per-user tag scope, role slide-over, Group Mappings) reads the registry via `GET /server-settings/tags` and is the one **client-side creator** of `Tag` rows outside Server Settings → Identification: a typed name absent from the catalogue POSTs a plain tag (no criteria, server-assigned color, category General) when the caller holds `serverSettingsSystem:fullwrite`, else it attaches to that principal's `otherTags` alone and the hint says so. The catalogue GET carries the same `serverSettingsSystem` read floor, so a user administrator without it degrades to the free-text chip input rather than being shown an empty registry — `regionPickerHtml`'s unreadable-catalogue posture. Deleting a registry tag never strips it from `User`/`Role`/`GroupMapping.otherTags` (no FK).
+- Manual tag pickers (assets edit modal) read from the registry to populate dropdowns. System-managed tags should also appear here so operators can search/filter for them — `mapRegionService` is the canonical example (upserts on create, rotates on rename, deletes on delete).
+
+**Invariants:**
+- A managed tag prefix must be **owned** by exactly one writer. Don't add a second feature that writes `region:*` — pick a different prefix.
+- System writers may strip on drift only where a provenance table says the writer itself applied the tag (`RegionTagAssignment` / `TagAutoAssignment`) — never from "every row carrying the tag". The one carve-out: `mapRegionService`'s map-save gate pass strips region tags from pinned FIREWALLS outside the named polygon regardless of provenance, because for a coordinate-carrying gate the polygon already implies the tag in the add direction; it runs only from the operator's explicit Save Regions click, never from a background job.
+- Manual operator attachments to system-managed tags (e.g. an endpoint server hand-tagged `region:Atlanta`) must survive periodic reconcilers.
+
+**When changing this:**
+- New auto-tagging feature? Pick a prefix, document it here, mirror to the `Tag` registry, and follow the additive-reconciler pattern from `mapRegionService`.
+- Removing a managed prefix? Audit existing rows for stale tags before retiring the writer.
+- Changing the `Asset.tags` column type or moving tags to a side table? Every writer in this section needs to migrate — the `String[]` shape is load-bearing.
+
+---

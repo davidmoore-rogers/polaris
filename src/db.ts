@@ -443,7 +443,7 @@ function fireIpOverrideFollowUp(outcome: OperatorOverrideOutcome, assetId: strin
 // and clampMonitoredForStatus guards do: it is the ONE seam every caller passes
 // through. Several route files still read `prisma.credential.findUnique` and
 // `prisma.integration.findUnique` inline (see the interim-state note in
-// CLAUDE.md), and encrypting at the service layer would have left those reading
+// polaris-business-rules, rule 20b), and encrypting at the service layer would have left those reading
 // ciphertext. Raw SQL bypasses this — the only raw reader of these columns is
 // monitorOverrideService's `integrations.config #>> '{…,addAsMonitored}'`, which
 // touches no secret field.

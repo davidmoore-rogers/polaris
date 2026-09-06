@@ -1,0 +1,36 @@
+## cross-cutting/fortinet-parent-key-resolution
+
+**What it is:** the one resolution order for "which Asset is this FortiSwitch/FortiAP's parent?", in `src/utils/fortinetParentKey.ts` (pure, `tests/unit/fortinetParentKey.test.ts`).
+
+`Asset.fortinetTopology.controllerFortigate` holds **FortiManager's device name**, assigned inside FMG. A firewall's `Asset.hostname` is projected from the **gate's own configured hostname** (`device.hostname || device.name`, `buildFortigateFirewallObservedBlob`). Nothing makes those equal, and every consumer used to compare one to the other. On an install where an operator named the FMG device differently, every switch/AP behind that gate resolved to NO parent — silently, since "no parent" is a legitimate state (prod 2026-08-12: dependency suppression never fired so a gate in a maintenance window left its switches reading plain "Down"; the Device Map drew the gate with no children; region membership, region subnet propagation and FortiLink interface auto-monitor all skipped them).
+
+**Resolution order** (`resolveInfraParentAsset`, case-insensitive):
+1. `controllerSerial` → `Asset.serialNumber`. Definitive; stamped by discovery from 2026-08 (`DiscoveredFortiSwitch/FortiAP.deviceSerial` → the topology stamp + observed blob).
+2. `controllerFortigate` → the candidate's OWN `fortinetTopology.deviceName`. Like-for-like (both are FMG's name for the gate) and **correct on pre-fix rows**, which is what makes the fix work without waiting for a re-discovery.
+3. `controllerFortigate` → `Asset.hostname`. The historical match; still correct wherever FMG's name and the gate's hostname agree. Never remove it.
+4. The stamped name as a **serial** — a FortiSwitch's `switch-id` IS its serial, and that's what an AP's LLDP table reports as `parentSwitch`, while the switch's hostname may be an operator label.
+
+**Two classes of `controllerFortigate` consumer — do not mix them:**
+- **Asset identity** (route through this util): `ipContextService` (`Subnet.fortigateDevice` / a sighting's gate name → the firewall Asset behind an address, for the Add Asset IP cross-reference), `dependencyTreeService`, `topologyGraphService.buildSiteTopology`, `routes/map.ts` topology search, `peerInferredLldpService`, `autoMonitorInterfacesService.loadInferredLldpByAsset`, `mapRegionService.computeMembership`, `connectionPathService.resolveTopologyFallback`.
+- **FMG/FortiOS API addressing** (must keep using the device NAME — never "fix" these): `monitoringService`'s parent-FortiGate polling (4 sites), the discovery decommission sweeps comparing against the FMG roster, `utils/infraDhcpBinding` (name-to-name against `Subnet.fortigateDevice`), `descriptionSyncService`'s transport grouping (already correctly keys the firewall side on `deviceName`), and the Sources column (`utils/assetSourceLocation`, business rule 22 — showing the FMG name is deliberate).
+
+**Helpers:** `buildInfraParentIndex` / `resolveInfraParentAsset` (in-memory, for a pass that already loaded the inventory) · `readControllerStamp` / `readParentSwitchStamp` / `readFirewallDeviceName` (defensive JSON reads) · `controllerStampWhereOr` (children of one gate, Prisma JSON-path OR) · `topologyStampWhereOr` (one stamp key vs. several identities) · `parentAssetWhereOr` (the reverse — the gate named by one child stamp) · `controllerIdentityKeys` (plain string list, for in-memory compares and `Subnet.fortigateDevice` `in:` lookups).
+
+**Invariants:**
+- `null` from the resolver means **no parent**, never an error — an unadopted switch, a gate another integration hasn't discovered yet, and a genuine orphan all land there.
+- `expectedType` is load-bearing: a switch's controller must be a `firewall`, an AP's `parentSwitch` a `switch`. Without it a name collision builds an edge to the wrong device.
+- `parentAssetWhereOr` deliberately over-fetches; resolve precedence in memory afterwards. `findFirst` with an OR gives no control over which match returns.
+- `Subnet.fortigateDevice` holds the device NAME, not a hostname — anything joining it to a firewall Asset needs `controllerIdentityKeys`, not `hostname`.
+- The Prisma query builders are case-EXACT while the in-memory resolver is case-insensitive. A stamp differing only in case resolves in one and not the other.
+
+**When changing this:**
+- Adding a consumer: use the helpers; never hand-roll a `byHostname` map off `controllerFortigate` again. Decide first which of the two consumer classes you're in.
+- Adding a stamp writer: FMG and standalone FortiGate both, per cross-cutting/fmg-fortigate-parity-surfaces — `fortimanagerService.fmgStepSwitches`/`fmgStepAps` (from `ctx.localDevice.serial`) and `fortigateService`'s switch/AP pushes (from `ctx.deviceSerial`), then `discoveryEngine`'s `swTopology`/`apTopology` stamps AND `buildFortiswitchObservedBlob`/`buildFortiapObservedBlob`.
+- Existing rows gain `controllerSerial` only on their integration's next discovery run — deliberately no backfill job, because step 2 already resolves them. Don't "optimize" step 2 or 3 away.
+- HA: the FMG device record's serial is the cluster's (the primary member's); each member Asset carries its own serial, so a `controllerSerial` match lands on the primary and the standby is handled by the existing `isHaStandby` rule in `evaluateSuppression`.
+
+---
+
+## The convention as CLAUDE.md stated it (moved 2026-09-06)
+
+**Resolving a FortiSwitch/FortiAP's parent goes through `src/utils/fortinetParentKey.ts`. Never match `fortinetTopology.controllerFortigate` against `Asset.hostname`.** That field holds FortiManager's *device name*; a firewall's hostname is projected from the gate's own configured hostname, and the two differ on any install where an operator named the FMG device differently — in which case every child resolves to *no parent*, silently, because "no parent" is a legitimate state. That single mismatch broke dependency suppression (a gate in a maintenance window left its switches reading "Down" instead of "Dep. Down"), Device Map site membership, map-region membership + subnet propagation, and FortiLink interface auto-monitor. The util resolves `controllerSerial` → the gate's own `fortinetTopology.deviceName` → hostname → the name-as-serial. Note the *second* class of consumer that must keep using the device name: anything addressing an FMG/FortiOS API (parent-FortiGate polling, decommission sweeps, description-sync transports, the Sources column). See polaris-change-impact → cross-cutting/fortinet-parent-key-resolution.md.

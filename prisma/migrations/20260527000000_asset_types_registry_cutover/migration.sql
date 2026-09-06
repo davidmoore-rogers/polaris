@@ -12,7 +12,7 @@
 -- fortinetTopology branches, polling source defaults, topology rendering,
 -- inferAssetTypeFromOs) only special-cases the eight built-in names. Custom
 -- types fall through to "other"-like generic behavior by design. Documented
--- as a known limitation in CLAUDE.md.
+-- as a known limitation in polaris-domain-model -> assets-core.md (AssetTypeDef).
 --
 -- Asset.assetType holds the registry row's `name` literal — not an FK. A
 -- non-FK string column lets us keep historical values safely if an admin

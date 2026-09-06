@@ -191,7 +191,7 @@
       '</div>';
     // No datalists: the builder's value control is the shared click-to-suggest
     // combobox, fed by /contacts/filter-schema. (A <datalist> was tried in the
-    // wizard and confirmed nothing — see UI-CANON.md → "Don't use `<datalist>`".)
+    // wizard and confirmed nothing — see polaris-ui-canon → "Don't use `<datalist>`".)
   }
 
   /**
@@ -242,7 +242,7 @@
       // Read the checkbox by PROPERTY rather than with a `:checked` selector:
       // happy-dom resolves `:checked` from the attribute, so a selector here
       // would make the DOM tests assert the engine's behaviour instead of ours
-      // (the same trap as <option selected> — see UI-CANON.md → "Nested condition tree").
+      // (the same trap as <option selected> — see polaris-ui-canon → "Nested condition tree").
       function allDevicesChecked() {
         var cb = q("#ab-all-devices");
         return !!(cb && cb.checked);

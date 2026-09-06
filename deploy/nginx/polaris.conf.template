@@ -18,7 +18,7 @@
 # Hand-edits to the rendered /etc/nginx/conf.d/polaris.conf trigger drift
 # detection on the next in-app update: the rendered file is NOT clobbered
 # and the GUI surfaces a banner until the operator clicks "Adopt managed
-# mode." See ARCHITECTURE.md -> nginx Proxy Management for the full flow.
+# mode." See polaris-deploy -> deployment-updates.md (In-app nginx GUI) for the full flow.
 #
 # WebSocket upgrade: RFC 6455 WebSockets work only over HTTP/1.1 and HTTP/2.
 # The agent's persistent WebSocket and any browser WebSocket negotiate over

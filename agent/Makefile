@@ -17,7 +17,7 @@
 # (agentBuildService.ts) reads the same file, so a `make all` from a shell
 # and a click on the Build button in the UI produce binaries stamped with
 # the same -ldflags='-X main.version=...' value. Anyone editing agent code
-# must bump VERSION in the same commit per the TOUCHES.md rebuild contract.
+# must bump VERSION in the same commit per the polaris-agent skill's rebuild contract.
 VERSION := $(shell cat $(dir $(lastword $(MAKEFILE_LIST)))VERSION | tr -d '[:space:]')
 PKG     := github.com/polaris/agent/cmd/polaris-agent
 OUTDIR  := dist/$(VERSION)
@@ -69,7 +69,7 @@ dev:
 # (ProductName/CompanyName/FileVersion — Explorer → Properties → Details)
 # makes the PE look legitimate to Defender heuristics and carries the agent
 # version. MUST be re-run whenever VERSION bumps — the version is baked into
-# the .syso at generation time (see TOUCHES.md → cross-cutting/polaris-agent).
+# the .syso at generation time (see polaris-agent → cross-cutting-polaris-agent.md).
 winres:
 	cd cmd/polaris-agent && go run github.com/tc-hib/go-winres@v0.3.3 make --in winres.json --arch amd64,arm64 --file-version $(VERSION) --product-version $(VERSION)
 

@@ -1,0 +1,40 @@
+# Change routing — what to update for each kind of change
+
+The former CLAUDE.md → Common Claude Code Tasks list, verbatim, followed by the skills-era routing table.
+
+- **Add a field to an entity** — Update `prisma/schema.prisma`, generate migration, update Zod schema in the route file, update the service type.
+- **Add a new integration type** — New service in `src/services/`, register in `integrations.ts` route (config schema + test/proxy branches), add the sync dispatch in `src/services/discovery/discoveryEngine.ts`. The scheduler is type-agnostic and needs no change; `TOUCHES.md → cross-cutting/integration-type-onboarding` is the authoritative ~30-callsite checklist.
+- **Add a new asset field** — Schema + migration, update `assets.ts` Zod schema, update `assets.js` frontend table/form.
+- **Add a new role permission** — Add the function key to `FUNCTION_KEYS` in `src/api/middleware/permissions.ts`, migration to seed it on existing Roles, apply the guard at the route layer. **Narrowing an existing key's ladder** (`levels`) additionally needs a migration folding every stored matrix DOWN into it — `normalizePermissions` only clamps on the next role write, so without it the UI and the database disagree until someone re-saves the role.
+- **Implement a monitoring collector (or notice one missing)** — flip its entry in `src/utils/pollingCapability.ts` in the SAME commit, and its `_collectorExists` mirror in `public/js/integrations.js`. That table is a hand-maintained claim about code elsewhere: nothing detects automatically that a collector appeared, and a stale entry either hides a method that now works or keeps offering one that silently gathers nothing. `tests/unit/pollingCapability.test.ts` doubles as the list of what is currently unimplemented.
+- **Add bulk reservation import via CSV** — Route `POST /api/v1/reservations/import`, service function handles row validation and upsert.
+- **Write integration tests** — Vitest + Supertest against a test database (Docker Compose).
+- **Add a new environment variable** — Add to `.env.example` with a comment, document in the CLAUDE.md "Environment Variables" block, update `docs/INSTALL.md` if operator-set, and seed a default in `deploy/setup-*.{sh,ps1}` if the install scripts write `.env`. See `TOUCHES.md → cross-cutting/deployment`.
+- **Add, rename, or remove a `polaris_*` metric** — Update `src/metrics.ts` (define + helper), the Observability section of this file, the writers list in `TOUCHES.md → cross-cutting/observability-metrics`, AND add/edit/remove the corresponding panel in `docs/grafana/polaris-monitoring-dashboard.json` (with the bullet in `docs/grafana/README.md`). Prometheus picks up new series automatically — Grafana does not.
+- **Add a new Polaris Agent sample stream** — Add a Zod variant to `SamplesBodySchema` in `src/api/routes/agents.ts`, map to the enqueue helper, mirror in the Go agent collector under `agent/internal/collectors/`, and bump `agent/VERSION`. See `TOUCHES.md → cross-cutting/polaris-agent`.
+- **Bump a runtime dependency or Go pin** — Update `Dockerfile`, every `deploy/setup-*.{sh,ps1}`, and `docs/INSTALL.md` per-platform notes; for Go, bump `agent/go.mod` in lockstep. See `TOUCHES.md → cross-cutting/deployment`.
+
+## Skills-era routing (2026-09-06 onward)
+
+The pre-skills list above still names the code-side steps correctly; the documentation-side
+targets moved. "TOUCHES.md -> X" now means `polaris-change-impact/references/.../X.md`, "the
+Observability section of this file" means `polaris-monitoring-discovery/references/observability.md`,
+and "the CLAUDE.md Environment Variables block" means `polaris-deploy/references/env-vars.md`.
+
+| Change | Documentation to update (same commit) |
+|---|---|
+| Prisma model / column / enum | `polaris-domain-model/references/<domain>.md` — Definitions bullet, Schema block, Notes; an enum change also updates the enum block in that skill's `SKILL.md` |
+| new or changed service | `polaris-change-impact/references/services/<group>.md` (`## services/<name>.ts` entry) + `file-map/src-services-*.md`; any cross-cutting file whose Writers/Readers list changed |
+| new or changed job | `polaris-monitoring-discovery/references/background-jobs.md` + `file-map/src-jobs.md` |
+| new or changed route / gate | `polaris-api-rbac/references/endpoints-*.md`; `routes-overview.md` for a new group; a new function key also `cross-cutting/dynamic-roles-permission-matrix.md` + `auth-rbac.md` + a migration seeding it on every Role |
+| new util | `file-map/src-utils-*.md`; `tests/unit/<name>.test.ts` |
+| environment variable | `.env.example`, `polaris-deploy/references/env-vars.md`, `docs/INSTALL.md`, `deploy/setup-*.{sh,ps1}` |
+| `polaris_*` metric | `src/metrics.ts`, `polaris-monitoring-discovery/references/observability.md`, `cross-cutting/observability-metrics.md`, `docs/grafana/polaris-monitoring-dashboard.json` + `docs/grafana/README.md` |
+| agent code / sample stream | `agent/VERSION`; `polaris-agent/references/cross-cutting-polaris-agent.md`; `agent-server-side.md` if the server flow changed |
+| polling method or collector | `src/utils/pollingCapability.ts` + `_collectorExists` in `public/js/integrations.js`; `polling-methods-streams.md`; `cross-cutting/polling-method-resolver.md` |
+| integration type | the `cross-cutting/integration-type-onboarding.md` checklist; `discovery-overview.md` + the matching `discovery-*.md`; `routes-overview.md`; the integration-modal entry in `polaris-ui-canon` |
+| UI pattern, shared module, page or gate | `polaris-ui-canon/references/canon-*.md`; the pages / shared-modules tables in `polaris-ui-canon/SKILL.md`; `frontend-*.md` for a surface |
+| business rule | `polaris-business-rules/SKILL.md` (rules 1–11) or `invariants-*.md` + `narrative-*.md` (12+); cite the number in code |
+| `public/api.html` | regenerate `polaris-api-conventions` (own repo: `node polaris-api-conventions/scripts/import-api-html.mjs <polaris>/public/api.html`) and bump its `plugin.json` version |
+| deploy artifact, Dockerfile, systemd unit, nginx template | `polaris-deploy/references/*`, `docs/INSTALL.md`, `README.md` |
+| the session workflow, lock files, hook | `polaris-worktree-workflow/*`, the CLAUDE.md "Session workflow" paragraph |

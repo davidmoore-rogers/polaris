@@ -109,7 +109,7 @@ export const CLAIM_FRESH_DAYS = 7;
  * equipment has deliberate addressing, not a per-install preference, and a
  * settings surface for it would need an asset-type picker no other conflict
  * behaviour has. Operator-added custom types fall outside it by design (the
- * `assetType`-branching convention in CLAUDE.md) — add them here deliberately.
+ * `assetType`-branching convention in polaris-domain-model, Enums) — add them here deliberately.
  * `hypervisor` (an ESXi host) and `router` are NOT here; see business rule 40.
  */
 export const CONFLICT_ELIGIBLE_ASSET_TYPES = ["switch", "access_point", "firewall", "server"];

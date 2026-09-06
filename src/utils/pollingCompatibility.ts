@@ -52,7 +52,7 @@
  * back to Polaris over HTTPS and holds an outbound WebSocket for on-demand
  * probes. It's incompatible with appliance sources (FortiManager, FortiGate)
  * because Fortinet appliances can't run third-party binaries. See the
- * "Polaris Agent" section in CLAUDE.md.
+ * polaris-agent skill.
  *
  * The "vcenter" method covers FOUR streams (enforced in isMethodValidForStream
  * via VCENTER_STREAMS): responseTime, cpuMemory, interfaces and storage. All
@@ -105,7 +105,7 @@
  * it would silently change how up/down is decided for every gate on every FMG
  * install.
  *
- * Locked with the user during the design exchange; see CLAUDE.md
+ * Locked with the user during the design exchange; see polaris-monitoring-discovery -> polling-methods-streams.md
  * "Polling-method compatibility matrix".
  */
 
@@ -290,7 +290,7 @@ export function isPollingMethod(v: unknown): v is PollingMethod {
  *
  * Exists as a shared pure predicate because its two callers — `computeDueWork`
  * in monitoringService and the pg-boss publisher in jobs/monitorAssets — are a
- * REQUIRED LOCKSTEP PAIR (TOUCHES.md), and this gate was previously absent from
+ * REQUIRED LOCKSTEP PAIR (polaris-change-impact -> cross-cutting/polling-method-resolver.md), and this gate was previously absent from
  * both: every other stream checked its resolved method before publishing, the
  * probe did not, and `"disabled"` therefore fell through probeAsset's dispatch
  * to the unknown-method error and was recorded as a failed poll. An operator

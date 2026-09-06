@@ -1097,7 +1097,7 @@ agentsRouter.post("/system-info", async (req, res, next) => {
         }
       }
 
-      // MAC isn't owned by projectAssetFromSources (see CLAUDE.md "Fields the
+      // MAC isn't owned by projectAssetFromSources (see polaris-change-impact -> cross-cutting/asset-source-projection.md "Fields the
       // projection does NOT own") — every discovery path writes it inline.
       // Mirror that here: normalize the agent's primaryMac to colon-upper,
       // merge into the AssetMacAddress side table preserving entries from

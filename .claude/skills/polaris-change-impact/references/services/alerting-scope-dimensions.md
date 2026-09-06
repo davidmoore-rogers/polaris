@@ -1,0 +1,171 @@
+# Services — device filters, scope, dimension pickers, cadence, regions, maintenance schedules
+
+Per-service touches (What it owns / Public API / Cross-service deps / Used by / Invariants / When changing this), verbatim from TOUCHES.md. Code references are `path/file.ts → symbolName()` — grep the symbol.
+
+## services/automationActionService.ts
+
+**What it owns:** The single fan-out point between a fired alert (Notification row) and its automation's `actions[]`. `executeActions(notificationId, actions, ctx, exec)` dispatches per action type: notify → the existing recipient/delivery pipeline (`expandDeliveries`, passing `scopeRegionTags` + `assetRegionTags` for the two region-recipient flavors) with the ACTION's `emailComposition` falling back to the rule-level one; api_call → one `NotificationDelivery` row (`transport: "api_call"`, `channelId: NULL` by design, request spec + fire-time-rendered body in meta); script → an AutomationScriptRun via `requestScriptRun`.
+
+**Public API:** `executeActions`, `ActionExecContext` ({scopeRegionTags?, assetRegionTags? (the triggering asset's stripped region snapshot — recipientDeviceRegion routing), assetId?, ruleId?, ruleName?, ruleEmailComposition?, escalation? {tier, attempt}, actor?}), `actionsCarryBothMethods(actions)`.
+
+**Cross-service deps:** `prisma` (NotificationDelivery + NotificationChannel type lookup for `actionsCarryBothMethods`), `eventLogService.logEvent`, `notificationRecipientService` (expandDeliveries + buildComposedEmail), `notificationTypes` (actionsToTargets + notifyChannelIds + CHANNEL_TRANSPORT + action types), `src/utils/notificationTemplate.ts` (api_call body rendering).
+
+**Used by:** `notificationEngine` (fire + event-tail, via its `executeActionsSafe` wrapper); the escalation sweep joins in the escalation-v2 phase.
+
+**Invariants:**
+- Best-effort PER ACTION: one failing action never blocks the others; every failure writes an `automation.action_error` warning Event with actionIndex/actionType/ruleId details.
+- **THIS is where business rule 39's group gate lives.** `actionsCarryBothMethods(actions)` answers "does the `actions[]` list being executed reach recipients by BOTH email and web push", and its result rides into `expandDeliveries` as `enforceUserPreference` for any action that set `respectUserPreference`. The GROUP is the list passed in — rule actions, one severity band's, the reset list, one escalation tier's — which is exactly what the wizard's `hostOffersBothMethods` grays the checkbox on; the two must stay in step or the checkbox is enabled on a group the server ignores it for. A multi-channel action counts on its own. Resolved lazily and at most once per group, so a group that never opts in issues no extra query.
+- A notify action may carry SEVERAL channels (`channelIds`). Nothing here special-cases that: `actionsToTargets([action])` expands to one target per channel and `expandDeliveries` sees the shape it always saw.
+- api_call bodies render at FIRE time from the live context — the drain never needs the rule. The api_call row's NULL channelId is legitimate (the drain's permanent-fail rule is transport-conditional); headers are operator-typed and stored unmasked (no-secrets warning lives in the catalog/docs).
+- notify composition precedence: action-level `emailComposition` ?? `exec.ruleEmailComposition` ?? none (legacy per-address fan-out) — byte-identical to the pre-actions path for converted rules.
+
+**When changing this:** New action type → new arm here + `actionSchema` + `assertActionRefs` (notificationRuleService) + a dispatch/execution path (drain arm or dedicated runner) + `actionTypes` catalog entry. Never execute long-running work inline here — enqueue (delivery row / script run) and let the owning job drain it.
+
+---
+
+## services/scopeRelationIndex.ts
+
+**What it owns:** The SQL half of the device-filter condition tree's RELATION-backed fields — `interfaceName` ("Device interface", `AssetInterface.ifName`) and `ssid` ("Broadcast SSID", `AssetApVap.ssid`). Every other condition field is a scalar column that rides the asset row for free; these two read relations that are larger than the fleet itself, on a tree the notification engine re-resolves every 60s. (Renamed from `scopeInterfaceIndex.ts` when `ssid` arrived — the module was always the general shape, and a second copy is how the two fields would have come to disagree.)
+
+**Public API:** `decorateRelationLeafHits(rows, trees)` — walk the trees for leaves whose field is in `RELATION_CONDITION_FIELDS`, dedupe by `relationLeafKey` (FIELD + POSITIVE operator + value, from notificationTypes), resolve each with one `groupBy` against the relation that field names, and stamp per-asset verdicts onto `row.relationLeafHits`.
+
+**Used by:** `notificationEngine.loadScopeAssets` (the engine tick, the builder's device preview, and mass pinning via `loadScopeAssetIds`) and its two carve-out passes, `deviceFilterService.resolveDeviceFilter` (tag auto-assignment + the tag preview), `downDetectionService`'s index build, and `contactService`'s condition preview.
+
+**Invariants:**
+- **Which relation and column each field reads is declared ONCE**, in `RELATION_CONDITION_FIELDS` (notificationTypes.ts). This module and the single-asset joins both read it, so "what does `ssid` mean" has one answer.
+- **Never join the relation on a fleet-scale path.** `AssetInterface` is the largest current-state table in the schema — tens of thousands of rows at 2000 devices. `AssetApVap` is far smaller (a handful of SSIDs per AP), but it goes through the same path so there is one mechanism, not two.
+- **`groupBy`, not `findMany` + `distinct`.** A client-side dedupe would ship every matching row, which for a broad leaf (`contains "port"`) is the whole table.
+- **The key carries the FIELD.** Two relations share one verdict map, so `interfaceName equals GUEST` and `ssid equals GUEST` must not collide — they are different questions and a collision would answer one with the other's row set.
+- **Decoration MERGES.** The engine decorates a rule's own scope first and its carve-out peers' second; a replace would drop the first pass.
+- **An absent leaf key means UNKNOWN, not false** — `matchScopeRule` tests `has()` before `get()` and falls back to the joined relation. Answering "no" for a leaf nobody prefetched would make a peer rule's filter silently select nothing.
+- **Both halves of a negative pair share one query.** The key is the positive form, which is also why the prefetched and in-memory paths cannot disagree — a table-driven test pins every operator against both paths, for both fields.
+- **`matches` (wildcard) has no SQL form.** Narrowed by the pattern's literal prefix, then regex-tested here against lower-cased values (compileWildcard is case-SENSITIVE, the evaluator is not).
+- Single-asset paths deliberately do NOT use this — `contactService.resolveContactsForAsset` and `tagAssignmentService` join `interfaces` / `apVaps` on the one row, which beats a second round trip. Both joins are conditional on the tree actually asking (`conditionNeedsInterfaces` / `conditionNeedsApVaps`, and `deviceFilterSelect` deriving `apVaps` from the tree's own fields).
+
+**When changing this:** Adding a third relation-backed condition field means an entry in `RELATION_CONDITION_FIELDS`, a branch in `assetIdsForLeaf` for its table, the matching join in `deviceFilterSelect` + `contactService`'s single-asset select, an `optionsFrom` list in `listScopeOptions`, and the value-suggestion case in ALL FOUR browser builders (`automations-wizard.js` — which also carries its own hardcoded field catalog — `assets-masspin.js`, `automations-address-book.js`, `server-settings.js`). Miss the last one and the field appears with an empty picker on exactly one surface.
+
+---
+
+## services/maintenanceScheduleService.ts
+
+**What it owns:** Maintenance schedules end-to-end — schedule CRUD, target resolution (criteria ∪ explicit assetIds, ∩ monitored), the reconcile tick that enters/exits assets (status flip to/from `"maintenance"` with `Asset.maintenanceReturnStatus` parking), operator release, per-asset reads for chart bands + edit-modal info, and window-row history/pruning.
+
+**Public API:** `listSchedules`/`getSchedule`/`createSchedule`/`updateSchedule`/`deleteSchedule`, `previewTargets`, `listOccurrences` (calendar-tab expansion over a day range), `getAssetMaintenanceInfo`, `listAssetWindows`, `operatorReleaseAsset`, `releaseAssetsForDecommission`, `reconcileMaintenance` (serialized + coalesced — safe to call from anywhere), `MaintenanceScheduleInput`.
+
+**Cross-service deps:** `prisma`, `eventLogService` (`logEvent` + `logEventsBatch`), `tagAssignmentService` (`normalizeCriteria` + `resolveMatchingAssetIds` — the shared criteria engine), `src/utils/maintenanceRecurrence.ts` (`validateScheduleShape`/`isInWindow`/`currentWindow`/`nextWindow`/`expandOccurrences`/`parseLocalDay`/`formatLocalIsoMinute`; `serverClockInfo` is read by the route, not the service), `notificationService.clearSuppressedAlerts` (best-effort, on the entering edge).
+
+**Used by:** `src/jobs/maintenanceScheduler.ts` (30s tick), `src/api/routes/maintenanceSchedules.ts` (CRUD + preview + the `serverClockInfo` passthrough on `GET /server-time`), `src/api/routes/assets.ts` (maintenance-windows + maintenance-info reads; `operatorReleaseAsset` from the PUT handler when an operator moves status off `"maintenance"`), `src/services/discovery/discoveryEngine.ts` (`releaseAssetsForDecommission` from the Phase 2a firewall sweep + its controller cascade onto managed FortiSwitches/FortiAPs, and the Phase 2b FortiSwitch/FortiAP decommission sweep).
+
+**Readers of the state it writes:** `MONITOR_CANDIDATE_WHERE` in `monitoringService` + `jobs/monitorAssets` (status="maintenance" excluded from ALL server-driven polling), `dependencyTreeService.evaluateSuppression` (maintenance parent counts as down → children suppress — unless the schedule's `suppressChildren` is false, OR-ed across the asset's open windows by `reconcileDependencySuppression`'s open-window query), `notificationEngine.isSuppressedForNotifications` + `notificationEscalationService.runEscalationSweep` (silenced), `presenceVerificationService` + `jobs/decommissionStaleAssets` (skip maintenance assets), the assets-list pill (`badge-maintenance`), the chart band overlay (`_maintenanceBandLayer` via `/assets/:id/maintenance-windows`), and the NOC dashboard surfaces (`nocDashboardService`'s `NOT_IN_MAINTENANCE` excludes maintenance assets from every down/warning/stale feed + buckets them as `statusCounts.maintenance`; `routes/dashboard.ts` `/summary` monitorAlerts mirrors it; the Status Map widget paints `status="maintenance"` sites purple instead of down).
+
+**Invariants:**
+- **A window must not open on top of a live alert** (business rule 16): the entering branch calls `notificationService.clearSuppressedAlerts(entering)` right after the status flip, so an ad-hoc "enter maintenance now" clears the board immediately instead of a tick later. Best-effort and after the flip — a failed sweep must never leave the status write half-applied, and the 60s engine sweep would catch the remainder anyway.
+- Open `AssetMaintenanceWindow` rows are the SOLE source of truth for "in maintenance": enter on the first open row, exit on the last close — restart-safe by construction; never flip status without the matching row write.
+- `maintenanceReturnStatus` parks the pre-window status; a manually-set `"maintenance"` parks verbatim so exit restores the operator's manual state (no loop). Exit restores ONLY when status is still `"maintenance"` — anything else means an operator/guarded writer moved it and wins.
+- Operator release (`endReason="operator"`) suppresses scheduler re-entry for the CURRENT occurrence (`currentWindow().start` comparison); the next occurrence re-enters normally.
+- Targets are always ∩ `monitored: true`, and criteria may never contain a `status` rule (membership would oscillate as the feature flips status).
+- **Ad-hoc lifecycle:** the ad-hoc shape (one-shot + no criteria + exactly one explicit assetId — `isAdhocShape`) self-deletes once spent: `operatorReleaseAsset` deletes it after closing windows (a released one-shot can never re-fire), and the reconcile's spent sweep deletes it when its window closes with reason "schedule" and `nextWindow` is null. Reasons "disabled" (operator intent) never auto-delete. Closed windows keep `scheduleName`; the FK goes SetNull.
+- **Never trust a client-stamped "now" — and that covers the END of the window, not just the start:** ad-hoc creates send `schedule.startNow: true` and `resolveStartNow` (maintenanceRecurrence) stamps startAt from the SERVER clock pre-validation — a browser-stamped startAt broke immediate entry whenever the operator's clock ran ahead of the server. `resolveStartNow` is only half the story: every OTHER time in a schedule is operator-picked, carries no offset, and is read as the server's wall clock, so a browser that prefills a `datetime-local` from `new Date()` posts the operator's digits for the server to read as its own. On a UTC-clocked host with a Central operator that turned a bulk-selected "now → now + 2h" window into one that started five hours ago and had ALREADY ENDED (schedule saved, `isInWindow` false forever, no `maintenance.entered`, every asset still reading Down), and it made the ad-hoc path enter maintenance and then exit on the very next 30s reconcile. `GET /server-time` + the `maintServerNow` skew cache in `public/js/assets-maintenance.js` are the fix: **any new picker of a maintenance time must be prefilled, validated and labelled through them, never from `Date.now()`.**
+- **Any new writer of `Asset.status` must skip assets with `status === "maintenance"`** (see the guards in discoveryEngine.ts Entra/AD/FortiSwitch/lease paths + decommissionStaleAssets); the reconcile self-heal absorbs missed writers but audits them as re-flips.
+- **Deletion-at-source is the ONE carve-out from that guard.** The Phase 2a/2b discovery decommission sweeps DO judge maintenance assets and call `releaseAssetsForDecommission` (window closed `endReason="decommissioned"`, parked status cleared, `status="decommissioned"` — all in one transaction so the reconcile can't observe a half-state and re-enter or self-heal-reflip). Roster/inventory absence is CONFIG truth, not reachability (an offline device stays in the FMG roster; a powered-off switch/AP stays `cmdbProtected`), so it outranks the window — otherwise a device deleted from FortiManager mid-window came back as `"active"` at window end. `decommissionStaleAssets` keeps its guard: that one ages on `lastSeen`, which maintenance freezes by design. Re-entry is prevented by the `monitored=false` clamp (business rule 10) the status write triggers, not by an `endReason` check.
+- **Occurrence times leave this service as server-local wall-clock STRINGS, never Dates.** `listOccurrences` formats through `formatLocalIsoMinute` because the recurrence engine evaluates against the Polaris server's clock: serialize a Date and every browser east or west of the server re-renders the window on a different day than the one it will actually run on. The calendar tab's day bucketing is string arithmetic for the same reason.
+- All bulk writes are grouped `updateMany`/`createMany` — no per-asset await loops (2000-asset scale rule); per-row awaits only for transition Events.
+
+**When changing this:** Any change to the enter/exit semantics must keep `reconcileMaintenance()` idempotent (running twice in a row must be a no-op) and update CLAUDE.md business rule 16. If you add a schedule field, thread it through the Zod outer shape in `routes/maintenanceSchedules.ts`, `normalizeInput`, the modal editor in `public/js/assets-maintenance.js` (collect + fill + summary — INCLUDING the Schedules-tab enable-toggle passthrough, which PUTs the full body: a field it omits snaps back to its `normalizeInput` default, exactly the trap `suppressChildren` documents), and the recurrence tests. A field that should show on the calendar also needs threading into `listOccurrences`' row shape + the chip render in `_maintRenderCalendar`. **Both ad-hoc "enter maintenance until…" entry points (status-pill popover, asset edit modal → Maintenance tab) must validate through `maintValidateAdhocEnd`** — a datetime-local with an untouched time half reads as `""`, and the edit modal used to drop that request silently after a successful asset save, reporting "Asset updated" with no window anywhere. The edit modal additionally verifies the outcome with `/assets/:id/maintenance-info` afterwards, because a schedule can be created for an UNMONITORED asset that then never enters maintenance (targets are ∩ monitored). The Assets-page bulk bar is a THIRD entry point (`bulkMaintenanceSelectedAssets` → `openMaintenanceModal({assetIds})`) and deliberately not an ad-hoc one: it pins the selection as the schedule's explicit `assetIds` and lets the operator name it and pick one-time or recurring, so it needs no validation of its own — but its client-side ceiling (`MAINT_ASSET_IDS_MAX` in `assets.js`) mirrors the route's `assetIds.max(500)` and must move with it, or a big selection 400s after the whole form is filled in. Same ∩ monitored caveat applies, which is why the explicit-includes line says so inline.
+
+---
+
+## services/notificationDimensionService.ts
+
+**What it owns** — nothing persistent. Read-only lookup answering "what do THESE devices actually report for this metric dimension?" for the automation builder's dimensionFilter pickers.
+
+**Public API** — `listDimensionValues(metric, dimension, scope, narrow?)`, `dimensionPickerMeta()` (merged into `GET /automations/schema` as `dimensionPickers`), `foldValuePairs` (pure, unit-tested).
+
+**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/dimension-values` + the `/schema` merge). Client consumer: `public/js/automations-wizard.js` (`dimControlHtml` / `refreshDimOptions` / `wireDimCombo`, pure helpers on `window.PolarisAutomationDimensions` — `optionsHtml` for strict enums, `suggestHtml` + `matchCue` + `substringMatch` for the `.aw-combo-dim` combobox, `note`, `narrow`). `substringMatch` MIRRORS `notificationTypes.dimensionSubstringMatch`: if the engine's pattern matching changes, the cue starts lying about whether a filter will fire.
+
+**Depends on** — `notificationEngine.loadScopeAssetIds` (the SAME `loadScopeAssets` the evaluation tick uses — deliberate, so the picker can never offer a value from a device the automation wouldn't evaluate) and `notificationTypes.triggerDimensionApplicable` — the `metric` param may also name an asset_state FIELD (`ifOperStatus` …, the two namespaces being disjoint by construction), and the device-identifier dimensions are valid against any asset metric/field; a mismatch is a 400, never a silent empty list that reads as "no sensors".
+
+**Invariants**
+
+- **`DIMENSION_SOURCES` keys and the `dimensionFilterSchema` fields are a LOCKSTEP PAIR.** Adding a dimensionFilter field means: the Zod field, `METRIC_DIMENSIONS` / `FIELD_DIMENSIONS` (or `DEVICE_FILTER_DIMENSIONS` for a device identifier), `dimensionPhrases` (server) + `DIM_PHRASE`/`DIM_PLACEHOLDER`/`FORMULA_DIM` (client), the engine's reading resolver (the filter is only real if something applies it), and a `DIMENSION_SOURCES` entry — otherwise the input silently stays free text. A liftable dim (identifier or component name) also needs a `TG_FILTER_META` entry in the wizard, or it can't be authored as a filter row. The five identifier sources list the SCOPED devices' own Asset columns (hostname / ipAddress / macAddress / manufacturer / model — not a sample table, `since` unused); their resolver-side application is `applyDeviceFilters` in the engine, shared by both asset resolvers.
+- **`strict` must mirror the Zod shape.** `strict: true` renders a select; making a dimension a closed enum server-side without flipping this leaves the UI offering a text box the server now rejects, and vice-versa a select over a substring field would forbid legitimate partials.
+- **Bounded queries only.** This is interactive and runs against hypertables: keep the window + asset cap, and keep the aggregation Postgres-side (GROUP BY, never fetch-then-count-in-JS). `sampledAssets < scopedAssets` MUST be reported so the UI can disclose a partial list.
+- **The cap samples CANDIDATES, never the raw scope.** A source's `candidateWhere` names which assets can report the dimension (firewalls for the three SD-WAN dims, non-empty pin arrays for interfaces/tunnels/mounts, `monitored: true` for sensors/state probes) and is applied — one indexed Asset query — before the 250-asset cap whenever the scope exceeds it. Without it the cap sampled scoped ids blindly, and at fleet scale (250 of ~14,500) the sample contained none of the few gates that report SD-WAN, so the picker declared "these devices report no health checks" about a fleet that has them (prod 2026-08-21). When the narrowed set fits under the cap the values list is EXHAUSTIVE and `sampledAssets` reports the full scope, which is what keeps the wizard's "Sampled X of Y" disclosure silent while the per-noun "Reported by N of M" line stays true. A new source that reads a sample table should almost always carry one — the identity dims are the exception, since every asset has identity.
+- **The interface picker lists the PIN SET, not the interface inventory.** `ifNamePattern` reads `Asset.monitoredInterfaces` (noun: "monitored interfaces"), because that is exactly what the engine's `interfaceIsPinned` gate matches on — listing an unpinned port would offer a filter that can never fire, which is the one thing this service exists to prevent. The pin set rather than `AssetInterface` for the same reason it isn't the sample table: a pin can exist before either has data (auto-monitor pins the cycle before the first scrape). The "monitored" in the noun is load-bearing — it flows into every message the wizard builds ("report no monitored interfaces"), so an empty list reads as the gate rather than as "this device has no ports". **The tunnel picker follows suit**: `tunnelName` reads `Asset.monitoredIpsecTunnels` (noun: "monitored IPsec tunnels") because both IPsec resolvers gate on `tunnelIsPinned` — the sample table still carries every tunnel the gate reports, so reading it would offer filters that can never fire. Storage (`mountPathPattern`) remains the deliberate exception: the engine has no pin gate there, the picker only steers.
+- **An empty result is a load-bearing answer**, not an error — it renders as "these devices report no <noun>, this condition would never match". Which is why the widened retry exists, and why `narrowLabel` ships with it: "no hardware sensors" must not be shown when the truth is "none of the class you picked".
+
+**When changing this**
+
+1. Adding a dimension → walk the lockstep list above, then add a `DIMENSION_SOURCES` entry + a case to `tests/unit/automationDimensionValues.test.ts`.
+2. Changing the window/caps → re-reason at 100 AND 2000 assets (default scope is every asset) and update the numbers quoted in the skill references (formerly ARCHITECTURE.md).
+3. New sibling narrowing → extend `DimensionNarrow`, the route's `narrow` schema, AND the client's `awDimNarrow`, or the client will keep asking for the unnarrowed list.
+
+## services/notificationCadenceService.ts
+
+**What it owns** — nothing persistent. Read-only lookup answering "how often do THESE devices take the reading this automation watches?", so the automations wizard can count its hold and window fields in POLLS while `forDurationSec` / `windowSec` / `reset.sustainSec` stay stored in SECONDS.
+
+**Public API** — `resolveScopeCadence(scope, metric)` → `{ stream, mode, min, max, timeoutMs, assetCount }`; `streamForMetric(metric)`; `summarizeIntervals(values)` (pure, unit-tested); `METRIC_STREAM`; `HOST_METRIC_INTERVAL_SEC`.
+
+**Readers / callers** — `api/routes/notificationRules.ts` only (`POST /automations/poll-cadence`, `automationManagement:read`). Client consumer: `public/js/automations-wizard.js` — `awCadence()` / `refreshCadence()` cache it per (metric, scope) the `_dimValues` way, `syncPollFields` paints every `.aw-poll-input` caption from it, and the down-detection caption (`syncDownDetection`) reads the SAME lookup rather than a second one.
+
+**Depends on** — `notificationEngine.loadScopeAssetIds` (monitored-only, the same loader the tick uses) and `monitoringService.resolveMonitorSettings` (the whole monitor-settings hierarchy).
+
+**Invariants**
+
+- **`METRIC_STREAM` mirrors the engine's metric dispatch.** Which table a reading is read from and which cadence produces it are two halves of one fact — a metric added to `resolveAssetMetricReadings` without an entry here silently counts its holds in the PROBE cadence, which is right for status metrics and wrong for everything else. The fallback is deliberate (every monitored asset has a probe interval) and is why the omission is silent.
+- **A fleet answer is a RANGE.** The cadence resolves per asset, so `mode` is what the wizard converts at and `min`/`max` are reported alongside it; every caption that falls back to 60s SAYS it is assuming. Never present one invented number as the fleet's.
+- **Seconds remain the stored unit.** This service exists to render and collect a count; nothing here changes what is persisted, and the engine never sees a poll count (business rule 36's `missedPolls` is the one place a count IS stored, and it is not this).
+- **Cost is per CLASS, not per asset** — `resolveMonitorSettings` memoizes on (integrationId, assetType). Keep the tight `select` and keep it that way: this is an interactive call on a fleet-wide default scope.
+
+**When changing this**
+
+1. New metric → add a `METRIC_STREAM` entry in the same change as the engine's reading resolver, plus a case in `tests/unit/notificationCadence.test.ts`.
+2. New cadence stream → add it to `STREAM_FIELDS` with the resolver field names, and to `CADENCE_STREAM_NOUN` in the wizard or the caption will read "poll interval" with no idea which.
+3. Changing what the wizard counts in polls → the fields are `.aw-poll-input` + `data-sec`; collection reads `pollFieldSec`, which trusts the stored seconds only while the visible count still represents them.
+
+## services/deviceFilterService.ts
+
+**What it owns:** Resolving a device-filter CONDITION TREE against inventory — the shared half of the "which devices?" question. Three surfaces store the same tree over `DEVICE_FILTER_FIELD_OPS`: an automation's `scope.condition`, a `Contact.assetCondition`, and a `Tag.assetCondition`. Automations resolve theirs inside the engine (the tree rides a scope that also carries flat dimensions, and the read is shaped by the tick's own select); the other two want the plain answer — the SET of asset ids the tree covers. That answer lived privately in `contactService` until tags needed the identical thing, at which point a second copy would have been two places for the relation-join decisions to drift apart.
+
+**Public API:** `resolveDeviceFilterAssetIds(cond, {where?})`, `deviceFilterSelect(conditions, {needsInterfaces?})`, `ResolveDeviceFilterOptions`.
+
+**Cross-service deps:** `conditionFields` / `evaluateScopeCondition` / `ScopeConditionAsset` / `ScopeConditionGroup` from `notificationTypes.ts`; `decorateInterfaceLeafHits` from `scopeInterfaceIndex.ts`; `prisma.asset.findMany`.
+
+**Used by:**
+- `src/services/contactService.ts` — `resolveAssetIdsForCondition` (the address-book editor's live device preview) delegates straight to it.
+- `src/services/tagAssignmentService.ts` — `resolveTagFilterAssetIds` for a tree-shaped tag filter (passing the decommissioned-exclusion `where`), and `deviceFilterSelect` for the single-asset `reconcileTagsForAsset` read.
+
+**Invariants:**
+- **No SQL prefilter for the tree itself.** An `or` / `none` / `notAll` group makes any narrowing `WHERE` unsound, and unlike the flat criteria (whose rules are always ANDed, which is what lets `tagAssignmentService.buildPrefilterWhere` exist) there is no safe superset to ask the DB for. Never "optimize" this into a derived WHERE.
+- **`opts.where` is ANDed OUTSIDE the tree** and is only for a caller-owned eligibility rule — never for narrowing derived FROM the tree, which is the unsound case above. Today's one caller is tag auto-assignment's "skip decommissioned unless the filter mentions status".
+- **Every relation-backed field stays conditional**, which is why the select is a function rather than a constant. `fortigate` joins the sighting relation only when a rule asks about the gate — the expensive half at 2000 assets. `interfaceName` is resolved to per-asset verdicts in SQL by `scopeInterfaceIndex` and NEVER joined here: the interface inventory dwarfs the fleet. No interface leaf ⇒ no query.
+- **The scalar select covers the DEVICE_FILTER SUPERSET** (`osVersion` / `department` / `location` on top of the automations scope fields). A caller validating against the narrower `SCOPE_FIELD_OPS` can't produce a tree that reads the extras, so there is nothing to gate — but dropping a column here silently makes every rule on it match nothing.
+- **An empty tree resolves to the whole (eligible) fleet** and that is deliberate: `and([])` is true for every asset. Whether that is the right meaning is the CALLER's decision — `Contact` means it, `Tag` must never store it (`normalizeTagCondition`).
+- Cost is one `findMany` of scalar columns, operator- or reconcile-triggered — never a per-tick path. Scale-checked at 2000 assets: fine here, which is exactly why the engine does NOT use it.
+
+**When changing this:**
+- Adding a condition field backed by a RELATION: decide join-vs-prefetch here, and follow `interfaceName`'s precedent (prefetch to per-asset verdicts) for anything whose row count exceeds the fleet's.
+- Adding a scalar field to `DEVICE_FILTER_FIELD_OPS`: add the column to `DEVICE_FILTER_SCALAR_SELECT` in the same change, or the field validates, stores, and matches nothing.
+
+---
+
+## services/regionScopeService.ts
+
+**What it owns:** The principal side of region scope — both directions. READ: the shared effective-tag resolver, `union(role, user, group)` for region + other tags. WRITE: carrying a region RENAME into `User.regionTags` / `Role.regionTags` / `GroupMapping.regionTags`, and reporting who a region DELETE strands.
+
+**Public API:** `resolveTagScopesForUser(u)`, `getEffectiveRegionTags(userId)`, `TagScope`/`UserTagScopes`, `renameRegionInPrincipalScopes(previousName, nextName)`, `principalsScopedToRegion(name)`, `PrincipalScopeMoves`.
+
+**Cross-service deps:** `prisma` (user + role + groupMapping), `groupMappingService.resolveGroupsToAccess`, `tagNormalize.unionTags` + `tagNormalize.renameTagInList` (pure rewrite; unit-tested in tests/unit/regionScopeRename.test.ts).
+
+**Used by:** `src/api/routes/auth.ts` (`GET /auth/me`), `src/api/routes/notifications.ts` (region-scoped list via `getEffectiveRegionTags`), `src/api/routes/mapRegions.ts` (`PUT` rename → `renameRegionInPrincipalScopes`, `DELETE` → `principalsScopedToRegion`).
+
+**Invariants:**
+- Group-derived tags are re-resolved live from `ssoGroups` each call — never persisted onto the user's own columns.
+- Empty effective tags means "unrestricted" downstream.
+- **A rename must follow the principal columns; a delete must NOT strip them.** The three scope columns hold BARE region names with no FK to any registry, so the name is the only link to the region it means: a rename that leaves them behind revokes the scope silently (tag present, matches no region, every name-resolving consumer reaches nothing), which is exactly what happened before this existed. A delete has no new name to move an assignment to and a region is routinely redrawn under the same name, so the assignment survives and the deletion Event names the holders instead.
+- Rename matching is CASE-INSENSITIVE, because every consumer that resolves a region tag compares that way (`normalizeNeedle` here-adjacent in notificationRecipientService, `key()` in regionHierarchyService, the Users page picker). A case-only rename is a no-op — `updateRegion` does not consider it a rename either.
+- `renameTagInList` returns `null` when nothing changed, so only rows that actually move are written, and it dedupes case-insensitively — a rename onto a name the principal already holds must not grow the list.
+
+**When changing this:** `/auth/me` and the notifications list must stay on this helper so the operator-visible scope and the enforced scope can't drift. The rename's caller must call `notificationRecipientService.bumpRecipientIndex()` — that module imports THIS one, so the bump cannot live here; it sits in the route. Scale: the write path reads users/roles/mappings whole and filters in memory (tens to low hundreds of operator-created rows even on a 2000-asset install) rather than pushing a case-insensitive array predicate into SQL.
+
+---

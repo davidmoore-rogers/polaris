@@ -76,6 +76,16 @@ podman compose -f compose.dev.yml up app
 
 (`docker compose` works identically if you use docker instead of podman.)
 
+### One stack per git worktree
+
+A second stack can run beside the main one for a worktree under `.claude/worktrees/`:
+pass `-p polaris-<slug>` (the compose project name isolates containers and volumes) and
+move the published ports with `POLARIS_DEV_PG_PORT` / `POLARIS_DEV_APP_PORT` (defaults
+5432 / 3000). Run the compose commands from the worktree root so the bind mount is that
+branch. The full procedure — including the `DEVLOCK` marker and teardown with
+`down -v` — is in the `polaris-worktree-workflow` skill
+([.claude/skills/polaris-worktree-workflow/references/dev-environment.md](.claude/skills/polaris-worktree-workflow/references/dev-environment.md)).
+
 ### First-run setup wizard vs. DATABASE_URL
 
 `DATABASE_URL` is deliberately **not** set in the app service's environment.
@@ -110,8 +120,8 @@ Everything else (`POLARIS_PUBLIC_URL`, `POLARIS_PROXY_CERT_PATH`,
 `HEALTH_TOKEN`, `METRICS_TOKEN`, pool/worker sizing, …) is unset in dev; the
 nginx-related fail-fast checks only apply to production deployments. The full
 variable catalog with per-variable commentary lives in
-[.env.example](.env.example) and the Environment Variables section of
-[CLAUDE.md](CLAUDE.md).
+[.env.example](.env.example) and in the `polaris-deploy` skill
+([.claude/skills/polaris-deploy/references/env-vars.md](.claude/skills/polaris-deploy/references/env-vars.md)).
 
 ---
 
@@ -200,4 +210,5 @@ that path — the suite logs which branch it took.
 - Nuke everything including the volume:
   `podman compose -f compose.dev.yml down -v` — then also delete
   `.setup-complete` and `.env` from the project root if you want the setup
-  wizard to run again (see "First-run setup lock" in CLAUDE.md).
+  wizard to run again (see "First-run setup lock" in
+  [.claude/skills/polaris-deploy/references/deployment-updates.md](.claude/skills/polaris-deploy/references/deployment-updates.md)).

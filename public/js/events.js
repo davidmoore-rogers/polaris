@@ -13,7 +13,7 @@ var _eventsLayout = null;
 // that reaches the tbody is already server-filtered/sorted, so sf.apply() is
 // never called — onTableSFChange translates state into API params and
 // re-fetches instead. Required by the 235k–350k-row Event table; see
-// UI-CANON.md → "Sortable + filterable data table (server-side mode)".
+// polaris-ui-canon → "Sortable + filterable data table (server-side mode)".
 var _eventsSF = null;
 
 (function () {

@@ -1,21 +1,23 @@
 #!/bin/sh
 # Polaris pre-commit hook — version-controlled (activate with:
-#   git config core.hooksPath .githooks   ).
+#   git config core.hooksPath .githooks   — `npm install` does this via postinstall).
 #
-# Runs the structural doc-drift guard so a new model / service / job / route
-# can't land without being documented, and so stale file:line refs / wrong
-# index casing can't creep back in. It does NOT judge prose accuracy.
+# Runs the structural doc-drift guard over CLAUDE.md + .claude/skills/** so a new
+# model / service / job / route can't land without being documented, and so stale
+# file:line refs, dead paths, orphaned reference files or references to the retired
+# root docs can't creep back in. It does NOT judge prose accuracy — that is
+# /polaris-docs-sync.
 #
 # Bypass for one commit:  git commit --no-verify
 
 # Only run when code or the project-memory docs changed (skip pure asset/test commits).
 changed=$(git diff --cached --name-only)
 case "$changed" in
-  *.ts|*src/*|*prisma/schema.prisma*|*CLAUDE.md*|*ARCHITECTURE.md*|*BUSINESS-RULES.md*|*TOUCHES.md*|*design/POLARIS-UI-GUIDE.md*)
+  *.ts|*src/*|*prisma/schema.prisma*|*CLAUDE.md*|*.claude/skills/*|*scripts/check-docs.mjs*)
     node scripts/check-docs.mjs || {
       echo ""
       echo "pre-commit: doc-drift check failed (see above)."
-      echo "Update the docs, or bypass once with:  git commit --no-verify"
+      echo "Update the docs (/polaris-docs-sync), or bypass once with:  git commit --no-verify"
       exit 1
     }
     ;;

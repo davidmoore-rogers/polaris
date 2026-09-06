@@ -1,0 +1,248 @@
+# Canonical backend patterns — data & storage
+
+Verbatim from TOUCHES.md → Canonical backend patterns. Copy the canonical's shape rather than inventing a parallel one.
+
+## Per-instance multi-lane worker (constrained + unconstrained endpoints)
+
+**What it is:** A per-instance worker that segregates traffic to a flaky external system by endpoint family — endpoints subject to the system's parallel-connection limit ride a strict single-consumer FIFO lane (concurrency=1); endpoints without that constraint ride an unbounded lane that just tracks inflight count for observability. Distinct from a single-cap worker pool: the value is *cross-feature serialization for the constrained endpoints only*, while letting unconstrained endpoints parallelize freely.
+
+**Canonical implementation:** `FmgWorker` in [src/services/fmgWorker.ts](src/services/fmgWorker.ts). One `FmgWorker` per integration id; module-level `Map<integrationId, FmgWorker>` keyed off the integration row's id. Proxy lane (strict 1) carries `/sys/proxy/json` calls — FMG drops parallel calls past 1-2 there. Native lane (unbounded) carries every other call (`/pm/config/...`, `/dvmdb/...`, auth) — those hit FMG's own DB and have no parallel-call constraint.
+
+**Key conventions:**
+- Public API is two submit methods: `submitProxy<T>(label, task, signal): Promise<T>` (strict lane) and `submitNative<T>(label, task, signal): Promise<T>` (unbounded lane). Plus read-only `proxyQueueDepth` / `proxyInFlightLabel` / `nativeInFlightCount` for telemetry. Don't expose the queue itself.
+- Lane dispatch lives at ONE call site — the shared low-level helper that every code path funnels through (in FmgWorker's case, `rpc()` in `fortimanagerService.ts`). The helper inspects the payload (e.g. URL pattern) and routes to the right lane. Callers above the helper don't pick the lane.
+- Proxy lane: FIFO single-consumer drain loop owned by the class. AbortSignal pre-dispatch drops the entry and rejects with `AbortError(...)`. In-flight abort is the *task's* responsibility (via fetch signal threading) — the worker doesn't force-cancel.
+- Native lane: no queue, no semaphore. `submitNative` just bumps an inflight counter, awaits the task, and decrements (in a finally so throws don't leak the counter). Pre-submit abort throws `AbortError` immediately; in-flight abort is the task's responsibility via the fetch signal.
+- Lazy creation, never torn down. `getXxxWorker(id)` returns the existing worker or creates one. Workers leak on instance-delete; that's intentional (cheap; tearing down races with concurrent `getXxxWorker` callers).
+- Telemetry: proxy lane publishes queue-depth gauge + 0/1 inflight gauge so operators can spot `queue_depth>0 AND inflight=1` as "constrained lane is the bottleneck." Native lane publishes a single inflight-count gauge — sustained high values indicate genuine parallelism (good), not a bottleneck.
+- Test reset: provide a `__resetXxxWorkersForTests()` symbol so tests start with a clean registry.
+- Label is a short string used for telemetry and audit logs. Format like `"fmg.<rpcMethod>:<resourceUrl>"` — derived from the inner task, not freeform.
+
+**When adding a new instance:**
+- Identify the shared low-level helper that all callers funnel through. The lane-dispatch predicate lives ONLY in that helper. Don't scatter `submitProxy` / `submitNative` calls across high-level entry points — the next contributor will forget one.
+- Decide which endpoints belong in the constrained lane. Document the rule in the worker file's header so future code paths route correctly. For FmgWorker: `/sys/proxy/json` ⇒ proxy lane, everything else ⇒ native lane.
+- Thread the keying id (typically integrationId) through every public function that ends up calling the helper. The id flows from the route handler → service → low-level helper.
+- Public functions take the id as the LAST optional parameter so unsaved-state callers (e.g. pre-create test connection on a draft integration) can omit it; in that case the worker is bypassed and the call runs direct (no contention possible since there's no other code talking to this instance yet).
+- Wire three gauges to `src/metrics.ts`: proxy-lane queue depth (count), proxy-lane inflight (0/1), native-lane inflight (count). Keep names parallel to FmgWorker's so dashboards generalize.
+- Document the "load-bearing tests" for both lanes:
+  - Proxy lane: one proxy task A in-flight, submit proxy task B from a different feature surface, confirm B waits until A completes. This is the cross-feature-serialization invariant the constrained lane exists to enforce.
+  - Native lane: submit three native tasks simultaneously, confirm all three are started concurrently (not queued).
+  - Cross-lane independence: a blocked proxy task does NOT block native tasks, and vice versa.
+
+---
+
+## Cross-asset graph derivation + persisted DAG
+
+**What it is:** A dependency / topology graph derived from heterogeneous discovery signals (controller-stamped fields + interface-name inference + LLDP), persisted as parent→child edges with a per-node BFS layer, refreshed at end of every discovery cycle, and read by both runtime logic (e.g. monitoring suppression) and the topology UI. Distinct from a per-request topology computation — persisting the DAG gives runtime callers a single source of truth without re-walking signals on every probe.
+
+**Canonical implementation:** `recomputeDependencyTree()` + `reconcileDependencySuppression()` + `propagateAfterStatusChange()` in [src/services/dependencyTreeService.ts](src/services/dependencyTreeService.ts), backed by the `AssetDependencyParent` model + `Asset.dependencyLayer` / `Asset.dependencySuppressed` columns.
+
+**Key conventions:**
+- **Pure helpers exported for tests.** `buildDependencyEdgesFromInputs(assets, interfaceEdges, lldpEdges)`, `assignLayers(assets, edges)`, `evaluateSuppression(states, parents)` are pure functions — no DB, no side effects. The DB-bound `recomputeDependencyTree` / `reconcileDependencySuppression` are thin wrappers that load inputs, call the pure helper, and write the diff. New tests cover the pure helpers; the wrappers are exercised via integration tests.
+- **Signal precedence at edge-build time.** When the same parent→child pair surfaces from multiple signals, keep the strongest. Convention (`physicalRank`): mesh (4) > interface (3) > lldp (2) > controller (1) — most-physical evidence of a real link wins the audit-trail row, with logical controller management as the weakest fallback. Implemented as a `(child|parent) → edge` map that keeps the higher-ranked signal.
+- **BFS layer assignment from a known root set, with edge pruning.** Layer-1 nodes are assigned by domain rule (here: every FortiGate). BFS outward; a candidate edge is kept only when `layer[parent] + 1 === layer[child]`. Same-layer edges (siblings, MCLAG pairs) and reverse edges are dropped. Cycles can't form once layers are settled — disconnected components or chains through unmonitored intermediates surface as `unresolved`.
+- **Persistence is replace-and-recreate per scope, not diff.** `recomputeDependencyTree(integrationId)` deletes computed rows for in-scope assets, re-inserts from `keptEdges`, updates `dependencyLayer` — all in one `prisma.$transaction`. Operator override rows (`source="override"`) are never touched. In-scope is the integration's discovered assets; out-of-scope rows are owned by another integration's recompute and left alone.
+- **…except when the pass can't be scoped, in which case DIFF.** The graph gained a second half in 2026-08: `syncEndpointDependencyEdges` attaches every non-infra asset as a LEAF (one parent, `source="endpoint"`). It can't use the per-integration scope axis — an endpoint's upstream device is resolved from its own columns against the global infra inventory, and most endpoints are discovered by an integration that never calls the recompute — so it runs fleet-wide on every finalize and writes a diff instead (insert missing / delete gone / retype a changed `detectedVia` / stamp the layer only where it differs). Two reasons to prefer that shape over delete-replace once the scope axis is gone: a fleet-wide delete-replace on every discovery finalize rewrites the whole table several times an hour for rows that change only when a device moves ports (dead-tuple churn the capacity advisor then reports on), and concurrent finalizes computing the same answer can't churn each other's rows. **Use a distinct `source` value per half** — it keeps each pass's delete-scope from touching another's rows, and makes a whole half revertible with one DELETE.
+- **A leaf half attaches with ONE parent, and that's a semantic decision, not a simplification.** The multi-parent rule here is all-down, which models REDUNDANT parents (a dual-homed switch). Series relationships — an endpoint under an access switch under a gate — must NOT be expressed by listing both: "some parent is ok" would then be satisfied by the healthy gate while the switch the device actually hangs off is dead. Resolve the most-specific parent only and let the chain do the rest (the switch is itself suppressed by its gate). Whenever you add a signal to such a half, it takes a place in the precedence ladder rather than becoming a co-parent.
+- **Override resolution at read time.** When loading effective parents, "if any override row exists for an asset, use the override set; else use the computed set." Empty override set = explicit "no parents" pin. Read-time resolution avoids any write coupling between operator edits and discovery cycles.
+- **Reconciler is the source of truth for runtime state; event hook is a latency optimization.** The 60s `reconcileDependencySuppression()` walks every monitored asset in BFS layer order, computes desired suppression under the domain rule (here: all-down multi-parent), writes only diffs. The event hook (`propagateAfterStatusChange`) calls the same reconciler on every probe-result transition for sub-second propagation, but correctness never depends on it firing — server restart mid-transition / race / dropped event are all caught by the next periodic tick.
+- **Discovery hook runs at the END of the discovery function**, after all asset writes and projection-apply phases — not interleaved. Gated on `mode in {full, finalize}` so per-device skip-deprecation passes don't trigger partial recomputes.
+- **One-shot startup backfill** (`backfillDependencyTree.ts`) runs `recomputeDependencyTree()` 30 s after boot so existing installs see populated rows without waiting for the next scheduled discovery cycle.
+
+**When adding a new instance:**
+- Identify your domain's "layer-1 root rule" (here: assetType === "firewall"). Hardcoded in the BFS layer assigner; write tests that cover the orphan case (no path from any root → null layer).
+- Define your edge-strength order over the available signals. Document it in the service header comment so future contributors don't re-litigate which signal wins.
+- Pick the "in-scope" axis for incremental recompute (here: `discoveredByIntegrationId`). The full graph load is cheap; the per-scope writeback is what matters for keeping cycles isolated to the active integration's writes.
+- Pure helpers go in the service file with explicit `export`. DB-bound wrappers stay in the same file but mark them clearly with a comment header so test contributors know which functions to mock vs which to call directly.
+- Add a polaris-change-impact cross-cutting section on day one — runtime callers and UI surfaces will discover the DAG quickly and reach for it; the index keeps the writers/readers visible.
+
+---
+
+## Serialized check-then-insert (per-scope advisory lock + DB backstop)
+
+**What it is:** An invariant that can only be enforced by reading existing rows, deciding, then inserting — "no overlapping subnets in this block", "no second active X for this Y". A plain `findMany` + decide + `create` is a race: two concurrent requests both read the pre-insert state, both pass, both insert. Wrapping it in a transaction gives ATOMICITY but not ISOLATION — at Postgres READ COMMITTED (the default, and never overridden in this codebase) an in-transaction re-read still cannot see another transaction's uncommitted rows and takes no locks.
+
+**Canonical implementation:** `lockBlockForSubnetWrites` + `createSubnetRowChecked` in [src/services/subnetService.ts](src/services/subnetService.ts), with the DB backstop in [prisma/migrations/20260806000000_subnet_block_cidr_unique](prisma/migrations/20260806000000_subnet_block_cidr_unique/migration.sql) and the self-heal in [src/jobs/enforceSubnetUniqueIndex.ts](src/jobs/enforceSubnetUniqueIndex.ts). Callers: `createSubnet`, `allocateNextSubnet`, `bulkAllocate`, and the DHCP-discovery create in `discoveryEngine`.
+
+**Key conventions:**
+- **One lock primitive, one guarded-insert seam.** Export `lock<Scope>ForWrites(tx, scopeId)` for batch writers that already own a transaction and insert many rows under one lock, and `create<Row>Checked(data)` for single-row writers (its own transaction: lock, re-read, re-decide, insert). Every writer must go through one of them — a single bare `prisma.x.create` re-opens the race, so the invariant is only as strong as its least careful caller. Discovery counts as a caller: it runs in its own process, concurrently with the web UI.
+- **Lock, THEN read.** The advisory lock must be the FIRST statement inside the transaction, before the read whose result the decision depends on. A lock taken after the read is decorative. Assert the ordering in a test (`prisma.$executeRaw.mock.invocationCallOrder[0] < prisma.x.findMany.mock.invocationCallOrder[0]`) — it is the kind of thing a later refactor silently reorders.
+- **`pg_advisory_xact_lock(classid, objid)`, not the session form.** The xact form releases on commit OR rollback with no unlock bookkeeping to leak. `classid` partitions namespaces so two unrelated lock users can never collide on a coincidentally-equal objid — allocate a new one per feature and comment it next to the existing values (`0x504c5253` "PLRS" = retention prune in `monitoringService.ts`, `0x504c5254` "PLRT" = subnet writes). `objid = hashtext(scopeId)`; a hash collision only makes two unrelated scopes briefly serialize, which is harmless.
+- **Lock the narrowest scope that makes the invariant safe.** Per-block, not global — unrelated blocks stay fully parallel.
+- **A policy that says "this row may not exist" belongs at the same seam.** The exclusion check (business rule 42) sits inside `createSubnetRowChecked` for exactly the reason the overlap re-read does: every writer already comes through it, so one check is every path. Give it an optional pre-loaded set (`opts.exclusions`) so a batch caller does not pay a read per row.
+- **Add a DB constraint as the backstop, even a partial one.** A UNIQUE index catches the exact-duplicate case (which is the usual race outcome) even from a future path that forgets the lock. Where the full invariant is not expressible as a constraint, say so in the migration and the service header rather than leaving the reader to wonder: stock PostgreSQL has no GiST-indexable `&&` for `inet`/`cidr`, so a general overlap exclusion constraint does not build without a third-party extension.
+- **A constraint that existing data violates must not fail the migration.** Detect the violation, `RAISE WARNING` naming the offending rows, skip creation, and ship a NOT-marker-guarded startup job that retries every boot so the constraint appears on its own once an operator cleans up. Failing the migration blocks the whole upgrade over historical data.
+- **Translate the constraint violation into the service's normal error.** Catch `err.code === "P2002"` at the seam and rethrow the same `AppError(409, …)` the in-transaction check raises, so callers see one error shape.
+- **A "give me any free X" caller should RETRY, not 409.** `allocateNextSubnet` picks a CIDR outside the lock, so a concurrent writer can take it; a 409 would be the wrong answer to "any free /24". Re-pick against committed state and try again (bounded attempts), and only retry the overlap/duplicate 409 — a genuine "scope full" 409 returns immediately.
+
+**When adding a new instance:**
+- Grep for every writer of the table BEFORE you start; the one you miss is the one that breaks the invariant.
+- Allocate a new advisory-lock `classid` and comment it beside the existing ones.
+- Unit-test with a mocked `$transaction` that runs its callback against the same mock, so the lock-then-read-then-insert ordering is observable.
+- Note the invariant in CLAUDE.md's Business Rules list, pointing at the seam functions by name so the next author knows not to call `create` directly.
+
+---
+
+## Encrypt-at-rest for a JSON config column
+
+**What it is:** Secrets stored inside a JSON column (device credentials, integration API keys, outbound-channel secrets) that must not be readable from a `pg_dump`, a volume snapshot, or a psql session. Masking on the API read path is a UI courtesy, not encryption.
+
+**Canonical implementation:** [src/utils/secretBox.ts](src/utils/secretBox.ts) (seal/open) + [src/utils/configSecretFields.ts](src/utils/configSecretFields.ts) (which keys, and the walks) + the two extension layers in [src/db.ts](src/db.ts) — per-model `secretHooks()` for seal-on-write, all-models `openNestedSecrets` for open-on-read — + [src/jobs/backfillSecretEncryption.ts](src/jobs/backfillSecretEncryption.ts) (converts existing rows). Covers `Credential.config`, `Integration.config`, `NotificationChannel.config`, `Setting.value`. Unit tests: [tests/unit/secretBox.test.ts](tests/unit/secretBox.test.ts) (the envelope) + [tests/unit/secretsAtRest.test.ts](tests/unit/secretsAtRest.test.ts) (the walks).
+
+**Key conventions:**
+- **Enforce in the Prisma extension, not the service.** The extension is the one seam every caller passes through. Several legacy route files still read these models with inline `prisma.x.findUnique` (see the interim-state note in CLAUDE.md), and encrypting at the service layer leaves those reading ciphertext.
+- **Seal per model; OPEN across all models.** Sealing has to know which JSON column of which model it is rewriting, so it registers per model. Opening does not — and must not, because **Prisma query extensions fire for TOP-LEVEL operations only**. `asset.findUnique({ include: { monitorCredential: true } })` runs the `asset` hooks and never the `credential` ones, so a per-model open returns ciphertext for every relation read: the monitor hot path's credentials, reservation push's FortiGate token, description sync's integration. That shipped, and it broke SNMP / WinRM / SSH / FortiOS polling and DHCP push on the first install to set the key, while top-level readers (SNMP Walk tab, credential Test, discovery) kept working — a confusing split to debug from. The open pass is therefore its own `$extends` layer over `$allModels.$allOperations`, walking whole results. Two things make that affordable and safe: a read-only `containsSecretField` pre-scan so the rebuild only runs on results that actually carry a sealed value (~2.5 ms worst case on a 2000-row × 40-column result, zero allocation otherwise), and an `isWalkable` plain-object check so the rebuild does not turn `Date` / `Buffer` / `Decimal` columns into `{}`. Giving the layer an explicitly-typed callback keeps Prisma's result types fully intact — verify with a probe file that assigns a model field to the wrong type and confirm `tsc` still errors.
+- **Seal values, not rows.** Non-secret fields in the same blob stay queryable, which matters: `monitorOverrideService` reads `integrations.config #>> '{fortigateMonitor,addAsMonitored}'` in raw SQL. Raw SQL bypasses the extension entirely — enumerate the raw readers of the column and confirm none of them touch a secret field.
+- **Field list is a NAME UNION, not per-type.** The services keep their per-type lists for MASKING; encryption deliberately does not reuse them. A per-type list that MISSES a field stores a real secret in plaintext silently; a union that includes a field which happens not to be secret for some type merely encrypts a harmless value. Over-sealing is a non-event, under-sealing is the bug.
+- **Self-describing token, so plaintext and sealed coexist.** `psec:v1:<iv>:<tag>:<ct>`. `sealValue` is idempotent (no-ops on already-sealed input) and `openValue` passes plaintext through, which is what lets a partially-backfilled install work — and what lets the backfill be safely re-runnable.
+- **Fresh IV per value.** Deterministic ciphertext would leak "these two devices share a community string" to anyone reading the dump.
+- **Key absent must mean PRE-FEATURE behavior, not breakage.** With no key, sealing is a no-op and values store as plaintext exactly as before. An in-app update that made a new env var mandatory would leave installs unable to reach their own devices. Surface the absence as a capacity watch reason plus a boot warning instead.
+- **The open path must never throw.** A wrong or missing key logs once per process and returns `""`, so a key mismatch degrades to "this credential stopped authenticating" (diagnosable, fixable by re-entering it) rather than an exception on every monitor tick.
+- **Backfill is NOT marker-guarded.** The key may be configured later than the upgrade that ships the code, so the job must retry on later boots. It reads through the UNEXTENDED client (`prismaBase`) because it has to see the RAW stored value to tell sealed from unsealed, and writes through the extended one.
+
+**When adding a new instance:**
+- Add the JSON key to `SECRET_CONFIG_KEYS` in the SAME change as the masking entry, and the model to `SECRET_BEARING_MODELS` + `secretJsonFieldFor` + the `secretHooks()` registration in db.ts. A model in the registry without a hook never gets SEALED on write (reads still open, since that layer is model-agnostic).
+- Confirm no raw SQL reads that column's secret fields.
+- Document the key-loss consequence wherever the operator will look: `.env.example`, `docs/INSTALL.md`, and the capacity reason's suggestion text.
+
+---
+
+## Server-generated keypair (private half never leaves the server)
+
+**What it is:** Polaris mints an asymmetric keypair itself, stores the private half sealed, and hands out only the public half. Better than asking the operator to generate one and paste it in: the private key never exists in a browser, a clipboard, a ticket, or a file on someone's laptop.
+
+**Canonical implementations:** [src/services/windowsSshOnboardingService.ts](src/services/windowsSshOnboardingService.ts) `generateKeypair` (SSH deployment key → `Credential.config`) and [src/services/notificationChannelService.ts](src/services/notificationChannelService.ts) `generateVapidKeys` (Web Push VAPID → `NotificationChannel.config`). Frontend: the confirm-gated Regenerate button — `ch-gen-vapid` in [public/js/automations.js](public/js/automations.js), `wssh-generate` in [public/js/agent-ssh-onboarding.js](public/js/agent-ssh-onboarding.js). Tests: [tests/unit/windowsSshOnboarding.test.ts](tests/unit/windowsSshOnboarding.test.ts).
+
+**Key conventions:**
+- **No read path returns the private half — ever.** Return the public key plus a `<field>Set: true` marker or a fingerprint. Resist a "show it once at generation" affordance: it re-introduces the browser/clipboard/screenshot exposure the pattern exists to remove, in exchange for an escrow copy nobody reliably keeps.
+- **Say the recovery story out loud, in the UI.** There is no escrow, so losing the sealing key (or restoring a backup onto a host with a different `POLARIS_SECRET_KEY`) means regenerate. That is acceptable only if regeneration is cheap — which is why the artifact the public half feeds (an onboarding script, a subscription registration) must be **idempotent and re-runnable**.
+- **The public half is NOT a secret — keep it out of the masking list.** Masking it means you cannot re-render whatever consumes it without rotating the key, which for a fleet-wide key means re-touching every endpoint. (`SshConfig.publicKey` is deliberately absent from `SECRET_FIELDS_BY_TYPE.ssh`.)
+- **Generate BEFORE creating the row when validation demands the secret.** `validateSshConfig` requires a password or a private key, so there is no "create empty, then key it" path.
+- **Rotation replaces the config; it cannot merge.** `mergeConfigPreservingSecrets` treats an empty string for a secret field as "keep the stored value" (that is what lets an edit modal round-trip a mask), so a merge can never CLEAR a now-stale sibling secret. Call `validateConfig` explicitly and write the whole config.
+- **Stamp rotation at `warning` level.** Rotating invalidates every peer that trusts the old key until they are re-provisioned; that belongs in the audit log at a level that stands out.
+- **Confirm-gate the Regenerate button** and spell out the blast radius in the confirm text, not just a hint below it.
+- Verify the generated key round-trips through the SAME parser the consuming path uses (`sshUtils.parseKey` here) and fail loudly at generation rather than shipping a credential that silently never authenticates.
+
+**When adding a new instance:** pick the library's own generator over shelling out (`ssh2`'s `utils.generateKeyPairSync` already emits the OpenSSH format `ssh2.connect` accepts — no conversion, no `ssh-keygen` dependency). Watch CJS interop: ssh2 is CommonJS and cjs-module-lexer surfaces `Client` but **not** `utils`, so `import { utils } from "ssh2"` throws at module load under Node's real ESM loader while passing cleanly under Vitest — import off the default export.
+
+---
+
+## Current-state table refreshed per scrape (delete-replace)
+
+**Canonical:** `persistPhysicalEntities` / `persistMacTable` / `persistTrunkMembers` in `src/services/monitoringService.ts`; `persistFortigateArpTables` in `src/services/arpTableService.ts` (the discovery-cadence variant, below); `persistInterfaces` in `src/services/interfaceInventoryService.ts` (the fullest worked example — it has its own service, tests and a backfill job).
+
+Use this when the device reports a SET that replaces the previous one and history answers no question worth storing: an interface list, an FDB table, an FRU inventory, LLDP neighbours, SD-WAN rules. The tell is that every consumer asks "what is it now?" — if you find yourself writing `DISTINCT ON (assetId, key) ORDER BY timestamp DESC` against a hypertable, you wanted this table, not that one.
+
+The shape:
+
+- **Plain table with a real FK to Asset** (`onDelete: Cascade`), `@@unique([assetId, <key>])`, `@@index([assetId])`. The no-foreign-key rule is hypertables-only — this deliberately is not one. Not a retention entity, not pruned, not in `sampleWriteBuffer` / `sampleRollupService` / `sampleRetentionService` / `timescaleService` / `capacityService`.
+- **Delete-then-`createMany` in ONE `$transaction`.** A concurrent reader must see the old set or the new set, never an empty intermediate — these tables back UI tables, and an empty read renders as "this device has nothing". Wrap in `retryOnDeadlock` if the writer can run concurrently per asset. An empty incoming array is a legal delete-only transaction: `...(rows.length > 0 ? [createMany] : [])`.
+- **`firstSeen` / `lastSeen`.** Pre-read the existing rows into a Map and carry `firstSeen` forward for a key still present, resetting when it disappears and returns (or when its identity changes — `persistPhysicalEntities` resets on a serial change, i.e. a module swap). `lastSeen` is the SCRAPE's timestamp, never `now`, so a backfilled or stale row is identifiable.
+- **`undefined` preserves, `[]` wipes** — enforced by the CALLER via `Array.isArray(...)`, never a truthiness check, so "the transport can't supply this" and "the device has none" stay distinguishable. Note the one deliberate exception: `persistInterfaces` callers skip an empty array instead of wiping, because an empty interface list is ambiguous (a FortiOS token without monitor scope answers `200 OK` with empty results) and blanking the System tab is the worse failure. Decide which case you're in and say so in a comment.
+- **Cap rows per asset with a LOUD warn**, counting drops rather than slicing silently. A partial set that looks complete is worse than a truncated one an operator knows about.
+- **Dedupe the incoming rows on the unique key** if the device can repeat one — otherwise a single duplicate aborts an entire otherwise-good scrape.
+- **Instrumentation triple** at the call site: `startSampleWriteTimer("<table>")` + `startPhase("systeminfo.persist.<name>")` + `end({ count })`.
+- **Watch for a second write cadence.** Every precedent has exactly one writer. `AssetInterface` has two candidates — the full system-info pass and the fast pinned re-walk — and only the full pass may write, because the fast pass sees a filtered subset (a delete-replace from it would wipe everything outside that subset) and leaves some columns null. If your stream has a fast path, decide this explicitly.
+
+**The discovery-cadence variant** (`persistFortigateArpTables` in `src/services/arpTableService.ts`, the first of these written from a discovery run rather than a monitor scrape) changes one thing about the shape above: **what "this device answered" means**. (That table has since moved to accumulate+age and gained a second writer — see the note at the end of this section — but the did-query problem below is what any discovery-sourced current-state table still has to solve.) A monitor scrape persists what one collector just returned for one asset, so `undefined` vs `[]` is decided right there. A discovery run collects for the whole fleet into one flat array and syncs it in a single pass, so "no rows for gate X" is ambiguous by construction — X could hold no neighbours, or its live read could have failed (offline behind an FMG proxy, admin profile without monitor scope, run aborted mid-fleet). Row presence cannot answer that. So the collector carries a per-device **did-query flag** (`didArpQuery` → `DiscoveryResult.arpQueriedDevices`, set on a clean response BEFORE the row count is known and forced false for an offline device), and the writer delete-replaces only the devices on that list. If you add another discovery-sourced current-state table, add the flag with it — deriving the scope from which devices have rows is the one shortcut that silently blanks a healthy device's tab. Two other differences worth copying: the fleet-wide read that resolves device → asset is done ONCE for the whole batch rather than per device, so the write cost tracks the device count rather than the asset count; and the instrumentation triple above does not apply, since the timing is already covered by the sync's own `phaseMark`.
+
+**When history is wanted, this pattern is the wrong one — switch to accumulate + age.** `AssetArpEntry` did exactly that once the ARP Table tab needed time ranges: `INSERT … ON CONFLICT DO UPDATE` bumping `lastSeen` with `firstSeen` left out of the update list, plus a flat retention entity pruning on `lastSeen`. Three consequences worth knowing before you copy it. (1) Volume is per DISTINCT ROW, not per scrape — a binding present all month is one row, where a snapshot table at a 600 s cadence would be ~52M rows/month across 40 devices. (2) The delete-replace rule that a second writer is dangerous **inverts**: two cadences can safely write the same accumulate table, because each bumps what it saw and touches nothing else, which is what let the 600 s monitor pass and the 12 h discovery pass coexist. (3) A nullable column in the business key becomes a bug — Postgres treats NULLs as DISTINCT, so `ON CONFLICT` never matches those rows and each poll inserts another; use a `""` sentinel and map it back at the API boundary. History is an INTERVAL, not a timeline: anything that appears and disappears between two polls is never recorded at all, which is a limitation the UI has to state rather than hide.
+
+`persistLldpNeighbors` is the **exception, not the template**: it does a keyed diff with a 48h sticky window because a missed LLDP advertisement shouldn't drop a neighbour. Don't copy it unless you have that same failure mode.
+
+Docs a new table owes: an the skill references (formerly ARCHITECTURE.md) "Core Entities" entry and file-tree line (both enforced by `npm run check:docs`), and a `## services/<name>.ts` polaris-change-impact entry.
+
+---
+
+## High-volume append-only time-series writes (batch-flush buffer)
+
+**What it is:** Persistent time-series tables that receive many small writes from a hot loop. Per-row `prisma.<table>.create()` calls each consume one Prisma pool connection, and at high concurrency the pool fills before the operation matters. The canonical fix is an in-memory per-table buffer with a periodic flush — accumulate rows, then issue one `createMany` per N-second window.
+
+**Canonical implementation:** [src/services/sampleWriteBuffer.ts](src/services/sampleWriteBuffer.ts) — handles the eight monitor sample tables (`asset_monitor_samples`, `asset_telemetry_samples`, `asset_hardware_sensor_samples`, `asset_interface_samples`, `asset_storage_samples`, `asset_ipsec_tunnel_samples`, `asset_perf_sla_samples`, `asset_sdwan_rule_samples`). Boot wiring in [src/app.ts](src/app.ts) — `startSampleWriteBuffer()` after queue init, `shutdownFlushSampleBuffers()` awaited in the SIGTERM/SIGINT hook. The two SD-WAN streams (added 2026-06) are the most recent end-to-end worked example — see `polaris-change-impact → SD-WAN stream change-checklist`.
+
+**Key conventions:**
+- **Append-only tables only.** Conflict-handling, dedupe, and per-asset replace semantics break the model. If you need to overwrite or delete prior rows, do that synchronously in the caller before the enqueue (cf. `recordSystemInfoResult`, which keeps the `$transaction` for `assetAssociatedIp` and the per-asset replace in `persistLldpNeighbors` synchronous). A third contract exists for **accumulate+age** tables (rows upsert on a business key bumping `lastSeen` — behind a churn gate — with `firstSeen` preserved, and a fixed-window prune instead of delete-replace): the canonical is `persistProcessConnections` in [src/services/monitoringService.ts](src/services/monitoringService.ts) (`asset_process_connections`) — one batched `INSERT … ON CONFLICT (business key) DO UPDATE SET lastSeen … WHERE lastSeen < EXCLUDED.lastSeen - interval 'N minutes'`, JS-side dedup first (duplicate tuples in one statement raise "cannot affect row a second time"), sentinel-filled NOT NULL key columns (Postgres NULLs are distinct in unique indexes), and deliberately NO index on `lastSeen` so bumps stay HOT.
+- **Buffer is sync to enqueue, async to flush.** The hot loop calls `enqueue*(row)` and returns immediately — no await on the buffer. The flush is fire-and-forget, driven by `setInterval` and a per-table size threshold (5,000 rows in this implementation).
+- **Snapshot the array up front.** `flushTable` splices the buffer into a local snapshot before the `await prisma.<table>.createMany` so concurrent enqueues during the awaited write land in a fresh array. On retry-exhausted failure, re-prepend the snapshot for the next tick.
+- **Per-table flush guard.** A `flushing[key]` boolean prevents re-entry on the same table — a 2 s tick that fires while a slow flush is still mid-write becomes a no-op for that table.
+- **Use `retryOnDeadlock` from `src/utils/dbRetry.ts`.** Postgres deadlocks (SQLSTATE 40P01) on bulk insert are rare but real; the retry helper covers them with jittered backoff.
+- **Trade-off documented in code:** up to one flush-interval of data is lost on hard crash. For STATE writes (per-asset replace, last-write-wins, threshold counters that need read-your-writes) use the parallel pattern in [src/services/probePatchBuffer.ts](src/services/probePatchBuffer.ts) instead — same `setInterval` shape, but a `Map<id, patch>` instead of an array, merge-on-enqueue, and one `UPDATE … FROM (VALUES …)` per flush instead of `createMany`. The two buffers are intentionally separate because the contracts are incompatible: append-only forbids dedupe, replace requires it.
+- **Instrument both flush duration and depth.** `polaris_sample_write_duration_seconds{table}` (histogram) wrapping each flush + `polaris_sample_buffer_depth{table}` (gauge) updated on every enqueue and flush — the pair distinguishes "flush is slow" from "enqueue rate exceeds flush throughput".
+- **SIGTERM-safe.** Exported `shutdown*` function clears the timer and runs one final `flushAllSampleBuffers()`. Awaited from the graceful-shutdown hook in `app.ts` so a restart doesn't drop the in-flight buffer.
+- **Test hooks under `__test__`.** Expose `getBufferDepth(key)` and `reset()` so unit tests can verify buffer state without exposing the buffers themselves to production callers.
+
+**When adding a new table:**
+- Append a `BufferKey`, a `TABLE_LABEL` entry, an `enqueueXxx` helper, and a `writeBatch` switch arm — five touch points in one file. Tests mirror the same shape.
+- Confirm the new table is append-only with no FK on `(assetId, ...)` that requires per-row uniqueness mid-flush; if it does, you probably want synchronous semantics (LLDP-style) instead.
+- Update polaris-change-impact's `services/sampleWriteBuffer.ts` entry's Writers list to name the new caller.
+
+---
+
+## Tiered time-series rollups (hourly + daily aggregates over detail samples)
+
+**What it is:** Long-range chart queries that would otherwise scan millions of detail rows are served from hourly + daily aggregate tables. Detail keeps recent (7 days default), hourly keeps medium (30 days), daily keeps long (1 year). The same query API returns same-shape responses on every tier — only sample count and granularity differ. SolarWinds-style storage policy adapted to Polaris's monitor sample tables.
+
+**Canonical implementation:** [src/services/sampleRollupService.ts](src/services/sampleRollupService.ts) (writer) + [src/services/sampleHistoryService.ts](src/services/sampleHistoryService.ts) (reader) + [src/services/sampleQueryRouter.ts](src/services/sampleQueryRouter.ts) (tier picker) + [src/jobs/runSampleRollup.ts](src/jobs/runSampleRollup.ts) (periodic driver). Retention policy backed by [src/services/sampleRetentionService.ts](src/services/sampleRetentionService.ts) and `Setting("sampleRetention")`, edited from the Maintenance card.
+
+**Key conventions:**
+- **Upsert writes, not append-only.** Rollup buckets MUST be rewritten in place on re-runs (handles late-arriving samples after a flush window crosses an hour rollover). The detail-tier `sampleWriteBuffer` pattern is the WRONG canonical here — rollup writes need INSERT...ON CONFLICT DO UPDATE semantics, which the append-only buffer intentionally rejects.
+- **One SQL statement per (table, tier).** Each rollup is a single `INSERT INTO <table>_<tier> SELECT date_trunc('<unit>', timestamp) ... GROUP BY ... ON CONFLICT (bucketStart, assetId[, extraKey]) DO UPDATE SET ...`. Portable across Timescale and plain Postgres via `date_trunc` (not `time_bucket` which is Timescale-only).
+- **Daily reads from hourly, NOT detail.** At scale (2000+ assets) a daily tick that re-scanned detail would be untenable. Layering daily on hourly keeps the daily tick bounded.
+- **Aggregation shape:** Gauge tables (monitor, telemetry, temperature, storage) carry `sampleCount + avg/min/max` per bucket. Counter tables (interface, ipsec) carry `first/last` counter endpoints + `lastBucketSampleAt` so the read layer derives rate as `(last - first) / (lastBucketSampleAt - bucketStart in seconds)`, dropping negative deltas as counter resets. IPsec additionally counts per-status sample occurrences within each bucket.
+- **Per-tier composite uniqueness.** `@@unique([bucketStart, assetId, <extraKey>?])` enforces one row per (asset, bucket, extra-key) so the rollup's ON CONFLICT clause has a target. Composite PK `(id, bucketStart)` separately so Timescale's "all PK columns must include the partitioning column" rule is satisfied without breaking the upsert semantics.
+- **Tier-routed reads use the same shape across tiers.** The reader translates rollup aggregate columns back to the source-table field names so chart renderers don't branch on tier — they get smoother values with smaller `sampleCount` per point. Counter charts get an explicit branch via `bucketSeconds > 0` because their semantic genuinely changes (cumulative counter vs pre-computed rate). The response carries `tier` + `bucketSeconds` discriminator fields the frontend uses for a "Hourly avg" / "Daily avg" stats-line badge.
+- **Two ticking loops, independent guards.** Hourly tick every 30 min, daily tick at 02:30 UTC. Each has its own `running` boolean so a slow tier can't block the other. Lookback windows (2 h hourly, 2 d daily) cover late-arriving samples without redoing the whole table.
+- **Stamp lastSuccess per tick.** `Setting("sampleRollup.<tier>.lastSuccess")` updated on every successful run; capacityService consumes for a `sample_rollup_lagging` watch reason that catches stuck rollups before long-range charts silently fall back to detail-table scans.
+- **Instrument writer + reader paths separately.** `polaris_sample_rollup_duration_seconds{tier,table}` (histogram, per INSERT) + the existing `polaris_job_duration_seconds{job="sampleRollup.<tier>"}` / `polaris_job_total{job, outcome}` from `runInstrumentedJob`. The HTTP histogram already times reads.
+
+**When adding a new aggregate column:**
+- Add the column to BOTH `*_hourly` and `*_daily` schema definitions.
+- Update both branches of the SQL builder in `sampleRollupService.ts` (hourly aggregation from detail; daily aggregation from hourly with weighted averages and first/last propagation).
+- Update the matching reader translation in `sampleHistoryService.ts` so the rollup row maps back to the chart-consumable shape.
+- Update `capacityService.DEFAULT_BYTES_PER_ROW` for the new rollup row size.
+- Tests mirror the same shape; commit the Prisma migration generated from `migrate diff`.
+
+**When adding a new sample stream:**
+- New `RetentionStream` enum value in `sampleRetentionService.ts` + matching default tier in `defaultSampleRetention()`.
+- New source + hourly + daily schema models. Add all three to `timescaleService.ROLLUP_TABLES` (and `SAMPLE_TABLES` for the source).
+- New SQL builders in `sampleRollupService.ts` (a hourly and a daily entry).
+- New reader in `sampleHistoryService.ts` matching the source's shape.
+- New prune helper in `monitoringService.ts` that calls `pruneOneTable` per (table × tier).
+- Capacity SAMPLE_TABLES enumeration in `capacityService.ts` gets three new entries (detail / hourly / daily).
+- Maintenance UI card gets a new stream row in `SAMPLE_RETENTION_STREAMS`.
+- Update polaris-change-impact's cross-cutting/tiered-sample-retention section's Writers list to name the new caller.
+
+**When changing retention defaults:**
+- Update `DEFAULT_DETAIL_DAYS` / `DEFAULT_HOURLY_DAYS` / `DEFAULT_DAILY_DAYS` in `sampleRetentionService.ts`.
+- The migration job `consolidateSampleRetention.ts` reads these constants for fresh-install seeding; no separate update.
+- Existing installs are unaffected — their stored `Setting("sampleRetention")` keeps whatever the operator set.
+
+---
+
+## Operator-declared value mapping → normalized sample → alertable dimension
+
+**What it is:** A device publishes something whose NUMBER is meaningless without vendor knowledge — a status enum, an alarm bit, a present/absent flag. Rather than teaching Polaris every vendor's convention (or making the operator encode it as a threshold and hope), the operator DECLARES the mapping once at config time, the collector applies it and stores the already-normalized result, and everything downstream compares normalized values only. Use this whenever "what does 2 mean here?" is a per-vendor question.
+
+**Canonical implementation:** **state probes** — a `ManufacturerCustomWidget` with `widgetType="state"`.
+- Pure mapping + evaluation: `src/utils/stateProbes.ts` (`StateMap`, `evaluateStateMap`, `joinStateRows`, `normalizeStateMap`, `validateStateMap`, `describeStateMap`) — dependency-free, fully unit-tested in `tests/unit/stateProbes.test.ts`.
+- Declaration: `ManufacturerCustomWidget.stateMap` + `labelSymbol` (nullable), validated on write by `stateFieldsForWrite` in `manufacturerProfileService.ts`, authored on Server Settings → Identification (`_widgetStateOptionsForm` in `public/js/server-settings.js`).
+- Collection: the state branch of `collectAndRecordCustomWidgets` (`monitoringService.ts`) → `AssetStateSample` (0/1 rows).
+- Consumption: the `customStateValue` asset_metric (`notificationTypes` + `notificationEngine`), the builder's probe/row pickers (`notificationDimensionService`), and the Custom MIB tab's per-row pills (`_renderCustomWidgetState` in `public/js/assets.js`).
+
+**Key conventions:**
+- **Declare the mapping, don't infer it.** The mode set exists because real MIBs disagree: `nonzero` (plain alarm bit) / `zero` (inverted health register) / `equals` / `notEquals` (SNMPv2 TruthValue, where `true(1)` is the GOOD state) / `gte` / `lte`. Comparisons are numeric when both sides parse as numbers and case-insensitive strings otherwise, so ONE declaration covers an agent answering `2` and one answering `"alarm"`.
+- **"Unreadable" is a third outcome, and it must not collapse into the healthy one.** `evaluateStateMap` returns `0 | 1 | null`; the collector DROPS nulls rather than storing 0. Storing 0 would be a positive claim of health that clears a live alert — and on a probe whose interesting state is the false one, would fire a brand-new alert about hardware that isn't present. The row simply stops being reported and the engine's vanished-dimension sweep owns it. (Mirror rule downstream: `Number.isFinite`, never `|| null`, in the engine's `valueFn`.)
+- **Store normalized, keep the raw for forensics.** `AssetStateSample.value` is the boolean the engine compares; `rawValue` carries what the device actually said, surfaced only as a tooltip. When a mapping looks wrong the raw value is the thing you need, but it is not what an operator reads day to day.
+- **A per-row stream needs a stable key AND a human label, and they are different columns.** `rowKey` (the OID index) is what the engine keys firing state on; `rowLabel` (resolved from a sibling `labelSymbol` walk joined on that same index) is what the operator filters and reads. Splitting them is what lets a row be renamed without clearing one alert and opening another — and a table whose rows are only identifiable by an index that shifts per model is barely alertable at all.
+- **Normalize on READ too.** `shapeWidget` passes the stored map through `normalizeStateMap` (which never throws) rather than trusting it, so a row written before a mode existed — or hand-edited in SQL — degrades to a usable mapping instead of throwing once per scrape on the telemetry hot path. Validation strictness belongs on the authoring path (`validateStateMap` → 400).
+- **Cap the fan-out loudly.** A table probe pointed at too broad a subtree costs a DB row per scrape AND an engine firing-state row per element; `MAX_STATE_ROWS_PER_PROBE` truncates at 500 with a warn-level log naming the probe, because a probe silently dropping rows looks exactly like a healthy one.
+- **A boolean metric rides the existing threshold machine, but must not inherit its numeric UI.** `customStateValue` lives in `ASSET_METRICS` and saves as a plain `== 1` comparison — the engine's debounce / sustain / reset / per-dimension state all work unchanged, and a third trigger type would have meant a second copy of them. `BOOLEAN_METRICS` / `isBooleanMetric` is then the single test every numeric-only surface checks: severity bands (server-rejected + hidden), hysteresis, unit hints, chart threshold shading.
+- **Render the operator's words, never the digit.** The two labels travel with the probe (`/automations/schema.stateProbes`) so the value control, the trigger sentence, the preview table, and the asset tab all say "Alarm" / "OK". Every one of them falls back to generic "true/false" when the probe can't be resolved (deleted profile, stale schema) rather than printing a UUID or throwing.
+
+**When adding another declared-mapping stream:**
+- Put the decision table in a dependency-free util with the tri-state return, and unit-test the null cases FIRST — they are the ones that cause silent wrong alerting rather than a visible crash.
+- Decide early whether the alerting dimension is the device or a sub-row. If it's a sub-row, give it real columns in its own table (indexed `(assetId, <probeId>, timestamp)`) rather than a JSON array on an existing sample table: the engine reads it every 60s and the builder needs a `GROUP BY` for its picker.
+- A boolean stream gets NO rollup companions — an average over 0/1 is a duty cycle, not a state. Register it in `STANDALONE_SAMPLE_TABLES` and prune it on an umbrella window (see "Tiered time-series rollups" for the tiered alternative).
+- Mirror any mode-set change into the client's label/needs-values tables (`STATE_MODE_LABELS`, `STATE_MODES_WITH_VALUES`, `_stateMapSummary` in `public/js/server-settings.js`).
+
+---

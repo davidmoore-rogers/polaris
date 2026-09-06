@@ -33,7 +33,7 @@ const d = dbDescribe;
 
 // Fixed ids keep the GROUP BY deterministic and scope the cleanup. The sample
 // tables carry assetId but no FK to Asset (TimescaleDB hypertables — see
-// CLAUDE.md tiered-sample-retention), so no real Asset rows are needed — the
+// polaris-change-impact cross-cutting/tiered-sample-retention), so no real Asset rows are needed — the
 // query's join to assets is a LEFT JOIN precisely so a sample row whose asset
 // is gone still counts. The recovery-anchor block below creates real rows,
 // because the anchor lives on one.
