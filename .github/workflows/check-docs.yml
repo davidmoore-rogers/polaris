@@ -1,9 +1,8 @@
 name: Check docs
 
-# Structural doc-drift guard for the project-memory files (CLAUDE.md,
-# ARCHITECTURE.md, BUSINESS-RULES.md, TOUCHES.md, UI-CANON.md). Enforces
-# coverage + reference hygiene even when a local clone hasn't activated the
-# pre-commit hook. design/ is deliberately out of scope — it is a drop-in
+# Structural doc-drift guard for the project memory (CLAUDE.md + every Markdown
+# file under .claude/skills/**). Enforces coverage + reference hygiene even when a
+# local clone hasn't activated the pre-commit hook. design/ is deliberately out of scope — it is a drop-in
 # snapshot of the external UI kit, not a doc this repo maintains.
 # Pure file reads — no DB, no npm install, no prisma generate needed.
 
