@@ -123,9 +123,9 @@
   // One exception: an explicit Sign out. With skip on and a silent SSO
   // (prompt=none) the redirect would sign the operator straight back in and the
   // button would look broken. The desktop dodges this by landing logout on
-  // /login.html, which is not a protected page and so is never redirected; the
-  // phone has no such page, so more-tab marks the transition instead and the
-  // check below spends the marker to draw the form once.
+  // /login.html?signed_out=1, the query key app.ts's login-page redirect lets
+  // through; the phone has no such page, so more-tab marks the transition
+  // instead and the check below spends the marker to draw the form once.
   var SIGNED_OUT_KEY = "polaris-mobile-signed-out";
 
   function markSignedOut() {

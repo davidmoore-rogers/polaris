@@ -1036,13 +1036,14 @@ function buildSessionTab(s) {
   var hint = lockOn
     ? "You are signed in with a local account. To enable this, sign in through SSO (SAML or OIDC) first — this prevents locking everyone out if SSO is misconfigured."
     : "Redirect unauthenticated users straight to SSO. Requires a SAML or OIDC provider to be configured.";
-  // Spell out what "skip" does to the accounts that don't use SSO. It hides
-  // the form from NAVIGATION, not from the network: local and LDAP users can
-  // still reach it, but only by typing the URL — which is also the way back in
-  // when the identity provider is down, so it must not read as "disabled".
+  // Spell out what "skip" does to the accounts that don't use SSO. Since
+  // 2026-09-06 it hides the form on /login.html too (app.ts redirects the bare
+  // URL to SSO), but not the recovery path: local and LDAP users still reach
+  // it at /login.html?local=1 — which is also the way back in when the
+  // identity provider is down, so it must not read as "disabled".
   var skipNote =
-    'While this is on, anyone visiting a Polaris page is sent straight to SSO and never sees the login form. ' +
-    'Local and LDAP accounts can still sign in, but only by browsing directly to <code>/login.html</code> — ' +
+    'While this is on, anyone visiting a Polaris page — the login page included — is sent straight to SSO and never sees the login form. ' +
+    'Local and LDAP accounts can still sign in, but only by browsing directly to <code>/login.html?local=1</code> — ' +
     'keep that URL somewhere your admins can find it, since it is the way back in if SSO is down. ' +
     'To limit which networks may reach it, see <em>Server Settings → Web Server → Local Login Access</em>.';
   return '<p style="font-size:0.85rem;color:var(--color-text-secondary);margin-bottom:1.25rem">Configure session behavior for all authentication methods.</p>' +

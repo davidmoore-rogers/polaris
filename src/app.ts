@@ -418,10 +418,12 @@ app.use(stripUntrustedEntraProxyHeaders);
 // endpoints answer only to allowed source IPs.
 //
 // Why both halves: /login.html is deliberately not in protectedPages (it is
-// the anti-lockout path when SSO is down, and "Skip login page" only redirects
-// PROTECTED pages), so gating the page alone would be cosmetic — the form is a
-// plain POST to a JSON API that anyone could curl. The page gate is UX; the
-// endpoint gate is the control.
+// the anti-lockout path when SSO is down — under "Skip login page" it is
+// reached as /login.html?local=1, see the login-page middleware below), so
+// gating the page alone would be cosmetic — the form is a plain POST to a
+// JSON API that anyone could curl. The page gate is UX; the endpoint gate is
+// the control. This gate is mounted ABOVE the skip redirect on purpose: an
+// out-of-scope visitor is dropped before that redirect could confirm anything.
 //
 // Scope: POST /auth/login + /auth/login/totp only. Those carry local AND LDAP
 // credentials — both are restricted, by design. Every SSO route (SAML, OIDC,
@@ -517,7 +519,10 @@ app.use(async (req, res, next) => {
         if (req.path.startsWith("/api/")) {
           return res.status(401).json({ error: "Session expired due to inactivity" });
         }
-        return res.redirect("/login.html");
+        // ?signed_out=1: an idle timeout has to END on the form, not on a
+        // silent SSO round-trip that hands the unattended screen a fresh
+        // session (see the /login.html middleware below).
+        return res.redirect("/login.html?signed_out=1");
       }
     }
     req.session.lastActivity = Date.now();
@@ -607,6 +612,56 @@ const pageRequiredPermission: Record<string, PagePermission> = {
   "/alert-ack.html":       { key: "alerts",               level: "read" },
 };
 const PERM_RANK = { none: 0, read: 1, write: 2, fullwrite: 3 } as const;
+
+// ─── "Skip login page" → where an unauthenticated visitor is sent ───────────
+// Honors either configured provider — SAML (Azure) takes precedence, OIDC is
+// the fallback — and answers null when the flag is off or neither provider
+// resolves. FAILS OPEN (null) on a settings read error: a DB blip must not
+// make the login page unreachable, the isLoginSourceAllowed posture.
+async function skipLoginSsoTarget(): Promise<string | null> {
+  try {
+    const settings = await getSsoSettings();
+    if (!settings.skipLoginPage) return null;
+    if (await isAzureSsoConfiguredAsync()) return "/api/v1/auth/azure/login?prompt=none";
+    if (await isOidcEnabled()) return "/api/v1/auth/oidc/login";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── /login.html under "Skip login page" ────────────────────────────────────
+// The setting used to redirect PROTECTED pages only, which left the form one
+// typed URL away for anyone, on any network — "skip" read as "hide from
+// navigation", and operators expected "hide". So an unauthenticated GET of
+// /login.html now goes to SSO too, UNLESS the request says why the form has
+// to be drawn. Three query keys do that, and each exists to stop a loop or a
+// lockout:
+//   ?error=…      an SSO attempt just failed and bounced here (every SAML /
+//                 OIDC / App Proxy failure redirect carries it) — redirecting
+//                 again would ping-pong between Polaris and the IdP forever.
+//   ?signed_out=1 the desktop logout landings (account menu, inactivity
+//                 timer, the server-side idle check) — a silent prompt=none
+//                 provider would otherwise sign the operator straight back
+//                 in and Logout would look broken. The phone's counterpart is
+//                 the one-shot sessionStorage marker in mobile/auth.js.
+//   ?local=1      the anti-lockout path: local and LDAP accounts, and the way
+//                 back in when the IdP is down. The Session tab's hint names
+//                 this URL — it is deliberately guessable, not a secret; the
+//                 source-IP gate above is what restricts WHO can reach the
+//                 form, and it runs first, so an out-of-scope visitor is
+//                 dropped before this redirect can tell them anything.
+// /login.html stays out of protectedPages: it must never be gated on a
+// session, and the SSO failure routes rely on it being reachable.
+const LOGIN_FORM_QUERY_KEYS = ["error", "signed_out", "local"];
+app.use(async (req, res, next) => {
+  if (req.path !== "/login.html" || req.session?.userId) return next();
+  if (LOGIN_FORM_QUERY_KEYS.some(k => Object.prototype.hasOwnProperty.call(req.query, k))) return next();
+  const ssoTarget = await skipLoginSsoTarget();
+  if (ssoTarget) return res.redirect(ssoTarget);
+  return next();
+});
+
 app.use(async (req, res, next) => {
   if (!protectedPages.includes(req.path)) return next();
   if (!req.session?.userId) {
@@ -627,21 +682,14 @@ app.use(async (req, res, next) => {
     if (await isEntraProxyLoginAvailable(req).catch(() => false)) {
       return res.redirect("/api/v1/auth/entra-proxy/login?next=" + encodeURIComponent(req.originalUrl));
     }
-    // Skip login page: redirect unauthenticated users straight to SSO. Honors
-    // either configured provider — SAML (Azure) takes precedence, OIDC is the
-    // fallback. The flag is only ever set by an SSO-authenticated admin (see
-    // the guard on PUT /auth/azure/settings), so reaching here means at least
-    // one of these branches resolves; the final /login.html catch covers the
-    // edge case where SSO was torn down after the flag was set.
-    const settings = await getSsoSettings().catch(() => ({ skipLoginPage: false }));
-    if (settings.skipLoginPage) {
-      if (await isAzureSsoConfiguredAsync()) {
-        return res.redirect("/api/v1/auth/azure/login?prompt=none");
-      }
-      if (await isOidcEnabled()) {
-        return res.redirect("/api/v1/auth/oidc/login");
-      }
-    }
+    // Skip login page: redirect unauthenticated users straight to SSO. The
+    // flag is only ever set by an SSO-authenticated admin (see the guard on
+    // PUT /auth/azure/settings), so reaching here normally resolves a
+    // provider; the final /login.html catch covers the edge case where SSO
+    // was torn down after the flag was set (the login-page middleware above
+    // falls through to the form for the same reason, so this cannot loop).
+    const ssoTarget = await skipLoginSsoTarget();
+    if (ssoTarget) return res.redirect(ssoTarget);
     return res.redirect("/login.html");
   }
   const required = pageRequiredPermission[req.path];
