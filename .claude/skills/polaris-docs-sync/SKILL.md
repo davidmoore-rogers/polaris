@@ -50,7 +50,7 @@ the pre-skills task list verbatim. The short form:
 | integration type | `cross-cutting/integration-type-onboarding.md` checklist; `discovery-*.md`; `routes-overview.md`; the modal in `polaris-ui-canon` |
 | UI pattern or shared module | `polaris-ui-canon/references/canon-*.md`, the pages/modules tables in its SKILL.md; `design/POLARIS-UI-GUIDE.md` is never edited (drop-in zone) |
 | business rule | `polaris-business-rules` (SKILL.md for 1–11; `invariants-*.md` + `narrative-*.md` for 12+); cite the number from code |
-| `public/api.html` (the external API contract) | regenerate the `polaris-api-conventions` plugin (in that repo: `node polaris-api-conventions/scripts/import-api-html.mjs <polaris>/public/api.html`) and bump its version |
+| `public/api.html` (the external API contract) | regenerate the `polaris-api-conventions` plugin — clone https://github.com/rogers-group-inc/polaris-api-conventions, run `node polaris-api-conventions/scripts/import-api-html.mjs <polaris>/public/api.html` there, bump its version, push |
 | deploy artifact, Dockerfile, unit, nginx | `polaris-deploy/references/*`, `docs/INSTALL.md`, `README.md` |
 | the session workflow itself | `polaris-worktree-workflow`, the CLAUDE.md "Session workflow" paragraph, the hook script |
 
